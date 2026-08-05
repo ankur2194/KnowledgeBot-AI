@@ -17,7 +17,7 @@ Twelve implementation agents, three languages, one namespace. OpenTelemetry SDKs
 - **Logs carry no raw API key, no password, no full `Authorization` or `X-KB-Signature` header, and no unredacted user content** (§20.3, §18.2). Enforced by a field **allow-list** at the logger, not a regex scrubber downstream. The scrubber is the backstop; the allow-list is the defence.
 - **First-token latency is measured from Laravel's receipt of the client request to the first `token` event flushed to the client.** Any other start point flatters the number and hides the 1.5 s retrieval budget (§23).
 
-**Not defined here.** OTel SDK setup, exporters, auto-instrumentation, samplers, Collector pipelines → `opentelemetry-instrumentation`. Deploying and configuring Prometheus/Grafana/Loki/Tempo → `prometheus-grafana-loki-tempo`. The 17 `error_class` values and their retry/fallback/page policy → `kb-error-taxonomy` (this skill only says where the field goes). What an audit entry must capture → `kb-security-baseline`. The header table that physically carries `traceparent` → `kb-internal-api-contracts`.
+**Not defined here.** OTel SDK setup, exporters, auto-instrumentation, samplers, Collector pipelines → `opentelemetry-instrumentation`. Deploying and configuring Prometheus/Grafana/Loki/Tempo → `prometheus-grafana-loki-tempo`. The 18 `error_class` values and their retry/fallback/page policy → `kb-error-taxonomy` (this skill only says where the field goes). What an audit entry must capture → `kb-security-baseline`. The header table that physically carries `traceparent` → `kb-internal-api-contracts`.
 
 ## How we use it
 
@@ -25,21 +25,29 @@ Twelve implementation agents, three languages, one namespace. OpenTelemetry SDKs
 
 Spans we create are `kb.<domain>.<operation>`, lowercase, dot-delimited, **no identifiers in the name**
 (`kb.retrieval.dense`, never `kb.retrieval.dense org_01J…`; ids are attributes). HTTP and DB spans keep their stable semconv names; LLM spans keep the semconv `{operation} {model}` form.
+**Span domains are a closed list too, and deliberately not the metric domains below:** `chat`, `query`,
+`retrieval`, `context`, `prompt`, `usage`, `ingestion`, `vector` — the union of the tree below and its
+ingestion mirror. Spans follow the request through stages that emit no metric of their own, so the two
+lists are different on purpose; never reconcile them into one.
 
 ```
 POST /api/v1/chat/{conversation}/messages       SERVER    Laravel — trace starts here
 ├─ kb.chat.authorize → kb.chat.config_snapshot  INTERNAL  identity/org/bot/quota, then resolve
-├─ POST /internal/v1/chat/stream                CLIENT    Laravel → FastAPI, injects traceparent
-│  └─ POST /internal/v1/chat/stream             SERVER    FastAPI, remote parent — the seam
-│     ├─ kb.chat.pipeline                       INTERNAL  the 20 stages of docs/07 §12.1
-│     │  ├─ kb.query.normalize → chat {rewrite_model}  (gen_ai, only if rewriting is on)
-│     │  ├─ kb.retrieval.filters                INTERNAL  the four mandatory terms
-│     │  ├─ embeddings {embed_model}            CLIENT    gen_ai
-│     │  ├─ kb.retrieval.dense / .sparse        CLIENT    concurrent siblings
-│     │  └─ kb.retrieval.fuse / .dedupe / .rerank / .threshold → kb.context.pack → kb.prompt.build
-│     ├─ chat {model}                           CLIENT    gen_ai — the provider call
-│     │  └─ kb.chat.stream                      INTERNAL  first token → terminal event
-│     └─ kb.usage.record
+├─ kb.chat.relay                                INTERNAL  the Laravel→FastAPI relay hop. The auto
+│  │                                                      server span ends when handle() returns the
+│  │                                                      StreamedResponse, before a byte of body —
+│  │                                                      this one ends in the stream's finally
+│  └─ POST /internal/v1/chat/stream             CLIENT    Laravel → FastAPI, injects traceparent
+│     └─ POST /internal/v1/chat/stream          SERVER    FastAPI, remote parent — the seam
+│        ├─ kb.chat.pipeline                    INTERNAL  the 20 stages of docs/07 §12.1
+│        │  ├─ kb.query.normalize → chat {rewrite_model}  (gen_ai, only if rewriting is on)
+│        │  ├─ kb.retrieval.filters             INTERNAL  the four mandatory terms
+│        │  ├─ embeddings {embed_model}         CLIENT    gen_ai
+│        │  ├─ kb.retrieval.dense / .sparse     CLIENT    concurrent siblings
+│        │  └─ kb.retrieval.fuse / .dedupe / .rerank / .threshold → kb.context.pack → kb.prompt.build
+│        ├─ chat {model}                        CLIENT    gen_ai — the provider call
+│        │  └─ kb.chat.stream                   INTERNAL  first token → terminal event
+│        └─ kb.usage.record
 └─ kb.chat.finalize                             INTERNAL  message row + usage row + analytics
 ```
 
@@ -103,87 +111,59 @@ Domains: `chat`, `retrieval`, `provider`, `ingestion`, `embedding`, `vector`, `c
 - **Declare the unit on the instrument; never write it into the name.** `kb.chat.first_token` + `unit="s"` exports as `kb_chat_first_token_seconds`. The OTLP→Prometheus rule only *SHOULD* skip a suffix the name already ends with, so writing it yourself is how you get `…_seconds_seconds`. Names stay underscore-style even though Prometheus 3.x accepts dotted UTF-8 — Grafana and client-library support still lag.
 - **One metric name, one label set, one owning service** — otherwise `sum by (…)` silently drops half the data and PromQL does not warn.
 
-Permitted labels, and nothing else unless this file is edited: `service` (4 values), `env` (3),
-`operation` (`X-KB-Operation`, ~12, plus the ~6 code-defined scheduled-task names), `outcome`
-(`success` `error` `timeout` `cancelled`, and `skipped` on the scheduler family only), `error_class`
-(18 + `none`, from `kb-error-taxonomy`), `provider`, `model`, `stage`, `kind`, `queue`, `collection`,
-`file_type`, `status_class` (`2xx` `3xx` `4xx` `5xx` `network`), `dependency`, `reason`. **`model`
-comes from the pinned model catalog; an unrecognised string maps to `other`** — a tenant can type
-anything into a provider connection, so the value is bounded only if you bound it. Budget: no family
-exceeds **10,000 series**; a histogram costs `buckets + 2` series per label combination.
+**The allow-list is the union of every `Extra labels` column in the catalog, and the two are one
+artifact** — adding a label to a metric means adding it here in the same change, or the allow-list
+unit test at the instrument wrapper fails. The list is closed *and* it is a bounded-cardinality rule:
+**no label may carry a tenant id, a user id, a URL, a query string, or free text**, and that outranks
+the list — a proposed label whose values cannot be enumerated is refused, not appended.
 
-**`outcome` has four values and only one of them is excluded from the error rate.** `timeout` is
-separate from `error` because `kb-error-taxonomy` has no dedicated timeout class — timeouts arrive as
+Permitted labels, and nothing else: `service` (4) · `env` (3) · `operation` (`X-KB-Operation`, ~12) ·
+`outcome` (`success` `error` `timeout` `cancelled`, plus `skipped` on the scheduler family only) ·
+`disposition` (a per-family result set that is deliberately *not* the shared four) · `error_class`
+(18 + `none`, from `kb-error-taxonomy`) · `provider` (5 adapters) · `model` / `from_model` /
+`to_model` · `token_type` (`input` `output`) · `finish_reason` (the SSE terminal enum,
+`kb-internal-api-contracts`) · `stage` (17 ingestion + 7 retrieval, code-defined) · `reason` (two
+disjoint closed enums — retrieval 3, crawl 8) · `kind` (`dense` `sparse`) · `engine` (the code-defined
+OCR set, `ocr-pipeline`) · `file_type` (supported formats, else `other`) · `queue` (the 9 named
+queues, never a connection name) · `collection` (one per embedding model) · `task` (the ~6
+code-defined scheduled-task names) · `status_class` (`2xx` `3xx` `4xx` `5xx` `network`) ·
+`dependency` (the fixed 8) · `required` (`true`/`false`) · `version`, `git_sha`, `contract_version`
+(**`kb_build_info` only** — the `_info` pattern, one series per running build).
+
+**`model` comes from the pinned model catalog; an unrecognised string maps to `other`** — a tenant can
+type anything into a provider connection, so the value is bounded only if you bound it, and the fold
+happens before the instrument, not in PromQL. `git_sha` is the one permitted churning value, which is
+why it is confined to a single always-`1` gauge. Budget: no family exceeds **10,000 series**; a
+histogram costs `buckets + 2` series per label combination.
+
+**`outcome` has four values and only one is excluded from the error rate.** `timeout` is separate from
+`error` because `kb-error-taxonomy` has no dedicated timeout class — timeouts arrive as
 `provider_temporary` or `internal_dependency` — so this label is the only way to answer §20.2's
 timeout-rate bullet without splitting a class. The consequence is a trap: **the error rate is
-`outcome=~"error|timeout"`, never `outcome="error"`**, which silently omits every timeout and is the
-exact undercount this file warns about elsewhere. `cancelled` is the only outcome legitimately outside
-the error rate, because a user hanging up is not a failure of ours (`kb-error-taxonomy`). Write the
-recording rule once, and let alerts reference the rule rather than re-deriving the matcher.
+`outcome=~"error|timeout"`, never `outcome="error"`**, which silently omits every timeout. `cancelled`
+is the only outcome legitimately outside the error rate, because a user hanging up is not a failure of
+ours. Write the recording rule once and let alerts reference it rather than re-deriving the matcher.
 
-**`skipped` is the fifth value and exists only on `kb_internal_scheduler_tasks_total`.** Laravel's
-`withoutOverlapping()` registers a *skip filter*, so a scheduled task blocked by its own mutex emits
-`ScheduledTaskSkipped` on every tick — which is exactly the fingerprint of a lock stranded by a
-`SIGKILL`, and by default that lock survives **24 hours**. It is outside the error rate (a skip is the
-lock working), but unlike `cancelled` it must carry **its own alert on sustained skips**, because the
-observable failure is silence: the task appears healthy, its tick timestamp keeps advancing, and no
-work happens. A skip that repeats for longer than the task's interval is a stuck lock, not contention
-(`laravel-scheduler`).
+**A family whose results are not those four names its label `disposition`, never `outcome`.** A crawl
+page is `discovered` / `changed` / `unchanged` / `skipped` / `missing` / `failed`; an OCR page is
+`success` / `partial` / `error`. Overloading `outcome` there is not a naming nit — it drops the family
+out of `outcome=~"error|timeout"` (Gotchas). `disposition` is opt-out-by-name: the family declares it
+has its own vocabulary and therefore needs its own rule.
 
-### Catalog — chat, retrieval, providers
+**`skipped` is the fifth `outcome` value and exists only on `kb_internal_scheduler_tasks_total`** — why
+it is outside the error rate yet still needs its own alert: `references/metric-catalog.md`.
 
-The rest of the catalog — ingestion, crawling, cross-cutting, infrastructure, shared bucket sets — is
-in **`references/metric-catalog.md`**. Every family carries `service` and `env` implicitly.
+### The catalog, the log shape, and the health endpoints
 
-| Prometheus name | Type | Extra labels | Answers |
-|---|---|---|---|
-| `kb_chat_requests_total` | Counter | `operation`, `outcome`, `error_class` | RPM, error rate (`outcome=~"error\|timeout"`), timeout rate **and** cancellation rate — four §20.2 bullets from one counter, because cancellation is an `outcome`, not an error (`kb-error-taxonomy`) |
-| `kb_chat_first_token_seconds` | Histogram | `model` | §23's "first visible token below 4 s", measured end to end |
-| `kb_chat_duration_seconds` | Histogram | `outcome` | Total latency, split so a fast failure cannot flatter p95 |
-| `kb_retrieval_duration_seconds` | Histogram | `stage` | The 1.5 s budget per stage: `embed` `dense` `sparse` `fuse` `dedupe` `rerank` `pack` |
-| `kb_retrieval_empty_total` | Counter | `reason` | Empty-retrieval rate → refusals. `reason` ∈ `no_match` `below_threshold` `filtered` |
-| `kb_provider_requests_total` | Counter | `provider`, `model`, `outcome`, `error_class` | Request count, success rate, rate-limit rate, timeout rate — four §20.2 bullets, one counter |
-| `kb_provider_duration_seconds` | Histogram | `provider`, `model` | Latency by model |
-| `kb_provider_first_token_seconds` | Histogram | `provider`, `model` | Provider-side TTFT. **Attribution only** — never the headline number |
-| `kb_provider_tokens_total` | Counter | `provider`, `model`, `token_type` | Token usage; `token_type` ∈ `input` `output` |
-
-### Structured logs
-
-One JSON object per line on stdout, RFC3339 UTC. **Required on every line:** `timestamp`, `severity`,
-`service`, `env`, `trace_id`, `span_id`, `request_id`, `operation`. **When applicable:** `org_id`,
-`bot_id`, `job_id`, `error_class`, `duration_ms`. `org_id` and `bot_id` are opaque ULIDs and belong in
-logs — that is what makes a tenant incident debuggable; §20.3's "where safe" means *not as metric
-labels* and *not shipped outside the DPA*, not "omit them". Durations are `duration_ms` in logs and
-seconds in metrics; the asymmetry is deliberate. **Never logged, at any level, in any environment:**
-provider API keys, passwords, `Authorization` and `X-KB-Signature` values, session tokens and cookies,
-the user's question, retrieved chunk text, the assembled prompt, model output, file contents. Evaluation
-content capture goes to the eval store behind the org's privacy switch (§18.10) — never to Loki, which has no per-tenant access control.
-
-### Telemetry vs audit
-
-| | Telemetry (traces, metrics, logs) | Audit log |
-|---|---|---|
-| Store / lifetime | Tempo, Prometheus, Loki; retention window, then gone | PostgreSQL `audit_logs`, append-only, outlives the record it describes |
-| Completeness | **Sampled and lossy by design** | **Every event, never sampled** |
-| Write coupling | Fire-and-forget; failure degrades silently (§19.6) | In the operation's transaction; failure fails the operation |
-| Reader | On-call, mid-incident | Compliance, the tenant, an investigator months later |
-
-Put audit rows in Loki and sampling plus retention delete the compliance record silently — you find out
-when someone asks who deleted a source in March. Put telemetry in `audit_logs` and the audit table
-becomes the hottest write path in the system, unqueryable exactly when it is needed. What audit
-captures: `kb-security-baseline`.
-
-### Liveness vs readiness
-
-| Service | `/health/live` — process only, **zero dependency I/O** | `/health/ready` — required deps | Degraded, does **not** fail readiness |
-|---|---|---|---|
-| Laravel `core-api` | PHP-FPM answers | PostgreSQL, Valkey | FastAPI, object storage, any provider |
-| FastAPI `ai-api` | event loop responsive | Qdrant, Valkey, embedding model loaded | reranker, object storage, provider credentials |
-| Celery / queue worker | heartbeat file touched within 2× the longest poll | broker reachable, `celery inspect ping` | reranker, OCR engine |
-
-Readiness caches its dependency check for 5 s — uncached, probe interval × replica count is a
-self-inflicted load test on PostgreSQL. `/health/deps` returns per-dependency detail and is
-**admin-authenticated**; it maps the topology. Optional-dependency breakers report degraded (§19.3) and never fail readiness (`kb-error-taxonomy`).
+**Every `kb_*` family — type, labels, and the question it answers — is in
+`references/metric-catalog.md`**, one file so no row drifts out of sight of the allow-list above;
+every family carries `service` and `env` implicitly. **`references/logs-health-audit.md`** holds the
+other three contracts, which share one rule (telemetry is lossy, audit is not): the required and
+forbidden fields on every JSON log line (`org_id` belongs in a log and never in a label; prompts,
+chunks and credentials belong in neither), the store/completeness/write-coupling table that keeps
+`audit_logs` out of Loki and telemetry out of PostgreSQL, and the liveness-vs-readiness matrix (zero
+dependency I/O on `/health/live`, a 5 s cached check on `/health/ready`, optional-dependency breakers
+degraded but ready).
 
 ## Gotchas
 
@@ -195,6 +175,7 @@ self-inflicted load test on PostgreSQL. `/health/deps` returns per-dependency de
 - **A support log line contains a customer's contract text.** Someone logged the packed prompt at DEBUG to debug grounding. That payload is retrieved tenant content plus the user's question — the most sensitive object in the system — and it landed in a store with no per-tenant access control and long retention. The same trap arrives free from auto-instrumentation: OTel GenAI's `gen_ai.input.messages`/`gen_ai.output.messages` are opt-in and must stay off (`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` unset — the name OTel Python contrib uses, though semconv only cites it as a non-normative example <!-- UNVERIFIED: confirm against the SDK version you pin -->), or every conversation is shipped to Tempo. Allow-list the fields; treat the scrubber as a backstop that will miss the case you did not imagine.
 - **The chat request is missing from Tempo entirely, and it is the one that failed — meanwhile the pod's memory creeps up.** Spans export only on `end()`, and the streaming span was ended on the happy path only. The ASGI instrumentation will not save you: it ends the server span on the final `http.response.body` message and has no `http.disconnect` handling at all, so an SSE generator that swallows the disconnect and keeps looping leaks the span and its context token for the life of the process. Use `start_span` plus an explicit `finally` — not a context manager wrapped around a generator, whose exit depends on GC — record `finish_reason` there, and re-raise `CancelledError` rather than swallowing it (`kb-internal-api-contracts`).
 - **An ingestion job's spans are dropped, or attached to an HTTP request that ended forty minutes earlier.** `opentelemetry-instrumentation-celery` still defaults to making the task a **child** of the submitting span; links are opt-in via `CeleryInstrumentor().instrument(use_span_links=True)`. With the default, the parent closed at `202`, Tempo already flushed the trace (`max_trace_idle` 5 s, `max_trace_live` 30 s) and the tail sampler's `decision_wait` expired long before the job's spans arrived. Set `use_span_links=True`, carry `traceparent` in the job payload, start a new root, link the submitter.
+- **The error-rate panel reads healthy through a crawl outage in which a third of pages fail.** A family reused `outcome` for a result set that is not the shared four — `kb_crawl_pages_total` counting `failed` and `missing`, OCR counting `partial` — so every one of those samples falls outside `outcome=~"error|timeout"` and the error rate under-reports by exactly the traffic that failed. Nothing errors and nothing looks wrong: the matcher is valid PromQL, the series exist, the sum is simply smaller, and the family drops out of the one rule that was supposed to catch it. Any family whose results are not `success`/`error`/`timeout`/`cancelled` names its label **`disposition`** and carries its own recording rule; CI asserts every emitted `outcome` value is in the closed set (five, counting `skipped` on the scheduler family).
 - **PromQL returns half the expected value, or the alert never fires at all — with no error either way.** Three variants of one root cause. Two services export one metric name with different label sets, so `sum by (operation)` drops the series lacking the label. A histogram named `kb_x_seconds` already produces `kb_x_seconds_count`, so your own counter with that name collides and one silently wins. And an instrument created inside the request handler, or a name written with its unit suffix that the exporter then suffixes again, yields `/metrics` output no query in the repo matches. One name, one owner, one label set; CI scrapes each service's `/metrics` and diffs the name set against the catalog — that test is what makes the catalog a contract rather than a document.
 - **A Qdrant blip takes every FastAPI replica out of the load balancer at once and a partial degradation becomes a total outage.** Readiness flapped in lockstep because all replicas poll the same shared dependency on the same interval. Give it a `failureThreshold` that outlives a normal blip, cache the check 5 s, and keep liveness free of dependency I/O — otherwise a failed readiness escalates into a fleet-wide restart loop.
 - **The GenAI attribute names copied from a blog post are already dead.** `gen_ai.*` is **Development/experimental — nothing in it is stable**, and it has churned hard: `gen_ai.system` → `gen_ai.provider.name`, `gen_ai.usage.prompt_tokens`/`completion_tokens` → `input_tokens`/`output_tokens`, and in semconv **v1.42.0 (June 2026) the whole `gen_ai.*` namespace was deprecated in the main repo and moved to `open-telemetry/semantic-conventions-genai`**, which as of v1.43.0 has no releases and no schema URL. Hence: `gen_ai.*` for span attributes (one adapter module, cheap to remap, every vendor UI reads them), `kb_*` for every metric name (compiled into alerts, expensive to remap). Pin the semconv version you mapped against and re-check on every SDK bump.
@@ -211,7 +192,7 @@ self-inflicted load test on PostgreSQL. `/health/deps` returns per-dependency de
 
 - [ ] An end-to-end test asserts **one** trace id spans the Laravel server span, the FastAPI server span, the retrieval spans, the provider span and the finalizing DB write — and that the FastAPI span's parent is the Laravel client span.
 - [ ] Every new metric is in the catalog before it is in code; the CI catalog diff is green. **That diff scrapes the OTel Collector's `prometheus` exporter, never a service's own `/metrics`** — transport is OTLP push everywhere, and under PHP-FPM and Celery prefork each request lands in a different process, so a per-service endpoint returns one worker's fragment and the gate passes while checking almost nothing (`github-actions-pipeline`, `opentelemetry-instrumentation`). Counters end `_total`, durations end `_seconds`, proportions end `_ratio` in 0–1, and no name contains `ms`, `percent` or `rate`.
-- [ ] No metric label from the banned list exists anywhere; a unit test asserts the allow-list at the instrument wrapper.
+- [ ] A unit test asserts the allow-list at the instrument wrapper **and** that the allow-list is exactly the union of the `Extra labels` column in `references/metric-catalog.md` — the two drift apart silently otherwise. No banned label exists anywhere, and every `outcome` value emitted is in the closed set; a family with a richer result set uses `disposition`.
 - [ ] Every streaming and job span ends in a `finally`; aborting a stream mid-flight still exports the span with `kb.finish_reason="cancelled"`. Celery and Laravel queued jobs start a new root with a span link, never a child of the submitter.
 - [ ] Sampling is head-100% with tail sampling in the Collector (`load_balancing` exporter in front); a test asserts a 5xx trace survives while a routine 200 is dropped. `opentelemetry-auto-guzzle` is installed and Celery runs with `use_span_links=True`.
 - [ ] A log fixture containing a known API key, password, prompt and retrieved chunk asserts none reach any sink; `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` is unset in every environment.

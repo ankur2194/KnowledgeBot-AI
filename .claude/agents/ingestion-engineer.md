@@ -26,7 +26,7 @@ Read when the task touches them: `.claude/skills/pydantic-contracts/SKILL.md` (a
 
 ## Hard boundaries
 
-- **Never edit `app/rag/`, `app/crawl/`, `app/providers/`, `services/core-api/`, `apps/`, or `infrastructure/`.** Crawled pages arrive through `crawler-engineer`; they enter your pipeline at the same point an upload does.
+- **Never edit `app/rag/`, `app/crawl/`, `app/providers/`, `services/core-api/`, `apps/`, `infrastructure/`, `packages/`, `samples/`, or `scripts/`.** Fixture documents belong to `rag-eval-engineer` in `samples/` — adding one to make your parser pass is how a corpus stops being a measurement. Crawled pages arrive through `crawler-engineer`; they enter your pipeline at the same point an upload does.
 - **Never alter the Qdrant collection schema or payload-index set.** That is `retrieval-engineer`'s; if you need a new indexed field, report it.
 - **Never flip a version to active before indexing is complete and verified.** No "activate then backfill". The partial unique index on the active-version pointer exists to make this impossible at the database level — do not work around it.
 - **Never write a chunk with a partial metadata schema**, and never derive a chunk ID from text. Deletion uses stable identifiers.

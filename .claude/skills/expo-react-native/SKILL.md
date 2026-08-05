@@ -43,20 +43,20 @@ apps/mobile/
 // EXPO_PUBLIC_USE_RN_FETCH=1 anywhere in the env restores Hermes' XHR fetch and `res.body` becomes
 // null. The named form cannot be switched off, and it is what CI greps for.
 import { fetch } from 'expo/fetch';
+// Runtime imports from the shared package — `parseFrame` and `KbError` are real code there, not
+// types, and this app forks neither. A second `KbError` breaks `instanceof` and every retry
+// decision made against it (`nextjs-app-router`, `tanstack-query-table`).
+import { KbError, parseFrame, parseRetryAfter } from '@kb/contracts';
+import type { KbEvent, ChatSendBody } from '@kb/contracts';
 
 const FRAME = /\r\n\r\n|\n\n|\r\r/;   // SSE frame separator — proxies do rewrite line endings
 const IDLE_MS = 45_000;               // three missed 15 s `: ping`s. NOT AbortSignal.timeout — see gotchas
 
-export type KbEvent = { name: string; data: any };
-export class KbError extends Error {
-  constructor(readonly errorClass: string, readonly retryable: boolean, m?: string) { super(m ?? errorClass); }
-}
-
 export async function* streamAnswer(
   conversationId: string,
-  body: { client_message_id: string; content: string },
-  token: string,
-  signal: AbortSignal,
+  body: ChatSendBody,        // {client_message_id, content} — kb-internal-api-contracts owns both
+  token: string,             // names; `text` is the token event's field, not the request's, and
+  signal: AbortSignal,       // posting it 422s every send on this client and no other.
 ): AsyncGenerator<KbEvent> {
   const res = await fetch(`${API_ORIGIN}/api/v1/chat/${conversationId}/messages`, {
     method: 'POST',                          // exactly why EventSource is unusable: GET-only, no headers
@@ -69,9 +69,13 @@ export async function* streamAnswer(
   // class renders as different statuses per surface (kb-error-taxonomy, the 403/404 footnote).
   if (!res.ok || !res.headers.get('content-type')?.startsWith('text/event-stream')) {
     const env: any = await res.json().catch(() => ({}));
-    throw new KbError(env.error_class ?? null, env.retryable ?? false, env.message)   // null = unknown, and unknown is permanent. NOT 'internal_dependency': that class is retryable and pages, so a malformed response would wake someone up.;
+    // Argument order is packages/contracts': (error_class, retryable, retry_after, request_id,
+    // message). retry_after comes off the HEADER, never the envelope; drop it and a 429's own
+    // instruction is ignored and the ladder retries inside the window it was told to wait.
+    throw new KbError(env.error_class ?? null, env.retryable ?? false,   // null = unknown, and unknown is permanent. NOT 'internal_dependency': that class is retryable and pages, so a malformed response would wake someone up.
+                      parseRetryAfter(res.headers.get('retry-after')), env.request_id ?? null, env.message);
   }
-  if (!res.body) throw new KbError(null, false, 'no ReadableStream — this is not expo/fetch')   // our own client bug, not a dependency failure;
+  if (!res.body) throw new KbError(null, false, null, null, 'no ReadableStream — this is not expo/fetch')   // our own client bug, not a dependency failure;
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();          // provided by the `expo` package's WinterCG runtime; UTF-8 only
@@ -90,9 +94,11 @@ export async function* streamAnswer(
       for (let m = FRAME.exec(buffer); m; m = FRAME.exec(buffer)) {
         const frame = buffer.slice(0, m.index);
         buffer = buffer.slice(m.index + m[0].length);
-        if (frame.startsWith(':')) continue;  // `: ping` is an SSE comment, never an event
-        const ev = parseFrame(frame);
-        if (ev.name === 'error') throw new KbError(ev.data.error_class, ev.data.retryable, ev.data.message);
+        const ev = parseFrame(frame);         // shared; returns null for `: ping`, an SSE comment
+        if (!ev) continue;
+        if (ev.name === 'error') throw new KbError(ev.data.error_class, ev.data.retryable,
+                                                   null, null, ev.data.message);  // the SSE error
+        //   frame carries three keys; request_id and Retry-After exist only on the HTTP envelope
         if (ev.name === 'message.complete') sawTerminal = true;
         yield ev;                             // citations always arrive before the first token
       }
@@ -111,18 +117,9 @@ export async function* streamAnswer(
     await reader.cancel().catch(() => {});    // an early `return` from the generator must still close the socket
   }
 }
-
-function parseFrame(frame: string): KbEvent {
-  let name = 'message', data = '';
-  for (const line of frame.split(/\r\n|\n|\r/)) {
-    const c = line.indexOf(':');
-    const field = c === -1 ? line : line.slice(0, c);
-    const v = c === -1 ? '' : line.slice(c + 1).replace(/^ /, '');  // exactly one leading space is stripped
-    if (field === 'event') name = v; else if (field === 'data') data += (data ? '\n' : '') + v;
-  }
-  return { name, data: data ? JSON.parse(data) : {} };
-}
 ```
+
+`parseFrame` is **not** defined here. It lives in `packages/contracts` as runtime code — the WHATWG field rules (`event`, multi-line `data`, exactly one leading space stripped, a leading `:` meaning comment-not-event) are one contract, and three clients implementing it three times is three chances to disagree about `: ping`. Import it; never fork it.
 
 ```ts
 // apps/mobile/src/features/chat/use-answer-stream.ts — the three cancel sources, one controller.
@@ -154,7 +151,7 @@ Custom schemes are for in-app navigation and dev only: on Android any app may re
 
 Expo Router makes **every** route deep-linkable automatically, so a link is a way into any screen you ever add. `app/(app)/_layout.tsx` is the gate: no valid token ⇒ redirect to `/login`, remember the intended href, resume after auth. A cold-start deep link that renders a stale cached screen before that check runs is a real leak; render nothing until the token has been read from SecureStore.
 
-**Not defined here.** Token minting, abilities, revocation, the device list, org resolution → `laravel-sanctum-auth`. SSE event names, the error envelope, idempotency keys, cancellation semantics on the server → `kb-internal-api-contracts`. Error classes and retry policy → `kb-error-taxonomy`. Span and metric names → `kb-observability-conventions`. Query-key shape, retry policy and optimistic updates → `tanstack-query-table` (written for `apps/web`; the key namespacing and the single-source retry rule apply here unchanged). The browser's copy of this read loop → `nextjs-app-router` (`streamAnswer`); the frame parser is the same contract and should move to `packages/contracts` when a third client needs it.
+**Not defined here.** Token minting, abilities, revocation, the device list, org resolution → `laravel-sanctum-auth`. SSE event names, the error envelope, idempotency keys, cancellation semantics on the server → `kb-internal-api-contracts`. Error classes and retry policy → `kb-error-taxonomy`. Span and metric names → `kb-observability-conventions`. Query-key shape, retry policy and optimistic updates → `tanstack-query-table` (written for `apps/web`; the key namespacing and the single-source retry rule apply here unchanged). The browser's copy of this read loop → `nextjs-app-router` (`streamAnswer`). The frame parser, the client event union and `KbError` are **not** copies: there are three clients now, so they live in `packages/contracts` as real runtime code and this app imports them (`admin-web-engineer` owns that package; import it, never fork it).
 
 ## Gotchas
 
@@ -183,6 +180,7 @@ Expo Router makes **every** route deep-linkable automatically, so a link is a wa
 
 - [ ] `rg -n "EventSource|from 'react-native'.*fetch|EXPO_PUBLIC_USE_RN_FETCH" apps/mobile` is empty, and every streaming call imports `fetch` from `expo/fetch`. A test asserts `res.body !== null`.
 - [ ] `rg -n "internal/v1|ai-api|X-KB-" apps/mobile` returns nothing; no HMAC secret exists in the bundle or in `app.config.ts`.
+- [ ] `rg -n "class KbError|function parseFrame|errorClass|retryAfter" apps/mobile` is empty — both come from `@kb/contracts`, snake_cased — and the send body is exactly `{client_message_id, content}` typed from the same package (`rg -n "text:" apps/mobile/src/features/chat` matches only the `token` event).
 - [ ] An integration test against a fixture SSE server asserts inter-event wall-clock gaps (not just the final text), a frame split across two chunks reassembling, a multi-byte codepoint split across two chunks decoding intact, and exactly one terminal event.
 - [ ] A cancellation test aborts mid-stream and asserts the server recorded `finish_reason: "cancelled"` / `user_cancellation` — separately for the Stop button, `router.back()`, and an `AppState` change to `background`.
 - [ ] A stream cut without a terminal event surfaces `stream_lost`, re-reads the persisted message, and never re-POSTs the same `client_message_id`; no `Last-Event-ID` header appears anywhere.

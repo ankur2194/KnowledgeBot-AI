@@ -32,7 +32,7 @@ Stack: Laravel + Laravel Queue (Valkey) control plane, FastAPI + Celery data pla
 | `tenant_quota` | Org exceeded its plan's token/storage/source allowance | 403 `tenant_quota_exceeded` | **no** | no (§8.7) | no |
 | `rate_limit` | *Our* limiter rejected the caller | 429 + `Retry-After` | client-only, after `Retry-After` | no | alert on sustained |
 | `provider_auth` | Provider rejected our credential (401, invalid key, revoked) | **502** | **no** | no (§8.7) | alert; page if >1 org in 15 min |
-| `provider_rate_limit` | Provider 429 / quota / concurrency limit | 429 + `Retry-After` | bounded, `Retry-After` as floor | yes **when configured** (§8.7) | alert on sustained |
+| `provider_rate_limit` | Provider 429 / quota / concurrency limit | 429 + `Retry-After` | bounded, `Retry-After` as floor | yes **when configured** (§8.7) | alert; page if >10% of a provider's calls for 15 min ³ |
 | `provider_billing` ² | Account credit or quota exhausted: OpenAI 429 `insufficient_quota`, Anthropic/DeepSeek 402 | **502** | **no** | no | **page** immediately |
 | `provider_temporary` | Provider 5xx, 529, connection reset, connect or first-token timeout | 503 | bounded | yes | page if breaker open >5 min |
 | `provider_permanent_request` | Provider 4xx we caused: bad params, unknown model, context too large, content-policy refusal | 502 (refusal → see gotchas) | **no** | no | page (it is our bug) |
@@ -48,6 +48,8 @@ Stack: Laravel + Laravel Queue (Valkey) control plane, FastAPI + Celery data pla
 ² **`provider_billing` exists because without it an exhausted account is retried.** OpenAI expresses it as **429 `insufficient_quota`** — the same status as a rate limit, raised by the SDK as the same `RateLimitError` — so it lands in `provider_rate_limit`, which is retryable *and* fallback-eligible. The one condition that will never self-heal gets the full backoff ladder, then silently falls back, and nobody is paged. Anthropic and DeepSeek use 402 for the same state. **Fallback is `no`** because an org that configured a fallback authorized it for provider *outages*, not for quietly moving its spend to a second account because an invoice went unpaid — the failure should be loud. That trade is genuinely arguable and is recorded in `docs/22` for ADR ratification. Never counted toward the circuit breaker: it is a credential property, not a sick dependency.
 
 ¹ The class is `authorization` either way — only the rendered status differs by surface. Authenticated admin surfaces return **403**; the public runtime and SDK surfaces return **404**, because a 403 on a foreign identifier confirms the row exists and turns the endpoint into an enumeration oracle. Never branch on this in retry or fallback logic — branch on `error_class`, which is identical in both cases. Owned by `kb-security-baseline`.
+
+³ **`provider_rate_limit` pages when sustained, because sustained means every automatic remedy has already run.** A single 429 is retried *at most once* and then falls back if the bot configured one, so >10% of a provider's calls 429ing continuously for 15 minutes is past both retry and fallback and is reaching users as failed turns. Below that bar it is an `alert`: one org bursting through its own quota is that org's plan boundary, shown on its admin dashboard (§19.3), not a fleet fault. `prometheus-grafana-loki-tempo` mechanises exactly this row as `KbProviderRateLimitSustained{severity: page}` — the threshold and the window live here, the PromQL lives there.
 
 Provider-specific error shapes (which SDK exception or status maps to which class) belong to `kb-provider-adapter-contract`. It maps *into* this table; it does not extend it.
 
@@ -121,6 +123,8 @@ Scope one breaker per `(org_id, provider_credential, model)` for credential-scop
 
 **Degradation matrix.** Fail silently, chat continues: analytics aggregation, tracing export, answer/retrieval cache, usage-estimate refresh. Degrade *and record the event*: reranker unavailable → fused retrieval only, **only if bot policy permits**; primary model unavailable → configured fallback (§8.7). Fail loudly: PostgreSQL, Qdrant, credential decryption, auth/authz, tenant-filter construction, and empty retrieval — which produces a refusal, not an invention.
 
+**Not defined here.** Provider-specific error shapes and the SDK-exception → class map → `kb-provider-adapter-contract`. The wire format that carries an error between Laravel and FastAPI → `kb-internal-api-contracts`. Metric and log field names, cardinality rules, trace attributes → `kb-observability-conventions`. Which ingestion state a failure moves a source into → `kb-source-lifecycle`.
+
 ## Gotchas
 
 - **Provider dashboard shows 9–27× your logged request count during an incident; your own logs show one attempt per request.** Every tier retried: TanStack Query defaults to 3 attempts, the OpenAI/Anthropic Python SDKs default to 2 internal retries, and the adapter added its own. Set `max_retries=0` on every provider SDK client, `retry: false` on chat mutations, and let only the adapter retry.
@@ -135,13 +139,6 @@ Scope one breaker per `(org_id, provider_credential, model)` for credential-scop
 - **An org receives another org's answer on a retry.** The idempotency key was client-supplied and not namespaced. Every key is stored as `idem:{org_id}:{operation}:{key}` in Valkey (24 h TTL) plus a durable record; a replay returns the stored response only on an exact `(org_id, operation, request-hash)` match, and a mismatched hash is a `validation` error, not a fresh execution. Required for file ingestion, crawl runs, source deletion, provider-usage finalization, and message submission (§19.5).
 - **Rate-limit handling doubles latency past the 4 s first-token target.** §19.2 permits retrying a rate-limit and §8.7 permits falling back on one, so both fired in series. Ordering rule: when fallback is configured for `provider_rate_limit`, retry the primary **at most once**, then fall back; never run the full retry ladder and then the fallback.
 - **Every fallback and every degradation must be written to telemetry and conversation diagnostics** (§8.7) — a silent fallback looks like the primary model produced the answer, and the eval suite then scores the wrong model.
-
-## Not defined here
-
-- Provider-specific error shapes and the SDK-exception → class map — `kb-provider-adapter-contract`.
-- The wire format that carries an error between Laravel and FastAPI — `kb-internal-api-contracts`.
-- Metric and log field names, cardinality rules, trace attributes — `kb-observability-conventions`.
-- Which ingestion state a failure moves a source into — `kb-source-lifecycle`.
 
 ## Official docs
 

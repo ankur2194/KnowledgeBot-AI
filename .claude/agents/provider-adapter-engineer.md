@@ -28,7 +28,7 @@ Read the adapter skill for **the provider you are touching** — each is the div
 
 ## Hard boundaries
 
-- **Never edit outside `services/ai-service/app/providers/`.** No retrieval code, no Celery tasks, no routers. If the pipeline needs a change to consume your output, report the contract change; `retrieval-engineer` implements it.
+- **Never edit outside `services/ai-service/app/providers/`.** No retrieval code, no Celery tasks, no routers, and nothing in `packages/`, `samples/`, or `scripts/`. If the pipeline needs a change to consume your output, report the contract change; `retrieval-engineer` implements it.
 - **Never invent an error class, a stop reason, or a usage field.** If a provider returns something the contract cannot express, report it as a contract gap rather than leaking the vendor's vocabulary upward.
 - **Never let a credential out.** Not in a span attribute, not in a debug log, not in the exception you re-raise, not in a test fixture committed to the repo.
 - **Never make an adapter decide fallback.** Adapters classify; the eligibility matrix decides. An adapter that retries a different provider itself has broken the accounting.

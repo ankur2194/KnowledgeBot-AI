@@ -1,0 +1,272 @@
+# Workflow jobs — the full YAML
+
+Companion to `SKILL.md`. The trigger table and the gate table there are the contract; this file is
+the YAML an implementer needs once. Every job below lives in `.github/workflows/ci.yml` unless
+noted. Data-service image tags are `docker-compose-stack`'s pin, not this skill's — keep every tag
+here byte-identical to the compose `test` profile.
+
+## Workflow top matter
+
+```yaml
+on:
+  pull_request:
+  merge_group: { types: [checks_requested] }
+  push: { branches: [main] }
+
+# cancel-in-progress must not apply to merge_group: a cancelled merge-queue check
+# evicts the PR from the queue and the author has to re-add it by hand.
+concurrency:
+  group: ci-${{ github.event.merge_group.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read            # jobs needing more raise it locally, never here
+```
+
+## `core-api` — the control-plane job
+
+Carries most of the reasoning, so read it before adding any other job.
+
+```yaml
+jobs:
+  core-api:
+    runs-on: ubuntu-24.04   # pinned: ubuntu-latest moves image, and the move swaps
+                            # the preinstalled PHP/Node/Python out from under us
+    defaults: { run: { working-directory: services/core-api } }
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env: { POSTGRES_PASSWORD: ci, POSTGRES_DB: kb_test }
+        ports: ['5432:5432']   # required: this job runs ON the runner, so the
+                               # service label is not a resolvable hostname
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-retries 20
+      valkey:
+        image: valkey/valkey:9.1.1   # NOT 8-alpine — 8 has no DELIFEQ and no
+                                     # database-level ACL, so the two-instance
+                                     # boundary tests pass against nothing (Gotchas)
+        ports: ['6379:6379']
+        options: --health-cmd "valkey-cli ping" --health-interval 5s --health-retries 20
+      qdrant:
+        image: qdrant/qdrant:v1.18.3   # matches qdrant-client==1.18.0; server and
+                                       # client minors are pinned and bumped together
+        ports: ['6333:6333']
+        # deliberately no --health-cmd: the image ships no shell utilities, so any
+        # in-container probe fails forever and the job hangs for the whole retry
+        # budget before reporting an unrelated error. Wait from the runner instead.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_pgsql, redis, bcmath, intl
+          coverage: none      # xdebug roughly doubles the Pest suite; only the
+                              # nightly mutation job sets pcov
+      - uses: actions/cache@v6
+        with:
+          # the Composer download cache, never vendor/ — a restored vendor/ tree
+          # outlives a composer.lock change and CI then tests the old dependency
+          path: ~/.cache/composer/files
+          key: composer-${{ hashFiles('services/core-api/composer.lock') }}
+      - run: composer install --no-interaction --prefer-dist --no-progress
+
+      - run: timeout 60 bash -c 'until curl -sf localhost:6333/readyz; do sleep 1; done'
+
+      - name: Tenancy escape hatches must be annotated
+        working-directory: .
+        run: |
+          # Each legitimate raw query carries `// tenancy-exempt: <reason>` on the
+          # same line; grep -v drops those, so anything left is unreviewed. This is
+          # why the allow-list is inline and not a paths file — it moves with the
+          # code and dies with it. Constructs and rationale: kb-tenancy-isolation.
+          ! grep -rnE 'withoutGlobalScopes\(|DB::table\(|DB::select\(' \
+              services/core-api/app services/core-api/database \
+            | grep -v 'tenancy-exempt:'
+
+      - name: Migrate, then arm the RLS tripwire
+        run: |
+          php artisan migrate --force
+          # RLS is a CI-only detector, never the authorization mechanism —
+          # postgresql-patterns declines it in production (PgBouncer leaks the GUC
+          # across pooled sessions). It must run as kb_ci_app, a NON-OWNER role:
+          # the table owner bypasses RLS silently unless FORCE is set, which makes
+          # the tripwire permanently green and proves nothing.
+          psql "postgres://postgres:ci@localhost:5432/kb_test" -f database/ci/enable-rls.sql
+
+      - run: php artisan test --parallel --processes=4
+        env:
+          DB_CONNECTION: pgsql       # never sqlite — jsonb, partial unique indexes
+          DB_HOST: 127.0.0.1         # and CHECK constraints must actually fire
+          DB_USERNAME: kb_ci_app
+          QDRANT_URL: http://localhost:6333
+
+      - name: Form-rules manifest is current
+        run: |
+          php artisan kb:dump-form-rules
+          git diff --exit-code -- ../../packages/contracts/rules
+```
+
+`packages/contracts/test/form-drift.test.ts` runs in the Node job and proves the Zod schemas and the
+FormRequests agree *behaviourally* (probe values, both directions) — the manifest diff alone only
+proves the dump is fresh (`rhf-zod-forms`).
+
+## `ai-service` — the data-plane greps
+
+Both steps are pure text passes with no containers and no secrets, so they run in the per-push tier.
+
+```yaml
+      - name: Every Qdrant call is filtered
+        run: |
+          # The Laravel grep above covers only half the system. Non-negotiable 2 is a
+          # DATA-PLANE rule, and until this existed the flagship invariant had no gate
+          # on the side that actually queries Qdrant. Failure mode (kb-tenancy-isolation):
+          # HTTP 200, normal latency, no log line, another tenant's chunks.
+          #
+          # Every retrieval entry point must take a filter positionally — no default, and
+          # no `filter or models.Filter()`, because Filter(must=[]) is a MATCH-ALL.
+          ! grep -rnE 'query_points\(|\.search\(|scroll\(|count\(' \
+              services/ai-service/app --include=*.py \
+            | grep -v 'tenancy-exempt:' \
+            | grep -vF 'app/retrieval/search.py'   # the one wrapper that builds the filter
+          # And no prefetch leaf may go out unfiltered.
+          ! grep -rn 'Prefetch(' services/ai-service/app --include=*.py \
+            | grep -v 'query_filter='
+
+      - name: Deletion targets identifiers, never text
+        run: |
+          # Project non-negotiable 6 / kb-deletion-and-verification §8.17: "Deletion
+          # targets stable identifiers, never text matching." Until this step existed the
+          # only enforcement was a reviewer noticing. Failure mode: headers, disclaimers,
+          # licence blocks and pricing tables repeat VERBATIM across documents and across
+          # tenants, so a payload-text or content-hash match issued for source A cuts a
+          # hole in source B. Nothing errors, every count stays plausible, and it surfaces
+          # weeks later as a bot that stopped citing a clause nobody edited.
+          #
+          # (a) An ALLOW-LIST of filter keys, not a deny-list of bad ones — a deny-list
+          # cannot anticipate the next payload field somebody adds. The payload contract is
+          # exactly the six fields kb-tenancy-isolation names, plus chunk_id; every other
+          # key (text, content, content_hash, title, heading_path, excerpt, url) is a
+          # content match wearing a filter's clothes. Escape hatch on the same line, same
+          # shape as the tenancy grep: `deletion-key-exempt: <reason>`.
+          ! grep -rnE 'FieldCondition\(\s*key=' \
+              services/ai-service/app --include=*.py \
+            | grep -vE "key=[\"'](org_id|bot_ids|source_id|source_item_id|source_version_id|source_status|chunk_id)[\"']" \
+            | grep -v 'deletion-key-exempt:' \
+            | grep -vF 'app/deletion/filters.py'   # the one builder; its keys come from the
+                                                   # DELETE_KEYS tuple, unit-tested against all
+                                                   # SEVEN keys above — the six-field payload
+                                                   # contract PLUS chunk_id, which deletion
+                                                   # targets and no query filter ever does.
+                                                   # Not equal to the six on purpose (Gotchas).
+          # (b) No full-text matcher reaches Qdrant at all, and no delete or count takes a
+          # text/content/hash kwarg. Lexical matching in this platform is BGE-M3 sparse
+          # vectors (bge-m3-embeddings), never MatchText — so a MatchText in the data plane
+          # is either a delete filter or a retrieval path that bypasses fusion. Both are bugs.
+          ! grep -rnE 'MatchText\(|(delete|count)[a-z_]*\([^)]*(text|content|content_hash)=' \
+              services/ai-service/app --include=*.py \
+            | grep -v 'deletion-key-exempt:'
+```
+
+## `qdrant-rebuild-proof` — ADR-010 as a merge gate
+
+```yaml
+  qdrant-rebuild-proof:
+    # MERGE GATE, not the nightly. ADR-010 requires Qdrant to be reconstructable from
+    # PostgreSQL + SeaweedFS. The violation is a payload key written at index time that
+    # exists in no column — a curated title, a boost weight, a language guess, a hand-fixed
+    # excerpt. Point counts and chunk counts both match afterwards, so counts cannot see it
+    # (kb-architecture-map Gotcha 5); only the ranking moves. Scheduled, it merged and was
+    # caught overnight at best. The full-corpus rebuild stays on the nightly; this is the
+    # fixture-sized version, ~90 s, that runs before merge.
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'merge_group'
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env: { POSTGRES_PASSWORD: ci, POSTGRES_DB: kb_test }
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 20
+      qdrant:
+        image: qdrant/qdrant:v1.18.3
+        ports: ['6333:6333']
+      seaweedfs:
+        image: chrislusf/seaweedfs:4.40   # the pin from `seaweedfs-s3` (4.30 is the floor —
+        command: server -s3 -dir=/data    # multipart ETag correctness, #9772); 8333 = `weed s3`
+        ports: ['8333:8333']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9
+        with: { enable-cache: true, cache-dependency-glob: services/ai-service/uv.lock }
+      - run: timeout 60 bash -c 'until curl -sf localhost:6333/readyz; do sleep 1; done'
+      - name: Rebuild a fixture collection and diff the payload key set
+        working-directory: services/ai-service
+        run: uv run pytest tests/integration/test_adr010_rebuild.py -q --no-header
+```
+
+What that test asserts, because the assertion is the whole gate:
+
+```python
+# services/ai-service/tests/integration/test_adr010_rebuild.py
+seed_fixture(orgs=1, sources=3, chunks=~200)      # PostgreSQL rows + SeaweedFS objects only
+client.delete_collection(COLLECTION)               # prove it from truth, not from a snapshot
+run_module("app.maintenance.rebuild_index", org_id=FIXTURE_ORG)
+
+observed = set().union(*(p.payload.keys() for p in scroll_all(client, COLLECTION)))
+assert observed == EXPECTED_PAYLOAD_KEYS   # SET equality — symmetric difference, not len().
+# len(observed) == len(EXPECTED) passes while a curated `title` swaps in for a dropped
+# `url`, which is precisely the bug this job exists for.
+assert golden_query_point_ids() == RECORDED_POINT_IDS
+# A key can be present and still be sourced from the wrong column, so the payload diff is
+# necessary and not sufficient: re-run the golden queries and compare ranked point ids.
+```
+
+## `observability-rules` — the three telemetry gates
+
+File checks only: no secrets, no service containers, no build. Per-push tier, path-filtered on
+`infrastructure/observability/**`.
+
+```yaml
+  observability-rules:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Alert rules carry the required labels and annotations
+        run: |
+          # A line grep cannot tell which rule a stray `severity:` belongs to — it passes a
+          # file where the label sits on the wrong rule — so drive it off the parsed
+          # document. yq -e exits 1 on empty output, so a clean run makes `!` succeed and a
+          # violation prints the offending alert name and fails the step.
+          ! yq -e '.groups[].rules[] | select(has("alert"))
+                   | select(((.labels.severity // "") | test("^(page|ticket)$") | not)
+                            or (.annotations.summary // "") == ""
+                            or (.annotations.runbook // "") == "")
+                   | .alert' infrastructure/observability/prometheus/rules/*.yml
+
+      - name: Every severity a rule emits has a real Alertmanager route
+        run: |
+          # `amtool config routes test` exits 0 for an unrouted severity too — it just falls
+          # through to the default receiver. So compare the RESOLVED receiver against a
+          # deliberately-named black hole. Symptom without this: Prometheus shows the alert
+          # firing and nobody is notified (prometheus-grafana-loki-tempo Gotchas).
+          for sev in $(yq -r '.groups[].rules[].labels.severity // empty' \
+                        infrastructure/observability/prometheus/rules/*.yml | sort -u); do
+            recv=$(docker run --rm -v "$PWD/infrastructure/observability:/o:ro" \
+                     --entrypoint amtool prom/alertmanager:v0.33.1 \
+                     config routes test --config.file=/o/alertmanager/alertmanager.yml \
+                     severity="$sev")
+            [ "$recv" = "kb-unrouted" ] && { echo "::error::severity=$sev routes nowhere"; exit 1; }
+          done
+
+      - name: promtool check rules + test rules
+        run: |
+          # `check rules` is syntax. `test rules` is the unit suite — the only one of the two
+          # that can fail on a rule which parses fine and computes the wrong thing (e.g. a
+          # kb:chat_error_ratio:5m that drops timeouts). -w is load-bearing: promtool resolves
+          # each test file's `rule_files:` relative to the CWD, not to the test file.
+          docker run --rm -v "$PWD/infrastructure/observability:/o:ro" \
+            -w /o/prometheus --entrypoint sh prom/prometheus:v3.13.2 -c \
+            'promtool check rules rules/*.yml && promtool test rules tests/*.yml'
+```

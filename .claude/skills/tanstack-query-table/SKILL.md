@@ -20,7 +20,7 @@ description: Server state and data grids for the Next.js admin in apps/web — T
 
 ## How we use it
 
-**Not ours.** The chat stream is `fetch()` + `getReader()` and never a query or mutation — `nextjs-app-router` owns it. Route structure, Router Cache, and `router.refresh()` → `nextjs-app-router`. Table markup, cells, and skeletons → `tailwind-shadcn`. Form state and 422 field mapping → `rhf-zod-forms`. Component and E2E tests → `vitest-playwright`. The `KbError` thrown by `apps/web/src/lib/api` and the `{error_class, message, retryable, request_id}` envelope → `kb-internal-api-contracts`; this skill requires two things of that wrapper — `error_class` readable as a property, and `retryAfter` parsed from the `Retry-After` **response header** (it is not in the JSON envelope). <!-- UNVERIFIED: `nextjs-app-router` constructs `new KbError(error_class, retryable)` with no retry-after; the two skills must be reconciled before either ships. -->
+**Not ours.** The chat stream is `fetch()` + `getReader()` and never a query or mutation — `nextjs-app-router` owns it. Route structure, Router Cache, and `router.refresh()` → `nextjs-app-router`. Table markup, cells, and skeletons → `tailwind-shadcn`. Form state and 422 field mapping → `rhf-zod-forms`. Component and E2E tests → `vitest-playwright`. The `{error_class, message, retryable, request_id}` envelope → `kb-internal-api-contracts`. **`KbError` is defined once, in `packages/contracts`** (`nextjs-app-router`), and imported here — never re-declared per app. Its five fields are all snake_case because each is a straight carry of the envelope plus one header: `error_class`, `retryable`, `retry_after` (seconds, parsed from the `Retry-After` **response header**; it is not in the JSON envelope), `request_id`, and the operator-facing `message`. This skill reads the first three.
 
 **Why v9, one day after release.** There is no application code to migrate, v8.21.3 has been feature-frozen since 2025-04-14, and starting on v8 schedules a migration on day one. Do **not** import `@tanstack/react-table/legacy` (`useLegacyTable`) or `stockFeatures` — both exist for migrations we do not have, and the migration guide states `stockFeatures` produces *"a larger bundle size than you even got with Table V8."* Pin exact; patch churn on a day-old major is expected.
 
@@ -31,7 +31,7 @@ Measured worst case was 27×: SDK 3 × adapter 3 × client 3. Provider SDKs are 
 ```ts
 // apps/web/src/lib/query/client.ts — the ONLY place a retry count appears in apps/web.
 import { QueryClient } from '@tanstack/react-query';
-import { KbError } from '@/lib/api';
+import { KbError } from '@kb/contracts';   // the one definition; never a per-app copy
 
 // Narrower than the envelope's `retryable` flag on purpose: `retryable: true` means *some* tier
 // may retry, and for `provider_temporary` that tier is the FastAPI adapter, which already spent
@@ -48,9 +48,11 @@ export const makeQueryClient = () =>
           // `rate_limit` is *our* limiter, and kb-error-taxonomy assigns its retry to the client.
           return CLIENT_RETRYABLE.has(error.error_class) || error.error_class === 'rate_limit';
         },
-        // Retry-After is a floor, not a hint. `retryAfter` is read off the response header.
+        // Retry-After is a floor, not a hint. `retry_after` is seconds, off the response header.
+        // Spelled `retryAfter` it reads `undefined`, the delay drops to 1 s with no error, and we
+        // retry inside the window we were told to wait.
         retryDelay: (_a, error) =>
-          error instanceof KbError && error.retryAfter ? error.retryAfter * 1000 : 1_000,
+          error instanceof KbError && error.retry_after ? error.retry_after * 1000 : 1_000,
         staleTime: 30_000,
         refetchOnWindowFocus: false,   // a focus storm on 12 open tabs is a self-inflicted 429
       },
@@ -73,90 +75,7 @@ Step 4 is the enforcement; the `orgId` key prefix is the invariant, and it is wh
 
 ### One complete example — server-driven source list
 
-```tsx
-// apps/web/src/features/sources/sources-table.tsx
-'use client';
-import { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import {
-  useTable, tableFeatures, rowSortingFeature, rowPaginationFeature,
-  createColumnHelper, FlexRender, type SortingState, type PaginationState,
-} from '@tanstack/react-table';
-import { api } from '@/lib/api'; import { useOrgId } from '@/lib/session';
-import { useDebounced } from '@/lib/hooks';
-
-type SourceRow = { id: string; title: string; status: string; chunk_count: number };
-type Page = { rows: SourceRow[]; row_count: number; organization_id: string };
-
-// Module scope: `features`, the helper and the fallback must be referentially stable or the core
-// row model rebuilds every render. No sorted/paginated row model is registered — the server does both.
-const features = tableFeatures({ rowSortingFeature, rowPaginationFeature });
-const columnHelper = createColumnHelper<typeof features, SourceRow>();
-const EMPTY: SourceRow[] = [];
-const TERMINAL = new Set(['ready', 'ready_with_warnings', 'failed', 'disabled', 'deleted', 'archived']);
-
-export function SourcesTable() {
-  const orgId = useOrgId();                       // from the session bootstrap, not the URL
-  const [sorting, setSorting] = useState<SortingState>([{ id: 'title', desc: false }]);
-  const [pagination, setPagination] = useState<PaginationState>({ pageIndex: 0, pageSize: 25 });
-  const [search, setSearch] = useState('');
-  const q = useDebounced(search, 300);            // undebounced, each keystroke mints a key and a request
-
-  const query = useQuery({
-    // orgId first. Every value the server sorts, filters or pages by is in the key, or a page-2
-    // response overwrites the page-1 entry and the table renders rows it did not ask for.
-    queryKey: ['org', orgId, 'sources', { sorting, pagination, q }] as const,
-    queryFn: ({ signal }) =>
-      api.get<Page>('/v1/sources', {
-        signal,                                   // without this, cancelQueries drops the result only
-        params: { page: pagination.pageIndex + 1, per_page: pagination.pageSize,
-                  sort: sorting.map((s) => (s.desc ? '-' : '') + s.id).join(','), q: q || undefined },
-      }),
-    // Keeps the previous page visible while the next loads, but only within one org: bare
-    // `keepPreviousData` renders the previous *key*, which after a switch is org A's rows.
-    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === orgId ? prev : undefined),
-    // Poll only while something is still ingesting; return false and it stops dead (§8.9).
-    refetchInterval: (self) =>
-      self.state.data?.rows.some((r) => !TERMINAL.has(r.status)) ? 5_000 : false,
-  });
-
-  // The response echoes the org Laravel scoped to (UNVERIFIED: no spec field; Laravel must add it).
-  // A switch landing mid-flight resolves under the old key — refuse to render a mismatched org.
-  const data = query.data?.organization_id === orgId ? query.data.rows : EMPTY;
-
-  const columns = useMemo(() => [
-    columnHelper.accessor('title', { header: 'Title' }),
-    columnHelper.accessor('status', { header: 'Status', enableSorting: false }),
-    columnHelper.accessor('chunk_count', { header: 'Chunks' }),
-  ], []);
-
-  const table = useTable({
-    features, columns, data,
-    manualSorting: true,
-    manualPagination: true,
-    rowCount: query.data?.row_count,   // the pager cannot know the last page without it
-    state: { sorting, pagination },
-    onSortingChange: (updater) => {
-      setSorting(updater);
-      // autoResetPageIndex is auto-disabled under manualPagination: reset by hand, or the next
-      // request asks for page 8 of a 2-page result and the table renders "no sources found".
-      setPagination((p) => ({ ...p, pageIndex: 0 }));
-    },
-    onPaginationChange: setPagination,
-  });
-
-  return (
-    <table>
-      <thead>{table.getHeaderGroups().map((hg) => <tr key={hg.id}>{hg.headers.map((h) => (
-        <th key={h.id} onClick={h.column.getToggleSortingHandler()}><FlexRender header={h} /></th>
-      ))}</tr>)}</thead>
-      <tbody>{table.getRowModel().rows.map((row) => <tr key={row.id}>{row.getVisibleCells().map((c) => (
-        <td key={c.id}><FlexRender cell={c} /></td>
-      ))}</tr>)}</tbody>
-    </table>
-  );
-}
-```
+The component in full — the org-prefixed key carrying every server-visible sort, filter and page value, the `signal`-forwarding `queryFn`, the org-compared `placeholderData`, the terminal-state poll, and the `manualSorting` / `manualPagination` wiring → **[references/sources-table-example.md](references/sources-table-example.md)**.
 
 ### Optimistic updates
 
@@ -172,6 +91,7 @@ Never optimistic here: **deletion and disable** (two-phase and verified — the 
 - **The pager reads "Page 1 of 1" on a 4,000-row set, or Next never disables.** `rowCount`/`pageCount` was not passed, so the table treats `data.length` as everything; `pageCount: -1` makes `getCanNextPage()` unconditionally `true`. Pass `rowCount` from the envelope, and render a skeleton pager while `query.data` is undefined rather than defaulting it to `0`.
 - **`queryClient.clear()` on the org switch, and org A's rows still appear.** `clear()` empties the caches but keeps the same client and the same mounted observers: active observers immediately refetch, and any request that started before the switch can still resolve into it. Replace the client instance instead — a new client has no observers and nothing renders the old one.
 - **A second admin's data appears in a first admin's dashboard, and only in production.** A module-scope `new QueryClient()`. In dev the process turns over often enough to hide it; in production one Node process serves everyone. Create it in `useState(() => makeQueryClient())`. Note `nextjs-app-router` makes the browser the fetcher, so there is no server prefetch to hydrate — if anyone adds one, it needs a fresh client per request and an org-prefixed key.
+- **Nothing ever retries, and a 429's `Retry-After` is ignored — with no error and no log line.** The retry predicate reads `error.error_class` and the delay reads `error.retry_after`; against an instance that spells either in camelCase both are `undefined`, `CLIENT_RETRYABLE.has(undefined)` is `false`, and every transient class renders as a permanent failure the user can only fix by reloading. It happens the moment a second `KbError` exists — a per-app copy, a mobile copy, a test double. Import the one in `packages/contracts`; `instanceof` against a forked class also fails, so the `!(error instanceof KbError)` guard above turns *everything* permanent at once.
 - **The provider dashboard shows 6–12 calls per user click while our logs show one.** TanStack Query's `retry` default is 3 (4 attempts) and multiplies against the adapter's 3. The single `retry` function above is the fix; a per-call `retry:` silently reopens it, so grep for it.
 - **An upload or delete executes twice, or the idempotency store returns 409.** Someone set `retry` on a mutation. Mutations default to `retry: 0` — keep it. A mutation that genuinely must survive a retry carries an `Idempotency-Key` (`kb-internal-api-contracts`); one without a key must never be retried by anything, including a user double-click, so disable the button on `isPending`.
 - **Selection checkboxes ignore clicks and sort arrows go stale — only in the production build.** React Compiler memoized an extracted header or cell component against the stable `column`/`row` reference, and builder-pattern reads (`column.getIsSorted()`, `row.getIsSelected()`) hide their state dependency from it. This hits exactly the shadcn/ui habit of breaking cell renderers into named components. Wrap those reads in `<Subscribe source={table.atoms.…} selector={…}>` from `@tanstack/react-table`.
@@ -191,6 +111,7 @@ Never optimistic here: **deletion and disable** (two-phase and verified — the 
 
 - [ ] `rg -n "queryKey:" apps/web/src` shows every key beginning `['org', orgId,` — and every server-visible sort, filter, and page value inside it.
 - [ ] `rg -n "retry:" apps/web/src` returns only `lib/query/client.ts`; `rg -n "\.status ===" apps/web/src` returns nothing in error-handling code.
+- [ ] `KbError` is imported from `@kb/contracts` and declared nowhere else (`rg -n "class KbError" apps/ packages/` returns one hit); `rg -n "errorClass|retryAfter" apps/` returns nothing. A test throws a `KbError` with `retry_after: 30` and asserts the delay is 30 s, and another asserts an unknown class is not retried.
 - [ ] `rg -n "new QueryClient\(" apps/web/src` returns only `makeQueryClient` and its `useState` call site; no persister, no production devtools; every `queryFn` destructures and forwards `{ signal }`, with a test asserting `cancelQueries` aborts the request and not just its result.
 - [ ] A Playwright test switches orgs with the network throttled and asserts org A's canary source title never appears on org B's list — including during the transition, not only after settle (`vitest-playwright`).
 - [ ] Every table with `manualPagination` also passes `rowCount` and resets `pageIndex` in the same update as a sort or filter change; a test paginates to the last page, applies a filter, and asserts rows render.

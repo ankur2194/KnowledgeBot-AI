@@ -61,7 +61,7 @@ The reranker score must be visible in the playground (§12.11). Model, batching,
 
 ## 12. Evidence threshold
 
-Applied to the reranker score only. When nothing passes: state the answer was not found in the available sources, do not invent one, optionally suggest a narrower question, and record an `insufficient_evidence` event (it is a §20.2 chat metric, not just a log line).
+Applied to the reranker score only, on the **sigmoid** scale that `bge-reranker` owns (`evidence.min_score` = 0.30, with `evidence.scale` stored beside it). Candidates that clear the threshold but fall outside `rerank.retain` are excluded here too, as `above_retain_limit` — a cap is a drop and needs a recorded reason like any other. When nothing passes: state the answer was not found in the available sources, do not invent one, optionally suggest a narrower question, and record an `insufficient_evidence` event (it is a §20.2 chat metric, not just a log line).
 
 The threshold is calibrated against the unanswerable and ambiguous cases in the evaluation dataset (§21.2), measured by refusal accuracy against hallucination rate (§21.3). Intuition is not an acceptable input.
 

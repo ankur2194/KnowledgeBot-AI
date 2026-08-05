@@ -12,7 +12,7 @@ Docker Compose **v5.4.0** (2026-08-03) on Docker Engine **29.7.1** (2026-07-31).
 
 ## Non-negotiables
 
-- **Network membership is the trust boundary, and it is the only one Compose can enforce.** `ai-api` and every `ai-worker-*` get no `ports:` key in any file or overlay and no `kb.edge=true` label; `laravel-api` is the only service on both `edge` and `application`. Published ports are DNAT'd ahead of the host firewall, so an "internal-only" debug port is a complete authorization bypass (`kb-architecture-map` gotcha 2). Traefik joins `edge` only (`traefik-routing`).
+- **Network membership is the trust boundary, and it is the only one Compose can enforce.** `ai-api` and every `ai-worker-*` get no `ports:` key in any file or overlay and no `kb.edge=true` label; `laravel-api` and `laravel-api-stream` are the only two services on both `edge` and `application` — that set is closed, and a third service joining both is the boundary being dissolved one convenience at a time (`kb-architecture-map`). Published ports are DNAT'd ahead of the host firewall, so an "internal-only" debug port is a complete authorization bypass (`kb-architecture-map` gotcha 2). Traefik joins `edge` only (`traefik-routing`).
 - **`web` is deliberately NOT on `application`.** §24.3 puts it there; `kb-architecture-map` narrowed it, and this file implements the narrowed version — with `web` on `application`, a Next route handler resolves `http://ai-api:8000` and *"clients never call FastAPI"* degrades from a fact to a convention. **This deviates from the spec as written and needs ratification** (docs/22 open decision 3).
 - **Two Valkey *services*, never two logical databases.** `maxmemory-policy`, `save` and `appendonly` are server-level, so `SELECT n` cannot separate them: `valkey-core` is `noeviction` + AOF (queues, broker, locks, idempotency, breakers, sessions, Laravel's *default* cache store); `valkey-cache` is `allkeys-lru` with **`--save "" --appendonly no` and no volume at all** — it is the only place tenant text lives in Valkey, and never writing an RDB or AOF is the only provable way to keep cached answers out of a backup (`valkey-keyspaces`).
 - **`stop_grace_period` exceeds the worker's own timeout on every worker service.** The default is **10 s**, then SIGKILL — short enough to kill a Laravel job mid-`UPDATE` or a Celery child mid-upsert, which is exactly the state both skills' idempotency is paying to avoid (`laravel-queues-valkey`, `celery-workers`).
@@ -69,6 +69,14 @@ volumes:
   # valkey-cache: absent on purpose. Nothing is written, so nothing can be recovered.
 
 services:
+  # ALL FOUR data-store tags live here and nowhere else — the versions `postgresql-patterns`,
+  # `qdrant-hybrid-search`, `seaweedfs-s3` and `valkey-keyspaces` agreed. CI copies three and a drift check
+  # diffs the two files (`github-actions-pipeline`): a tag written only in a workflow is how CI and prod drift.
+  postgres:  {image: postgres:18-alpine,       networks: [data], volumes: [pgdata:/var/lib/postgresql/data],
+              healthcheck: {test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER"], interval: 10s, retries: 5}}
+  qdrant:    {image: qdrant/qdrant:v1.18.3,    networks: [data], volumes: [qdrant:/qdrant/storage]}   # minor tracks qdrant-client==1.18.0
+  seaweedfs: {image: chrislusf/seaweedfs:4.40, networks: [data], volumes: [seaweed:/data]}            # floor 4.30; a bump is a restore drill
+
   valkey-core:
     image: valkey/valkey:9.1.1
     command: ["valkey-server", "--maxmemory", "1gb", "--maxmemory-policy", "noeviction",
@@ -150,11 +158,7 @@ Second, **a profile cannot patch a service, only include or exclude it** — so 
 
 Limits are `deploy.resources.limits.{memory,cpus,pids}` and `deploy.resources.reservations.{memory,devices}`, all of which `docker compose up` honours; `placement`, `mode`, `update_config` and `rollback_config` do not apply outside Swarm. <!-- UNVERIFIED: the ignored-key list is read from docker/compose source, not from prose docs -->
 
-### Self-hosted single host vs production
-
-One host: everything on one Compose project, `restart: unless-stopped`, `observability` and `dev-tools` off (the telemetry stack costs ~2 GB before it stores anything), Postgres and Qdrant sharing a disk, no replicas. Resource limits become *more* important, not less — they are the only thing stopping an embedding worker from OOM-killing Postgres. Production adds digest pins, `read_only: true` with `tmpfs` for scratch, `security_opt: [no-new-privileges:true]`, `cap_drop: [ALL]`, non-root `user:`, and moves Postgres and object storage to hosts with their own backup schedule. Neither profile publishes a database port; dev binds `127.0.0.1:5432:5432` explicitly and prod binds nothing.
-
-Dev uses `develop.watch` (`sync` for app source, `rebuild` on lockfiles, `sync+restart` for config), which needs a `build:` section on the service and `stat`/`mkdir`/`rmdir` in the image. Run it as `docker compose watch` or `up --watch`.
+**Self-hosted single host vs production, and `develop.watch` in dev: [`references/deployment-profiles.md`](references/deployment-profiles.md)** — one-host trade-offs, the production hardening set (digest pins, `read_only`, `cap_drop`, non-root), and why neither profile publishes a database port.
 
 ## Gotchas
 
@@ -193,4 +197,4 @@ Dev uses `develop.watch` (`sync` for app source, `rebuild` on lockfiles, `sync+r
 - [ ] `laravel-api*` and all workers gate on `laravel-migrate` with `service_completed_successfully`.
 - [ ] The backup job covers `pgdata` and the SeaweedFS volumes and nothing else; a restore drill rebuilds Qdrant from PostgreSQL rather than restoring a snapshot (§25.3 option 2).
 - [ ] No secret value appears in any committed file or in `docker compose config` output; all arrive via `secrets:` at `/run/secrets/`.
-- [ ] The production deploy command passes explicit `-f` files; CI asserts the rendered prod config has no bind mounts and no published ports outside `traefik`.
+- [ ] The production deploy command passes explicit `-f` files; CI asserts the rendered prod config has no bind mounts and no published ports outside `traefik`, and that every data-store tag matches the pin written here — `postgres:18-alpine`, `qdrant/qdrant:v1.18.3`, `chrislusf/seaweedfs:4.40`, `valkey/valkey:9.1.1` — with no floating `latest` anywhere.

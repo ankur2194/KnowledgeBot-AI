@@ -13,18 +13,21 @@ Work from one assumption and never relax it: **the host page is hostile.** It ma
 
 1. `.claude/skills/iframe-postmessage-bridge/SKILL.md` — the handshake, the versioned envelope, **exact-origin checks in both directions**, and what survives storage partitioning. `postMessage(msg, "*")` and a missing `event.origin` check are the two defects this skill exists to prevent.
 2. `.claude/skills/kb-security-baseline/SKILL.md` — widget origin rules, CSP, and `frame-ancestors` derived per-bot from a live allow-list. That last part has a structural consequence: the iframe **document** cannot be a static file, because its headers depend on the bot.
-3. `.claude/skills/preact-vite-library/SKILL.md` — Vite 8 library mode, the split between the tiny loader and the iframe app, the brotli budget enforced by size-limit in CI, and the shadow-DOM-plus-iframe isolation model. Owns the build and bootstrap; the protocol is the bridge skill.
-4. `.claude/skills/laravel-sanctum-auth/SKILL.md` — the widget session. **Origin binding is proven at mint only**: `mint()` sees the embedder's unforgeable Origin, but every request afterwards comes from the iframe, whose Origin is always ours. Comparing them on `resolve()` would 404 every chat message ever sent.
-5. `.claude/skills/kb-internal-api-contracts/SKILL.md` — the normalized SSE event schema the widget consumes, the heartbeat comment, and the never-forward list.
-6. `.claude/skills/kb-error-taxonomy/SKILL.md` — what the widget shows for each class. It cannot leak internal detail into a stranger's page.
-7. `.claude/skills/kb-architecture-map/SKILL.md` — the widget talks only to Laravel, like every other client.
+3. `.claude/skills/preact-vite-library/SKILL.md` — Vite 8 library mode, the split between the tiny loader and the iframe app, the brotli budget enforced by size-limit in CI, and the shadow-DOM-plus-iframe isolation model. Owns the build and bootstrap; the protocol is the bridge skill. It also declares the build-time constants: `__KB_WIDGET_ORIGIN__` = `https://<widget-domain>`, `__KB_API_ORIGIN__` = `https://api.<domain>`.
+4. `.claude/skills/traefik-routing/SKILL.md` — read for the hostnames only, and treat them as fixed: `app.<domain>` (admin), `chat.<domain>` (hosted chat), `api.<domain>` (the Laravel public API, on the **main** registrable domain) and `<widget-domain>`, a **separate eTLD+1** serving only the loader and the iframe app. There is no API on the widget's domain. The admin session cookie is scoped to the main domain, so an API there would put a widget iframe on a hostile customer page same-site with a real admin credential.
+5. `.claude/skills/laravel-sanctum-auth/SKILL.md` — the widget session. **Origin binding is proven at mint only**: `mint()` sees the embedder's unforgeable Origin, but every request afterwards comes from the iframe, whose Origin is always ours. Comparing them on `resolve()` would 404 every chat message ever sent.
+6. `.claude/skills/kb-internal-api-contracts/SKILL.md` — the normalized SSE event schema the widget consumes, the heartbeat comment, and the never-forward list.
+7. `.claude/skills/kb-error-taxonomy/SKILL.md` — what the widget shows for each class. It cannot leak internal detail into a stranger's page.
+8. `.claude/skills/kb-architecture-map/SKILL.md` — the widget talks only to Laravel, like every other client.
 
 Read when the task touches them: `.claude/skills/tailwind-shadcn/SKILL.md` (only for token names shared with the design system — the widget does not ship the web app's CSS), `.claude/skills/vitest-playwright/SKILL.md` (the browser-test rules this app inherits).
 
 ## Hard boundaries
 
-- **Never edit `apps/web`, `apps/mobile`, `services/`, or `infrastructure/`.** If the widget needs a new endpoint or a session behaviour change, report it for `control-plane-engineer`.
+- **Never edit `apps/web`, `apps/mobile`, `services/`, `infrastructure/`, `packages/`, `samples/`, or `scripts/`.** If the widget needs a new endpoint or a session behaviour change, report it for `control-plane-engineer`.
+- **Import `packages/contracts`; never fork it.** The SSE frame parser is shared with web and mobile precisely because three hand-written parsers drift, and the one that drifts is the one nobody notices until a terminal event stops being handled. If it lacks something you need, report it for `admin-web-engineer` rather than copying it into `apps/widget`.
 - **Never `postMessage` to `"*"`** and never handle a message without checking `event.origin` against an exact expected origin. No wildcards, no `endsWith`, no substring matching.
+- **Never point any widget code at an API on the widget's own registrable domain**, and never introduce a fourth hostname. The only origins the widget knows are `__KB_WIDGET_ORIGIN__` and `__KB_API_ORIGIN__`, both baked in by Vite `define` — never read from `iframe.src`, `document.currentScript.src`, or a `data-*` attribute, all of which the host page can rewrite before our code runs.
 - **Never store a credential or conversation identifier where the host page can read it** — no `window.` globals, no host-page `localStorage`. State that must persist lives on our origin, inside the iframe.
 - **Never give the loader authority.** It measures, mounts, and forwards; every decision that matters happens on our side of the frame.
 - **Never inject the widget's styles into the host page's document beyond the shadow root**, and never let the host page's CSS reach the chat UI. Both directions matter — a customer's `* { font-family: … }` must not reshape our UI.

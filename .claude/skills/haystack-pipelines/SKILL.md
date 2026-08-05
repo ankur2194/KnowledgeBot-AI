@@ -21,31 +21,9 @@ Evaluated against **haystack-ai 3.0.0** (released 2026-07-20, Apache-2.0, Python
 
 ## How we use it
 
-### What Haystack 3.0 genuinely offers, and why none of it lands here
+### Evaluated layer by layer, and the four collisions
 
-Haystack 3.0 is a serious release: `AsyncPipeline` folded into `Pipeline` with `run_async`/`run_async_generator`/`stream`, first-class `warm_up_async`/`close_async` component lifecycles, an Agent with `before_run`/`before_llm`/`before_tool`/`after_tool` hooks, allow-listed deserialization, and tracing that is **no longer auto-enabled** (you attach an OTel connector explicitly). The problem is not quality. It is that every layer it offers is a layer we have already decided.
-
-| Haystack layer | Our owner | Verdict |
-|---|---|---|
-| `ChatGenerator` per provider | `app/providers/` — 5 adapters, ADR-001 | Bypassed. Our `ChatRequest`/`ChatResult`/`StopReason`/`Usage` contract is finer-grained than Haystack's. |
-| `QdrantDocumentStore` + retrievers | `app/retrieval/` on `qdrant-client` | Bypassed — see the collisions below. |
-| `DocumentJoiner(join_mode="reciprocal_rank_fusion")` | `app/rag/evidence.py::fuse` | Bypassed. `k` is hardcoded 61 and per-branch scores are overwritten. |
-| Converters / `DocumentSplitter` | Docling + `kb-chunking-rules` | Bypassed. Our boundaries follow document structure, not word counts. |
-| Rankers | `bge-reranker-v2-m3` directly (`bge-reranker`) | Bypassed. Moved out of core in 3.0 anyway. |
-| Evaluators | Ragas (docs/21 §33) + §21.4 config snapshots | Bypassed. |
-| `Pipeline` DAG runtime + serialization | `app/rag/pipeline.py`, below | Not needed. 20 stages, one order, no branch, no loop. |
-| Agent + hooks | — | Out of MVP scope. **This is the one that could change the answer.** |
-
-### The four collisions, from source
-
-| Our contract requires | What the code does | Where |
-|---|---|---|
-| Tenant filter cannot be replaced by a caller | Retrievers default to `filter_policy=FilterPolicy.REPLACE`; a runtime `filters=` **replaces** init filters outright. `MERGE` exists but explicitly rejects native filters: *"Native Qdrant filters cannot be used with filter_policy set to MERGE."* There is no mode in which our `models.Filter` and a facet filter both survive. | `integrations/qdrant/.../retrievers/qdrant/retriever.py` |
-| Payload key `org_id`, point id from `chunk_id` | `payload = document.to_dict(flatten=False)` → every meta field lands under `meta.*`. Point id is `uuid.uuid5(UUID("3896d314-1e95-4a3a-b45a-945f9f0b541d"), document.id).hex`, and `Document.id` itself defaults to a SHA-256 of content+meta+embedding. | `.../document_stores/qdrant/converters.py` |
-| Per-branch rank + score retained through fusion | Server-side path returns one fused score and no branch ranks. In-process `DocumentJoiner` calls `_reciprocal_rank_fusion`, which hardcodes `k = 61` (no parameter) and returns `replace(doc, score=fused)` — the branch score is gone. | `haystack/utils/misc.py`, `haystack/components/joiners/document_joiner.py` |
-| Empty scope raises; `==` means equality | `convert_filters_to_qdrant({})` returns `None` → an unfiltered, match-all query. `_build_eq_condition` turns a string value **containing a space** into `MatchText` (a token/substring match), not `MatchValue`. `in`, `!=`, and `not in` each apply the space test with a *different* polarity than `==`. | `.../document_stores/qdrant/filters.py` |
-
-A narrow adoption survives none of this: to keep our payload you replace the converters, to keep our filter you replace the filter DSL and pin `filter_policy=REPLACE`, to keep our trace you replace the retriever and the joiner. What remains is `qdrant-client` with a `meta.` prefix tax, a beta-classified package in the path of every tenant query, and `haystack-ai`'s own hard `openai>=1.99.2` floor constraining the SDK our OpenAI, DeepSeek, and OpenRouter adapters share.
+Both evidence tables are in [references/haystack-evidence.md](references/haystack-evidence.md), verbatim: every Haystack 3.0 layer against the owner we already have for it, and the four places its source collides with a KnowledgeBot contract — `filter_policy=REPLACE` overwriting the tenant filter, `to_dict(flatten=False)` + a third-party `uuid5` namespace owning our payload keys and point ids, `DocumentJoiner`'s hardcoded `k = 61` destroying the per-branch trace, and a filter DSL where `convert_filters_to_qdrant({})` returns `None` (match-all) and `==` on a value with a space becomes a substring match. A narrow adoption survives none of it: keeping our payload, our filter and our trace means replacing the converters, the filter DSL, the retriever and the joiner, leaving `qdrant-client` plus a `meta.` prefix tax, a beta-classified package in the path of every tenant query, and `haystack-ai`'s hard `openai>=1.99.2` floor on the SDK three of our adapters share.
 
 ### What we build instead
 
@@ -60,7 +38,25 @@ from typing import Any, Awaitable, Callable
 
 from opentelemetry import trace
 
-tracer = trace.get_tracer("kb.rag")
+tracer = trace.get_tracer("app.rag.pipeline")   # instrumentation scope (a module path), NOT a
+                                                # span name — spans come from the catalogue below.
+
+# `kb-observability-conventions` owns every span name in the query pipeline and declares them
+# permanent: `kb.<domain>.<operation>`, and there is no `rag` domain. The Retrieval dashboard,
+# the alerts and the trace-to-logs links all key on these exact strings, so a stage that invents
+# `kb.rag.<stage>` renders those panels empty with no error anywhere. A stage that fans out into
+# several catalogued spans owns them itself and registers `None`.
+STAGE_SPANS: dict[str, str | None] = {
+    "normalize": "kb.query.normalize",
+    "filters":   "kb.retrieval.filters",
+    "retrieve":  None,                  # fans out → kb.retrieval.dense + kb.retrieval.sparse
+    "fuse":      "kb.retrieval.fuse",
+    "dedupe":    "kb.retrieval.dedupe",
+    "rerank":    "kb.retrieval.rerank",
+    "threshold": "kb.retrieval.threshold",
+    "pack":      "kb.context.pack",
+    "prompt":    "kb.prompt.build",
+}
 
 
 @dataclass(frozen=True)
@@ -102,22 +98,31 @@ async def run_pipeline(stages: list[tuple[str, Stage]], ctx: Ctx) -> Ctx:
         if name in ctx.cfg.disabled:
             ctx.stage_log.append({"stage": name, "status": "disabled"})   # config-off, never a jump
             continue
-        with tracer.start_as_current_span(f"kb.rag.{name}") as span:      # kb-observability-conventions
-            span.set_attribute("kb.retrieval_configuration_version", ctx.cfg.version)
-            t0 = time.perf_counter()
-            try:
+        span_name = STAGE_SPANS[name]     # KeyError beats minting an uncatalogued name at runtime
+        t0 = time.perf_counter()
+        try:
+            if span_name is None:                                         # stage owns its own spans
                 await stage(ctx)
-            finally:                                                      # a raising stage still times
-                ctx.stage_log.append({"stage": name, "ms": round((time.perf_counter() - t0) * 1000, 2)})
+            else:
+                with tracer.start_as_current_span(span_name) as span:
+                    span.set_attribute("kb.retrieval_configuration_version", ctx.cfg.version)
+                    await stage(ctx)
+        finally:                                                          # a raising stage still times
+            ctx.stage_log.append({"stage": name, "ms": round((time.perf_counter() - t0) * 1000, 2)})
     return ctx
 
 
 async def retrieve(ctx: Ctx) -> None:
     """Two single-vector queries, not one server-side fusion query: a fused Qdrant response carries
-    one score per point and no per-branch rank, and stages 7-9 must record both."""
+    one score per point and no per-branch rank, and stages 7-9 must record both. The two catalogued
+    CLIENT spans are concurrent siblings, exactly as the trace tree declares them."""
+    async def branch(using: str, limit: int) -> list[tuple[str, float]]:
+        with tracer.start_as_current_span(f"kb.retrieval.{using}", kind=trace.SpanKind.CLIENT):
+            return await ctx.search(using, limit, ctx.tenant_filter)
+
     dense, sparse = await asyncio.gather(
-        ctx.search("dense", ctx.cfg.dense_top_k, ctx.tenant_filter),
-        ctx.search("sparse", ctx.cfg.sparse_top_k, ctx.tenant_filter),
+        branch("dense", ctx.cfg.dense_top_k),
+        branch("sparse", ctx.cfg.sparse_top_k),
     )
     ctx.branches = {"dense": dense, "sparse": sparse}
 
@@ -173,20 +178,20 @@ Items 2–4 are checked by running the Definition-of-done greps against the inte
 - **Independent `dense.top_k` and `sparse.top_k` are unreachable.** `_query_hybrid` builds both `Prefetch` objects with no `limit`, so both branches inherit the outer `top_k`. Stages 7 and 8 are separately tunable in our contract and are not separately tunable there.
 - **An air-gapped or compliance-reviewed deployment makes outbound calls to `eu.posthog.com`.** `haystack/telemetry/_telemetry.py` reads `os.getenv("HAYSTACK_TELEMETRY_ENABLED", "true")` — **on by default** — and `pipeline_running` posts the pipeline's component inventory (including each component's `_get_telemetry_data()`, which for generators is the model name) plus a `user_id` persisted to a config file on disk. Errors are swallowed by a `NullHandler`, so a blocked egress leaves no log line either. KnowledgeBot is a self-hostable product; unsolicited egress from the data plane is a customer-facing property, not a preference.
 - **`pip install qdrant-haystack` upgrades the core framework under you.** The integration pins `haystack-ai>=2.29.0` with no upper bound and is versioned on its own line (10.5.0 against haystack 3.0.0), so a routine lockfile refresh can cross a major boundary of a package that just moved 30+ components out of core. Two independently versioned dependencies with an open-ended constraint between them is exactly the runtime dependency ADR-001 removed from the provider path.
-- **A Haystack trace appears as a second root next to `kb.rag.*`.** 3.0 no longer auto-enables tracing, so this only bites if someone attaches the OTel connector: Haystack emits its own `haystack.pipeline.run` / `haystack.component.run` span names, which violate the permanent `kb.<domain>.<operation>` catalog in `kb-observability-conventions` and split the single-trace requirement into two naming schemes on one trace.
+- **The Retrieval dashboard and the trace-to-logs links go empty, every panel a flat "No data", while traces are plainly arriving in Tempo.** A stage span was named off-catalogue — `kb.rag.<stage>` is the one that keeps getting proposed, because the module is called `rag`. `kb-observability-conventions` owns these names, declares them permanent, and its trace tree has no `rag` domain: the query pipeline is `kb.query.normalize`, `kb.retrieval.filters/.dense/.sparse/.fuse/.dedupe/.rerank/.threshold`, `kb.context.pack`, `kb.prompt.build`. Nothing errors — the spans export fine, they simply match no rule, alert or dashboard query in the repo, so the failure is silence in exactly the surface you would use to debug retrieval. `STAGE_SPANS` above is the whole defence: an unknown stage raises `KeyError` instead of minting a name.
+- **A Haystack trace appears as a second root next to `kb.retrieval.*`.** 3.0 no longer auto-enables tracing, so this only bites if someone attaches the OTel connector: Haystack emits its own `haystack.pipeline.run` / `haystack.component.run` span names, which violate the permanent `kb.<domain>.<operation>` catalog in `kb-observability-conventions` and split the single-trace requirement into two naming schemes on one trace.
 
 ## Official docs
 
 - [Haystack docs](https://docs.haystack.deepset.ai/) — component and Pipeline reference.
-- [Haystack release notes](https://haystack.deepset.ai/release-notes) — version index; 3.0.0 is 2026-07-20.
-- [Haystack 3.0 migration guide](https://haystack.deepset.ai/release-notes/3.0.0) — what moved out of core, and the `AsyncPipeline` removal.
+- [Haystack release notes](https://haystack.deepset.ai/release-notes) — version index; 3.0.0 is 2026-07-20 — and its [3.0 migration guide](https://haystack.deepset.ai/release-notes/3.0.0), for what moved out of core and the `AsyncPipeline` removal.
 - [deepset-ai/haystack](https://github.com/deepset-ai/haystack) — `haystack/utils/misc.py` (RRF k=61), `haystack/telemetry/_telemetry.py`, `haystack/document_stores/types/filter_policy.py`.
 - [deepset-ai/haystack-core-integrations — `integrations/qdrant`](https://github.com/deepset-ai/haystack-core-integrations/tree/main/integrations/qdrant) — the converter, filter, store, and retriever sources cited above.
 - [Haystack metadata filtering](https://docs.haystack.deepset.ai/docs/metadata-filtering) — the `field`/`operator`/`value` DSL and its `meta.` prefix.
 
 ## Definition of done
 
-- [ ] `grep -rn "haystack" services/ai-service/ --include=*.py --include=*.toml --include=*.lock` returns nothing.
+- [ ] `grep -rn "haystack" services/ai-service/ --include=*.py --include=*.toml --include=*.lock` returns nothing, and so does `grep -rn 'kb\.rag\.' services/ai-service/` — every stage span name comes from `STAGE_SPANS` and every value in it is in the `kb-observability-conventions` catalogue, asserted by a test.
 - [ ] `haystack-ai`, `qdrant-haystack`, and any `*-haystack` package are absent from `services/ai-service/pyproject.toml` and the lockfile; CI fails on a new occurrence.
 - [ ] Retrieval calls `qdrant_client` directly through the `app/retrieval/` wrapper, with `tenant_filter(...)` built in the same call site (`kb-tenancy-isolation` Definition of done).
 - [ ] Fusion is in-process; `fusion.k` comes from `RetrievalConfig` and is written into `retrieval_traces.retrieval_configuration_version`; per-candidate `dense_rank`, `dense_score`, `sparse_rank`, `sparse_score` all survive to the playground.

@@ -44,7 +44,7 @@ One queue per cost class, one container per queue (§24.2). Never route a 15-min
 | `embed` | `ai-worker-embedding` | embed batches, upsert, verify, publish, retire | prefork, `-c 2` | tasks-per-child **unset**, `worker_max_memory_per_child=6000000` |
 | `crawl` | `ai-worker-crawl` | fetch/render one URL; egress-restricted (`kb-architecture-map`) | prefork, `-c 8` | `worker_max_tasks_per_child=100` |
 | `evaluate` | `ai-worker-evaluation` | eval runs | prefork, `-c 2` | — |
-| `maintenance` | co-located with `ai-worker-evaluation` | purge, verification, reapers, orphan sweeps, cache invalidation | prefork, `-c 2` | — |
+| `maintenance` | co-located with `ai-worker-evaluation` | purge, verification, reapers, orphan sweeps, the multipart-abort sweep, cache invalidation | prefork, `-c 2` | — |
 
 `maintenance` is separate because `kb-deletion-and-verification`'s purge and its reaper must not queue behind a 400-page crawl — a source stuck in `Deleting` is a visible product failure (§33 steps 14–15). Route with `task_routes`, never `task_default_queue`; a task with no route lands on `celery` where no worker listens and hangs with no error.
 
@@ -133,7 +133,9 @@ def ingest_version(self, *, org_id: str, version_id: str, idem_key: str, tracepa
 
 ### Beat
 
-One replica, `celery -A app beat --schedule /var/lib/celerybeat/schedule` on a persisted volume; never `celery worker -B`. Entries are **crontab** schedules only — a `timedelta` schedule re-fires immediately on every beat restart, so a deploy loop replays every sweep. Beat owns exactly: the `Deleting` reaper, the orphan-version sweep (`activated_at IS NULL`, terminal, past grace), the retired-vector deletion backstop, the Qdrant↔PostgreSQL reconciliation sweep, and the silent-job re-query from `kb-internal-api-contracts`. It does **not** own recrawl. Each entry is itself idempotent, because a scheduler restart across a tick boundary can double-fire.
+One replica, `celery -A app beat --schedule /var/lib/celerybeat/schedule` on a persisted volume; never `celery worker -B`. Entries are **crontab** schedules only — a `timedelta` schedule re-fires immediately on every beat restart, so a deploy loop replays every sweep. **Beat owns exactly six entries, all routed to `maintenance`:** the `Deleting` reaper, the orphan-version sweep (`activated_at IS NULL`, terminal, past grace), the retired-vector deletion backstop, the Qdrant↔PostgreSQL reconciliation sweep, the silent-job re-query from `kb-internal-api-contracts`, and `sweep-abandoned-multipart-uploads` (task `kb.sweep_abandoned_multipart_uploads`, `crontab(minute=17, hour=4)` — daily; `ListMultipartUploads` → `AbortMultipartUpload` for every upload older than **24 h**, per `seaweedfs-s3`). The list is closed: a seventh entry is a deliberate edit here, not something added in passing. It does **not** own recrawl. Each entry is itself idempotent, because a scheduler restart across a tick boundary can double-fire.
+
+24 h is the abort age because the threshold must clear the longest legitimate in-flight upload: the 960 s hard time limit plus one full 7200 s visibility-timeout redelivery is ≈ 2.3 h, so 24 h leaves an order of magnitude of headroom and still reclaims the parts the same day. Abort younger than that and the sweep kills uploads that are still running, which surfaces as `NoSuchUpload` on a `CompleteMultipartUpload` in an ingestion job that was healthy.
 
 ## Gotchas
 
@@ -173,4 +175,5 @@ One replica, `celery -A app beat --schedule /var/lib/celerybeat/schedule` on a p
 - [ ] `result_backend` is unset in every environment; no code calls `.get()`, `chord`, or `GroupResult`.
 - [ ] Tasks start a new root span with a link to the submitter's `traceparent` from the payload; a test asserts the task span's trace id differs from the submitter's and the link is present.
 - [ ] `beat` runs with `replicas: 1`, a persisted schedule file, and crontab-only entries; no worker uses `-B`. Recrawl is not scheduled here.
+- [ ] `beat_schedule` holds **exactly six** entries, every one crontab and routed to `maintenance`; a test asserts the count and the entry names, so a seventh fails CI until this skill is updated too.
 - [ ] `/health/live` touches a heartbeat file from a worker-blueprint bootstep and stays true while all pool children are busy; `/health/ready` runs `celery inspect ping`.

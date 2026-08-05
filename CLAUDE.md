@@ -37,6 +37,19 @@ Delegate implementation to the agent that owns the area rather than editing acro
 | Contract review *(read-only)* | `contract-steward` |
 | Docs and ADRs | `docs-adr-writer` |
 
+### Shared directories
+
+`apps/` and `services/` are owned by the table above. The three top-level directories that are *shared* need their own row, because a directory owned by everyone is owned by nobody — and every artifact below is mandatory somewhere.
+
+| Directory | Contents | Writes | Everyone else |
+|---|---|---|---|
+| `packages/contracts/` | the SSE frame parser, shared TypeScript types, the generated OpenAPI document | `admin-web-engineer` | import it; **never fork it.** A second copy of the frame parser is the drift `contract-steward` exists to catch |
+| `packages/design-tokens/` | design tokens consumed by web and widget | `admin-web-engineer` | import only |
+| `samples/` | the golden eval corpus and fixture documents | `rag-eval-engineer` | read only |
+| `scripts/` | repo-level developer and operational scripts | `platform-devops-engineer` | read only |
+
+There are exactly two workspace packages. Inventing a third is a finding, not a refactor.
+
 ## Non-negotiables
 
 These are architectural, not stylistic. Breaking one is a bug even when tests pass.

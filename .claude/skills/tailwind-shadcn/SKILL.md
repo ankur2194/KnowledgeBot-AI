@@ -19,20 +19,24 @@ Tailwind CSS **4.3.3** (`@tailwindcss/postcss` 4.3.3) · shadcn CLI **4.16.1** a
 ## How we use it
 
 ```
-apps/web/app/globals.css       the entire Tailwind config. There is no tailwind.config.js.
-apps/web/components/ui/**      shadcn output — vendored source we own and edit
-apps/web/components/**         our components; import from components/ui
-apps/web/lib/utils.ts          cn() = twMerge(clsx(...))
-apps/web/components.json       CLI config: style, base, baseColor, aliases
+apps/web/src/app/globals.css   the entire Tailwind config. There is no tailwind.config.js.
+apps/web/src/components/ui/**  shadcn output — vendored source we own and edit
+apps/web/src/components/**     our components; import from components/ui
+apps/web/src/lib/utils.ts      cn() = twMerge(clsx(...))
+apps/web/components.json       CLI config: style, base, baseColor, aliases. Stays at the app
+                               root — the CLI resolves it from there — but every alias in it
+                               points into `src/`, and the CLI writes files where they point.
 packages/design-tokens/        tokens.css (the :root defaults) + tokens.json — data, shared with apps/widget
 ```
+
+`apps/web` uses the **`src/` layout** — `nextjs-app-router`, `rhf-zod-forms`, `tanstack-query-table` and the CI lint step all address it that way, and `tsconfig` maps `@/*` → `src/*`. Every relative path below counts from `src/`; get that wrong and `@source`/`@reference` resolve to nothing and fail silently (Gotchas).
 
 ### The config is CSS now
 
 v4 deleted the JavaScript config. `content`, `theme.extend`, `darkMode`, `plugins`, `safelist` and `corePlugins` have no equivalent object; the directives are `@theme`, `@custom-variant`, `@utility`, `@plugin`, `@source`, `@source inline()`. Do **not** add `@config "../tailwind.config.js"` — the v3 bridge exists, it silently disables `corePlugins`/`safelist`/`separator`, and it splits the source of truth across two files.
 
 ```css
-/* apps/web/app/globals.css */
+/* apps/web/src/app/globals.css */
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";        /* data-open/data-closed variants, keyframes, scroll-fade */
@@ -63,7 +67,7 @@ Dark mode is `next-themes` with `attribute="class"` plus `suppressHydrationWarni
 - **The admin console and the theme preview panel** — many bots in one document, and the console chrome must stay neutral. Write the properties onto a scoping element through the CSSOM. MDN is explicit that CSP does not intercept this: *"styles properties that are set directly on the element's `style` property will not be blocked."* A `style="…"` attribute would be blocked, because nonces never apply to attributes.
 
 ```tsx
-// apps/web/components/bot-theme-scope.tsx
+// apps/web/src/components/bot-theme-scope.tsx
 'use client';
 import { useLayoutEffect, useRef } from 'react';
 
@@ -103,7 +107,7 @@ export function BotThemeScope(
 
 `shadcn add` copies TSX into `components/ui/` and stops caring. There is no upstream version, no lockfile entry for a component, and no update path — `add --overwrite` replaces your file wholesale and discards every local edit. So: run `add --diff <component>` before any re-add, keep local changes small and reviewable, and treat `components/ui/` as owned code in review. Only the CLI (`shadcn`), the primitives (`radix-ui`), and the runtime helpers (`cva`, `clsx`, `tailwind-merge`, `lucide-react`, `tw-animate-css`) are real dependencies.
 
-`components.json` is pinned to `{"style":"new-york","base":"radix","baseColor":"neutral","cssVariables":true,"rsc":true}`. `baseColor` and `cssVariables` **cannot be changed after init** without regenerating every component. `base` must be written explicitly and every CI invocation passes `-b radix` — since July 2026 the CLI's default base is Base UI, and an unflagged `add` will quietly install a Base UI component next to Radix ones.
+`components.json` is pinned to `{"style":"new-york","base":"radix","baseColor":"neutral","cssVariables":true,"rsc":true}`, with `"tailwind":{"css":"src/app/globals.css"}` and every alias resolving through `src/` — `{"components":"@/components","ui":"@/components/ui","lib":"@/lib","utils":"@/lib/utils","hooks":"@/hooks"}` against a `tsconfig` `@/*` → `src/*` mapping. The CLI writes files wherever the aliases point, so a `components.json` still describing a flat `app/` layout scatters shadcn output into a second component tree that compiles, renders, and is invisible to every `rg … apps/web/src` check in this file. `baseColor` and `cssVariables` **cannot be changed after init** without regenerating every component. `base` must be written explicitly and every CI invocation passes `-b radix` — since July 2026 the CLI's default base is Base UI, and an unflagged `add` will quietly install a Base UI component next to Radix ones.
 
 ### What the widget takes
 
@@ -122,10 +126,10 @@ Forms → `rhf-zod-forms`. Tables and data fetching → `tanstack-query-table`. 
 - **An element renders with no background at all — no error, no build warning.** A class name was composed at runtime: `` `bg-${tone}-500` ``, `` `text-[${color}]` ``. Tailwind's scanner is a plain-text pass over source files, not an evaluator, so a name that never appears literally never exists. Pass whole class strings through a lookup object, or `@source inline("bg-{red,green}-500")` for a genuinely closed set — never for tenant colours, whose value space is unbounded by definition.
 - **A launcher styled with utilities loses to the customer's `button {}` rule, and raising specificity does not help.** v4 emits utilities inside real `@layer` blocks (v3 did not), and **unlayered CSS beats layered CSS regardless of specificity** — so every plain rule on the host page outranks every Tailwind utility placed in the same tree. This is the CSS-side reason `preact-vite-library` puts the launcher's declarations in a closed shadow root behind `:host { all: initial }`; inside the iframe, layers behave normally and Tailwind is fine.
 - **A `className` you pass to a shadcn component does not win, intermittently, and only for recently-added utilities.** `tailwind-merge` carries its own hardcoded map of Tailwind's conflict groups and ships one release per Tailwind minor to extend it — 3.6.0 *"Add support for Tailwind CSS v4.3"*, 3.5.0 for v4.2. A family the installed `tailwind-merge` has never heard of (4.3's `scrollbar-*`, 4.2's `mauve`/`olive`/`mist`/`taupe`) is not a conflict group, so both classes survive `cn()` and stylesheet order — not prop order — decides. Bump `tailwindcss` and `tailwind-merge` in the same PR; Renovate must not split them.
-- **`@apply` fails with "Cannot apply unknown utility class" in a CSS module or any non-entry stylesheet.** v4 scopes theme and utilities to the file that imported Tailwind. Add `@reference "../app/globals.css";` at the top, or better, use `var(--color-…)` directly — `@reference` makes every consuming file re-process the entry stylesheet. <!-- UNVERIFIED: the build-time cost of `@reference` at our scale is not measured; the directive itself is documented. -->
+- **`@apply` fails with "Cannot apply unknown utility class" in a CSS module or any non-entry stylesheet.** v4 scopes theme and utilities to the file that imported Tailwind. Add `@reference` to the entry stylesheet at the top — from `src/features/<x>/` that is `@reference "../../app/globals.css";`, counted from the importing file, not from `apps/web` — or better, use `var(--color-…)` directly — `@reference` makes every consuming file re-process the entry stylesheet. <!-- UNVERIFIED: the build-time cost of `@reference` at our scale is not measured; the directive itself is documented. -->
 - **Borders turn the colour of their text everywhere you write CSS outside `@layer base`.** v4's default border colour is `currentColor`, not `gray-200`. shadcn's `* { @apply border-border }` hides this inside `apps/web`, so it surfaces first in `apps/widget` or in any component that sets its own border — and it reads as a design bug, not a config change.
 - **Focus rings look thin and low-contrast after a v3-era component is pasted in.** `ring` is 1px `currentColor` in v4, not 3px `blue-500`. `ring-3` restores the geometry. The same rename class covers `shadow-sm`→`shadow-xs`, `rounded-sm`→`rounded-xs`, `blur-sm`→`blur-xs` and `outline-none`→`outline-hidden`; all of them compile fine and just look wrong.
-- **A class written inside a workspace package produces no CSS in the app that consumes it.** v4's automatic content detection ignores `node_modules`, and pnpm workspace links resolve through `node_modules`, so a shared package's markup is invisible to `apps/web`'s build. Add `@source "../../../packages/<name>/src";` to `globals.css` for every workspace package that contains class names. `packages/design-tokens` needs none — it ships CSS and JSON, not markup, which is precisely why it is safe for `apps/widget` to share.
+- **A class written inside a workspace package produces no CSS in the app that consumes it.** v4's automatic content detection ignores `node_modules`, and pnpm workspace links resolve through `node_modules`, so a shared package's markup is invisible to `apps/web`'s build. Add `@source "../../../../packages/<name>/src";` to `globals.css` for every workspace package that contains class names — four levels, because the entry stylesheet is `apps/web/src/app/globals.css` and not `apps/web/app/globals.css`. A `@source` pointing at a directory that does not exist is not an error in v4; it scans nothing and you get the identical missing-CSS symptom you were trying to fix. `packages/design-tokens` needs none — it ships CSS and JSON, not markup, which is precisely why it is safe for `apps/widget` to share.
 - **A `dark:` utility placed on `<html>` itself does nothing.** shadcn's docs ship `@custom-variant dark (&:is(.dark *))`, which matches descendants of `.dark` but not the `.dark` element. Tailwind's own recommendation, `(&:where(.dark, .dark *))`, matches both and keeps specificity at zero — use it, and note that the difference is invisible until someone styles the root element.
 - **Hover styles stop working on tablets and someone "fixes" it by re-breaking sticky hover.** v4 wraps `hover:` in `@media (hover: hover)` deliberately, so a touch device never latches a hover state on the composer's send button. This is correct behaviour; supply an explicit pressed/active state instead of overriding the variant.
 - **On an older iOS device a surface renders transparent and its text renders black.** An unsupported colour function invalidates the whole declaration, so the element silently falls back to its initial or inherited value rather than erroring. The palette is OKLCH throughout and v4's baseline is Safari 16.4 / Chrome 111 / Firefox 128; there is no fallback layer and adding one means abandoning the token model. Accept the baseline or do not adopt v4 — and check it before a customer's embed target is promised support below it.
@@ -150,6 +154,7 @@ Forms → `rhf-zod-forms`. Tables and data fetching → `tanstack-query-table`. 
 - [ ] A theme fixture containing `oklch(.5 .1 20); } body { background: url(https://evil/) `, a `var(--x)`, and a `calc()` is rejected by both the Laravel validator and the render-time guard, with the platform default rendered instead
 - [ ] Derived `-foreground` pairings meet 4.5:1 against their surface for the full range of accepted `primary` values, asserted in CI over the allowed grammar's bounds
 - [ ] `components.json` has `"base": "radix"`; every CI/script `shadcn` invocation passes `-b radix`; `rg '@base-ui' apps/web/package.json` is empty
+- [ ] The `src/` layout is intact end to end: `components.json` names `src/app/globals.css`, its aliases resolve through `@/*` → `src/*`, `rg -n 'apps/web/app/' apps packages` returns nothing, and every `@source`/`@reference` in `globals.css` resolves to a directory that exists (delete one and confirm the build still passes — that silence is the reason to check by hand)
 - [ ] `apps/widget` imports nothing from `apps/web`; `rg 'tailwind-merge|class-variance-authority|components/ui' apps/widget` is empty; `packages/design-tokens` is the only styling import it shares
 - [ ] Nothing in the loader bundle imports `tailwindcss/preflight.css`; the iframe document may
 - [ ] `tailwindcss` and `tailwind-merge` bumped in the same PR, with a merge test over any newly added utility family

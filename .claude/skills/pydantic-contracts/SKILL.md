@@ -21,101 +21,40 @@ Pydantic **2.13.4** (2026-05-06, latest stable — verified against the publishe
 
 Owned elsewhere, cited not restated: headers, signing, SSE semantics, idempotency-key composition → `kb-internal-api-contracts`. Routers, dependencies, exception-handler registration → `fastapi-service`. The provider request/response models themselves → `kb-provider-adapter-contract`. Table and column types → `postgresql-patterns`.
 
-### The `extra` policy, and its two exceptions
+### The `extra` policy and the validation boundaries
 
-| Model | `extra` | Why |
-|---|---|---|
-| Internal request bodies and the nested config snapshot | `forbid` | Sender is our own Laravel; a dropped field is a silent misconfiguration |
-| Internal responses and SSE event payloads | `forbid` | We construct these; `forbid` catches a typo'd kwarg at construction, not in a client |
-| **Raw provider responses** | `ignore` | Providers add fields weekly; `forbid` converts every one into an outage |
-| **Celery task args and anything read back out of Valkey** | `ignore` | A queued message written by the previous deploy is validated by the next one |
-
-### Where validation runs, and where it deliberately does not
-
-| Boundary | Validate |
-|---|---|
-| Request body from Laravel | **yes** — strict + forbid; the only place a bad snapshot is catchable |
-| Raw provider response → normalized model | **yes** — `extra="ignore"` |
-| Qdrant payload read back (≤30 candidates/query) | **yes** — small N, and a payload missing `org_id` must be loud (`kb-tenancy-isolation`) |
-| Per-token `Token`/`Delta` we produced ourselves | **no** — `model_construct()` |
-| A model already validated, handed down the call stack | **no** — `revalidate_instances` stays at its `never` default |
+The per-model `extra` table — with its **two** exceptions, raw provider responses and anything read back off the broker or Valkey — and the table of which boundaries validate and which deliberately do not → **[references/validation-policy.md](references/validation-policy.md)**.
 
 ### The internal chat request, complete
 
+`Inbound` (strict + forbid + frozen, and why each of the three does a different job), `ReasoningEffort`'s seven members, `ProviderConnection`, `RetrievalConfig`, `ConfigSnapshot`, `ChatExecuteRequest`, and `parse_request()`'s redaction of `ValidationError.errors()` → **[references/internal-chat-request.md](references/internal-chat-request.md)**. They share the module below and the `Ulid` declared in it.
+
+### The outbound stream, as a discriminated union
+
 ```python
-# services/ai-service/app/contracts/internal/chat.py
-from enum import StrEnum
+# services/ai-service/app/contracts/internal/chat.py — the wire half.
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
 
 # ULIDs, not UUIDs (kb-internal-api-contracts, kb-observability-conventions).
 # `uuid.UUID("01J8...")` raises — a `UUID`-typed id field 422s every real request.
 Ulid = Annotated[str, StringConstraints(pattern=r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$")]
 
 
-class Inbound(BaseModel):
-    """Base for everything Laravel sends. Three settings, three distinct jobs.
-    strict: "8" must not become 8 and 1 must not become True — X-KB-Config-Version
-            claims both sides hold the same snapshot, and coercion makes that a lie.
-    forbid: a renamed field must 422 here rather than evaporate.
-    frozen: a request is evidence, not scratch space; it also makes the model hashable,
-            so a resolved snapshot can key a per-request cache."""
-    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
-
-class ReasoningEffort(StrEnum):
-    NONE = "none"
-    MINIMAL = "minimal"   # OpenAI ships this between NONE and LOW
-    LOW, MEDIUM, HIGH = "low", "medium", "high"
-    XHIGH = "xhigh"       # Anthropic ships this between HIGH and MAX
-    MAX = "max"
-    # Seven members. MINIMAL and XHIGH are not synonyms of their neighbours — an enum
-    # missing either silently rounds a provider's recommended setting to the nearest
-    # level we happen to model (kb-provider-adapter-contract).
-
-class ProviderConnection(Inbound):
-    connection_id: Ulid
-    provider: Literal["openai", "anthropic", "deepseek", "nvidia_nim", "openrouter"]
-    model: str
-    api_key: SecretStr          # repr/str -> '**********'; get_secret_value() appears
-    base_url: str | None = None # exactly once in the codebase, inside the adapter
-
-class RetrievalConfig(Inbound):
-    dense_top_k: int = Field(ge=1, le=200)
-    sparse_top_k: int = Field(ge=1, le=200)
-    rerank_top_n: int = Field(ge=0, le=100)   # 0 disables reranking
-    fusion_k: int = Field(ge=1, le=100)       # never inherit Qdrant's k=2 (kb-rag-query-contract)
-    retain: int = Field(ge=1, le=50)
-
-class ConfigSnapshot(Inbound):
-    """docs/06 §11.2 — FastAPI never queries Laravel's tables; this is the whole input."""
-    config_version: int = Field(ge=1)                  # mirrors X-KB-Config-Version
-    retrieval_configuration_version: int = Field(ge=1)
-    connection: ProviderConnection
-    retrieval: RetrievalConfig
-    max_output_tokens: int = Field(ge=1, le=200_000)
-    temperature: float | None = None                   # int->float stays legal under strict
-    reasoning_effort: ReasoningEffort = ReasoningEffort.NONE
-    stream: bool = True
-
-class ChatExecuteRequest(Inbound):
-    org_id: Ulid
-    bot_id: Ulid
-    conversation_id: Ulid
-    client_message_id: Ulid
-    actor_type: Literal["user", "anonymous_session", "scheduler", "system"]
-    query: str = Field(min_length=1, max_length=32_000)
-    deadline_epoch_ms: int = Field(ge=0)   # absolute, per kb-internal-api-contracts.
-    config: ConfigSnapshot                 # int, not datetime — see the strict-mode gotcha.
-
-
-# --- the outbound stream, as a discriminated union -------------------------------
+# Every field below reaches a browser, a widget and a phone unaltered: Laravel's relay forwards
+# approved frames verbatim (laravel-control-plane) and Event sets extra="forbid", so what this
+# file emits is exactly what three clients parse. The names are kb-internal-api-contracts',
+# not ours — it owns the wire, this file owns the shape, and drift here is a client outage.
 class Event(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 class MessageStart(Event):
     event: Literal["message.start"] = "message.start"
     message_id: Ulid
     conversation_id: Ulid
+    created_at: str                        # RFC 3339 UTC with a `Z`, e.g. "2026-08-04T09:15:02Z".
+                                           # `str`, not `datetime`, for the same reason ids are —
+                                           # see the strict-mode gotcha; format once, here.
 class Status(Event):
     event: Literal["status"] = "status"
     stage: Literal["retrieving", "reranking", "generating"]
@@ -123,8 +62,17 @@ class Token(Event):
     event: Literal["token"] = "token"
     text: str                              # nothing else — every key is paid per token
 class Citation(BaseModel):
+    """kb-internal-api-contracts' citations frame, field for field. `index` is what the answer's
+    footnote markers count from; a client reading `citation.index` off a model that spells it `n`
+    gets `undefined` and renders every marker blank with no error anywhere. There is deliberately
+    no `locator` — the wire carries none, and the transcript's location and excerpt are
+    denormalized onto Laravel's `citations` row at persist time (`postgresql-patterns`)."""
     model_config = ConfigDict(extra="forbid", frozen=True)
-    n: int; source_id: Ulid; source_version_id: Ulid; chunk_id: Ulid; locator: str
+    index: int                             # 1-based, assigned from evidence before generation
+    source_id: Ulid; source_version_id: Ulid; chunk_id: Ulid
+    title: str                             # display title, always present
+    url: str | None = None                 # crawled sources only; explicitly null for uploads
+    score: float                           # reranker score, on bge-reranker's scale
 class Citations(Event):
     # MANDATORY and easy to forget: kb-internal-api-contracts requires this BEFORE the first
     # token, because citations are assigned from evidence pre-generation. Leaving it out of the
@@ -132,7 +80,15 @@ class Citations(Event):
     # time a real answer streams, since Event sets extra="forbid".
     event: Literal["citations"] = "citations"
     citations: list[Citation]
-class Usage(Event):
+class Usage(BaseModel):
+    """Client-facing, nested on message.complete only — not an Event, so it serializes as two
+    keys and not as a stray `event: "provider.usage"` inside a terminal frame."""
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    prompt_tokens: int; completion_tokens: int
+class ProviderUsage(Event):
+    """The internal-only provider.usage event. Same numbers, different audience: Laravel writes
+    the usage row and drops the frame, so the cache split stays server-side (it is cost data,
+    kb-internal-api-contracts' never-forward list). One model for both leaks it to every widget."""
     event: Literal["provider.usage"] = "provider.usage"
     input_tokens: int; output_tokens: int; cached_tokens: int = 0
 class MessageComplete(Event):
@@ -147,7 +103,7 @@ class StreamError(Event):
     retryable: bool
 
 StreamEvent = Annotated[
-    MessageStart | Status | Citations | Token | Usage | MessageComplete | StreamError,
+    MessageStart | Status | Citations | Token | ProviderUsage | MessageComplete | StreamError,
     Field(discriminator="event"),
 ]
 STREAM_EVENT = TypeAdapter(StreamEvent)    # module level: each construction builds a
@@ -156,33 +112,11 @@ def emit_token(text: str) -> bytes:
     """Hot path — one call per generated token. `model_construct` applies defaults and
     skips validation; re-validating a `str` we just produced is pure cost per token."""
     return f"event: token\ndata: {Token.model_construct(text=text).model_dump_json()}\n\n".encode()
-def parse_request(raw: bytes) -> ChatExecuteRequest:
-    try:
-        return ChatExecuteRequest.model_validate_json(raw)
-    except ValidationError as exc:
-        # include_input=False is not optional: the rejected input is routinely the
-        # config snapshot, and errors() renders it raw (kb-security-baseline).
-        raise KbError("validation", detail=exc.errors(
-            include_input=False, include_context=False, include_url=False))
 ```
 
 ### Changing a model without breaking a deployed Laravel
 
-`X-KB-Contract-Version` versions the **shape**; `X-KB-Config-Version` versions the **content** of one snapshot. Bumping the config version tells FastAPI nothing about a new field, and adding a field does not make old snapshots invalid — conflating the two is how a shape change ships with no version bump at all.
-
-| Change to an inbound model | Safe against a Laravel that has not redeployed? |
-|---|---|
-| Add an optional field with a default | **yes** — the old sender omits it |
-| Add a required field | **no** — `missing` on every request. Ship optional-with-default, migrate the sender, then tighten |
-| Remove a field | **no** — `extra_forbidden` on every request. This is the price of `forbid`. Stop reading it, migrate the sender, then delete |
-| Rename a field | **no** — it is remove + add. Bridge with `validation_alias=AliasChoices("new", "old")`, which accepts both *without* relaxing `extra` |
-| Widen a constraint (`le=100` → `le=200`) | **yes** |
-| Narrow a constraint, or tighten a `Literal` | **no** |
-| Add a member to an enum we **receive** | **yes** — the old sender never sends it |
-| Add a member to an enum we **send** (e.g. `finish_reason`) | **no** — client matches are exhaustive; that is a `/internal/v2` change |
-| Change a field's type | **never** — add a new field and deprecate the old one |
-
-Enum discipline at the two edges is deliberately asymmetric. **Our own seam is strict:** an unrecognized `reasoning_effort` from Laravel is a `validation` error, because Laravel is our code and a typo there is a bug. **The provider edge is tolerant but loud:** parse the native value as `str`, map it through an explicit table, fall back to a known member, and preserve the raw string in `Diagnostics.native_stop_reason` plus a counter. An unknown provider value must not crash the pipeline and must not disappear.
+The shape-vs-content version distinction, the nine-row table of what is and is not safe against a Laravel that has not redeployed, and the deliberately asymmetric enum discipline at our seam versus the provider edge → **[references/model-versioning.md](references/model-versioning.md)**.
 
 ## Gotchas
 
@@ -190,6 +124,7 @@ Enum discipline at the two edges is deliberately asymmetric. **Our own seam is s
 - **A 422 body in the Laravel log contains the tenant's question and the provider key.** `ValidationError.errors()` and `.json()` default `include_input=True`, `include_context=True`, `include_url=True`. FastAPI registers a `RequestValidationError` handler by default and it renders `exc.errors()` into the response body, so the value crosses the wire as well as landing in a log. <!-- UNVERIFIED: that the default handler's output includes the `input` key was not re-checked against the pinned FastAPI 0.141.1 --> `fastapi-service` owns registering the override; this file owns what it may emit — `type` + `loc` + `msg`, nothing else.
 - **A payload that passes the unit test 422s against the running service with `datetime_type` / `uuid_type` / `decimal_type`.** Strict mode is *looser* from JSON than from Python: `TypeAdapter(date).validate_json('"2000-01-01"', strict=True)` succeeds, `validate_python('2000-01-01', strict=True)` raises, because JSON has no native date type. The test called `model_validate_json`; the server validated a dict someone had already parsed. Decision: no `datetime`, `UUID`, or `Decimal` field on a strict inbound model — epoch milliseconds (`X-KB-Deadline` already is one), ULID `str`, money as `str` converted explicitly. Contract tests go through an HTTP client, never straight into `model_validate_json`.
 - **One malformed event produces five validation errors naming the wrong variant.** An untagged `Union` runs in smart mode: it tries every member and reports every member's failures, so a missing `stage` on a `status` event is reported as a broken `token`, a broken `citations`, and a broken `message.complete`. `Field(discriminator="event")` validates exactly one member and yields a single `union_tag_invalid` carrying the tag it actually saw. It is also the documented performance recommendation — N type-checks become one dict lookup.
+- **Every citation chip renders blank, every usage figure reads zero, and nothing errors on either side.** An event model was named for itself instead of for the wire — `n` where `kb-internal-api-contracts` says `index`, `input_tokens` where it says `prompt_tokens`, a `Citation` with no `title`/`url`/`score`, a `message.start` with no `created_at`. Nothing catches it: `extra="forbid"` only rejects keys coming *in*, Laravel forwards frames verbatim so it re-spells nothing, and a client reading a missing key gets `undefined` rather than a parse error. The mirror-image leak is subclassing an `Event` for something nested — a `Usage` that inherits `Event` puts `event: "provider.usage"` *inside* `message.complete`, shipping an internal event name to every widget. This file owns the shape and owns none of the names: diff the field sets against the SSE block in `kb-internal-api-contracts` in a test, not in review.
 - **Reranking is off in production and the config diff is empty.** `rerank_top_n` arrived as `"0"` from a PHP cast, or `rerank_enabled` as `0`, and lax mode coerced both without complaint while `config_version` continued to assert the snapshot matched. `strict=True` turns them into `int_type` / `bool_type` at the boundary, where a contract test sees it. Note the deliberate exception: `int` → `float` remains legal in strict mode, so `temperature: 1` → `1.0` is intended, not a leak in the policy.
 - **An `org_id: UUID` field rejects every real request.** Identifiers on this platform are ULIDs; `uuid.UUID` cannot parse Crockford base32. `kb-provider-adapter-contract`'s example types `org_id`/`bot_id` as `UUID` — that contradicts the wire format in `kb-internal-api-contracts` and must be reconciled there, not worked around here with a coercing validator. Type IDs as a pattern-constrained `str`.
 - **Queued ingestion tasks start failing with `extra_forbidden` during a rolling deploy.** A Celery message serialized by the old workers is validated by the new ones. Broker payloads time-shift across deploys exactly the way a third party's response shape does, which is why they are the second named exception to `forbid`. The mirror-image failure — a field removed from the task model — is the same table row as removing an inbound field.
@@ -214,6 +149,7 @@ Enum discipline at the two edges is deliberately asymmetric. **Our own seam is s
 - [ ] Every credential field is `SecretStr`; `grep -rn "get_secret_value" services/ai-service/` returns only adapter call sites; a test asserts no Celery task signature accepts a model containing one.
 - [ ] The `RequestValidationError` handler (`fastapi-service`) emits `type`/`loc`/`msg` only; a fixture with a known API key and a known question asserts neither appears in the 422 body or in any log line.
 - [ ] Every wire-crossing union is `Annotated[..., Field(discriminator=...)]`; a test asserts a bad tag yields exactly one `union_tag_invalid`.
+- [ ] A contract test serializes one instance of every `Event` subclass and asserts the key set equals the SSE block in `kb-internal-api-contracts` — `citations[].index/title/url/score`, `message.start.created_at`, `message.complete.usage.{prompt_tokens,completion_tokens}` — and that no forwarded frame contains `cached_tokens` or a nested `event` key.
 - [ ] Every `TypeAdapter` is module-level (`grep` for `TypeAdapter(` inside function bodies returns nothing); per-token event objects use `model_construct`.
 - [ ] The idempotency fingerprint is an explicit projection, not a model dump; a test adds an unused optional field to `ConfigSnapshot` and asserts the key is unchanged.
 - [ ] Any shape change is checked against the versioning table, the regenerated OpenAPI document in `packages/contracts/` is committed, and a removal or rename ships as three deploys or as `/internal/v2`.

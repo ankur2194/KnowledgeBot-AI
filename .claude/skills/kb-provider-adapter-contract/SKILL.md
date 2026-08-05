@@ -150,25 +150,7 @@ class ProviderAdapter(Protocol):
 
 ### Fallback eligibility
 
-Ordered fallback (§8.7) consults this table on the `error_class` the adapter produced. There is no "probably transient" bucket; an unmapped class does **not** fall back.
-
-| Condition | Typical provider evidence | Fallback? | Why |
-|---|---|---|---|
-| Provider outage / 5xx | Anthropic `529 overloaded_error`, OpenAI 503, DeepSeek `503 Server Overloaded`, OpenRouter 502/503 | **Yes** | Another provider can serve it |
-| Connection / first-token timeout | no bytes before `timeouts.first_token` | **Yes** | Nothing generated, nothing charged |
-| Temporary server error | 500 `api_error` | **Yes** | Non-deterministic |
-| Rate limit | 429 + reset headers | **Yes, if configured** | Per-connection switch; off by default so limits stay visible |
-| Model temporarily unavailable | 404/503 on a previously valid model id | **Yes** | Capacity, not configuration |
-| Capacity signal (DeepSeek) | `finish_reason: insufficient_system_resource` | **Yes** | Reached us as a 200 — classify it, don't call it `COMPLETE` |
-| Auth failure | 401/403 | **No** | Deterministic; a second key hides a broken connection |
-| Invalid request | 400/422 | **No** | Our bug — retrying elsewhere multiplies it |
-| Content-policy refusal | Anthropic `stop_reason: refusal`, OpenAI `refusal` part | **No** | Deterministic. Falling back re-asks a banned question and bills for it |
-| Tenant quota exceeded | our own quota check | **No** | Fallback would defeat the quota |
-| Context too large from an app bug | prompt-packing overflow | **No** | Same prompt overflows the fallback too |
-| Provider billing exhausted | Anthropic 402 `billing_error`, DeepSeek 402 | **No** | Operator action needed; it will not self-heal |
-| User cancellation | client disconnect | **No** | Nobody is waiting |
-
-Every fallback attempt writes a `provider_calls` row of its own with `fallback_metadata` set (docs/11 §16.6). One user turn that falls back once is two rows, not one — otherwise the cost of fallback is invisible.
+**The eligibility table lives in [`references/fallback-eligibility.md`](references/fallback-eligibility.md)**: thirteen conditions keyed on the `error_class` the adapter produced, the provider evidence that identifies each, the yes/no verdict and its reason, the rule that an unmapped class does **not** fall back, and the requirement that every fallback attempt writes its own `provider_calls` row with `fallback_metadata`. Consult it before letting any new class fall back.
 
 ## Gotchas
 
@@ -176,7 +158,7 @@ Every fallback attempt writes a `provider_calls` row of its own with `fallback_m
 - **`message_delta.usage` from Anthropic is cumulative; OpenAI's usage chunk is a total.** Summing Anthropic's deltas triple-counts output on a long stream. Assign, don't `+=`, and keep the distinction in the adapter, not the caller.
 - **Anthropic's `input_tokens` excludes cached tokens; OpenAI's `cached_tokens` is a subset of `prompt_tokens`; DeepSeek's hit+miss partition it.** Three different arithmetics for one number. Reading `prompt_tokens` as "input" under-reports Anthropic by the entire cached prefix — a 200k-token cached document with a 50-token question reports `input_tokens: 50`. This is why `Usage` buckets are disjoint and `total_input_tokens` is derived.
 - **`finish_reason: "length"` mapped to `COMPLETE` truncates answers with no error anywhere.** The same trap in Responses-shaped APIs is `status: "incomplete"` with `incomplete_details.reason: "max_output_tokens"` — and `incomplete_details` has been observed arriving empty while the output is genuinely truncated, so never decide truncation from `status` alone. Anthropic splits the case: `max_tokens` is our cap (`MAX_OUTPUT`), `model_context_window_exceeded` is the model's window (`CONTEXT_EXCEEDED`) — and on recent models an over-budget request is accepted at validation time and stops mid-generation instead of erroring, so a request that used to fail loudly now fails quietly.
-- **A refusal that triggers fallback burns money twice for the same answer.** Refusals arrive as HTTP 200, so an adapter that only classifies on status code files them as success and a naive router that only classifies on empty text files them as a fault. Detect them explicitly (`stop_reason: refusal` with `content: []`; a `refusal` content part) and set `StopReason.REFUSAL` — the table above makes them terminal. A mid-stream refusal still bills input plus everything already streamed.
+- **A refusal that triggers fallback burns money twice for the same answer.** Refusals arrive as HTTP 200, so an adapter that only classifies on status code files them as success and a naive router that only classifies on empty text files them as a fault. Detect them explicitly (`stop_reason: refusal` with `content: []`; a `refusal` content part) and set `StopReason.REFUSAL` — the fallback table makes them terminal. A mid-stream refusal still bills input plus everything already streamed.
 - **OpenRouter drops unsupported parameters silently by default.** `provider.require_parameters` defaults to `false`, so `response_format` or `reasoning` can be discarded by whichever upstream served the request, returning 200 with plausible prose. Always send `provider: {require_parameters: true}`. Recording who actually answered into `Diagnostics.served_by` is mandatory — but the current `Response` type has **no top-level `provider` field**; attribution requires opting in with an `X-OpenRouter-Metadata: enabled` request header and reading `openrouter_metadata` off the **final** streamed chunk. An adapter written against the old field leaves `served_by` permanently null, which silently breaks upstream-scoped breaker keying (`openrouter-api`). Also skip SSE comment lines (`: OPENROUTER PROCESSING`) before parsing, or the reader crashes on the first keep-alive under load.
 - **Capability drift is a rejection, not an outage — and it looks like neither.** Providers add parameters faster than adapters learn them, and `extra="forbid"` plus `on_unsupported="reject"` means a new option is a 422 from *us* long before the provider would refuse it. The fix is procedural: adding a capability is a three-step change — a `Capability` member, the adapter's `validate()` mapping, and the `provider_models.capability_flags` migration/backfill. Ship one or two of the three and the flag exists but no model has it, so the feature is dark.
 - **`temperature` is not universally accepted, and rejection is a 400, not an ignore.** OpenAI reasoning models reject `temperature`/`top_p` outright; recent Anthropic models reject non-default sampling on *every* request regardless of thinking. Gate on `Capability.SAMPLING` and let `on_unsupported` decide, rather than sending a default `temperature=0.2` everywhere and discovering it per model.

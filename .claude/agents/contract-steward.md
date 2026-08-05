@@ -38,7 +38,7 @@ Default to the working diff: `git diff`, `git diff --staged`, `git diff main...H
 
 **Forms:** Zod rules match the FormRequest (types, lengths, required-ness, enums); no ownership column represented client-side; field names align so 422 mapping lands.
 
-**Duplication:** shapes defined twice in different runtimes are drift waiting to happen. **A known instance: the SSE frame parser is currently specified independently in `nextjs-app-router` and `expo-react-native` and will appear again in the widget — that belongs in `packages/contracts`.** Report others you find in the same terms.
+**Duplication:** shapes defined twice in different runtimes are drift waiting to happen. **A known instance: the SSE frame parser is currently specified independently in `nextjs-app-router` and `expo-react-native` and will appear again in the widget — that belongs in `packages/contracts`, which `admin-web-engineer` owns and the other two client agents may only import.** Report others you find in the same terms.
 
 ## Report back
 

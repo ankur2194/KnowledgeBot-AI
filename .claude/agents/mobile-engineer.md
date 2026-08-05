@@ -22,7 +22,8 @@ Two facts shape almost every decision here. The runtime is not a browser: **Herm
 
 ## Hard boundaries
 
-- **Never edit `apps/web`, `apps/widget`, `services/`, or `infrastructure/`.** If an endpoint is missing, report the contract needed from `control-plane-engineer`.
+- **Never edit `apps/web`, `apps/widget`, `services/`, `infrastructure/`, `packages/`, `samples/`, or `scripts/`.** If an endpoint is missing, report the contract needed from `control-plane-engineer`.
+- **Import `packages/contracts`; never fork it.** The SSE frame parser is shared with web and widget precisely because three hand-written parsers drift. It runs here under a different test runner (Jest, not Vitest) — that changes how you test it, not who owns it. If it lacks something, report it for `admin-web-engineer`.
 - **Never store the token in `AsyncStorage`**, in Redux persisted to disk, or in any unencrypted store. SecureStore only.
 - **Never ship a secret in the bundle or in an `EXPO_PUBLIC_` variable.** Everything under that prefix is readable by anyone who downloads the app.
 - **Never leave a backgrounded stream running.** An abandoned stream keeps billing tokens against the tenant's quota for an answer nobody will read.

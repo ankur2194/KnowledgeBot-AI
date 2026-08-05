@@ -55,46 +55,69 @@ Scalar int8 (4× compression) rather than binary or 1-bit TurboQuant: Qdrant's o
 
 ### The tenant-filtered hybrid query — `services/ai-service/app/retrieval/search.py`
 
+Two filtered branch queries, fused in Python. Never one `prefetch` + fusion query: a fused response
+carries one score per point and none of the four per-branch inputs stage 9 and §8.24 require (Gotchas).
+
 ```python
+from dataclasses import dataclass
 from qdrant_client import QdrantClient, models
 from app.retrieval.tenancy import tenant_filter   # kb-tenancy-isolation owns this
 
-RRF_K = 61  # textbook RRF k=60. Qdrant scores 1/((pos+1)/w + k - 1) with pos 0-based,
-            # i.e. 1/(rank + k - 1) — so Qdrant's k is the literature's k PLUS ONE.
-            # The server default is 2, which is textbook k=1: ~30x sharper than intended.
+RRF_K = 60                # OUR Python fusion, textbook 1/(k + rank). Owned by
+                          # kb-rag-query-contract §12.9 and snapshotted with the config.
+QDRANT_SERVER_RRF_K = 61  # A DIFFERENT constant with a different owner: Qdrant's `fusion.k`,
+                          # eval/playground comparison only. Never assert the two are equal.
+
+@dataclass
+class Candidate:                      # one row of the §8.24 playground table
+    point: models.ScoredPoint
+    dense_rank: int | None = None
+    dense_score: float | None = None
+    sparse_rank: int | None = None
+    sparse_score: float | None = None
+    fused_score: float = 0.0
 
 def hybrid_search(client: QdrantClient, ctx, allowed_version_ids: list[str],
                   dense: list[float], sparse: models.SparseVector,
-                  branch_k: int = 20, limit: int = 20) -> list[models.ScoredPoint]:
+                  branch_k: int = 20, limit: int = 20) -> list[Candidate]:
     """Stages 7-9 of kb-rag-query-contract. `f` is positional and required: an
     unfiltered call must be unrepresentable, not merely discouraged."""
-    f = tenant_filter(ctx, allowed_version_ids)   # raises EmptyScopeError on an empty scope
+    f = tenant_filter(ctx, allowed_version_ids)   # raises EmptyScopeError on an empty scope.
+    # One object, all four tenant terms in `must`, passed to BOTH calls below — two queries
+    # means two chances to forget it, so neither call builds its own filter.
 
-    response = client.query_points(
-        collection_name=COLLECTION,
-        prefetch=[
-            # filter= on EVERY leaf. The server would propagate the root filter down,
-            # but QdrantClient(":memory:") does not — see Gotchas. Never rely on it.
-            models.Prefetch(query=dense,  using="dense",  limit=branch_k, filter=f),
-            models.Prefetch(query=sparse, using="sparse", limit=branch_k, filter=f),
-        ],
-        query=models.RrfQuery(rrf=models.Rrf(k=RRF_K)),  # NOT FusionQuery — it cannot carry k
-        query_filter=f,          # top level is `query_filter`; Prefetch's is `filter`
-        limit=limit,
-        with_payload=["chunk_id", "source_id", "source_version_id", "page", "url"],
-        with_vectors=False,      # a returned vector is recoverable plaintext (Morris et al. 2023)
-        timeout=5,
-    )
-    return response.points       # QueryResponse.points, not a bare list
+    branches: dict[str, list[models.ScoredPoint]] = {}
+    for name, vector in (("dense", dense), ("sparse", sparse)):
+        response = client.query_points(     # or one query_batch_points — each request still
+            collection_name=COLLECTION,     # carries its own query_filter; there is no shared one
+            query=vector,
+            using=name,              # named vectors have no default branch; required every call
+            query_filter=f,          # top level is `query_filter`; Prefetch's is `filter`
+            limit=branch_k,
+            with_payload=["chunk_id", "source_id", "source_version_id", "page", "url"],
+            with_vectors=False,      # a returned vector is recoverable plaintext (Morris et al. 2023)
+            timeout=5,
+        )
+        branches[name] = response.points     # QueryResponse.points, not a bare list
+
+    pool: dict[str, Candidate] = {}
+    for name, points in branches.items():
+        for rank, p in enumerate(points, start=1):        # RRF ranks are 1-indexed
+            c = pool.setdefault(p.payload["chunk_id"], Candidate(point=p))
+            setattr(c, f"{name}_rank", rank)
+            setattr(c, f"{name}_score", p.score)   # magnitude is kept for the trace, never fused
+            c.fused_score += 1.0 / (RRF_K + rank)
+    return sorted(pool.values(), key=lambda c: -c.fused_score)[:limit]
 ```
 
 Writes, counts and deletes use the same builder and the same explicit flags:
 
 ```python
 client.upsert(COLLECTION, points=[models.PointStruct(
-    id=str(chunk_id),                                    # UUIDv7 or uint only — no arbitrary strings
+    id=point_id(chunk),   # uuid5(POINT_NS, f"{org}:{version}:{seq}") — u64 or UUID only, and deterministic
     vector={"dense": d, "sparse": s},                    # both branches, one point
-    payload=payload)], wait=True)                        # wait=True or §13.5's count check is a lie
+    payload={**payload, "chunk_id": chunk_id},           # the ULID rides in the payload, never as the id
+)], wait=True)                                           # wait=True or §13.5's count check is a lie
 
 client.delete(COLLECTION, points_selector=models.PointIdsList(points=point_ids), wait=True)
 client.delete(COLLECTION, points_selector=models.FilterSelector(filter=orphan_sweep_filter),
@@ -112,14 +135,27 @@ Emit `kb_vector_upsert_duration_seconds{collection}` and `kb_vector_upsert_point
 - **A query missing its per-prefetch filters passes every unit test and leaks nothing in production — until either end changes.** The propagation is inverted between the two runtimes. The **server** merges the root filter into every prefetch leaf (`lib/shard/src/query/planned_query.rs`: `let filter = Filter::merge_opts(propagate_filter.clone(), filter);` under the comment *"Filters are propagated into the leaves"*) — undocumented, source-only, and it ANDs correctly only because our terms are in `must`; `merge_owned` concatenates clause lists per type, so a tenant term in `should` would widen to `tenant OR anything_else`. `QdrantClient(":memory:")` does the opposite: `local_collection.py::_merge_sources` takes the fusion branch, ignores `query_filter` entirely, and calls `self.retrieve(ids, ...)` — unfiltered by construction. So the same broken query **leaks under the in-memory client that unit tests use and is safe in production by an accident nobody wrote down.** Put `filter=` on every leaf, and run isolation tests against a real Qdrant container with two seeded orgs and a canary string.
 - **A point ID resolves across the tenant boundary and nothing complains.** `retrieve()` takes no filter parameter at all. Neither does `lookup_from`, and `WithLookup` has no filter field while its `with_payload` defaults to **`true`** server-side — so `query_points_groups` + `with_lookup` pulls whole payloads out of another collection with no tenant condition anywhere. Never expose a point id to a client; authorize any id-addressed fetch against PostgreSQL first.
 - **A verification job passes against a collection still absorbing writes — or an ingest that "succeeded" is not searchable.** The wire defaults and the Python client's defaults are **opposite**, and the docs describe the wire. REST `UpdateParams.wait` is `#[serde(default)]` on a `bool`, i.e. `false` — an acknowledgement of receipt, not a commit. `qdrant-client` defaults `wait=True` and explicitly sends it. Likewise `count`: the docs prose says *"the count is approximate for performance reasons"*, but `CountRequestInternal::default_exact()` returns `true`, the gRPC handler unwraps to the same, and the client defaults `exact=True` — the prose is a **docs bug**. Pass both explicitly anyway: the disagreement becomes moot, and a `curl`, a Laravel smoke check, or a raw-REST rebuild script gets the wire default, not the client's. Watch the near-miss: `SearchParams.exact` is a *different* field meaning "brute-force this search", and it does default to `false`.
-- **Hybrid search suddenly favours whatever the sparse branch returned first, on queries where dense was obviously right.** Qdrant's `DEFAULT_RRF_K = 2` versus the 60 used by Elasticsearch, OpenSearch and the RRF literature — roughly a 30× difference in how sharply rank 1 dominates. Two traps stacked: `models.FusionQuery(fusion=models.Fusion.RRF)` has **no field for k**, so the shape most examples show can only ever use the default; k arrives via `models.RrfQuery(rrf=models.Rrf(k=...))`, added in server 1.16.0. And Qdrant's formula is `1/((pos+1)/weight + k - 1)` with `pos` 0-based, so **Qdrant's k is the literature's k plus one** — passing `k=60` gives you textbook 59. Set `RRF_K = 61`, and snapshot it in the `retrieval_configuration_version` (`kb-rag-query-contract` §12.9).
-- **The bot never refuses, however irrelevant the corpus.** Somebody put `score_threshold` on the fused query. RRF discards magnitude by construction — only ranks enter the formula — so the top fused candidate scores the same whether it is a verbatim match or noise, and a threshold there can only ever cut the tail. The evidence threshold lives on the `bge-reranker` logit scale and nowhere else (`kb-rag-query-contract` §12.12).
-- **Server-side fusion returns the answer but destroys the trace.** `query_points` with `prefetch` hands back one fused score per point; §12.9 and the admin playground (§8.24) require *dense rank, dense score, sparse rank, sparse score, and fused score* per candidate. Where the trace is mandatory — i.e. the production chat path — issue the two branches as separate filtered `query_points` calls (or one `query_batch_points`) and fuse in Python at the same `RRF_K`. Server-side fusion is for the eval harness and for the playground's "what would server fusion have done" comparison. The two must be configured from the same value, or an eval result does not describe production.
+- **Hybrid search suddenly favours whatever the sparse branch returned first, on queries where dense was obviously right.** A fusion path inherited Qdrant's `DEFAULT_RRF_K = 2` instead of the 60 used by Elasticsearch, OpenSearch and the RRF literature — roughly a 30× difference in how sharply rank 1 dominates. Two traps stacked: `models.FusionQuery(fusion=models.Fusion.RRF)` has **no field for k**, so the shape most examples show can only ever use the default; k arrives via `models.RrfQuery(rrf=models.Rrf(k=...))`, added in server 1.16.0. And Qdrant's formula is `1/((pos+1)/weight + k - 1)` with `pos` 0-based, so **Qdrant's k is the literature's k plus one** — a server-side `k=60` behaves as textbook 59. Our chat path meets neither number: it fuses in Python at `RRF_K = 60` with `1/(k + rank)`. `QDRANT_SERVER_RRF_K = 61` exists only where a comparison run talks to Qdrant's fusion, and 61 is what textbook 60 is spelled on that side. Third-party fusion pins its own k again — Haystack's `DocumentJoiner` hardcodes 61 with no parameter (`haystack-pipelines`). Record whichever k a path actually used in its `retrieval_configuration_version` (`kb-rag-query-contract` §12.9); never expect the numbers to match.
+- **The bot never refuses, however irrelevant the corpus.** Somebody thresholded the fused score — a `score_threshold` on a fusion query, or a cutoff on `Candidate.fused_score`. RRF discards magnitude by construction — only ranks enter the formula — so the top fused candidate scores the same whether it is a verbatim match or noise, and a threshold there can only ever cut the tail. The evidence threshold lives on the `bge-reranker` **sigmoid** scale — `normalize=True`, `evidence.scale = "sigmoid"` in the config snapshot, `evidence.min_score = 0.30` — and nowhere else (`kb-rag-query-contract` §12.12; `bge-reranker` owns the scale). Read that same 0.30 as a logit and it demands a sigmoid score of ≥ 0.57, so the bot refuses on good evidence instead: same float, opposite bug, nothing raises.
+- **The playground's retrieval panel shows a fused score and dashes in the four columns beside it, and no code change can refill them.** Somebody put the branches behind `prefetch` and let Qdrant fuse. A fused response is one score per point: the per-branch ranks and scores that §12.9 and §8.24 require were discarded server-side and are not recoverable from the result. Banned on the production chat path — that path issues the two filtered `query_points` calls above and fuses in Python. Server-side fusion survives only in the eval harness and the playground's "what would server fusion have done" comparison, which records `QDRANT_SERVER_RRF_K` as its own field. The banned shape, so it is recognisable on sight:
+
+  ```python
+  client.query_points(                       # NOT the chat path — comparison runs only
+      collection_name=COLLECTION,
+      prefetch=[   # filter= on EVERY leaf; the server propagates the root filter down but
+                   # QdrantClient(":memory:") does not — see the propagation gotcha above.
+          models.Prefetch(query=dense,  using="dense",  limit=branch_k, filter=f),
+          models.Prefetch(query=sparse, using="sparse", limit=branch_k, filter=f),
+      ],
+      query=models.RrfQuery(rrf=models.Rrf(k=QDRANT_SERVER_RRF_K)),  # FusionQuery cannot carry k
+      query_filter=f, limit=limit, with_vectors=False,
+  )
+  ```
 - **`AttributeError: 'QdrantClient' object has no attribute 'search'` after a dependency bump.** `search`, `search_batch`, `recommend` and `discover` were **removed** — not deprecated — from the client in 1.16.0, and server 1.19.0 deletes the matching REST endpoints. Every tutorial, blog post and StackOverflow answer written before late 2025 shows the dead API. `query_points` and `query_batch_points` are the only search surface.
 - **Every filtered query is slow and `is_tenant` seems to do nothing.** Payload indexes were created after ingestion. Extra HNSW edges for a payload field are generated only once that field's index exists, and tenant co-location happens during optimization — both apply going forward, not retroactively. Index first, then upsert; to repair, force a re-index by bumping `ef_construct` by 1, which rebuilds every segment.
 - **A sparse-only tuning change makes no difference, or `sparse` returns far more than `limit`.** Sparse vectors use an exact inverted index: no HNSW, no quantization, no approximation, and `SparseVectorParams` has exactly two fields (`index`, `modifier`). The unit trap follows: `SparseIndexParams.full_scan_threshold` counts **vectors**, while the dense `HnswConfigDiff.full_scan_threshold` counts **kilobytes**. Same name, same collection, different units.
 - **Sparse recall collapses after someone enables `modifier=IDF` "because that is what the docs show".** IDF is for BM25-style vectors carrying raw term frequencies. BGE-M3's weights are already learned term importance, so IDF double-counts rarity — `bge-m3-embeddings` owns this ruling; leave the modifier unset. It matters for tenancy too: with IDF on, document frequencies are computed **collection-wide across every tenant** by default, which is both a relevance error and a weak cross-tenant statistical oracle. Server 1.19.0 adds `SearchParams(idf=models.IdfCorpusParams(corpus=<org filter>))` to scope it; if a BM25 branch is ever added, that scoping is mandatory, not optional.
-- **A whole batch fails with a point-id validation error on the first upsert of a new ingest path.** Qdrant accepts only an unsigned integer or a UUID as a point id. `chunk_id` is UUIDv7 and satisfies this; a composite key like `f"{source_id}:{seq}"` does not. Keep the point id equal to `chunk_id` and store it back into `chunks.vector_point_id`, or deletion loses its only stable handle (§8.17).
+- **A whole batch fails with a point-id validation error on the first upsert of a new ingest path — and the "fix" is worse than the bug.** Qdrant accepts only an unsigned integer or a UUID as a point id, so a 26-character ULID `chunk_id` (`postgresql-patterns`) or a composite like `f"{source_id}:{seq}"` is **rejected outright** and nothing lands. That failure is loud. The sneaky one is reaching for `uuid4()` to get past it: it is accepted, HTTP 200, no log line — and then a retried upsert writes a second copy of every chunk it already wrote, and a rebuild from PostgreSQL mints *different* ids for byte-identical content, so deletion by `chunks.vector_point_id` misses the strays and the ADR-010 rebuild proof stops reproducing. The point id is the deterministic `uuid5(POINT_NS, f"{org_id}:{source_version_id}:{seq}")` (`kb-source-lifecycle`), stored back into `chunks.vector_point_id` — a genuine `uuid` column — so a rebuild reproduces byte-identical ids and PostgreSQL can always name every point it owns (§8.17). `chunk_id` travels in the payload, where retrieval, dedup and citation read it.
 - **A query with `using=` omitted errors or silently searches the wrong branch.** A collection with named vectors has no default vector, so `using` is required on every `Prefetch` and on any single-branch `query_points`. The names `"dense"` and `"sparse"` are part of the collection contract — changing one is a re-index, not a rename.
 - **A chunk is indexed but never retrievable by the sparse branch.** Its `models.SparseVector` had empty `indices`/`values` — an all-stopword or whitespace chunk. An empty sparse vector matches nothing, forever, and no error is raised at upsert. `bge-m3-embeddings` handles the conversion; assert non-empty lexical weights on the first batch of every ingest run.
 - **A newly `Ready` source is missing chunks and re-running the job "fixes" it.** Ingestion upserted with `wait=False` for throughput and the publication check counted immediately (§13.5). Either upsert with `wait=True`, or make the count a separate step that retries — never both in the same call chain with the flag off.
@@ -141,7 +177,8 @@ Emit `kb_vector_upsert_duration_seconds{collection}` and `kb_vector_upsert_point
 - [ ] Every `models.Prefetch(...)` carries `filter=`; the top level carries `query_filter=`; a grep for `Prefetch(` shows no leaf without one.
 - [ ] Two-organization isolation test runs against a **real Qdrant container** (never `:memory:`), seeds a canary string in org B, and asserts zero hits for org A across dense-only, sparse-only, and fused queries.
 - [ ] A test asserts `Filter(must=[])` never reaches the client: `tenant_filter` raises on an empty scope, and the wrapper rejects a `Filter` whose `must` is empty or `None`.
-- [ ] `RRF_K` is set from config (61 for textbook 60), recorded in `retrieval_configuration_version`, and identical between the server-fusion path and the Python fusion path.
+- [ ] The chat path issues two separate filtered `query_points` calls and fuses in Python, keeping `dense_rank`, `dense_score`, `sparse_rank`, `sparse_score` and `fused_score` per candidate; `grep -rn "RrfQuery(\|FusionQuery(\|prefetch=" services/ai-service/app/rag services/ai-service/app/retrieval` returns nothing outside the eval/playground comparison module.
+- [ ] Each RRF `k` is a separately named constant set from config, and each is snapshotted into the `retrieval_configuration_version` of the path that used it: `RRF_K = 60` for our Python fusion (owned by `kb-rag-query-contract`); for any server-side or third-party fusion, that implementation's own `k` — Qdrant's `fusion.k`, which defaults to **2** and must be passed explicitly as 61 to mean textbook 60, or Haystack's `DocumentJoiner`, which hardcodes 61 and takes no parameter. No test, comment or config asserts that two of these numbers are equal; a comparison report that omits the k it ran under is the defect.
 - [ ] Payload indexes for all six payload fields are created in the collection bootstrap **before** any upsert, with `is_tenant=True` on `org_id` only; `hnsw_config` sets `m=0` and `payload_m=16`.
 - [ ] Point id is `uuid5(POINT_NS, f"{org_id}:{source_version_id}:{seq}")` (`kb-source-lifecycle`) and is written back to `chunks.vector_point_id` in the same transaction as the chunk row. Re-running the indexer for a version produces byte-identical ids — assert that in a test, because the failure mode is a silent doubling of every vector rather than an error.
 - [ ] Every upsert and delete passes `wait=True` explicitly; every verification `count` passes `exact=True` explicitly; no code relies on either default.

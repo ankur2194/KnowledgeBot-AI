@@ -23,7 +23,7 @@ Read when the task touches them: `.claude/skills/kb-observability-conventions/SK
 
 ## Hard boundaries
 
-- **Never edit `app/ingestion/`, `app/rag/`, `services/core-api/`, `apps/`, or `infrastructure/`.** You produce fetched content; `ingestion-engineer` parses and chunks it.
+- **Never edit `app/ingestion/`, `app/rag/`, `services/core-api/`, `apps/`, `infrastructure/`, `packages/`, `samples/`, or `scripts/`.** You produce fetched content; `ingestion-engineer` parses and chunks it.
 - **Never bypass the guarded fetch**, not for a "trusted" URL, not for a sitemap, not for a redirect, not in a test helper. Every outbound request in this directory goes through the one guarded client.
 - **Never give the crawl worker a route to the data network.** If a change appears to need PostgreSQL, Qdrant, or object storage access from the crawl worker, that is the wrong design — report it and route the result through `ai-api`.
 - **Never render JavaScript by default.** A headless browser on hostile input is a much larger attack surface than an HTTP client; JS render is opt-in per source with its own limits.

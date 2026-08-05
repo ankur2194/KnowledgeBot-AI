@@ -89,13 +89,57 @@ groups:
         annotations:
           summary: "{{ $labels.task }} skipped every tick for 30m — stranded mutex, not contention"
           runbook: "php artisan schedule:clear-cache; see laravel-scheduler Gotchas"
+
+  - name: kb_provider
+    interval: 30s
+    rules:
+      # `kb-error-taxonomy` marks provider_rate_limit "alert on sustained" and it is the incident
+      # we actually get. A RATIO per provider, never a raw 429 rate: one tenant burning its own
+      # quota must not read as a fleet outage, and org_id is not and never will be a label.
+      - record: kb:provider_rate_limit_ratio:5m
+        expr: |
+          sum by (service, env, provider) (rate(kb_provider_requests_total{error_class="provider_rate_limit"}[5m]))
+            / sum by (service, env, provider) (rate(kb_provider_requests_total[5m]))
+
+      - alert: KbProviderRateLimitSustained
+        # 15m outlives every automatic remedy: a single 429 is retried at most once and then
+        # falls back if configured (§8.7, `kb-error-taxonomy`), so anything still true here has
+        # already exhausted retry AND fallback and is reaching users. Traffic floor as above.
+        expr: kb:provider_rate_limit_ratio:5m > 0.10
+              and sum by (service, env, provider) (rate(kb_provider_requests_total[5m])) > 0.1
+        for: 15m
+        keep_firing_for: 10m
+        labels: {severity: page}
+        annotations:
+          summary: "{{ $labels.provider }} 429ing {{ $value | humanizePercentage }} of calls for 15m"
+          runbook: "One tenant or the fleet? PromQL cannot answer — org_id is not a label. Run
+            SELECT organization_id, count(*) FROM usage_events WHERE error_class='provider_rate_limit'
+            AND created_at > now() - interval '30 minutes' GROUP BY 1 ORDER BY 2 DESC. One org
+            dominating: throttle or raise that connection's quota. Spread across orgs: our provider
+            account is capped — open a limit increase and confirm §8.7 fallback is configured on the
+            affected bots, because without it every retry ladder ends in a 429 reaching a user."
 ```
 
 Layer 2 is `->pingOnSuccess()` to a **dead-man's switch outside this stack** — layer 1 dies with Prometheus. Layer 3 is `kb_crawl_sources_overdue`, computed from PostgreSQL on scrape: the only signal that catches a scheduler ticking perfectly while the work does not happen (`alert: kb_crawl_sources_overdue > 50 for: 30m`).
 
 ### What pages, what waits for morning
 
-Severity is not invented here — it is `kb-error-taxonomy`'s **Page** column, mechanised. Route `severity: page` to the pager, `severity: ticket` to a chat channel with `repeat_interval: 12h`.
+Severity is not invented here — it is `kb-error-taxonomy`'s **Page** column, mechanised. The vocabulary is exactly two values and both are routed; the default receiver is the pager, so a rule that ships with a typo'd severity wakes someone instead of vanishing.
+
+```yaml
+# infrastructure/observability/alertmanager/alertmanager.yml
+route:
+  group_by: [alertname, service]     # only labels every alert carries — see Gotchas
+  group_wait: 30s
+  receiver: pager                    # deliberately loud, never a black-hole default
+  routes:
+    - matchers: ['severity = "ticket"']
+      receiver: chat
+      repeat_interval: 12h
+    - matchers: ['severity = "page"']
+      receiver: pager
+      repeat_interval: 4h            # KbProviderRateLimitSustained re-pages until the cap lifts
+```
 
 | Pages now | Waits (`ticket`) | Never alerts |
 |---|---|---|
@@ -104,30 +148,15 @@ Severity is not invented here — it is `kb-error-taxonomy`'s **Page** column, m
 | `provider_permanent_request` — it is our bug | `provider_auth` (but see Gotchas) | `parsing`, `ocr`, `crawl` — per-job, shown on the source detail |
 | `kb_circuit_breaker_state == 2` for >5m | `kb_dependency_up{required="false"} == 0` | `user_cancellation` — an `outcome`, deliberately outside the error rate |
 | `KbChatErrorRateHigh`, `KbSchedulerStalled`, dead-man's-switch silence | `KbSchedulerSkipStuck`, `kb_crawl_sources_overdue` | insufficient-evidence rate — a *product* number, dashboard only |
+| sustained `provider_rate_limit` (`KbProviderRateLimitSustained`) — >10% of a provider's calls for 15m, i.e. past retry **and** fallback | one org's `provider_rate_limit` burst — its own quota, surfaced on its admin dashboard (§19.3), not a fleet fault | — |
 
-### Retention — four stores, four windows
+### Retention and correlation
 
-| Store | Window | Where it is set | What it costs / why |
-|---|---|---|---|
-| Prometheus | **15d**, hard cap 20 GB | `--storage.tsdb.retention.time=15d --storage.tsdb.retention.size=20GB` | ~50k series at a 15 s scrape ≈ 0.5 GB/day compressed <!-- UNVERIFIED: derived from ~1.7 bytes/sample, not measured — re-derive from `prometheus_tsdb_head_series` once real traffic exists -->. The size cap is the safety net: enforced *after* the time window, so a cardinality incident truncates history instead of filling the disk. |
-| Loki | **30d** | `limits_config.retention_period: 720h` **plus** `compactor.retention_enabled: true` and `delete_request_store` | Logs are the tenant-incident record (`org_id` is a *field*, so debugging one tenant means 30d of JSON). Cheapest of the four per byte; minimum permitted is 24h. |
-| Tempo | **7d** | `backend_scheduler.provider.compaction.block_retention: 168h` (default 336h) | Most expensive per byte and least often read past a week. Head-100% sampling with Collector tail sampling keeps volume sane. |
-| Grafana | n/a | provisioned; `grafana.db` on a volume for sessions only | Nothing to retain — that is the point. |
-
-On 8–16 GB / fast SSD (§24.8) this is roughly 8 GB Prometheus + 20–40 GB Loki + 15–30 GB Tempo. All three are **separate named volumes**; one filling must not take the others down.
-
-### Correlation — `request_id` → `trace_id` → span, and back
-
-Clients never receive `traceparent` (`kb-observability-conventions` rule 4); they receive `X-KB-Request-Id`. So the chain from a support ticket is: **`request_id` → Loki (`| json | request_id="…"`) → `trace_id` → Tempo**. Wire both directions in datasource provisioning:
-
-- Tempo datasource, `tracesToLogsV2`: `datasourceUid: loki`, `filterByTraceID: true`, `tags: [{key: service.name, value: service}]`, and `spanStartTimeShift: -1h` / `spanEndTimeShift: 1h`.
-- Loki datasource, `derivedFields`: `matcherType: label`, `name: trace_id`, `datasourceUid: tempo`, `url: "${__value.raw}"` — `matcherType: label` works because the Collector writes `trace_id` as **structured metadata** (requires `tsdb` + `schema: v13`), so no regex over the line body is needed. <!-- UNVERIFIED: `matcherType` accepts `label` as well as `regex`; confirm against the pinned Grafana before relying on it, and keep a `matcherRegex` over the JSON as the fallback. -->
-
-Confirm both directions against a real trace before shipping — a mistyped `datasourceUid` produces a link that renders and goes nowhere, with no error in any log.
+Four stores, four windows — Prometheus **15d** + a 20 GB size cap, Loki **30d**, Tempo **7d**, Grafana none — and the `request_id` → Loki → `trace_id` → Tempo chain a support ticket is walked along in both directions. Settings, sizing, and the datasource provisioning that wires the links: **`references/retention-and-correlation.md`**. The 30d/7d asymmetry is load-bearing and deliberate.
 
 ### Dashboards
 
-Five JSON files, provisioned with `allowUiUpdates: false`, `disableDeletion: false`, `foldersFromFilesStructure: true`: **Chat SLO** (RPM, `kb:chat_error_ratio:5m`, first-token p95, active streams, cancellation and fallback rate), **Retrieval** (per-`stage` p95 against the 1.5 s budget, candidate funnel, empty-retrieval by `reason`), **Providers** (per `provider`/`model` success, latency, tokens, cost), **Ingestion & Crawl** (queue depth, stage duration by `file_type`, `kb_crawl_pages_total` by `outcome`, `status_class` distribution), **Platform** (`kb_build_info`, `kb_dependency_up`, `kb_circuit_breaker_state`, scheduler freshness, plus node/cAdvisor/postgres/redis exporters). No dashboard has an org or bot variable — there is no series to fill it.
+Five JSON files, provisioned with `allowUiUpdates: false`, `disableDeletion: false`, `foldersFromFilesStructure: true`: **Chat SLO** (RPM, `kb:chat_error_ratio:5m`, first-token p95, active streams, cancellation and fallback rate), **Retrieval** (per-`stage` p95 against the 1.5 s budget, candidate funnel, empty-retrieval by `reason`), **Providers** (per `provider`/`model` success, latency, tokens, cost), **Ingestion & Crawl** (queue depth, stage duration by `file_type`, `kb_crawl_pages_total` by `disposition` — the crawl family's own label, never `outcome` — `status_class` distribution), **Platform** (`kb_build_info`, `kb_dependency_up`, `kb_circuit_breaker_state`, scheduler freshness, plus node/cAdvisor/postgres/redis exporters). No dashboard has an org or bot variable — there is no series to fill it.
 
 ## Gotchas
 
@@ -160,7 +189,8 @@ Five JSON files, provisioned with `allowUiUpdates: false`, `disableDeletion: fal
 - [ ] Every metric name in every rule file and dashboard JSON exists in `kb-observability-conventions/references/metric-catalog.md`; a CI check diffs the two name sets and fails on a name that exists in neither `/metrics` nor the catalog.
 - [ ] `outcome=~"error|timeout"` appears in exactly one place, `kb-recording.yml`; a CI grep for `outcome="error"` in any other rule, dashboard, or docs file returns nothing.
 - [ ] Every alert carries `severity: page` or `severity: ticket`, and `amtool config routes test` resolves both to a real receiver. Ratio alerts carry a traffic-floor term.
-- [ ] `promtool check rules` and `promtool test rules` pass, including a unit test asserting `kb:chat_error_ratio:5m` counts a timeout and ignores a cancellation.
+- [ ] `promtool check rules` and `promtool test rules` pass, including a unit test asserting `kb:chat_error_ratio:5m` counts a timeout and ignores a cancellation, and one asserting `KbProviderRateLimitSustained` stays silent through a 10-minute 429 burst and fires at 15 minutes.
+- [ ] Every `kb-error-taxonomy` class whose Page column says "alert" resolves to a named rule in `kb-alerts.yml` — a CI check diffs the class list against the alerts, so "alert on sustained" cannot sit in doctrine with no route (this is how `provider_rate_limit` went unpaged).
 - [ ] The three scheduler layers are live and independently verified: stopping the `laravel-scheduler` container fires `KbSchedulerStalled`; holding its mutex fires `KbSchedulerSkipStuck` while the freshness gauge stays fresh; stopping the whole Compose stack alerts via the external dead-man's switch.
 - [ ] No Loki stream label outside `service`, `env`, `level`, `container` — asserted against `/loki/api/v1/labels` in an integration test; a fixture log line containing `org_id` is queryable via `| json` and produces no new stream.
 - [ ] Loki retention proven: `retention_enabled: true`, `delete_request_store` set, exactly one compactor, and a test writes a line with a backdated timestamp beyond the window and asserts it is gone after compaction.

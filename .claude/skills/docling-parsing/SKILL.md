@@ -14,7 +14,7 @@ description: Docling 2.118 document parsing for the FastAPI ingestion path — D
 - **`parser_cfg_version` covers every option *and* every model revision.** A changed option or model mints a new source version and forces reprocessing (`kb-source-lifecycle` §13.4). Docling pins model specs to `revision="main"`, a moving branch — resolve each repo to a commit SHA at image build and fold those SHAs into the string, or "reprocess with new parser settings" is unfalsifiable.
 - **We emit elements; `kb-chunking-rules` decides boundaries.** Never split, merge, or size anything here. Never emit a markdown/HTML table grid into text a chunker will consume — row-wise verbalization measures P@1 **0.528 vs 0.382** for markdown ([RAGonite, WSDM '25](https://arxiv.org/abs/2412.10571)), a deliberate deviation from Unstructured.io's published advice.
 - **Models are pre-fetched at image build and loaded from `artifacts_path`.** ~550 MB of weights (layout 172 MB, TableFormer 358 MB, figure classifier 16 MB, plus RapidOCR) downloaded inside a Celery task is an ingestion timeout, and it happens once per worker container, not once per cluster.
-- **Every conversion carries all four caps** (§8.10): `document_timeout`, `max_num_pages`, `max_file_size`, `page_range`. All four default to unbounded (`None` / `sys.maxsize`).
+- **Every conversion carries all four caps** (§8.10): `document_timeout`, `max_num_pages`, `max_file_size`, `page_range`. All four default to unbounded (`None` / `sys.maxsize`). **`document_timeout` is not this skill's number: `kb-error-taxonomy` owns the timeout ladder and sets document parsing at 300 s per document**, nested inside the 900 s ingestion job. Copy it; never restate it as an independent choice and never lower it (see Gotchas).
 - **Parser warnings are advisory, never a failure.** `ConversionStatus.PARTIAL_SUCCESS` and low confidence map to `Ready with warnings`, which is retrievable and identical to `Ready` (`kb-source-lifecycle`). Only `FAILURE` is `Failed`.
 
 ## How we use it
@@ -38,9 +38,11 @@ services/ai-service/app/ingestion/parsing/
 └── warnings.py      # ConfidenceReport/ErrorItem -> the §8.11 warning taxonomy
 ```
 
+`serializers.py` in full — `RowVerbalizingTableSerializer`, `KbSerializerProvider`, and the `get_header_and_body_lines` override the first two Gotchas turn on: **[`references/table-serializer.md`](references/table-serializer.md)**.
+
 Build step, once per image: `docling-tools models download -o /opt/docling-artifacts` (layout + TableFormer + picture classifier + RapidOCR by default), then `DOCLING_ARTIFACTS_PATH=/opt/docling-artifacts`.
 
-Telemetry (`kb-observability-conventions`): this stage is `stage="parse"` — `kb_ingestion_stage_duration_seconds{stage,file_type}`, `kb_ingestion_pages_total{file_type}`, and `kb_ingestion_jobs_total{file_type,outcome,error_class}`. `file_type` is the fixed supported-format enum, never a tenant-supplied extension. `stage="ocr"` and `kb_ingestion_ocr_pages_total{engine,outcome}` belong to `ocr-pipeline`; `PARTIAL_SUCCESS` is `outcome="partial"`, not an error.
+Telemetry (`kb-observability-conventions`): this stage is `stage="parse"` — `kb_ingestion_stage_duration_seconds{stage,file_type}`, `kb_ingestion_pages_total{file_type}`, and `kb_ingestion_jobs_total{file_type,outcome,error_class}`. `file_type` is the fixed supported-format enum, never a tenant-supplied extension. `stage="ocr"` and `kb_ingestion_ocr_pages_total{engine,disposition}` belong to `ocr-pipeline`, where `disposition` ∈ `success` `partial` `error` — a partially-OCR'd page is `disposition="partial"`, not an error, and the label is deliberately not the shared four-value `outcome`. A `PARTIAL_SUCCESS` conversion is still `Ready with warnings`, so the job stays `outcome="success"`.
 
 ```python
 # services/ai-service/app/ingestion/parsing/converter.py
@@ -55,61 +57,19 @@ from docling.datamodel.pipeline_options import (
 from docling.document_converter import (
     DocumentConverter, ExcelFormatOption, HTMLFormatOption, ImageFormatOption,
     PdfFormatOption)
-from docling_core.transforms.chunker.hierarchical_chunker import (
-    ChunkingDocSerializer, ChunkingSerializerProvider)
-from docling_core.transforms.serializer.base import BaseTableSerializer, SerializationResult
-from docling_core.transforms.serializer.common import create_ser_result
-from docling_core.types.doc import ContentLayer, DoclingDocument, TableItem
+from docling_core.types.doc import ContentLayer
+# The chunking-side table serializer lives in serializers.py, not here:
+# references/table-serializer.md
 
 ARTIFACTS = Path("/opt/docling-artifacts")   # baked in at build; never fetched at runtime
-HDR, ROW = "Columns: ", "Row "
-
-
-class RowVerbalizingTableSerializer(BaseTableSerializer):
-    """One line per row; every column name repeated on every row.
-
-    Docling's own TripletTableSerializer emits `<col-0 value>, <column> = <value>`,
-    which keys every cell to column 0 — wrong the moment column 0 is not a key —
-    and joins the whole table with ". " into a single line (see Gotchas).
-    """
-
-    def _txt(self, cell, doc, ser, **kw) -> str:
-        # RichTableCell (nested content in a cell) resolves via _get_text; called
-        # WITHOUT doc it returns the literal string "<!-- rich cell -->".
-        return (cell._get_text(doc=doc, doc_serializer=ser, **kw) or "").strip() or "—"
-
-    def serialize(self, *, item: TableItem, doc_serializer, doc, **kw) -> SerializationResult:
-        grid = item.data.grid   # spanned cells are repeated into every position they
-        if not grid:            # cover, which is what flattens a merged/two-row header
-            return create_ser_result(text="", span_source=item)
-        head = [self._txt(c, doc, doc_serializer, **kw) for c in grid[0]]
-        body = grid[1:] if any(c.column_header for c in grid[0]) else grid
-        lines = [HDR + "; ".join(head) + "\n"] + [
-            f"{ROW}{i + 2} — " + "; ".join(
-                f"{h}: {self._txt(c, doc, doc_serializer, **kw)}" for h, c in zip(head, r)
-            ) + "\n" for i, r in enumerate(body)]
-        cap = doc_serializer.serialize_captions(item=item, **kw).text
-        return create_ser_result(text="".join(([cap + "\n"] if cap else []) + lines),
-                                 span_source=item)
-
-    def get_header_and_body_lines(self, *, table_text: str, **kw):
-        # MUST be overridden. The base returns [] header lines, which is exactly why
-        # HybridChunker(repeat_table_header=True) is a silent no-op by default.
-        lines = [f"{ln}\n" for ln in table_text.split("\n") if ln.strip()]
-        return ([ln for ln in lines if ln.startswith(HDR)],
-                [ln for ln in lines if ln.startswith(ROW)])
-
-
-class KbSerializerProvider(ChunkingSerializerProvider):
-    def get_serializer(self, doc: DoclingDocument) -> ChunkingDocSerializer:
-        return ChunkingDocSerializer(doc=doc,
-                                     table_serializer=RowVerbalizingTableSerializer())
 
 
 def build_converter(ocr_options=None) -> DocumentConverter:
     pdf = PdfPipelineOptions(
         artifacts_path=ARTIFACTS,
-        document_timeout=180.0,                 # default None = unbounded (§8.10)
+        # 300 s is `kb-error-taxonomy`'s number, not ours — it owns the timeout ladder
+        # and nests this inside the 900 s ingestion job. Never set it lower: see Gotchas.
+        document_timeout=300.0,                 # default None = unbounded (§8.10)
         enable_remote_services=False, allow_external_plugins=False,
         accelerator_options=AcceleratorOptions(device=AcceleratorDevice.CPU, num_threads=4),
         do_ocr=True,
@@ -170,6 +130,7 @@ PDF and images run `StandardPdfPipeline` (layout → OCR → TableFormer → rea
 - **Symptom: a scanned page returns empty text while OCR is "on".** `OcrMode.DEFAULT` resolves to `PDF_AWARE_LAYOUT_REGIONS`: it OCRs only layout clusters that overlap a bitmap or overlap no PDF text cell. A page with a thin junk text layer therefore has its clusters eliminated and never reaches OCR. That is the `ocr-pipeline` escalation trigger — re-run the page with `OcrMode.FULL_PAGE`. `force_full_page_ocr` is deprecated; set `mode`.
 - **Symptom: a spreadsheet answers for one region and hallucinates for an adjacent one.** `MsExcelBackendOptions.gap_tolerance` defaults to 0, so each contiguous block becomes its own `TableItem`. That is what we want — carry the sheet name and per-table index into `table_ref` so two tables on one sheet stay distinguishable. Raising it merges unrelated blocks into one table.
 - **Symptom: an ordinary `.docx` is refused, or a `.pptx` blows the memory cap.** OOXML files are ZIP archives; the decompression-bomb, entry-count and ratio gates run **before** Docling. `defusedxml` must be a direct dependency (assert `openpyxl.DEFUSEDXML is True` at worker start). See `kb-security-baseline`.
+- **Symptom: a 10-page scan publishes as `Ready with warnings` and only its first pages are ever answerable — the bot says a clause "is not in the document" while the clause is visibly on page 8.** `document_timeout` was set below the owner's budget (it read `180.0` here for a while). `kb-error-taxonomy` allows **300 s per document**, and `ocr-pipeline` caps a task at **10 OCR pages** by exactly that arithmetic — 30 s/page × 10 = 300 s — so a scan sized to that cap needs the full budget and a 180 s timeout cuts it in half. Because `document_timeout` returns `PARTIAL_SUCCESS` rather than raising (next Gotcha), the pages after the cut silently never index and the source lands in a state that reads like a minor OCR-quality note. Fix: take the number from `kb-error-taxonomy` (`document_timeout=300.0`) instead of picking one here, and emit a distinct `parse_timeout` warning rather than folding it into the confidence warnings, so a *truncated* document is distinguishable from a merely blurry one on the source detail.
 - **Symptom: `res.document` is populated but half the pages are blank, and nothing raised.** `document_timeout` returns `PARTIAL_SUCCESS` with partial content rather than raising, and `raises_on_error=False` swallows per-page failures into `res.errors`. Always branch on `res.status` and persist `res.errors` (`ErrorItem`: `component_type`, `category`, `page_no`) plus `res.confidence` (`parse_score`/`layout_score`/`table_score`/`ocr_score`, graded `poor` <0.5, `fair` <0.8, `good` <0.9, `excellent` ≥0.9) as the §8.11 warning set.
 - **Contradiction with the spec:** docs/05 §9.10 routes legacy binary Office formats through a LibreOffice conversion worker. Docling 2.114.0 added native `.doc`/`.ppt`/`.xls` backends, so that worker is now avoidable — and worth avoiding, given LibreOffice's advisory history. Not resolved here; raise it as an ADR. <!-- UNVERIFIED: fidelity of the native legacy backends vs a LibreOffice round-trip is unmeasured -->
 - **Determinism is unproven, and §13.5 depends on it.** Image extraction rasterizes through pypdfium2 with float scaling; torch.compile and GPU kernels add their own variance; issue #1159 reports the same PDF converting at visibly different quality across runs. Golden-file the element count and text hash per format fixture and pin CPU inference for ingestion until measured. <!-- UNVERIFIED: no upstream determinism guarantee exists -->
@@ -190,7 +151,7 @@ PDF and images run `StandardPdfPipeline` (layout → OCR → TableFormer → rea
 - [ ] `allowed_formats` is explicit and equals the upload allow-list; a test asserts an `.epub`/`.tex`/JATS file is rejected by the converter, not just by Laravel.
 - [ ] `enable_remote_services`, `allow_external_plugins`, `enable_remote_fetch`, `enable_local_fetch`, `render_page`, `fetch_images` all False — asserted on the constructed converter, not read off the source.
 - [ ] `artifacts_path` is set and the image contains the weights; a test with the network namespace removed converts a fixture successfully.
-- [ ] `document_timeout`, `max_num_pages`, `max_file_size` are passed on every `convert()`; a 4 000-page fixture is rejected before parsing.
+- [ ] `document_timeout`, `max_num_pages`, `max_file_size` are passed on every `convert()`; a 4 000-page fixture is rejected before parsing. `document_timeout` equals `kb-error-taxonomy`'s **300 s** and a test asserts it is never below `ocr-pipeline`'s 10-page × 30 s cap.
 - [ ] `parser_cfg_version` contains `docling.__version__`, the serializer version, and the resolved model commit SHAs; changing one option changes the string and mints a new source version.
 - [ ] The custom table serializer overrides `get_header_and_body_lines`, and a test splits a 200-row table and asserts every segment opens with the `Columns:` line.
 - [ ] No markdown or HTML table grid reaches chunk text — asserted by a test scanning emitted element text for `|---`.

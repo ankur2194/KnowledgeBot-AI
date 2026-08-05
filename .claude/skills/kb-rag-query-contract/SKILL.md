@@ -37,7 +37,7 @@ Per-stage obligations, tuning notes, and the exclusion-reason vocabulary live in
 | 9 | Fusion (RRF) | `fusion.k` = **60**, per-branch weights | fused score, and both input ranks per candidate |
 | 10 | Dedup + diversity | `dedup.simhash_distance`, `diversity.max_per_document` | dropped candidates + reason |
 | 11 | Reranking | `rerank.candidates` = **20–30**, `rerank.retain` = **6–10** | reranker score per candidate, latency |
-| 12 | Evidence threshold | `evidence.min_score` (reranker scale) | pass/fail per candidate, `insufficient_evidence` flag |
+| 12 | Evidence threshold | `evidence.min_score` = **0.30**, on the reranker's **sigmoid** scale | pass/fail per candidate, `above_retain_limit` drops, `insufficient_evidence` flag |
 | 13 | Context packing | `context.budget_tokens`, `context.reserve_output` | packed order, per-chunk tokens, budget-evicted chunks |
 | 14 | Prompt construction | `prompt.version` | prompt version id, section token counts |
 | 15 | Provider call | model, temperature | delegated to `provider_calls`; see `kb-provider-adapter-contract` |
@@ -51,7 +51,7 @@ Stages 7–13 are the tunable core. Stage 6's filter is not tunable — it is a 
 
 ### Defaults, and the standing instruction about them
 
-Ship §12.7–12.12 as written: dense 20, sparse 20, RRF fusion, rerank 20–30, retain 6–10. **These are starting points, not findings.** Every one of them moves only through an evaluation run with an immutable config snapshot (§21.4). Snapshot the whole retrieval config under a `retrieval_configuration_version` and write that version into every trace — a trace without it cannot be replayed and is worthless for a regression gate.
+Ship §12.7–12.12 as written: dense 20, sparse 20, RRF fusion, rerank 20–30, retain 6–10, and `evidence.min_score` = **0.30 on the reranker's sigmoid scale** — never a logit; `bge-reranker` owns that scale and the snapshot stores `evidence.scale = "sigmoid"` beside the number. **These are starting points, not findings.** Every one of them moves only through an evaluation run with an immutable config snapshot (§21.4). Snapshot the whole retrieval config under a `retrieval_configuration_version` and write that version into every trace — a trace without it cannot be replayed and is worthless for a regression gate.
 
 The first experiment to run is candidate depth. A reranker can only reorder what stage 1 handed it, so recall@candidates is a hard ceiling on final quality; 20–30 candidates is a thin set to be asking a cross-encoder to rescue. Anthropic's contextual-retrieval eval reranks a much wider pool and finds top-20 into the model beats top-10 and top-5, while Liu et al. report only ~1–1.5% gain going from 20 to 50 *retrieved* documents without reranking — so the payoff is in retrieving wide and packing narrow, which is exactly what stages 7–13 are shaped for.
 
@@ -85,12 +85,16 @@ def select(cands: list[Candidate], cfg: RetrievalConfig, trace: Trace) -> list[E
     kept = dedup_and_diversify(cands, cfg, trace)            # exact-dup drop, near-dup penalty,
                                                              # max_per_document cap, neighbours spared
     scored = reranker.score(trace.retrieval_query, kept[: cfg.rerank_candidates])
-    trace.rerank = [(c.chunk_id, s) for c, s in scored]      # sigmoid scale, pinned in config; see bge-reranker
+    assert cfg.evidence_scale == "sigmoid"                   # the scale 0.30 is expressed on; a logit
+    trace.rerank = [(c.chunk_id, s, cfg.evidence_scale) for c, s in scored]   # reading is a 0.57 gate
 
-    passing = [(c, s) for c, s in scored if s >= cfg.evidence_min_score][: cfg.rerank_retain]
+    over = [(c, s) for c, s in scored if s >= cfg.evidence_min_score]
     for c, s in scored:
         if s < cfg.evidence_min_score:
             trace.exclude(c, "below_evidence_threshold", score=s)
+    for c, s in over[cfg.rerank_retain:]:                    # the retain cap drops candidates too,
+        trace.exclude(c, "above_retain_limit", score=s)      # and §8.24 needs the reason for each
+    passing = over[: cfg.rerank_retain]
     if not passing:
         trace.insufficient_evidence = True                   # stage 12 refusal — no fallthrough
         return []
@@ -123,7 +127,8 @@ After generation (stage 18): extract every `[S<n>]` from the answer; any label n
 
 - **Hybrid search suddenly favours whatever sparse returns first, on queries where dense was obviously right.** Qdrant's RRF constant defaults to **k = 2**, while Elasticsearch, OpenSearch, and every RRF tutorial use **60**. At k=2 the rank-1 hit of each branch contributes `1/3` and rank-5 contributes `1/7` — top ranks dominate ~30× more sharply than the literature default. Set `fusion.k` explicitly and record it in the config snapshot; never inherit it. **And `k` does not mean the same thing on both sides of the wire:** Qdrant scores `1/((pos+1)/weight + k − 1)` with a 0-based `pos`, so a server-side `k=60` behaves as textbook 59. Our production path fuses here in Python with the textbook `1/(k + rank)` at `RRF_K = 60`; the eval harness and the playground, which *do* use server-side fusion for comparison, must pass **61** to be the same setting. Two numbers, one behaviour — `qdrant-hybrid-search` carries the arithmetic.
 - **The bot never refuses, no matter how irrelevant the corpus is.** Symptom of thresholding on the *fused* score: RRF discards magnitude by construction, so the top candidate scores `2/(k+1)` whether it is a perfect match or noise. The evidence threshold is defined **only** on the reranker score. For the same reason, never threshold on dense cosine either — dual-encoder similarity is not calibrated and is not comparable across queries (arXiv:2408.04887).
-- **The refusal rate flips to ~0% or ~100% after a reranker config change.** `bge-reranker-v2-m3` returns **unbounded logits** (roughly ±10) unless `normalize=True` applies a sigmoid, and a threshold of `0.5` means "barely relevant" on the sigmoid scale but "very relevant" on the logit scale. Pin the scale in config, store it beside the threshold, and re-tune the threshold whenever the reranker changes — the number is not portable. Model specifics: `bge-reranker`.
+- **The refusal rate flips to ~0% or ~100% after a reranker config change.** `bge-reranker-v2-m3` returns **unbounded logits** (roughly ±10) unless `normalize=True` applies a sigmoid, and our `0.30` means "leans irrelevant, not confidently" on the sigmoid scale we ship but "very relevant" on the logit scale. Pin the scale in config, store it beside the threshold, and re-tune the threshold whenever the reranker changes — the number is not portable. Model specifics: `bge-reranker`.
+- **Refusals climb across the board after a change that moved no number — only the sentence describing it.** Someone read the threshold's scale off a doc that said "logit", and re-derived or re-tuned against that. `evidence.min_score = 0.30` is **sigmoid**; demanding logit ≥ 0.30 is demanding sigmoid ≥ **0.57**, roughly doubling the bar, so the bot answers "not in your sources" on evidence it retrieved and reranked well. The swap is undetectable downstream: `0.30` is a valid float on both scales, the trace stores a plausible-looking score either way, and no test fails — only the refusal rate moves, and only in aggregate. The scale is pinned in one place (`bge-reranker`), carried as `evidence.scale` in the config snapshot, and asserted equal to the loader's `SCALE` before thresholding; every prose statement of the threshold anywhere in this repo names the scale beside the number for exactly this reason.
 - **The answer cites `[S7]` when only six chunks were packed, or cites a document the trace shows was never retrieved.** Citation labels were assigned after generation. Attaching citations post-hoc collapses citation recall by roughly 3× versus generating inline against pre-assigned labels (ALCE, arXiv:2305.14627): the model writes plausible prose that matches no passage, and nothing can retroactively map it. Labels are assigned in `pack()` and are the only identifiers the model ever sees.
 - **The model reports a value from the wrong column of a table.** The packer cut an oversized table between rows, orphaning the header, or truncated mid-row. Render tables and structured lists as atomic blocks — pack whole or exclude with `context_budget_exhausted` — and never character-split them to fit. Chunk-level table integrity is `kb-chunking-rules`; the packer must not undo it.
 - **A follow-up about a specific part number returns generic marketing pages.** The rewrite dropped the code — "does the XR-400B cover accidental damage?" became "does the warranty cover accidental damage?". The entity guard above catches this; without it, the trace looks healthy because retrieval genuinely succeeded, just for the wrong question. <!-- UNVERIFIED: mechanism is consistent with reported "rewrites distort intent" findings, but I found no study isolating entity-drop rates. -->
@@ -131,13 +136,13 @@ After generation (stage 18): extract every `[S<n>]` from the answer; any label n
 - **Adding more evidence makes the answer worse, and 20 chunks scores below answering with none at all.** Positional degradation — accuracy is U-shaped in the packed order, worst in the middle (Liu et al., TACL 2024). This is why `pack()` puts rank 1 first and rank 2 last, and why `rerank.retain` stays at 6–10 rather than "everything that passed". Newer long-context models flatten the curve somewhat; do not assume it away without an eval run.
 - **A generated answer is silently cut off mid-sentence with no error.** The packer consumed the window that generation needed. `context.reserve_output` must be subtracted from the budget *before* packing, and it must account for the prompt sections, tool definitions if any, and thinking tokens — all input. Recent provider APIs accept an over-budget request and truncate rather than rejecting it, so the adapter must surface the truncation stop reason; see `kb-provider-adapter-contract` and `kb-error-taxonomy`.
 - **The bot follows an instruction that came out of a crawled page.** Retrieved text reached an instruction section, or the fencing was interpolated rather than escaped. Retrieved content is one section, one fence, marked as data, always after the instruction sections. `kb-security-baseline` owns the rest of the defence.
-- **The playground shows fewer results than the trace implies, with no explanation.** Every drop — dedup, diversity cap, threshold, budget — must call `trace.exclude(candidate, reason)`. §8.24 requires "excluded results *and reasons*"; a stage that filters without recording makes the whole panel untrustworthy.
+- **The playground shows fewer results than the trace implies, with no explanation.** Every drop — dedup, diversity cap, candidate cutoff, threshold, **retain cap**, budget — must call `trace.exclude(candidate, reason)`. The retain cap is the one that gets forgotten, because `[: cfg.rerank_retain]` looks like a slice rather than a filter: the panel then shows fewer candidates than were reranked, all of them passing the threshold, and no row saying `above_retain_limit`. §8.24 requires "excluded results *and reasons*"; a stage that filters without recording makes the whole panel untrustworthy.
 
 ## Official docs
 
 - [Reciprocal rank fusion — Elasticsearch](https://www.elastic.co/docs/reference/elasticsearch/rest-apis/reciprocal-rank-fusion) — the RRF formula and the k=60 convention.
 - [Hybrid queries — Qdrant](https://qdrant.tech/documentation/concepts/hybrid-queries/) — server-side fusion, the k=2 default, and Qdrant's own RRF-vs-DBSF guidance.
-- [BAAI/bge-reranker-v2-m3 model card](https://huggingface.co/BAAI/bge-reranker-v2-m3) — the `normalize` flag and the raw logit scale the threshold sits on.
+- [BAAI/bge-reranker-v2-m3 model card](https://huggingface.co/BAAI/bge-reranker-v2-m3) — the `normalize` flag, the raw logit the model returns without it, and the sigmoid scale our threshold sits on once it is set.
 - [Lost in the Middle (Liu et al., TACL 2024)](https://aclanthology.org/2024.tacl-1.9/) — positional degradation; the reason for the packing order.
 - [Enabling LLMs to Generate Text with Citations (ALCE, EMNLP 2023)](https://arxiv.org/abs/2305.14627) — measured cost of post-hoc citation attachment.
 - [Relevance Filtering for Embedding-based Retrieval (arXiv:2408.04887)](https://arxiv.org/abs/2408.04887) — why raw cosine cannot be thresholded across queries.
@@ -150,7 +155,8 @@ After generation (stage 18): extract every `[S<n>]` from the answer; any label n
 - [ ] `fusion.k` is set explicitly in config, not inherited from the client default.
 - [ ] `retrieval_traces` row written per message with original query, rewritten query, resolved filters, `retrieval_configuration_version`, per-candidate dense/sparse/fused/rerank scores and ranks, exclusions with reasons, packed order, and the timing breakdown.
 - [ ] Playground renders every field in §8.24, including excluded results with reasons.
-- [ ] Evidence threshold is defined on the reranker score with its scale pinned; an unanswerable-question eval case produces a refusal plus an `insufficient_evidence` event, and no answer.
+- [ ] Evidence threshold is defined on the reranker score with `evidence.scale = "sigmoid"` pinned beside it and asserted against the loader's `SCALE` before thresholding; an unanswerable-question eval case produces a refusal plus an `insufficient_evidence` event, and no answer.
+- [ ] A test drops candidates by the retain cap and asserts each one appears in the trace as `above_retain_limit` — the reranked count minus the packed count is fully accounted for by exclusion reasons.
 - [ ] Citation labels assigned in the packer before prompt construction; a test feeds a fabricated `[S99]` through output validation and asserts it is stripped and logged.
 - [ ] Table/list blocks are packed atomically — a test with an oversized table asserts it is excluded whole, never split.
 - [ ] Entity guard test: a rewrite that drops a product code falls back to the original query and records the fallback.

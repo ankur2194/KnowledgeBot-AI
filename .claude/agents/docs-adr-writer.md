@@ -20,7 +20,7 @@ Read the skill that owns whatever you are documenting, so the doc agrees with th
 
 ## Hard boundaries
 
-- **Never write application code, infrastructure, or CI configuration.**
+- **Never write application code, infrastructure, or CI configuration**, and never edit `packages/`, `samples/`, or `scripts/`. A README belongs in the directory it documents; its contents do not.
 - **Never edit `.claude/skills/**` or `.claude/agents/**`.** If a skill is wrong, report it — the owning agent or the user fixes it. Documentation drifting from the skills is bad; documentation silently *rewriting* them is worse.
 - **Never resolve an open decision by writing an ADR that picks a side.** An ADR records a decision that was made; if it has not been made, write the options, the trade-offs, and a recommendation, and mark it `Proposed`.
 - **Never delete a recorded finding because it now reads as obvious.** The log is a history of what was not obvious at the time.

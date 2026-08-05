@@ -33,7 +33,7 @@ Read these **when the task touches them**:
 
 ## Hard boundaries
 
-- **Never edit `services/ai-service/`, `apps/`, or `infrastructure/`.** If a task needs a data-plane change, stop and report the internal contract it requires so `provider-adapter-engineer`, `ingestion-engineer`, or `retrieval-engineer` can implement their side.
+- **Never edit `services/ai-service/`, `apps/`, `infrastructure/`, `packages/`, `samples/`, or `scripts/`.** The generated OpenAPI document lands in `packages/contracts/` but you do not hand-edit it there: it is dumped from executing `rules()`, so the FormRequest is the only place a request rule changes. If a task needs a data-plane change, stop and report the internal contract it requires so `provider-adapter-engineer`, `ingestion-engineer`, or `retrieval-engineer` can implement their side.
 - **Never expose a route that proxies raw client input to FastAPI unvalidated.** The relay carries a config snapshot you assemble server-side, not parameters the caller chose.
 - **Never return, log, or audit a decrypted provider credential** — not the key, not a prefix beyond the documented last-four, not in an exception message.
 - **Never widen a query past its organization** to make a test pass. Legitimate org-agnostic queries exist (the recrawl claim query is one); each carries an inline `// tenancy-exempt: <reason>` marker so the CI grep allow-lists it deliberately.

@@ -21,7 +21,7 @@ description: The postMessage channel between the KnowledgeBot widget loader on a
 
 ### The handshake — the frame speaks first, always
 
-Each side knows exactly one origin constant. The **loader** has `__KB_WIDGET_ORIGIN__`, baked in by Vite `define` (`preact-vite-library`) — never read from `iframe.src` or `document.currentScript.src`, both host-writable before our code runs. The **frame** has the embedder origin from its own `?origin=` query parameter.
+Each side knows exactly one origin constant. The **loader** has `__KB_WIDGET_ORIGIN__` = `https://<widget-domain>` and, for the one mint POST, `__KB_API_ORIGIN__` = `https://api.<domain>` — both baked in by Vite `define` (`preact-vite-library`), never read from `iframe.src` or `document.currentScript.src`, both host-writable before our code runs. Those two are on **different registrable domains** and `traefik-routing` owns the spelling: `api.<domain>` shares the admin session cookie's site, so an API on the widget's eTLD+1 would put a hostile customer page's iframe same-site with a real admin credential. The **frame** has the embedder origin from its own `?origin=` query parameter.
 
 **Trusting `?origin=` is sound, and nothing else is available.** An iframe navigation carries no header naming the embedder: `Origin` is not sent on a GET navigation, and `Referer` is suppressible by the embedder. The parameter is attacker-controlled — and self-defeating, because the server echoes the *validated* value into `Content-Security-Policy: frame-ancestors <that one origin>` on the framed document (`kb-security-baseline`). A page at `https://evil.example` claiming `origin=https://customer.example` gets a frame the browser refuses to render, so by the time our script runs the browser has already proved the claim. This holds only because `frame-ancestors` is a real response header on every `/embed` response — it cannot be set in `<meta>` — and because an unregistered origin yields `frame-ancestors 'none'`, never a permissive default.
 
@@ -54,7 +54,7 @@ Outbound is the §8.20 set — `widget.opened`, `widget.closed`, `conversation.s
 
 **There is no way for a host page to hand the browser a credential it could not also forge.** Anything the loader can compute, every other script on that page can compute, including an XSS on the customer's marketing site. So identity never crosses this bridge as a claim; it crosses as a token the customer's **backend** signed, verified server-side. The customer's server renders `KB.init({ botId, userToken })`, where `userToken` is HMAC-SHA256 over `{sub, name, email, iat, exp}` with a per-bot shared secret and a `kid`, minted per page render with `exp` ≤ 5 minutes. The **loader** POSTs `{botId, userToken}` to Laravel — this request, and only this one, carries a real unforgeable `Origin: https://customer.example` — and Laravel verifies signature, `kid` and expiry, binds the resolved subject into the Valkey session record, and returns an opaque token (`laravel-sanctum-auth::mint`). The loader then postMessages **the session token only**. The frame learns who the visitor is from our server on its first API call, never from the host page.
 
-**Why the loader mints and not the frame:** an XHR from the frame carries `Origin: https://widget.kbwidget.example`, so moving the mint inside the frame destroys the one host-page fact that cannot be forged. **Why postMessage and not the URL fragment:** a fragment is not sent to the server but it is still a URL — it lands in `location`, in the frame's history entry, and in whatever the customer's analytics scrapes off the DOM; `laravel-sanctum-auth` NN 4 bars tokens in URLs and the fragment is not an exemption. **And yes, the session token sits in host-page JS for one tick** — not a downgrade, because any script on an allow-listed page can mint its own from the same endpoint. What makes it acceptable is the blast radius: one bot, one origin, three abilities, 30 minutes. Nothing broader is ever handed to the loader.
+**Why the loader mints and not the frame:** an XHR from the frame carries `Origin: https://<widget-domain>`, so moving the mint inside the frame destroys the one host-page fact that cannot be forged. **Why postMessage and not the URL fragment:** a fragment is not sent to the server but it is still a URL — it lands in `location`, in the frame's history entry, and in whatever the customer's analytics scrapes off the DOM; `laravel-sanctum-auth` NN 4 bars tokens in URLs and the fragment is not an exemption. **And yes, the session token sits in host-page JS for one tick** — not a downgrade, because any script on an allow-listed page can mint its own from the same endpoint. What makes it acceptable is the blast radius: one bot, one origin, three abilities, 30 minutes. Nothing broader is ever handed to the loader.
 
 ### Storage: what survives partitioning, and what we do when nothing does
 
@@ -70,6 +70,9 @@ Ruled out, with reasons. `localStorage` and IndexedDB: barred for the token anyw
 // apps/widget/src/bridge/protocol.ts — imported by BOTH documents. One shape, one source of truth.
 export const KB = 1 as const;
 export interface Envelope { kb: typeof KB; ch: string; type: string; payload?: unknown }
+/** The loader's third argument. `userToken` is the customer BACKEND's signed identity, drained from
+ *  `window.kbq` — never a `data-*` attribute, which any host script can write. */
+export interface LoaderOptions { botId: string; userToken?: string; onEvent?: (type: string, payload?: unknown) => void }
 
 /** Structure only; the caller has ALREADY checked source, then origin. That order is the contract. */
 export function parse(d: unknown, ch: string, ok: ReadonlySet<string>): Envelope | null {
@@ -80,14 +83,14 @@ export function parse(d: unknown, ch: string, ok: ReadonlySet<string>): Envelope
 }
 
 // ── apps/widget/src/loader/bridge.ts — runs on the CUSTOMER's origin ────────────────────
-const FROM_FRAME = new Set(['ready', 'resize', 'error', 'widget.opened', 'widget.closed',
-  'conversation.started', 'message.sent', 'response.completed', 'citation.opened', 'feedback.submitted']);
+const FROM_FRAME = new Set(['ready', 'resize', 'error', 'widget.opened', 'widget.closed', 'conversation.started', 'message.sent', 'response.completed', 'citation.opened', 'feedback.submitted']);
 
+// THREE arguments. `ch` is the same uuid the loader put in the frame URL (`preact-vite-library`);
+// call this with the frame alone and `ch` is undefined, so every envelope fails `parse()`.
 export function attachBridge(frame: HTMLIFrameElement, ch: string, o: LoaderOptions) {
   let initialised = false;
   // Explicit target origin, always: '*' delivers to whatever document now occupies the frame.
-  const send = (type: string, payload?: unknown) =>
-    frame.contentWindow?.postMessage({ kb: KB, ch, type, payload }, __KB_WIDGET_ORIGIN__);
+  const send = (t: string, p?: unknown) => frame.contentWindow?.postMessage({ kb: KB, ch, type: t, payload: p }, __KB_WIDGET_ORIGIN__);
 
   addEventListener('message', async (e: MessageEvent) => {
     if (e.source !== frame.contentWindow) return;   // the check an origin test cannot make
@@ -100,16 +103,15 @@ export function attachBridge(frame: HTMLIFrameElement, ch: string, o: LoaderOpti
       // The ONE request carrying an unforgeable Origin: https://<customer>. Minting here instead of
       // inside the frame is the whole reason signed end-user identity works. Every SDK rejection is
       // a 404 with a byte-identical body (laravel-sanctum-auth) — never branch on it.
+      // `__KB_API_ORIGIN__` = https://api.<domain>: the main domain, NOT <widget-domain> (see above).
       const r = await fetch(`${__KB_API_ORIGIN__}/api/v1/sdk/session`, { method: 'POST', mode: 'cors',
         credentials: 'omit', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ bot_id: o.botId, user_token: o.userToken ?? null }) });
-      return r.ok ? send('init', { session: await r.json(), locale: navigator.language })
-                  : o.onEvent?.('error', { error_class: 'authentication' });
+      return r.ok ? send('init', { session: await r.json(), locale: navigator.language }) : o.onEvent?.('error', { error_class: 'authentication' });
     }
     if (msg.type === 'resize') {                    // frame → host: only the frame knows its height
-      const h = (msg.payload as { height?: unknown })?.height;
-      if (typeof h === 'number' && Number.isFinite(h))   // clamp, because it is untrusted arithmetic
-        frame.style.height = `${Math.min(Math.max(Math.round(h), 96), innerHeight - 32)}px`;
+      const h = (msg.payload as { height?: unknown })?.height;   // untrusted arithmetic — clamp it
+      if (typeof h === 'number' && Number.isFinite(h)) frame.style.height = `${Math.min(Math.max(Math.round(h), 96), innerHeight - 32)}px`;
       return;
     }
     o.onEvent?.(msg.type, msg.payload);             // §8.20 analytics — metadata only, never text
@@ -122,14 +124,13 @@ const q = new URLSearchParams(location.search);
 // Attacker-supplied, and already proven: the server echoed this value into `frame-ancestors`, so a
 // page that lied about it never got to render us (kb-security-baseline).
 const HOST = q.get('origin') ?? '', CH = q.get('ch') ?? '';
-const FROM_HOST = new Set(['init', 'open', 'close', 'toggle', 'set-theme', 'set-locale',
-  'set-page-context', 'prefill', 'destroy']);
+const FROM_HOST = new Set(['init', 'open', 'close', 'toggle', 'set-theme', 'set-locale', 'set-page-context', 'prefill', 'destroy']);
 const THEMES = new Set(['light', 'dark', 'auto']);
 let session: string | null = null;
 
 export function toHost(type: string, payload?: unknown) {
-  // An opaque origin serialises to the string "null" and cannot be targeted by name; the only send
-  // that would work is '*'. Refuse instead of degrading.
+  // An opaque origin serialises to "null" and cannot be targeted by name — the only send that works
+  // is '*'. Refuse instead of degrading.
   if (HOST !== '' && HOST !== 'null') parent.postMessage({ kb: KB, ch: CH, type, payload }, HOST);
 }
 
@@ -145,8 +146,7 @@ addEventListener('message', (e: MessageEvent) => {
       const t = (p.session as { token?: unknown } | undefined)?.token;
       if (typeof t !== 'string') return;
       session = t;                                      // authority arrives once, from OUR server
-      clearInterval(readyTimer);
-      return boot();                                    // resume via __Host-kbresume, else start fresh
+      clearInterval(readyTimer); return boot();         // resume via __Host-kbresume, else start fresh
     }
     case 'set-theme':                                   // closed enum; never coerce a stray string
       if (typeof p.value === 'string' && THEMES.has(p.value))
@@ -162,14 +162,14 @@ addEventListener('message', (e: MessageEvent) => {
 
 // The frame speaks first: anything posted to us before this listener existed was DROPPED, not queued.
 let tries = 0;
-const readyTimer = setInterval(
-  () => (session !== null || ++tries > 20 ? clearInterval(readyTimer) : toHost('ready')), 250);
+const readyTimer = setInterval(() => (session !== null || ++tries > 20 ? clearInterval(readyTimer) : toHost('ready')), 250);
 toHost('ready');
 ```
 
 ## Gotchas
 
 - **The widget never appears and both consoles are empty.** The loader posted `init` before the frame installed its listener; `postMessage` to a document with no listener yet is dropped, never queued, with no error at either end. The frame must speak first — and the frame's `load` event is not a substitute, because it also fires for the "not authorized for this domain" page.
+- **The frame renders, the launcher works, and nothing ever happens — or the loader throws `Cannot read properties of undefined (reading 'botId')` on the first `ready`.** `attachBridge` was called with one argument. `ch` arrives `undefined`, so `parse()` rejects every envelope on `e.ch !== ch` and the handshake times out into `degrade()`; `o` arrives `undefined` and the mint throws instead. Both symptoms are the same defect, and the dangerous near-miss is a `ch` check written as `==` or dropped "because it was always undefined in dev" — that turns the channel id into decoration and lets a second widget instance on the page answer this one's messages. The signature is `attachBridge(frame, ch, o)`; a compile-time check is the fix, so `LoaderOptions` is exported from `protocol.ts` and both call sites are type-checked in CI.
 - **The origin check passes for `https://customer.example.attacker.net`.** `startsWith` on `event.origin`. `endsWith` fails symmetrically on `https://evilcustomer.example`, and an unanchored regex on both. Full-string `===`, or `new URL()` and compare `protocol`/`hostname`/`port` (`kb-security-baseline`).
 - **The widget opens by itself on a page that also runs an ad tag or a tag manager.** Origin-only check. A sibling frame on the customer's origin passes it — including an `about:blank` frame the host created, which **inherits** the host's origin instead of being opaque, exactly the case people assume is safe. `event.source` is set by the browser from the actual sending browsing context and is what excludes it.
 - **`DataCloneError: … could not be cloned` the first time someone puts a class instance or a signal in a payload.** Structured clone throws outright on functions, DOM nodes, Symbols and `Proxy`. The silent half is worse: a class instance *does* clone, arriving as a plain object with the prototype, every getter and every private field gone — a `TypeError` in the other document one frame later. Payloads are JSON-shaped object literals; assert `structuredClone(payload)` in the envelope builder's unit test.
@@ -184,8 +184,7 @@ toHost('ready');
 ## Official docs
 
 - [MDN — `Window.postMessage()`](https://developer.mozilla.org/en-US/docs/Web/API/Window/postMessage) and [WHATWG HTML §9.3 Cross-document messaging](https://html.spec.whatwg.org/multipage/web-messaging.html) — `targetOrigin` semantics, the security notes, how `origin` and `source` are populated.
-- [MDN — `MessageEvent`](https://developer.mozilla.org/en-US/docs/Web/API/MessageEvent) and [`Window.frameElement`](https://developer.mozilla.org/en-US/docs/Web/API/Window/frameElement) — `source` as a `WindowProxy`; `frameElement` is `null` cross-origin.
-- [MDN — Structured clone algorithm](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Structured_clone_algorithm) — what survives, what throws `DataCloneError`, what silently loses its prototype — and [Using channel messaging](https://developer.mozilla.org/en-US/docs/Web/API/Channel_Messaging_API/Using_channel_messaging), the `MessagePort` handshake we chose not to use.
+- [MDN — `MessageEvent`](https://developer.mozilla.org/en-US/docs/Web/API/MessageEvent), [`Window.frameElement`](https://developer.mozilla.org/en-US/docs/Web/API/Window/frameElement), [Structured clone algorithm](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Structured_clone_algorithm) and [Using channel messaging](https://developer.mozilla.org/en-US/docs/Web/API/Channel_Messaging_API/Using_channel_messaging) — `source` as a `WindowProxy`; `frameElement` is `null` cross-origin; what survives a clone, what throws `DataCloneError`, what silently loses its prototype; and the `MessagePort` handshake we chose not to use.
 - [MDN — CHIPS / partitioned cookies](https://developer.mozilla.org/en-US/docs/Web/Privacy/Guides/Third-party_cookies/Partitioned_cookies), [State Partitioning](https://developer.mozilla.org/en-US/docs/Web/Privacy/Guides/State_Partitioning) and [Storage Access API](https://developer.mozilla.org/en-US/docs/Web/API/Storage_Access_API) — the `Partitioned` attribute, the site-level partition key, the activation requirement, `StorageAccessHandle`'s status.
 - [MDN — Firefox Storage Access Policy](https://developer.mozilla.org/en-US/docs/Web/Privacy/Guides/Storage_Access_Policy), [WebKit — Full third-party cookie blocking](https://webkit.org/blog/10218/full-third-party-cookie-blocking-and-more/) and [Privacy Sandbox — Update on plans (2025-10-17)](https://privacysandbox.google.com/blog/update-on-plans-for-privacy-sandbox-technologies) — which APIs throw, Safari's baseline, and Chrome keeping third-party cookies.
 
@@ -193,6 +192,7 @@ toHost('ready');
 
 - [ ] `rg -n "postMessage\(" apps/widget` — every call passes a literal origin constant, no `'*'` and no origin built from a template or read from `iframe.src`; every `message` listener checks `event.source`, then `event.origin === <constant>`, then `parse()`, before reading any payload field; `rg -n "startsWith|endsWith|includes|RegExp|\.test\(" apps/widget/src/**/bridge*` finds nothing applied to an origin
 - [ ] Harness suite (`vitest-playwright`): handshake attempted from an unregistered origin (frame refuses to render); a forged message from a sibling iframe on the host's origin; one from an `about:blank` frame the host created; wrong `ch`; any message before `init`; a second `init`; unknown `type`; unknown `kb`; `set-theme: "<img onerror=…>"`; 1 MB `prefill` — none change widget state, none throw
+- [ ] One composition test runs the real loader bootstrap against the real frame bundle end to end — `attachBridge(frame, ch, o)` with the `ch` from the frame URL, `ready` → mint against `__KB_API_ORIGIN__` → `init` → first API call — and a mutant dropping either the `ch` or the `o` argument fails it. `__KB_API_ORIGIN__` and `__KB_WIDGET_ORIGIN__` differ in eTLD+1 in every fixture (`traefik-routing`)
 - [ ] A `set-bot` / `set-session` / identity-claiming message is rejected, and a test asserts the frame's bot id afterwards still equals the one the URL minted
 - [ ] `structuredClone()` round-trips every outbound payload in a unit test; an outbound snapshot test asserts no message text, citation URL or excerpt, token, usage or cost appears in any §8.20 event
 - [ ] Signed end-user identity is minted by the loader with a real `Origin` and verified server-side; a test asserts an identity claim sent over the bridge is ignored entirely (`laravel-sanctum-auth`)

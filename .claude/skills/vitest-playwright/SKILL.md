@@ -37,86 +37,7 @@ The Laravel half is `pest-testing` and the Python half is `pytest-ai-service`; R
 
 ### The SSE fixture — one server, both layers
 
-```ts
-// apps/web/tests/fixtures/sse-server.ts
-import { createServer, type ServerResponse } from 'node:http';
-import { once } from 'node:events';
-import type { AddressInfo } from 'node:net';
-
-export type Stream = {
-  send(event: string, data: unknown, eol?: string): Promise<void>;  // eol '\r\n': proxies rewrite them
-  split(event: string, data: unknown, atByte: number): Promise<void>;  // two segments; aim INSIDE a
-  ping(): Promise<void>;      //   multi-byte codepoint to exercise TextDecoder({stream:true}) — the
-  end(): void;                //   corruption is invisible in English (nextjs-app-router). ping() is an
-  cut(): void;                //   SSE *comment*: the parser must never surface it as an event.
-};
-
-export async function startSseServer(script: (s: Stream) => Promise<void>) {
-  const server = createServer(async (req, res) => {
-    const cors = { 'access-control-allow-origin': req.headers.origin ?? '*',
-                   'access-control-allow-credentials': 'true', vary: 'Origin' };
-    if (req.method === 'OPTIONS') return void res.writeHead(204, cors).end();
-    // Nagle coalesces small back-to-back writes into ONE segment, so the client reads two frames
-    // as one chunk and the incremental loop is never crossed. Skip this and the fixture quietly
-    // degrades into the single-shot mock it exists to replace.
-    res.socket?.setNoDelay(true);
-    res.writeHead(200, { ...cors, 'content-type': 'text/event-stream',
-      'cache-control': 'no-cache, no-transform', 'x-accel-buffering': 'no' });
-    // Node ships headers with the first body write. Without this `await fetch()` does not resolve
-    // until the first token, so no pre-token UI state (status events, skeleton) is observable.
-    res.flushHeaders();
-    await script(controller(res));
-  });
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
-           async close() { server.close(); } };
-}
-
-function controller(res: ServerResponse): Stream {
-  // Await the write callback: `await s.send(...)` must mean "on the socket", not "queued in
-  // Node's stream buffer" — otherwise every delay the script encodes is fiction.
-  const w = (b: Buffer) => new Promise<void>((ok) => void res.write(b, () => ok()));
-  const frame = (e: string, d: unknown, eol = '\n') =>
-    Buffer.from(`event: ${e}${eol}data: ${JSON.stringify(d)}${eol}${eol}`, 'utf8');
-  return {
-    send: (e, d, eol) => w(frame(e, d, eol)),
-    ping: () => w(Buffer.from(': ping\n\n', 'utf8')),
-    async split(e, d, at) {
-      const f = frame(e, d);
-      await w(f.subarray(0, at));
-      await new Promise((ok) => setTimeout(ok, 20));  // guarantee a second segment
-      await w(f.subarray(at));
-    },
-    end: () => res.end(),
-    // end() is a clean FIN — the reader sees a normal end-of-stream and the UI renders the answer
-    // as complete, so the cancellation path is never entered. destroy() sends RST, which is what a
-    // vanished client or a dead proxy looks like: undici raises `TypeError: terminated`.
-    cut: () => res.socket?.destroy(),
-  };
-}
-```
-
-```ts
-// apps/web/tests/unit/stream-answer.test.ts — project `unit`, environment 'node'.
-it('parses a frame split mid-codepoint, ignores the heartbeat, and reports a cut', async () => {
-  const fx = await startSseServer(async (s) => {
-    await s.send('message.start', { message_id: '01J' });
-    await s.send('citations', { citations: [{ index: 1, title: 'Rückgaberecht' }] }, '\r\n');
-    await s.ping();                                  // must not appear in `seen`
-    await s.split('token', { text: 'Rückgabe ' }, 34);   // byte 34 lands inside the ü
-    await s.send('token', { text: 'in 30 Tagen.' });
-    s.cut();                                         // no terminal event will ever arrive
-  });
-  const seen: KbEvent[] = [];
-  await expect(async () => {
-    for await (const e of streamAnswer(fx.url, body, new AbortController().signal)) seen.push(e);
-  }).rejects.toMatchObject({ errorClass: 'stream_lost' });   // never 'complete' (kb-internal-api-contracts)
-  expect(seen.map((e) => e.name)).toEqual(['message.start', 'citations', 'token', 'token']);
-  expect(seen.flatMap((e) => (e.name === 'token' ? [e.data.text] : [])).join('')).toBe('Rückgabe in 30 Tagen.');
-  await fx.close();
-});
-```
+The fixture server in full — the `Stream` control surface (`send`, `split`, `ping`, `end`, `cut`), `setNoDelay` and `flushHeaders`, the awaited write callback — and the `unit` spec that drives it → **[references/sse-fixture-server.md](references/sse-fixture-server.md)**.
 
 The *only* legal way to put that fixture in front of a browser is to redirect the request so the browser fetches it for real — `route.continue({ url })` leaves the response stage untouched, so the chunking survives (same protocol required, hence `http://` locally):
 `await page.route('**/api/v1/chat/*/messages', (r) => r.continue({ url: \`${sse.url}/chat\` }));`
@@ -166,6 +87,7 @@ Playwright runs `--shard=i/N` with `fullyParallel: true` (without it whole *file
 - **The streaming spec is green and the UI paints the whole answer in one jump.** `route.fulfill()` sends one buffered body (Playwright intercepts the Request stage only) and `route.fetch()` buffers before replaying, so neither can chunk. `route.continue({ url })` — or no route at all — is the only interception that preserves real streaming. The same failure has a second shape in Vitest: MSW's `sse()` resolver *streams* when it returns synchronously and **buffers the entire stream** when it is `async`, because MSW awaits the resolver before delivering the response — so `await sleep()` between `client.send()` calls, the obvious way to write it, silently collapses every gap to zero. <!-- UNVERIFIED: measured on msw 2.15.0, undocumented -->
 - **`sse()` handlers never match and the request falls through as unhandled.** MSW requires `accept: text/event-stream` on the request, and constructing the handler throws outright when `globalThis.EventSource` is undefined — which it is in Vitest's `node` environment. Both are reasons the chat path uses the fixture server instead.
 - **The parser passes every unit test and mangles production answers.** Every mocked chunk was a whole frame. Real segments split anywhere: between `\n` and `\n`, mid-`data:` line, and mid-UTF-8 codepoint — the last one only ever shows up in German, Hindi or an emoji, i.e. never in a fixture written in English. Use `split()` with a byte offset inside a multi-byte character.
+- **The stream spec is green and every citation chip in the running app renders blank.** The fixture payloads were typed by hand, so they encode what the test author believed the wire says rather than what `pydantic-contracts` actually emits — a `citations` frame keyed `n`/`locator` instead of `index`/`title`/`url`/`score` proves only that the parser survives whatever it is fed. Build fixture payloads from `packages/contracts`' types (unit-layer rule in the table above) so a server-side rename fails the type-check here instead of shipping.
 - **Two events sent back to back arrive as one read and a timing assertion flakes.** Nagle's algorithm. `res.socket.setNoDelay(true)` in the fixture — and never assert a chunk *count*; assert the rendered transcript.
 - **`await fetch()` in the test hangs until the first token.** No `res.flushHeaders()`, so Node held the headers for the first body write. Nothing about the pre-token UI (status events, skeleton, stop button enabled) can be tested until this is fixed.
 - **The mid-stream-cut spec passes but the UI shows a completed answer.** The fixture called `res.end()`. A clean FIN is a normal end-of-stream; only `res.socket.destroy()` (RST) reproduces a vanished peer and drives the `stream_lost` path the whole cancellation design exists for.
@@ -193,6 +115,7 @@ Playwright runs `--shard=i/N` with `fullyParallel: true` (without it whole *file
 - [ ] Exactly one SSE fixture exists; `rg -n "route\.fulfill" apps/web/tests` shows no match on a chat or `text/event-stream` route.
 - [ ] Stream specs cover: a frame split mid-UTF-8 codepoint, a frame split between `\n` and `\n`, `\r\n` line endings, `: ping` not surfaced as an event, `citations` before the first `token`, and a `cut()` yielding `stream_lost` with a Retry affordance — never a completed answer.
 - [ ] An abort mid-stream produces one request, and Laravel records one `finish_reason: "cancelled"` message row and one usage row (asserted on the Pest side; this suite asserts the UI state).
+- [ ] Every SSE fixture payload and every error assertion is typed from `packages/contracts` — `rg -n "errorClass|retryAfter|locator|\bn:" apps/web/tests` is empty — and the hosted-chat E2E asserts the send carries `Authorization` and no session cookie while the admin send carries the cookie and `X-XSRF-TOKEN` (`nextjs-app-router` NN8).
 - [ ] Every isolation spec uses the worker-scoped two-org fixture with a per-test canary and asserts the positive control before the negative one; `rg -n "toHaveCount\(0\)|not\.toBeVisible" apps/web/tests/e2e` shows each occurrence preceded by a positive control.
 - [ ] The org-switch spec covers both caches — the in-flight window (request held open) and the Router Cache (soft navigation back), per `nextjs-app-router`. Playwright authenticates only through the real login route: `rg -n "test-login|__test|actingAs|\?org=" apps/web/tests` returns nothing.
 - [ ] Browser-only §22.5 cases exist: a source containing `<img src=x onerror>` renders inert while its sanitized text is visible; an answer containing a remote image issues no request to that host (`page.on('request')`, EchoLeak); the widget is refused framing from an unlisted origin; an unlisted origin gets a byte-identical 404 from the SDK bootstrap.

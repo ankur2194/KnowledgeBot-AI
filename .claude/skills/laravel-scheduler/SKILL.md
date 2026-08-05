@@ -10,7 +10,7 @@ Laravel **13.24.0** (tagged 2026-08-04; 13.x released 17 Mar 2026, PHP 8.3–8.5
 
 ## Non-negotiables
 
-- **One scheduler per schedule, and the line runs through the plane boundary.** Celery beat schedules **data-plane repair** — orphan versions, retired vectors, Qdrant↔PostgreSQL reconciliation, the `Deleting` reaper, the silent-job re-query (`celery-workers`). The Laravel scheduler decides **whether a tenant's work should start** — recrawl due-times, retention timers, manual-entry expiry, quota windows — all of it policy over control-plane data. Nothing appears in both. Two schedulers on one schedule is not a race, it is a guaranteed double tick every period.
+- **One scheduler per schedule, and the line runs through the plane boundary.** Celery beat schedules **data-plane repair** — six entries, all on the `maintenance` queue: the `Deleting` reaper, the orphan-version sweep, the retired-vector deletion backstop, the Qdrant↔PostgreSQL reconciliation sweep, the silent-job re-query, and `sweep-abandoned-multipart-uploads` (task `kb.sweep_abandoned_multipart_uploads`, `crontab(minute=17, hour=4)`, aborting multipart uploads older than 24 h). `celery-workers` is authoritative for beat's contents and keeps that list closed; if it and this table disagree, it wins. The Laravel scheduler decides **whether a tenant's work should start** — recrawl due-times, retention timers, manual-entry expiry, quota windows — all of it policy over control-plane data. Nothing appears in both. Two schedulers on one schedule is not a race, it is a guaranteed double tick every period.
 - **A scheduled task claims rows and dispatches queued jobs. It never does the work.** `schedule:run` is a single PHP process running due events **sequentially**; one 4-minute task delays every task defined after it. Work goes to Laravel queues (`laravel-queues-valkey`), which then submit to FastAPI (`kb-internal-api-contracts`). The scheduler's own budget is seconds.
 - **Every task carries `->name()` and `->onOneServer()`, and `CACHE_STORE` points at shared Valkey.** Without a shared store `onOneServer` is a silent no-op (Gotchas). Writing it in from day one is what keeps scaling the container from becoming a duplicate-billing incident later.
 - **The schedule runs in UTC and never in a tenant's timezone.** `config('app.timezone')` is `UTC`, `schedule_timezone` is unset, and no task calls `->timezone()`. Tenant-local times are *data*, converted to a UTC `timestamptz` by our code. Laravel's own docs: *"we recommend avoiding timezone scheduling when possible."*
@@ -61,91 +61,7 @@ Schedule::onOneServer()->group(function () {
 });
 ```
 
-```php
-// services/core-api/app/Console/Commands/DispatchDueCrawls.php
-namespace App\Console\Commands;
-
-use App\Jobs\SubmitCrawlRun;
-use App\Repositories\Contracts\CrawlScheduleRepositoryInterface as Schedules;
-use App\Support\Tenancy\TenantContext;
-use Illuminate\Console\Command;
-use Illuminate\Support\Facades\DB;
-
-final class DispatchDueCrawls extends Command
-{
-    protected $signature = 'kb:dispatch-due-crawls';
-    protected $description = 'Claim crawl configurations past their due time and dispatch one submission job each.';
-
-    private const GLOBAL_BATCH = 200;   // ≈ what the `crawl` queue drains between ticks
-    private const PER_ORG_BATCH = 3;    // fairness: no org exceeds this per tick
-    private const PER_ORG_INFLIGHT = 2; // …or this many concurrent runs
-
-    public function handle(Schedules $schedules, TenantContext $tenant): int
-    {
-        $now = now();                                    // UTC, always
-        $failed = 0;
-
-        // Claim and advance in ONE transaction, then dispatch after commit. Dispatching first
-        // means a crash between dispatch and UPDATE re-dispatches the same source next tick.
-        $claimed = DB::transaction(function () use ($schedules, $now) {
-            $rows = $schedules->claimDue($now, self::GLOBAL_BATCH, self::PER_ORG_BATCH, self::PER_ORG_INFLIGHT);
-            foreach ($rows as $row) {
-                $schedules->advance($row->id, $this->nextDueAt($row, $now));  // due time moves on CLAIM
-            }
-            return $rows;
-        });
-
-        foreach ($claimed as $row) {
-            try {
-                $tenant->setOrganization($row->organization_id);   // per row — never once, outside the loop
-                // afterCommit is belt and braces: the transaction above already closed, but a
-                // future caller wrapping this command must not enqueue a job for an unclaimed row.
-                SubmitCrawlRun::dispatch($row->organization_id, $row->source_id, $row->crawl_run_id)
-                    ->onQueue('ai-dispatch')->afterCommit();   // Laravel's closed queue list (laravel-queues-valkey);
-                                                        // 'crawl-submit' is not a queue in either runtime
-                                                        // and nothing would ever consume it.
-            } catch (\Throwable $e) {
-                $failed++;
-                report($e);                                        // one bad row must not kill the tick
-            } finally {
-                $tenant->clear();                                  // pooled context; see kb-tenancy-isolation
-            }
-        }
-
-        // Freshness is written every tick, success or not — the alert is on staleness, not on absence.
-        $schedules->recordTick($now, dispatched: count($claimed) - $failed, failed: $failed);
-
-        // Non-zero exit is what makes onFailure/ScheduledTaskFailed fire. Swallowing it here
-        // is the single most common way a broken sweep reports success forever.
-        return $failed > 0 ? self::FAILURE : self::SUCCESS;
-    }
-}
-```
-
-```sql
--- CrawlScheduleRepository::claimDue — the fairness and the claim, in one statement.
--- Raw SQL, deliberately org-agnostic (it iterates all tenants), so it is an allow-listed
--- exception to the DB::select CI grep in kb-tenancy-isolation; the org is set per row above.
-WITH ranked AS (
-    SELECT cc.id,
-           row_number() OVER (PARTITION BY cc.organization_id ORDER BY cc.next_crawl_due_at) AS org_rank
-    FROM crawl_configurations cc
-    JOIN knowledge_sources ks ON ks.id = cc.source_id
-    WHERE cc.schedule_kind <> 'manual'
-      AND cc.next_crawl_due_at <= :now
-      AND ks.status IN ('ready', 'ready_with_warnings', 'failed')       -- never a source mid-delete
-      AND NOT EXISTS (SELECT 1 FROM crawl_runs r
-                      WHERE r.source_id = cc.source_id AND r.status IN ('queued', 'running'))
-      AND (SELECT count(*) FROM crawl_runs r2
-           WHERE r2.organization_id = cc.organization_id
-             AND r2.status IN ('queued', 'running')) < :per_org_inflight
-)
-SELECT cc.* FROM crawl_configurations cc
-WHERE cc.id IN (SELECT id FROM ranked WHERE org_rank <= :per_org_batch)
-ORDER BY cc.next_crawl_due_at
-LIMIT :global_batch
-FOR UPDATE SKIP LOCKED;   -- two ticks, or two replicas, cannot claim the same row
-```
+**The command and its claim query live in [`references/dispatcher-and-claim.md`](references/dispatcher-and-claim.md)**: `DispatchDueCrawls` end to end — the claim-and-advance transaction, per-row tenant context, the freshness write, the non-zero exit — and the `claimDue` SQL with its `FOR UPDATE SKIP LOCKED` fairness window. Read it before changing a batch constant.
 
 ### Making a stalled scheduler visible
 

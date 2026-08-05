@@ -66,7 +66,7 @@ async def guarded_get(client: httpx.AsyncClient, url: str) -> "FetchResult":
         p = urlsplit(url)
         if p.scheme not in ALLOWED_SCHEMES:   raise CrawlRejected("scheme")
         if p.username or p.password:          raise CrawlRejected("credentials")
-        if not p.hostname:                    raise CrawlRejected("host")
+        if not p.hostname:                    raise CrawlRejected("dns")   # one of the catalog's eight
         port = p.port or (443 if p.scheme == "https" else 80)
         ip = _validate_all_records(p.hostname, port)
         literal = f"[{ip}]" if ":" in ip else ip
@@ -146,7 +146,7 @@ Counter mechanics (policy: `kb-deletion-and-verification` §8.14):
 - **Run-level circuit breaker:** compute the missing set for the whole run first; if `len(missing) / len(known_items) > CRAWL_MISSING_FRACTION_MAX` (0.20), fail the run with `kb_crawl_runs_total{outcome="error"}`, apply no policy, and touch no counter. A truncated sitemap or a site behind a maintenance page otherwise disables every page at once.
 - A page that 301s to another known item is a *canonical fold*, not a missing page: retire the redirecting item against the target and leave both counters alone.
 
-Metrics are `kb_crawl_*` from `kb-observability-conventions` → `references/metric-catalog.md`; emit `kb_crawl_pages_total{outcome}` once per item per run and `kb_crawl_robots_blocked_total{reason}` on every `CrawlRejected`. **Never label with the host or URL** — a tenant-controlled target set is an unbounded label.
+Metrics are `kb_crawl_*` from `kb-observability-conventions` → `references/metric-catalog.md`; emit `kb_crawl_pages_total{disposition}` once per item per run — `disposition`, **not** `outcome`, because the six per-page results are not the shared four-value outcome enum and an `outcome` label would hide `failed` and `missing` from the global error-rate matcher — and `kb_crawl_robots_blocked_total{reason}` on every `CrawlRejected`. Run-level success stays `kb_crawl_runs_total{outcome}`, which *is* the shared enum. **Never label with the host or URL** — a tenant-controlled target set is an unbounded label.
 
 ## Gotchas
 
@@ -161,7 +161,8 @@ Metrics are `kb_crawl_*` from `kb-observability-conventions` → `references/met
 - **Politeness is configured and the target still rate-limits us.** `RateLimiter` and `MemoryAdaptiveDispatcher` throttle within one Python process; the `crawl` queue runs `-c 8` prefork children per container. Eight independent limiters is no limiter. The token bucket must live in Valkey.
 - **A crawl task is killed at 300 s with nothing written.** `celery-workers` sets `soft_time_limit=300` on `crawl`, and a single JS render with `scan_full_page` plus a slow site can pass it. Keep the per-URL wall clock at 20 s and the render budget under 60 s, so one task is always many URLs' worth of headroom, and checkpoint each item as it completes.
 - **A tenant's crawl config reaches `BrowserConfig.extra_args` and becomes RCE.** GHSA-r253-r9jw-qg44 (critical, Jun 2026) is Chromium launch-argument injection through exactly that field. `extra_args` is code-defined and constant; no tenant string may reach it, `proxy_config`, `js_code`, or `hooks`. Same reason `accept_downloads` stays `False` (GHSA-2jq4-q6vv-4cp3, path traversal in the download path).
-- **A rejection is dropped from the dashboard.** `kb_crawl_robots_blocked_total`'s `reason` enum is `robots private_ip redirect content_type size`; `scheme`, `credentials`, and `dns` have no value. Record those on the span and the log line, and do not invent a label — the allow-list in `kb-observability-conventions` is closed. *(Reported as a catalog gap, not fixed here.)*
+- **The SSRF guard looks quieter than it is, and the rejections that vanish are the security-relevant ones.** `kb_crawl_robots_blocked_total`'s `reason` enum was written short — `robots private_ip redirect content_type size` — so a `CrawlRejected("scheme")`, `("credentials")` or `("dns")` increments no counter at all. Nothing errors: the guard still refuses the fetch, the log line still exists, and the dashboard simply shows fewer blocks than happened, so a tenant probing `file://`, embedded credentials, or a rebinding host reads as zero traffic. The enum is **eight** values — `robots` `scheme` `credentials` `dns` `private_ip` `redirect` `content_type` `size` — exactly as `kb-observability-conventions` → `references/metric-catalog.md` lists it, and every `CrawlRejected` reason must be one of them. A guard that needs a ninth is a catalog PR first, never a new label value invented at the call site.
+- **A crawl failure is invisible to the error-rate alert.** `kb_crawl_pages_total` is labelled `disposition`, not `outcome`, because its six per-page results include `failed` and `missing`, which no shared `outcome=~"error|timeout"` matcher covers. Reusing `outcome` for a richer enum is valid PromQL that silently under-reports: the series exist, the sum is just smaller, and the dashboard reads healthy while pages fail. Run-level health lives on `kb_crawl_runs_total{outcome}` and is what the alerts consume (`kb-observability-conventions`).
 
 ## Official docs
 
@@ -192,4 +193,4 @@ Metrics are `kb_crawl_*` from `kb-observability-conventions` → `references/met
 - [ ] A run in which the origin returns 503 for every URL marks nothing missing and increments `kb_crawl_runs_total{outcome="error"}`.
 - [ ] The circuit breaker trips at >20% missing and applies no policy; a test asserts `missing_count` is unchanged for every item.
 - [ ] `missing_count` resets to 0 on a 304 as well as a 200; a 5xx leaves it unchanged.
-- [ ] `kb_crawl_*` metrics carry no host or URL label; a test asserts the emitted label set is a subset of the catalog's.
+- [ ] `kb_crawl_*` metrics carry no host or URL label; a test asserts the emitted label set is a subset of the catalog's, that pages are counted on `disposition` and runs on `outcome`, and that every `CrawlRejected` reason raised in `app/crawl/` is one of the catalog's eight `reason` values.

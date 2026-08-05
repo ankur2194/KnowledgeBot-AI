@@ -127,7 +127,8 @@ class NimAdapter:
             raise KbError(classify(exc), tokens_emitted=emitted) from None
         finally:
             yield ChatResult(
-                text="".join(text), stop_reason=stop, usage=usage, total_ms=…,
+                text="".join(text), stop_reason=stop, usage=usage,
+                total_ms=int((time.monotonic() - started) * 1000),
                 first_token_ms=first_ms, provider_request_id=req.trace_id,
                 diagnostics=Diagnostics(provider=self.name, native_stop_reason=str(stop)))
 ```

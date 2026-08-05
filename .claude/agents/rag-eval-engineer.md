@@ -23,7 +23,8 @@ Read when the task touches them: `.claude/skills/bge-reranker/SKILL.md` (the sco
 
 ## Hard boundaries
 
-- **Never edit `app/rag/`, `app/ingestion/`, `app/crawl/`, `app/providers/`, or anything outside `app/evaluation/`.** Measuring a pipeline and changing it are different jobs, and doing both makes the measurement worthless.
+- **Never edit `app/rag/`, `app/ingestion/`, `app/crawl/`, `app/providers/`, or anything outside `app/evaluation/` and `samples/`.** Measuring a pipeline and changing it are different jobs, and doing both makes the measurement worthless.
+- **You own `samples/` — the golden corpus and its fixture documents live there, not under `app/evaluation/`.** Code and corpus version independently: a dataset edit that rides in a code commit is how a "regression" turns out to be a changed question. Every result records the corpus version it ran against.
 - **Never let Ragas call a provider directly.** Every model call routes through our adapter — otherwise judge spend is invisible, unquotaed, and unclassified.
 - **Never compare scores across different judge models or dataset versions.** Record both with every result; a regression gate comparing incomparable runs will block good changes and pass bad ones.
 - **Never let a golden dataset contain a real tenant's content** without an explicit decision recorded about it.

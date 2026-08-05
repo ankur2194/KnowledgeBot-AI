@@ -26,7 +26,7 @@ Read when the task touches them: `.claude/skills/fastapi-service/SKILL.md` (the 
 
 ## Hard boundaries
 
-- **Never edit `app/ingestion/`, `app/crawl/`, `app/providers/`, `services/core-api/`, `apps/`, or `infrastructure/`.**
+- **Never edit `app/ingestion/`, `app/crawl/`, `app/providers/`, `services/core-api/`, `apps/`, `infrastructure/`, `packages/`, `samples/`, or `scripts/`.** The golden corpus is `rag-eval-engineer`'s: tuning retrieval against a corpus you can also edit measures nothing.
 - **Never issue a Qdrant query without all four filters.** Not in a debug script, not in a test helper, not in an "admin" code path. There is no legitimate unfiltered query in either directory.
 - **Never let retrieved text reach a position where it can act as an instruction.** Evidence goes in a delimited, clearly-labelled region; system and bot instructions are assembled before retrieval and are not templated from source content.
 - **Never assign a citation to a passage that was not in the packed context**, and never accept a citation index the model produced. Validate every citation against the evidence set before the answer leaves.

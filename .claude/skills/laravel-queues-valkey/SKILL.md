@@ -11,7 +11,7 @@ Laravel **13.24.0** (13.x released 2026-03-17, PHP ≥ 8.3), `redis` queue drive
 ## Non-negotiables
 
 - **Every job is idempotent, because the driver guarantees at-least-once and nothing else.** `retry_after` expiry, `release()`, a `queue:restart` mid-job, and a redelivered reservation all re-run work that already ran. Idempotency is our code: a durable unique key on `(organization_id, idempotency_key)` in `background_jobs`, plus the `X-KB-Idempotency-Key` FastAPI dedupes on (`kb-internal-api-contracts`). The Valkey `idem:{org_id}:{operation}:{key}` store is FastAPI's, not ours (`kb-error-taxonomy`).
-- **`kb-error-taxonomy` decides every retry.** `tries`/`backoff` are the cap, never the policy: they dispatch on *nothing*, and `FailOnException`'s array form dispatches on exception *type*, while our taxonomy dispatches on `error_class`. One `KbException` type spans retryable and never-retryable classes, so type dispatch retries an unsupported file to the attempt cap. Use `FailOnException` only with a closure reading `error_class`.
+- **`kb-error-taxonomy` decides every retry.** `tries`/`backoff` are the cap, never the policy: they dispatch on *nothing*, and `FailOnException`'s array form dispatches on exception *type*, while our taxonomy dispatches on `error_class`. One `KbException` type spans retryable and never-retryable classes, so type dispatch retries an unsupported file to the attempt cap. Use `FailOnException` only with a closure reading `error_class`. **It owns the backoff ladder too, and we quote it rather than restate it:** internal calls (Laravel → FastAPI included) are full jitter, base **0.2 s**, cap **5 s** — `sleep = uniform(0, min(cap, base × 2**attempt))`. Two copies of a cap drift, and the drifting copy is always the one that ships; change the number in `kb-error-taxonomy` and it propagates. Note `release()` takes whole seconds, so rungs below 1 s floor to an immediate retry — `tries` and the taxonomy's 10%-of-requests retry budget, not the sleep, are what actually bound the loop.
 - **A job's timeout must be shorter than its connection's `retry_after`, and every lock TTL longer.** Otherwise Laravel releases a still-running job and two workers process one source (see the arithmetic below). This is the exact analogue of Celery's `visibility_timeout` trap (`celery-workers`).
 - **A queued job starts a NEW ROOT span with a link to the dispatcher, never a child** (`kb-observability-conventions` rule 3). Implement `TracingLinked`; the default in `opentelemetry-auto-laravel` is parent-child, and a child arriving after its parent's request closed is dropped by the tail sampler.
 - **A job carries `organization_id` in its payload, sets tenant context on entry, and clears it in `finally`** (`kb-tenancy-isolation`). Worker processes are pooled; the *previous* tenant still set is the silent failure. Every lock, cache, and rate-limit key the job derives is org-prefixed. Queue *names* are workload classes, not tenants — a per-org queue is an unbounded set and `queue:work --queue=` takes a fixed list, so an org whose queue nobody listens to hangs with no error.
@@ -137,11 +137,11 @@ final class SubmitIngestionJob implements
             if ($this->attempts() >= RetryPolicy::maxAttempts($e->errorClass)) {
                 $this->fail($e); return;               // straight to failed_jobs; no more attempts
             }
-            // Full jitter, floored by the provider's Retry-After. Safe at any size: release() moves
-            // the payload to queues:*:delayed, NOT the reserved set — so unlike a Celery countdown
-            // it can never collide with retry_after.
+            // Full jitter, floored by Retry-After. base 0.2 s / cap 5 s QUOTED from kb-error-taxonomy,
+            // never chosen here. release() moves the payload to queues:*:delayed, NOT the reserved set,
+            // so unlike a Celery countdown it can never collide with retry_after. Safe at any size.
             $this->release(max($e->retryAfter ?? 0,
-                random_int(0, (int) min(30, 0.2 * 2 ** $this->attempts()))));
+                random_int(0, (int) min(5, 0.2 * 2 ** $this->attempts()))));
         } finally {
             Tenancy::forget();   // ...and clear on exit. The PREVIOUS tenant still set is the leak.
         }
@@ -193,7 +193,7 @@ final class SubmitIngestionJob implements
 - [ ] `REDIS_CLIENT=phpredis`, `ext-pcntl` and `ext-posix` present in the worker image, and `options.serializer`/`options.compression` unset.
 - [ ] Every job class implements `ShouldQueue` + `TracingLinked`, takes ULIDs (no Eloquent models), and sets/clears tenant context in a `try`/`finally`; a test asserts the job span's trace id differs from the dispatcher's and the link is present.
 - [ ] Every tenant-bearing job implements `ShouldBeEncrypted`; a test dispatches one and asserts the raw Valkey payload contains neither the org id nor any user-supplied string.
-- [ ] No job uses `FailOnException`'s array form; every retry decision reads `error_class`. Running a completed job a second time produces zero net writes (asserted for ingestion submission and for deletion submission).
+- [ ] No job uses `FailOnException`'s array form; every retry decision reads `error_class`, and no backoff base or cap is written as an independent literal — a grep for `min(` in `app/Jobs/` finds only the 0.2/5 ladder quoted from `kb-error-taxonomy`. Running a completed job a second time produces zero net writes (asserted for ingestion submission and for deletion submission).
 - [ ] `after_commit` is `true` on both connections; a test dispatching inside a rolled-back transaction asserts the job never runs.
 - [ ] Each queue has its own worker service with `stop_grace_period > --timeout`; `--max-time` recycling is set; no worker listens to both a `valkey` and a `valkey-long` queue.
 - [ ] Horizon: `viewHorizon` resolves a platform operator (a test asserts a tenant admin gets 403), no Traefik label, no `edge` membership, supervisor `timeout < retry_after`, `horizon:snapshot` scheduled.

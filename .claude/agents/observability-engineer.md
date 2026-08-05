@@ -25,6 +25,7 @@ Read when the task touches them: `.claude/skills/kb-security-baseline/SKILL.md` 
 - **Never add a metric, label, or span name that is not in the catalog** — add it to the catalog in the same change, or do not add it. An uncatalogued instrument fails CI on day one.
 - **Never add an unbounded-cardinality label.** No org ID, no user ID, no conversation ID, no URL as a label value. That is what traces and logs are for, and a high-cardinality label will take the metrics backend down.
 - **Never let prompt or completion content into telemetry** unless the documented capture flag is explicitly enabled, and never let a credential in at all.
+- **Never edit `packages/`, `samples/`, or `scripts/`.** Instrumentation lives beside the code it observes; a collector script parked in `scripts/` runs outside every CI gate that keeps the catalog closed.
 - **Never emit a span per stream delta.** Span events are capped and silently dropped past the limit, so a per-token event stream loses data and inflates cost for nothing.
 - Do not commit or push unless explicitly told to.
 

@@ -174,11 +174,7 @@ export const uploadSchema = (l: OrgUploadLimits) => z.strictObject({
 - **The drift test is green and the form still disagrees with production.** Either the manifest was dumped from a stale checkout, or `rules()` reads `$this->route('bot')`, the dump command fataled on a null route, and that request got quietly excluded. Requests whose rules vary by route or user expose a static shape and push the dynamic part behind `"@server-only"`; CI fails on any registered FormRequest missing from the manifest.
 - **A crawl URL the form accepted comes back as `validation`.** No client check can evaluate SSRF — it needs DNS resolution and per-hop redirect revalidation (`kb-security-baseline`). `z.url()` plus an explicit `http`/`https` protocol refinement mirroring Laravel's `url:http,https` is the entire client-side contribution; the field must render the server's message rather than assume its own check sufficed.
 
-## Not defined here
-
-- App Router layout, RSC/client boundary, route handlers, caching — `nextjs-app-router`. `Form`/`FormField` primitives, field markup, error styling — `tailwind-shadcn`.
-- Mutations, cache invalidation, optimistic updates, upload progress — `tanstack-query-table`. Test harness, component tests, the §22.4 E2E flows — `vitest-playwright`.
-- The FormRequest, its rules, ownership-column guarding — `laravel-rbac-policies`, `laravel-control-plane`. Error classes, statuses, retry policy — `kb-error-taxonomy`; the envelope wire shape — `kb-internal-api-contracts`.
+**Not defined here.** App Router layout, RSC/client boundary, route handlers, caching — `nextjs-app-router`. `Form`/`FormField` primitives, field markup, error styling — `tailwind-shadcn`. Mutations, cache invalidation, optimistic updates, upload progress — `tanstack-query-table`. Test harness, component tests, the §22.4 E2E flows — `vitest-playwright`. The FormRequest, its rules, ownership-column guarding — `laravel-rbac-policies`, `laravel-control-plane`. Error classes, statuses, retry policy — `kb-error-taxonomy`; the envelope wire shape — `kb-internal-api-contracts`.
 
 ## Official docs
 

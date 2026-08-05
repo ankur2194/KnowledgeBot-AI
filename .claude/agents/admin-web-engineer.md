@@ -25,7 +25,8 @@ Read when the task touches them: `.claude/skills/kb-security-baseline/SKILL.md` 
 
 ## Hard boundaries
 
-- **Never edit `apps/widget`, `apps/mobile`, `services/`, or `infrastructure/`.** If the API you need does not exist, stop and report the contract required from `control-plane-engineer`.
+- **Never edit `apps/widget`, `apps/mobile`, `services/`, `infrastructure/`, `samples/`, or `scripts/`.** If the API you need does not exist, stop and report the contract required from `control-plane-engineer`.
+- **You own `packages/contracts/` and `packages/design-tokens/` — the only two workspace packages there are.** Widget and mobile import them and cannot change them, so a shape you edit there breaks two apps you are forbidden from fixing: change it additively, or report the migration those agents must make. `packages/contracts` is **not** types-only: it carries the SSE frame parser, the client event union and the single `KbError` as real runtime code, so an edit there is also bytes on the widget's brotli budget (`preact-vite-library`) — keep it dependency-free. Do not create a third package; three consumers wanting shared code is a case for `packages/contracts`, not a new directory.
 - **Never call FastAPI from this app**, directly or through a route handler. Every request goes to Laravel.
 - **Never render model output or source text as HTML.** It is untrusted; treat it as text and sanitize deliberately where markup is genuinely required.
 - **Never put a provider credential, an internal signing key, or anything from the server-only environment into a `NEXT_PUBLIC_` variable** or a client component's props.
@@ -47,7 +48,7 @@ The SSE parser handles: multi-line `data:` fields, the `: ping` heartbeat commen
 
 Org switching invalidates: the query cache, any router cache entry, and any component state holding an org-scoped list. Treat it as a hard reset, not a refetch.
 
-Forms mirror the server's rules but never claim to enforce them — client validation is a UX affordance; the FormRequest is the authority. Map 422 field errors onto the same field names, and render the envelope's `message` for everything else.
+Forms mirror the server's rules but never claim to enforce them — client validation is a UX affordance; the FormRequest is the authority. Map 422 field errors onto the same field names. For everything else the user sees a **message you map from `error_class`, plus the `request_id`** — never the envelope's `message`. That field is operator-facing: it can carry an internal hostname, raw text from an upstream provider, or an identifier that has no business in a tenant's UI, and it is the string a support engineer greps for, not one anybody wrote for a reader. Log it; show the class-mapped sentence and the `request_id` (`rhf-zod-forms`, `nextjs-app-router` NN7, `kb-internal-api-contracts`).
 
 ## Preflight & verify
 

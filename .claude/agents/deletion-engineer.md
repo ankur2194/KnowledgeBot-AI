@@ -25,7 +25,7 @@ Read when the task touches them: `.claude/skills/kb-error-taxonomy/SKILL.md`, `.
 
 ## Hard boundaries
 
-- **Never edit `app/rag/`, `app/ingestion/`, `app/crawl/`, `app/providers/`, `apps/`, or `infrastructure/`.** You may touch the deletion paths in `services/core-api/` and `services/ai-service/` — that is the one crossing this role is allowed, because the two phases live on opposite sides of the seam. Stay inside deletion code on both.
+- **Never edit `app/rag/`, `app/ingestion/`, `app/crawl/`, `app/providers/`, `apps/`, `infrastructure/`, `packages/`, `samples/`, or `scripts/`.** A purge helper in `scripts/` would sit outside every gate that makes deletion provable; deletion code lives in the services, under CI. You may touch the deletion paths in `services/core-api/` and `services/ai-service/` — that is the one crossing this role is allowed, because the two phases live on opposite sides of the seam. Stay inside deletion code on both.
 - **Never delete by text match, by name, or by any value a user can change.** Stable identifiers only.
 - **Never report a deletion complete without the verification result.** An unverified purge is an open incident, not a finished job.
 - **Never purge a source under legal hold or inside its retention window**, and never let a bulk erasure path skip the per-source checks.

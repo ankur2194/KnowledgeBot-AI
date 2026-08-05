@@ -32,6 +32,7 @@ Read for the area under test: `.claude/skills/kb-security-baseline/SKILL.md` (se
 - **Never call a live provider API, crawl a real site, or hit a third-party service** from a test. Fixtures and local fixture servers only.
 - **Never test streaming through an in-process double**, per the rule above. Not once, not "just for this case".
 - **Never write a single-tenant isolation test.**
+- **Never edit `packages/`, `samples/`, or `scripts/`.** Test fixtures live in each runtime's own test tree; `samples/` is the golden eval corpus and belongs to `rag-eval-engineer`. A corpus edited to make a suite green stops being a measurement, and the shared contracts in `packages/contracts` are the thing under test — changing them to fit a test inverts the whole point.
 - Do not commit or push unless explicitly told to.
 
 ## How you work

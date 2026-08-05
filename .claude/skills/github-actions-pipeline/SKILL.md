@@ -1,6 +1,6 @@
 ---
 name: github-actions-pipeline
-description: GitHub Actions CI/CD for the KnowledgeBot monorepo — the PHP + Python + Node job graph, containerized test dependencies, three package-manager caches, and the gates CI owns, not review (tenancy greps, /metrics catalog diff, form-rules manifest, size-limit budgets, the CI-only RLS tripwire). Use whenever editing .github/workflows/, adding a job, cache key, required check, or artifact hand-off, or when a fork PR dies on an empty secret. Pairs with security-scanning-toolchain (which scanners run where).
+description: GitHub Actions CI/CD for the KnowledgeBot monorepo — the PHP + Python + Node job graph, containerized test dependencies, and the gates CI owns rather than review (tenancy and deletion-key greps, the ADR-010 Qdrant rebuild proof, three telemetry checks, metric-catalog and form-rules diffs, size-limit budgets, the RLS tripwire). Use whenever editing .github/workflows/, adding a job, cache key, or required check, or when a fork PR dies on an empty secret. Pairs with security-scanning-toolchain (which scanners run where).
 ---
 
 # GitHub Actions Pipeline
@@ -11,7 +11,7 @@ Runners `ubuntu-24.04` (= `ubuntu-latest` today) · `actions/checkout@v7` · `se
 ## Non-negotiables
 
 - **No secret reaches a fork PR job, and none is needed for a green PR.** GitHub passes no repository secret to a `pull_request` run from a fork and hands it a read-only `GITHUB_TOKEN`. A self-hostable product gets fork PRs, so every gate on the required-check list must run without credentials. Provider keys, registry pushes and OIDC exchanges live in `merge_group`/`push` jobs guarded by `if: github.event.pull_request.head.repo.fork != true`. Never `pull_request_target` — it runs privileged against the base ref with secrets in scope (`kb-security-baseline`).
-- **The tenancy, metric-catalog, form-rules and size-limit gates are required checks, not reports.** Earlier waves moved these out of review deliberately. A gate that runs with `continue-on-error: true`, behind `|| true`, or on a non-required workflow is the same as deleting it.
+- **Every gate in the gate table is a required check, not a report.** Tenancy, deletion keys, the ADR-010 rebuild proof, the three telemetry checks, the metric catalog, form rules, `size-limit`. These were moved out of review deliberately, because each one guards a violation that produces no error, no failing test, and no log line — human review is a detector with an unknown false-negative rate, and the ones here have all shipped somewhere before. A gate that runs with `continue-on-error: true`, behind `|| true`, or on a non-required workflow is the same as deleting it.
 - **Ragas never gates a unit suite.** Evaluation is LLM-judged quality scoring with real provider calls, its own quota and its own error taxonomy (`ragas-evaluation`). It runs in its own scheduled job against `samples/` only. A faithfulness dip must not block an unrelated PR. §26 lists it as pipeline step 10 in a linear sequence — do not read that as "in the same job as tests".
 - **Test jobs never call a live provider.** The fake adapter (docs/18 §24.6) and recorded responses cover adapter contract tests; live smoke tests are a scheduled job (`kb-provider-adapter-contract`).
 - **No credential, DSN, or KEK is echoed by a workflow.** Actions redacts registered secrets in logs, not values you derive from them (`kb-security-baseline`).
@@ -22,132 +22,57 @@ Runners `ubuntu-24.04` (= `ubuntu-latest` today) · `actions/checkout@v7` · `se
 
 | Tier | Trigger | Jobs |
 |---|---|---|
-| Per push / PR | `pull_request`, `push: main` | format, static analysis, ESLint, unit + arch + contract tests per workspace, all enforcement greps, contract diffs, widget build + `size`, `next build`. No secrets, no containers beyond the test services. |
-| Merge queue | `merge_group: [checks_requested]` | Integration tests against real Postgres/Qdrant/Valkey/SeaweedFS, Playwright E2E shards against `next build && next start`, image build + container CVE scan. |
-| Scheduled | `schedule`, `workflow_dispatch` | Ragas regression, Pest mutation (`--mutate --min=90`), `--order-by=random`, provider live smoke, Qdrant rebuild-reproduction check, the nightly security sweep. |
+| Per push / PR | `pull_request`, `push: main` | format, static analysis, ESLint, unit + arch + contract tests per workspace, **all enforcement greps**, `observability-rules`, contract diffs, widget build + `size`, `next build`. No secrets, no containers beyond the test services. |
+| Merge queue | `merge_group: [checks_requested]` | Integration tests against real Postgres/Qdrant/Valkey/SeaweedFS, **`qdrant-rebuild-proof`**, Playwright E2E shards against `next build && next start`, image build + container CVE scan. |
+| Scheduled | `schedule`, `workflow_dispatch` | Ragas regression, Pest mutation (`--mutate --min=90`), `--order-by=random`, provider live smoke, the **full-corpus** Qdrant rebuild, the nightly security sweep. |
 
-Which scanners run in which tier, and which of them may block, is `security-scanning-toolchain`'s call — it also puts SBOM and the licence gate in the release job, not the merge queue. Deploy (§26 steps 11–16) is a separate `release.yml` on tag, using `environment:` for the production approval gate and OIDC (`permissions: id-token: write`) rather than a long-lived registry password.
+**Which paths fire which jobs.** Workspace jobs are `paths`-filtered; the enforcement gates are not filtered away by anything except their own path list, because a gate that a PR can dodge by touching a different directory is not a gate.
+
+| Path changed | Jobs it must fire |
+|---|---|
+| `services/core-api/**` | `core-api` — Pest, the Laravel tenancy grep, the RLS tripwire, the form-rules diff |
+| `services/ai-service/**` | `ai-service` — pytest, the Qdrant-filter grep, the **deletion-key grep** — and `qdrant-rebuild-proof` in the merge queue |
+| `packages/contracts/**` | `core-api` (form-rules diff), the contracts drift suite under Vitest, and the `apps/mobile` typecheck against the **built** output |
+| `apps/web/**` | web unit + component tests, ESLint, `next build`, Playwright shards |
+| `apps/widget/**` | widget build + `size-limit` in the same job |
+| `apps/mobile/**` | the Jest job |
+| `infrastructure/observability/**` | **`observability-rules`** — alert label/annotation check, Alertmanager route coverage, `promtool check rules` + `test rules` |
+| `infrastructure/docker/**`, `.github/workflows/**` | everything: a change here can move a service image tag or a trigger, and both invalidate every other job's result |
+
+**The gates CI owns, not review.** Each is a required check, each fails on the violation and passes on the fix, and each exists because the violation is *silent* — green tests, no error, no log line.
+
+| Gate | Tier | Command (elided; full form in `references/workflow-jobs.md`) | What is invisible without it |
+|---|---|---|---|
+| Laravel tenancy | push | `! grep -rnE 'withoutGlobalScopes\(\|DB::table\(\|DB::select\(' … \| grep -v 'tenancy-exempt:'` | a raw query that escapes the org scope |
+| Qdrant filter | push | `! grep -rnE 'query_points\(\|\.search\(\|scroll\(\|count\(' … \| grep -vF 'app/retrieval/search.py'` | cross-tenant retrieval at HTTP 200 and normal latency |
+| **Deletion keys** | push | `! grep -rnE 'FieldCondition\(\s*key=' … \| grep -vE "key=\"(org_id\|bot_ids\|source_id\|source_item_id\|source_version_id\|source_status\|chunk_id)\"" \| grep -v 'deletion-key-exempt:'` | a text- or hash-matched delete cutting a hole in a source nobody touched, in another tenant |
+| **ADR-010 rebuild** | merge queue | `uv run pytest tests/integration/test_adr010_rebuild.py` | a payload key with no PostgreSQL column: counts match, ranking moves |
+| **Alert metadata** | push | `! yq -e '.groups[].rules[] \| select(has("alert")) \| select(…) \| .alert' rules/*.yml` | an alert with no `severity`, no `summary`, or no runbook |
+| **Alert routing** | push | `amtool config routes test --config.file=… severity="$sev"`, compared against `kb-unrouted` | Prometheus shows the alert firing and nobody is notified |
+| **promtool** | push | `promtool check rules rules/*.yml && promtool test rules tests/*.yml` | a rule that parses fine and computes the wrong number |
+| `/metrics` catalog | push | catalog diff against the Collector's `prometheus` exporter | an uncatalogued instrument, or a diff that checks nothing (Gotchas) |
+| form-rules | push | `php artisan kb:dump-form-rules && git diff --exit-code` | Zod and the FormRequests drifting apart |
+| `size-limit` | push | run in the build job, exit code is the job's | the widget shipping over its brotli budget |
+
+Which scanners run in which tier, and which of them may block, is `security-scanning-toolchain`'s call — it also puts SBOM and the licence gate in the release job, not the merge queue, and the licence gate reads **artifact** SBOMs, so a GPL/AGPL tool running as a separate CI process is out of scope by construction while an AGPL library linked into a shipped image is a defect. Deploy (§26 steps 11–16) is a separate `release.yml` on tag, using `environment:` for the production approval gate and OIDC (`permissions: id-token: write`) rather than a long-lived registry password.
 
 **Two JavaScript test runners, on purpose.** `apps/mobile` is Jest + React Native Testing Library (§9.3, `expo-react-native`); `apps/web` and `apps/widget` are Vitest 4 + Playwright (`vitest-playwright`). Never `pnpm -r test` — always `pnpm --filter <workspace> test`. `packages/contracts` runs its drift suite under Vitest while `apps/mobile` consumes the same schemas under Jest, so the mobile job typechecks against the **built** `packages/contracts` output, not its source.
 
-The control-plane job, complete — it carries most of the reasoning:
+**Service container images track `docker-compose-stack`, exactly.** `postgres:18-alpine`, `valkey/valkey:9.1.1`, `qdrant/qdrant:v1.18.3` — the same tags as the compose `test` profile, because a CI service one minor behind production tests a different product (Gotchas). Qdrant gets no `--health-cmd`: the image ships no shell utilities, so an in-container probe fails forever and the job burns its whole retry budget before reporting an unrelated error. Wait from the runner with `timeout 60 bash -c 'until curl -sf localhost:6333/readyz; do sleep 1; done'`.
 
-```yaml
-# .github/workflows/ci.yml (excerpt)
-on:
-  pull_request:
-  merge_group: { types: [checks_requested] }
-  push: { branches: [main] }
+**Service ports are published, not addressed by label.** These jobs run *on* the runner rather than in a container, so `postgres:5432` is not resolvable and every step connects to `127.0.0.1`. Caches key on lockfile hashes and never restore `vendor/`, `node_modules/` or `.venv/` directly — a restored tree outlives its lockfile change and CI then tests the old dependency.
 
-# cancel-in-progress must not apply to merge_group: a cancelled merge-queue check
-# evicts the PR from the queue and the author has to re-add it by hand.
-concurrency:
-  group: ci-${{ github.event.merge_group.head_ref || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
-permissions:
-  contents: read            # jobs needing more raise it locally, never here
-
-jobs:
-  core-api:
-    runs-on: ubuntu-24.04   # pinned: ubuntu-latest moves image, and the move swaps
-                            # the preinstalled PHP/Node/Python out from under us
-    defaults: { run: { working-directory: services/core-api } }
-    services:
-      postgres:
-        image: postgres:18-alpine
-        env: { POSTGRES_PASSWORD: ci, POSTGRES_DB: kb_test }
-        ports: ['5432:5432']   # required: this job runs ON the runner, so the
-                               # service label is not a resolvable hostname
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s --health-retries 20
-      valkey:
-        image: valkey/valkey:8-alpine
-        ports: ['6379:6379']
-        options: --health-cmd "valkey-cli ping" --health-interval 5s --health-retries 20
-      qdrant:
-        image: qdrant/qdrant:v1.16.1
-        ports: ['6333:6333']
-        # deliberately no --health-cmd: the image ships no shell utilities, so any
-        # in-container probe fails forever and the job hangs for the whole retry
-        # budget before reporting an unrelated error. Wait from the runner instead.
-        # Data-service image tags are docker-compose-stack's pin, not this skill's;
-        # keep the CI tags identical to the compose `test` profile.
-        # <!-- UNVERIFIED: qdrant/qdrant image contents not re-checked this revision -->
-    steps:
-      - uses: actions/checkout@v7
-      - uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.4'
-          extensions: pdo_pgsql, redis, bcmath, intl
-          coverage: none      # xdebug roughly doubles the Pest suite; only the
-                              # nightly mutation job sets pcov
-      - uses: actions/cache@v6
-        with:
-          # the Composer download cache, never vendor/ — a restored vendor/ tree
-          # outlives a composer.lock change and CI then tests the old dependency
-          path: ~/.cache/composer/files
-          key: composer-${{ hashFiles('services/core-api/composer.lock') }}
-      - run: composer install --no-interaction --prefer-dist --no-progress
-
-      - run: timeout 60 bash -c 'until curl -sf localhost:6333/readyz; do sleep 1; done'
-
-      - name: Tenancy escape hatches must be annotated
-        working-directory: .
-        run: |
-          # Each legitimate raw query carries `// tenancy-exempt: <reason>` on the
-          # same line; grep -v drops those, so anything left is unreviewed. This is
-          # why the allow-list is inline and not a paths file — it moves with the
-          # code and dies with it. Constructs and rationale: kb-tenancy-isolation.
-          ! grep -rnE 'withoutGlobalScopes\(|DB::table\(|DB::select\(' \
-              services/core-api/app services/core-api/database \
-            | grep -v 'tenancy-exempt:'
-
-      - name: Every Qdrant call is filtered
-        run: |
-          # The Laravel grep above covers only half the system. Non-negotiable 2 is a
-          # DATA-PLANE rule, and until this existed the flagship invariant had no gate
-          # on the side that actually queries Qdrant. Failure mode (kb-tenancy-isolation):
-          # HTTP 200, normal latency, no log line, another tenant's chunks.
-          #
-          # Every retrieval entry point must take a filter positionally — no default, and
-          # no `filter or models.Filter()`, because Filter(must=[]) is a MATCH-ALL.
-          ! grep -rnE 'query_points\(|\.search\(|scroll\(|count\(' \
-              services/ai-service/app --include=*.py \
-            | grep -v 'tenancy-exempt:' \
-            | grep -vF 'app/retrieval/search.py'   # the one wrapper that builds the filter
-          # And no prefetch leaf may go out unfiltered.
-          ! grep -rn 'Prefetch(' services/ai-service/app --include=*.py \
-            | grep -v 'query_filter='
-
-      - name: Migrate, then arm the RLS tripwire
-        run: |
-          php artisan migrate --force
-          # RLS is a CI-only detector, never the authorization mechanism —
-          # postgresql-patterns declines it in production (PgBouncer leaks the GUC
-          # across pooled sessions). It must run as kb_ci_app, a NON-OWNER role:
-          # the table owner bypasses RLS silently unless FORCE is set, which makes
-          # the tripwire permanently green and proves nothing.
-          psql "postgres://postgres:ci@localhost:5432/kb_test" -f database/ci/enable-rls.sql
-
-      - run: php artisan test --parallel --processes=4
-        env:
-          DB_CONNECTION: pgsql       # never sqlite — jsonb, partial unique indexes
-          DB_HOST: 127.0.0.1         # and CHECK constraints must actually fire
-          DB_USERNAME: kb_ci_app
-          QDRANT_URL: http://localhost:6333
-
-      - name: Form-rules manifest is current
-        run: |
-          php artisan kb:dump-form-rules
-          git diff --exit-code -- ../../packages/contracts/rules
-```
+**The full YAML lives in [`references/workflow-jobs.md`](references/workflow-jobs.md)**: workflow top matter and `concurrency`, the `core-api` job end to end, the two `ai-service` greps, `qdrant-rebuild-proof` with the assertion it makes, and `observability-rules` with all three telemetry checks. Read it before adding a job; the comments there are the reasoning, not decoration.
 
 `packages/contracts/test/form-drift.test.ts` runs in the Node job and proves the Zod schemas and the FormRequests agree *behaviourally* (probe values, both directions) — the manifest diff alone only proves the dump is fresh (`rhf-zod-forms`).
 
 ## Gotchas
 
+- **The integration suite is green and the boundary it is named after does not exist.** The CI service images drifted behind `docker-compose-stack`'s pins. On `valkey/valkey:8-alpine` there is no `DELIFEQ` (Valkey 9.0.0) and no database-level ACL (9.1.0) — and database-level ACL is exactly what turns the `valkey-core`/`valkey-cache` split from a naming convention into an enforced boundary (`valkey-keyspaces`). So the test that is supposed to prove a cache credential *cannot* reach the queue DB passes because on Valkey 8 there is no mechanism to fail, and the lock-release test passes against whatever `DEL`-shaped fallback the code took. Both go red the day production runs 9.1.1. Same shape on the vector side: `qdrant/qdrant:v1.16.1` against `qdrant-client==1.18.0` is a two-minor API-surface gap, so the client's request shapes are validated by a server that never sees production's. Pin CI to `postgres:18-alpine`, `valkey/valkey:9.1.1`, `qdrant/qdrant:v1.18.3` and let `docker-compose-stack` own every bump.
+- **The deletion-key grep is green and a text-matched delete ships anyway.** The key was built from a variable — `FieldCondition(key=field, …)` inside a loop — so the allow-list regex never saw a literal. That is the whole reason `app/deletion/filters.py` is the *named* file exemption rather than a blanket one: it is the single module allowed to construct keys dynamically, and it earns that by unit-testing its `DELETE_KEYS` tuple against the **seven** keys the grep allow-lists — `kb-tenancy-isolation`'s six payload fields, **plus `chunk_id`**. Those two sets are deliberately not equal and must not be collapsed: the six are the terms a *tenant filter* must be able to express on every query, while deletion additionally addresses one chunk by its own identity, and `chunk_id` is never a query-filter term (it is in the §14.6 payload superset, not in the mandatory four). Assert `DELETE_KEYS` against the seven, not against the six — "simplifying" it to the payload contract silently removes single-chunk deletion, and promoting `chunk_id` into the mandatory filter breaks retrieval instead. A second file appearing in the exemption list is a review stop, not a merge.
+- **The rebuild proof passes and the rebuild is still lossy.** The assertion compared `len(observed_payload_keys)` with `len(expected)`. A curated `title` swapping in for a dropped `url` keeps the cardinality identical, and so do point counts and chunk counts — which is precisely why counts were never going to catch this (`kb-architecture-map` Gotcha 5). Compare the **sets**, then re-run the golden queries and compare ranked point ids, because a key can be present and sourced from the wrong column. And never satisfy this gate with a snapshot restore: a snapshot copies the drift forward, so it hides the violation instead of proving the ADR.
+- **`promtool test rules` reports "0 tests" or "rule file not found", and the job is green.** `rule_files:` inside a unit-test file resolves relative to the **CWD**, not to the test file, so running it from the repo root finds nothing. Run it with the working directory set to `infrastructure/observability/prometheus` and use paths relative to that. Check the count in the output; a passing run of zero tests looks identical to a passing run.
+- **`amtool config routes test` exits 0 for a severity that routes nowhere.** It resolves the label set against the tree and reports whichever receiver it lands on — a fall-through to the default *is* a resolution. Gate on the resolved receiver name against a deliberately-named black hole (`kb-unrouted`), not on the exit code. Without that, Prometheus shows the alert firing and nobody is paged (`prometheus-grafana-loki-tempo`). The same trap makes a line-`grep` unfit for the label check: a stray `severity:` anywhere in the file satisfies it while the alert next to it carries nothing, so that check is driven off the parsed document with `yq`.
 - **A lint job reports zero problems on a file with an obvious violation.** Next 16 removed `next lint` and the `eslint` key, and `next build` no longer lints — a job whose "lint" is `next build` passes while checking nothing. Run `eslint .` as its own step, and assert the config actually resolves (`eslint --print-config apps/web/src/app/page.tsx > /dev/null`) so a missing flat config fails loudly instead of matching no files and exiting 0.
 - **`download-artifact` reports "Unable to find any artifacts" for an artifact uploaded seconds earlier in the same run.** v3 and v4+ write to different backing services and cannot see each other. Keep the pair current together: `upload-artifact@v7` ↔ `download-artifact@v8`. (v4+ of both is unsupported on GHES; a self-hosted-Enterprise fork must pin v3.2.2 on both sides.)
 - **`Unable to locate executable file: pnpm`** from `actions/setup-node` with `cache: pnpm`. `setup-node` shells out to the package manager to find its store; `pnpm/action-setup@v6` must come **before** it. On pnpm ≥ 11 collapse both into `pnpm/setup`.
@@ -171,6 +96,8 @@ jobs:
 - [OIDC in cloud providers](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-cloud-providers) — `id-token: write`, token exchange.
 - [actions/runner-images](https://github.com/actions/runner-images) — current labels and what `-latest` maps to.
 - [actions/cache](https://github.com/actions/cache), [setup-node](https://github.com/actions/setup-node), [setup-python](https://github.com/actions/setup-python), [setup-uv](https://github.com/astral-sh/setup-uv), [setup-php](https://github.com/shivammathur/setup-php), [pnpm/action-setup](https://github.com/pnpm/action-setup).
+- [Prometheus — unit testing rules](https://prometheus.io/docs/prometheus/latest/configuration/unit_testing_rules/) — the `rule_files:`/CWD resolution behind the promtool gotcha, and the test-file schema.
+- [Alertmanager — `amtool`](https://github.com/prometheus/alertmanager#amtool) — `config routes test`, and what "resolved" means when nothing matched.
 
 ## Definition of done
 
@@ -180,6 +107,10 @@ jobs:
 - [ ] `upload-artifact` and `download-artifact` majors verified as a working pair by an actual round trip in CI.
 - [ ] ESLint runs as its own step and a deliberately violating file fails it.
 - [ ] Tenancy grep fails on a newly added unannotated `DB::table(`, and passes once `// tenancy-exempt: <reason>` is added.
+- [ ] Deletion-key grep fails on a `FieldCondition(key="content_hash", …)` added anywhere under `services/ai-service/app`, and on a `MatchText(`; passes once the line carries `# deletion-key-exempt: <reason>`. `app/deletion/filters.py` is the only file exemption, and its `DELETE_KEYS` tuple has a unit test asserting it equals the seven allow-listed keys — the six-field payload contract **plus `chunk_id`** — so dropping `chunk_id` fails the test rather than quietly disabling single-chunk deletion.
+- [ ] `qdrant-rebuild-proof` runs in the merge queue on any `services/ai-service/**` change, asserts payload-key **set** equality (not cardinality) plus identical golden-query point ids, and fails when a payload key with no PostgreSQL column is introduced. The full-corpus rebuild still runs on `schedule`.
+- [ ] `observability-rules` fires on `infrastructure/observability/**` and fails on: an alert missing `severity`/`summary`/`runbook`; a `severity` value with no Alertmanager route (asserted by resolved receiver, not exit code); and `promtool check rules` or `promtool test rules` failing. The `test rules` output reports a non-zero test count.
+- [ ] Every CI service image tag equals the compose `test` profile tag — `postgres:18-alpine`, `valkey/valkey:9.1.1`, `qdrant/qdrant:v1.18.3`; a drift check diffs the two files.
 - [ ] `/metrics` diff fails when an uncatalogued instrument is added; label allow-list unit test runs in the same job.
 - [ ] `kb:dump-form-rules` is idempotent (run twice, clean tree) and `git diff --exit-code` fails on a one-character `max:` change; `form-drift.test.ts` fails on the same change.
 - [ ] `size-limit` exit code is the job's; a +1 kB bundle change fails the PR.

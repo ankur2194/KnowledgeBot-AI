@@ -24,7 +24,7 @@ Laravel (control plane) · FastAPI (AI data plane) · PostgreSQL · Qdrant · Va
  browser ─┐
  widget  ─┼─ HTTPS ─▶ ┌── PUBLIC EDGE — traefik, ports 80/443 only ──────────┐
  mobile  ─┘           │  web (Next.js)     sdk (static widget + iframe)      │
-                      │  laravel-api  ◀── the only door that leads inward    │
+                      │  laravel-api + laravel-api-stream ◀── the only way in│
                       └──────────────────────────┬───────────────────────────┘
                                                  │ signed internal HTTP (sync)
    ══════ TRUST BOUNDARY ═════════════════════   │ + Valkey job handoff (async)
@@ -67,10 +67,8 @@ apps/widget       Preact loader + iframe app    — ADR-007
 apps/mobile       React Native / Expo
 services/core-api Laravel control plane
 services/ai-service FastAPI + RAG + workers
-packages/contracts  shared schemas / generated clients — the only cross-boundary types
-packages/design-tokens
-infrastructure/docker         Compose, Traefik, local env
-infrastructure/observability  dashboards, OTel config
+packages/contracts · packages/design-tokens   shared schemas / generated clients + tokens — the only cross-boundary types
+infrastructure/{docker,observability}   Compose (four networks) + Traefik · dashboards + OTel Collector
 docs · samples · scripts
 ```
 
@@ -78,40 +76,49 @@ docs · samples · scripts
 
 ```yaml
 # infrastructure/docker/compose.yaml — the map above, as configuration
+networks: {edge: {}, application: {}, data: {internal: true}, observability: {internal: true}}
+# FOUR, not three. `application` is deliberately NOT internal — ai-api and the crawl worker need
+# provider and public-web egress. `observability` is one-way OTLP to the collector and reaches
+# nothing else; every exporting service joins it and nothing `depends_on` it, so telemetry fails
+# soft. Per-service membership is `docker-compose-stack`'s to own; this file states the shape.
 services:
   laravel-api:
-    networks: [edge, application, data]   # the ONLY service on edge *and* application
+    networks: [edge, application, data, observability]
     labels: ["traefik.enable=true", "traefik.http.routers.api.rule=Host(`api.${DOMAIN}`)"]
+
+  laravel-api-stream:                     # 2nd FPM pool, sized for long-lived SSE — Gotcha 9
+    networks: [edge, application, data, observability]   # laravel-api and laravel-api-stream are
+    labels: ["traefik.enable=true"]       # EXACTLY the services on `edge` *and* `application`.
+                                          # Two, closed. A third one there is a finding, not a
+                                          # variation. Stream paths route here (traefik-routing).
 
   web:                                    # Next.js is a client of Laravel, not a peer of ai-api
     networks: [edge]                      # deliberately NOT on `application` — see Gotcha 1
     labels: ["traefik.enable=true"]
 
   ai-api:
-    networks: [application, data]
+    networks: [application, data, observability]
     labels: ["traefik.enable=false"]      # no router exists; there is no URL to guess
     # NO `ports:` key here or in ANY override file, ever — see Gotcha 2
     healthcheck: { test: ["CMD", "curl", "-fsS", "http://localhost:8000/health/ready"] }
 
   ai-worker-crawl:
-    networks: [application]               # NOT `data` — this is the one worker that fetches
-                                          # attacker-chosen URLs from inside the private
-                                          # network, so it is the SSRF pivot (Gotcha 3), and
-                                          # Qdrant's REST API needs no credentials: a single
-                                          # coerced GET/DELETE against http://qdrant:6333
-                                          # would be unauthenticated index destruction.
-                                          # It reaches the broker (valkey-core joins
-                                          # `application` for exactly this) and hands results
-                                          # to `ai-api`; it never speaks to PostgreSQL,
-                                          # Qdrant or object storage directly.
-                                          # + egress allow-list denying private ranges.
+    networks: [application, observability] # NOT `data` — this is the one worker that fetches
+                                           # attacker-chosen URLs from inside the private
+                                           # network, so it is the SSRF pivot (Gotcha 3), and
+                                           # Qdrant's REST API needs no credentials: a single
+                                           # coerced GET/DELETE against http://qdrant:6333
+                                           # would be unauthenticated index destruction.
+                                           # It reaches the broker (valkey-core joins
+                                           # `application` for exactly this) and hands results
+                                           # to `ai-api`; it never speaks to PostgreSQL,
+                                           # Qdrant or object storage directly.
+                                           # + egress allow-list denying private ranges.
 ```
 
 §24.3 sketches `web` as a member of `application`. We narrow that deliberately: with `web` on that network, a Next.js route handler can reach `ai-api` and the "clients never call FastAPI" invariant becomes a convention instead of a fact.
 
-### Keeping Qdrant genuinely derived
-
-Four mechanics, not aspirations. Together they are what ADR-010 actually costs.
+### Keeping Qdrant genuinely derived — four mechanics, not aspirations; together they are what ADR-010 actually costs
 
 - **Application code never names a concrete collection** — always an alias. Alias updates in Qdrant are atomic (*"no concurrent requests will be affected during the switch"*), so build the new collection in the background and swap in one `update_aliases` call. Retrofitting the alias later is itself an outage.
 - **The payload is a projection, not a record.** Build it through one serializer derived from primary rows; ban ad-hoc `set_payload` outside it. If a field can't be produced from PostgreSQL, it can't enter the payload.
@@ -120,10 +127,7 @@ Four mechanics, not aspirations. Together they are what ADR-010 actually costs.
 
 ### Owned elsewhere — cite, do not restate
 
-- Tenant scoping of queries, filters, storage paths, and cache keys → `kb-tenancy-isolation`.
-- Wire format, signing, headers, and versioning of Laravel↔FastAPI calls → `kb-internal-api-contracts`.
-- The retrieval pipeline stages and their ordering → `kb-rag-query-contract`.
-- Error classes, retry eligibility, and degradation rules → `kb-error-taxonomy`.
+Tenant scoping of queries, filters, storage paths and cache keys → `kb-tenancy-isolation`. Wire format, signing, headers and versioning of Laravel↔FastAPI calls → `kb-internal-api-contracts`. Retrieval pipeline stages and their ordering → `kb-rag-query-contract`. Error classes, retry eligibility, backoff ladders and degradation rules → `kb-error-taxonomy`. Per-service network, volume, healthcheck and grace-period values → `docker-compose-stack`.
 
 ### ADRs (§28) and what each one costs
 
@@ -162,7 +166,7 @@ Four mechanics, not aspirations. Together they are what ADR-010 actually costs.
 
 9. **A long stream starves the pool: one PHP-FPM child is pinned for the whole generation, and enough concurrent chats exhaust `pm.max_children` while the app looks idle.** Streaming is the one place where request duration is measured in minutes, so the stream routes need their own FPM pool sized independently of the admin API — a shared pool means a burst of chats takes the dashboard down with it. Note that the widely-repeated *session-lock* version of this warning ("one tab blocks the others, fix with `Session::save()`") is **cargo on this stack**: it describes native PHP sessions, and Laravel does not use them — its handlers take no request-long lock. The rule that does survive is keep session middleware off the token-authenticated stream routes entirely (`laravel-control-plane`). Related, and worth checking before committing to SSE-through-Laravel: Laravel Octane's RoadRunner handler buffers streamed output regardless of `flush()` (open issue laravel/octane#903). Verify streaming on your chosen runtime *first* — this is the one credible technical threat to the "clients only talk to Laravel" rule.
 
-10. **A user closes the tab, the provider bill keeps rising, and `provider_calls` never gets a row — so the tenant is never charged.** Two independent mechanisms. PHP notices a dropped client only *"the next time your script tries to output something,"* so a loop blocked reading the FastAPI stream learns nothing; and the provider's token `usage` block arrives in the **final** chunk, so a stream that dies before it logs zero for tokens that were generated and billed. Fix: meter incrementally in FastAPI and persist the partial count from a `CancelledError`/`finally` handler; treat cancellation as a normal terminal state (§19.1). Do not rely on TCP close propagating through PHP → Starlette → provider — give each stream an id and an explicit control-plane cancel call, and put a hard deadline on the FastAPI side. <!-- UNVERIFIED --> End-to-end propagation of a PHP client abort into cancellation of the upstream provider stream is untested here; assume it does not work until proven.
+10. **A user closes the tab, the provider bill keeps rising, and `provider_calls` never gets a row — so the tenant is never charged.** Two independent mechanisms. PHP notices a dropped client only *"the next time your script tries to output something,"* so a loop blocked reading the FastAPI stream learns nothing; and the provider's token `usage` block arrives in the **final** chunk, so a stream that dies before it logs zero for tokens that were generated and billed. Fix: meter incrementally in FastAPI and persist the partial count from a `CancelledError`/`finally` handler; treat cancellation as a normal terminal state (§19.1). **There is no cancel endpoint, deliberately** — cancellation is a propagated disconnect, not a second request: the client calls `AbortController.abort()`, which closes the connection to Laravel; Laravel's relay is running under `ignore_user_abort(true)` so its next heartbeat write makes `connection_aborted()` true (a blocked read never learns anything — the heartbeat *is* the probe); the relay then cancels the upstream PSR request, closing the internal socket; Starlette turns that into `http.disconnect`, cancels the SSE task, and the `CancelledError` reaches the provider client's open stream and closes it. Two things carry the whole design. **The abort must actually reach the provider call.** Any buffering or shielding link absorbs it and the chain silently dead-ends — an `ob_start()` from a debug bar or profiler, a compressing proxy accumulating the SSE body, a generator that catches `CancelledError` without re-raising, or an unshielded unit of work parked in `run_in_threadpool` (threads cannot be interrupted, so cancellation waits for it). **And the symptom of getting it wrong is invisibility**: no request is in flight anywhere, no error is logged, the trace ended — while the provider keeps generating and billing output nobody will ever receive, charged to the org. So assert it end to end (`laravel-control-plane`, `fastapi-service`, `kb-internal-api-contracts`), never by unit test, and keep the FastAPI-side hard deadline as the backstop for the case where propagation fails anyway.
 
 11. **`php artisan cache:clear` makes queued ingestion jobs disappear, or Celery workers crash on payloads they cannot decode.** Laravel queues and the Celery broker were pointed at the same Valkey logical database, so their keyspaces overlap and a cache flush takes the other system's queue with it. Fix: separate logical DBs (or instances) and distinct key prefixes per workload, as §9.8 requires — decided at Compose time, because by the time you notice, the jobs are gone.
 
@@ -177,7 +181,7 @@ Four mechanics, not aspirations. Together they are what ADR-010 actually costs.
 - [Qdrant collections and aliases](https://qdrant.tech/documentation/concepts/collections/) — atomic alias switch for rebuild and re-embed cutover (§15.4–15.5).
 - [Qdrant snapshots](https://qdrant.tech/documentation/concepts/snapshots/) — restore path, version locking, and the alias exclusion in Gotcha 6.
 - [Qdrant multitenancy](https://qdrant.tech/documentation/guides/multiple-partitions/) — tenant payload indexes; the swap precondition in Gotcha 6.
-- [Laravel streamed responses](https://laravel.com/docs/12.x/responses#streamed-responses) — `eventStream`, generator auto-flush, `X-Accel-Buffering`.
+- [Laravel streamed responses](https://laravel.com/docs/13.x/responses#streamed-responses) — `eventStream`, generator auto-flush, `X-Accel-Buffering`. Laravel is pinned at **13.x** across this library; a 12.x link is a stale link.
 - [PHP connection handling](https://www.php.net/manual/en/features.connection-handling.php) — abort detection requires an output attempt (Gotcha 10).
 - [MDN: Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events) — event framing and reconnection (ADR-008).
 
@@ -186,7 +190,8 @@ Four mechanics, not aspirations. Together they are what ADR-010 actually costs.
 - [ ] The change lives in exactly one of `apps/`, `services/`, `packages/`, `infrastructure/`; anything shared is in `packages/contracts`.
 - [ ] `grep -rn "ai-api\|ai-service" apps/ infrastructure/docker/` shows no client, route handler, or dev proxy targeting the AI service.
 - [ ] `docker compose config` shows no `ports:` and no `traefik.enable=true` on `ai-api` or any `ai-worker-*`, in base or any override.
-- [ ] `docker compose config` shows `laravel-api` as the only service on both `edge` and `application`.
+- [ ] `docker compose config` shows the services on both `edge` and `application` to be exactly `{laravel-api, laravel-api-stream}` — that set, closed: a third service there fails the check, and so does a missing one. `web` is on `edge` only; `ai-worker-crawl` is off `data`; `valkey-core` is the one store also on `application`.
+- [ ] All four networks exist — `edge`, `application`, `data`, `observability` — with `data` and `observability` `internal: true` and `application` not.
 - [ ] Every new Qdrant payload key maps to a named PostgreSQL column, and the rebuild job asserts it.
 - [ ] A rebuild-from-PostgreSQL of the touched sources reproduces the same point count, payload keys, and top-k for the evaluation dataset.
 - [ ] No code names a concrete Qdrant collection; payload indexes exist on the new collection *before* any alias swap.

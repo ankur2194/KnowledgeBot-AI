@@ -125,20 +125,20 @@ Row 3 — Plan: Pro; Monthly price (INR): 4,999; Seats included: 25; Priority su
 
 ### Chunk metadata schema
 
-Every chunk carries all of these. `(+)` marks fields not enumerated in §14.6 that citation, deletion, or dedup need in practice — add them and say so in the ADR.
+Every chunk carries all of these. `(+)` marks fields not enumerated in §14.6 that citation, deletion, or dedup need in practice — add them and say so in the ADR. **Every identifier below is a ULID** (`char(26) COLLATE "C"` in PostgreSQL, `postgresql-patterns`; the `Ulid` string annotation in Pydantic, `pydantic-contracts`), never a UUID — the one genuine `uuid` anywhere in the system is `chunks.vector_point_id`, and only because a Qdrant point id may be nothing but a u64 or a UUID.
 
 | Field | Type | Source | Why it exists |
 |---|---|---|---|
 | `chunk_id` | ULID `char(26)` | chunker | The relational chunk identity (`postgresql-patterns`). Deletion targets identifiers, never text (§8.17) — but the **vector point id is not derived from this**; it is the deterministic `uuid5` of `kb-source-lifecycle`, because a chunk id minted per run is not stable across a replay |
-| `org_id` | UUID | source record | Mandatory tenant filter on every query — `kb-tenancy-isolation` |
-| `source_id` | UUID | source | "Delete this source" fan-out |
-| `source_item_id` | UUID | source item | A sitemap page re-versions and deletes independently of its source |
-| `source_version_id` | UUID | version | Active-version filter; retirement deletes on this alone (§13.5) |
-| `bot_ids` | UUID[] or access key | bot assignment | Bot-scoped retrieval filter; shape is `kb-tenancy-isolation`'s call |
+| `org_id` | ULID `char(26)` | source record | Mandatory tenant filter on every query — `kb-tenancy-isolation` |
+| `source_id` | ULID `char(26)` | source | "Delete this source" fan-out |
+| `source_item_id` | ULID `char(26)` | source item | A sitemap page re-versions and deletes independently of its source |
+| `source_version_id` | ULID `char(26)` | version | Active-version filter; retirement deletes on this alone (§13.5) |
+| `bot_ids` | ULID `char(26)`[] or access key | bot assignment | Bot-scoped retrieval filter; shape is `kb-tenancy-isolation`'s call |
 | `seq` | int | chunker | Document order; packing merges adjacent chunks (§12.13) and needs it |
-| `document_element_id` | UUID | Docling element | Traceability required by §8.17 cascading identity |
-| `element_ids` `(+)` | UUID[] | grouper | A prose chunk spans several elements; the singular field loses all but one |
-| `parent_element_id` | UUID | element tree | Small-to-big: retrieve the child, return the enclosing section |
+| `document_element_id` | ULID `char(26)` | Docling element | Traceability required by §8.17 cascading identity |
+| `element_ids` `(+)` | ULID `char(26)`[] | grouper | A prose chunk spans several elements; the singular field loses all but one |
+| `parent_element_id` | ULID `char(26)` | element tree | Small-to-big: retrieve the child, return the enclosing section |
 | `heading_path` | string[] | heading stack | Embedded prefix **and** the citation's "where in the document" |
 | `page` / `page_end` `(+)` | int? | PDF | Citation label; `page_end` set only when a chunk legitimately crosses a break |
 | `slide` | int? | PPTX | Citation label (§8.11 requires the slide number) |
@@ -152,13 +152,14 @@ Every chunk carries all of these. `(+)` marks fields not enumerated in §14.6 th
 | `content_type` | enum | element type | Drives size policy, packing, and table-integrity checks |
 | `token_count` | int | BGE-M3 tokenizer | Context budget (§12.13); over-length guard |
 | `content_hash` | sha256 | chunker | Idempotency (§13.3) — unchanged chunk skips re-embedding |
-| `overlap_of` `(+)` | UUID? | chunker | Lets packing drop a near-duplicate instead of spending two evidence slots |
+| `overlap_of` `(+)` | ULID `char(26)`? | chunker | Lets packing drop a near-duplicate instead of spending two evidence slots |
 | `created_at`, `effective_at`/`expires_at` | timestamptz(?) | chunker / source | Audit; and time-scoped policies retrieval must exclude once expired |
 | `embedding_model_id` | string | config | e.g. `bge-m3@<rev>`; a mixed-model collection is silently wrong |
 | `parser_version`, `chunker_version` | string | `docling-parsing` / this skill | Reproducibility, and the reprocess trigger when config changes but content does not (§13.3) |
 
 ## Gotchas
 
+- **Symptom: every bot in every organization retrieves nothing — HTTP 200, normal latency, zero candidates, no exception and no log line — on a corpus that indexed successfully.** A payload identifier was written or typed as a UUID while the filter matches a ULID: `tenant_filter` builds `MatchValue(value=ctx.org_id)` from the ULID in `X-KB-Org-Id` (`kb-tenancy-isolation`, `kb-internal-api-contracts`), so a `uuid`-shaped `org_id`/`source_version_id`/`bot_ids` payload value satisfies no `must` term and the positive filter correctly excludes everything. **The tempting fix is to relax the filter, and that is the one change that must never happen** — a widened filter converts a total outage into a cross-tenant leak, which is the failure this platform least wants. `kb-tenancy-isolation` Non-negotiable 5 is why the outage is the *correct* failure of a positive `must` filter, and its "a rebuilt source becomes invisible to its own organization" gotcha is this same trap reached by a different route. Fix: type and write every payload identifier as a ULID, assert the `^[0-7][0-9A-HJKMNP-TV-Z]{25}$` shape at upsert, and let the rebuild re-run. A Pydantic model that types one of these `UUID` never gets that far — it 422s the internal request instead (`pydantic-contracts`).
 - **Symptom: "the Pro plan includes 4,999 seats."** A table was split and every chunk after the first lost the header row, so the model matched values to columns positionally and guessed. Fix: `chunk_table` repeats the column names in every row and asserts that no `table_rows` chunk ships without them. Merged or two-row headers must be flattened by `docling-parsing` first — a spanned cell silently shifts every column to its right. **Do not assume Docling's `HybridChunker(repeat_table_header=True)` covers you:** `get_header_and_body_lines` is implemented only on the Markdown/HTML table serializers, while the *default* chunking serializer is `TripletTableSerializer`, which does not override it — so the base returns no header lines and the header prefix is never emitted. Choose the serializer deliberately rather than trusting the flag name.
 - **Symptom: one document retrieves badly while the rest of the corpus is fine, and its chunks start mid-word.** Something applied a hard token cap *after* the structural pass — usually a defensive truncate before `encode()`. Fix: the cap belongs to the grouper; the embed step must **raise** on an over-length chunk, never truncate. Truncated text embeds perfectly well, it just means something else.
 - **Symptom: the top-5 evidence is the same paragraph three times, and a second relevant source never makes the context.** Overlap applied at structural boundaries, so near-identical chunks compete for every slot. Chroma's eval shows overlap is a bad trade even before this: recursive 400/0 → 400/200 *lost* recall (89.5%→88.1%) and a third of Precision_Ω (17.7%→13.9%), and the OpenAI Assistants 800/400 default scored worst of everything tested (Precision_Ω 4.7%). Fix: overlap only inside a prose run, keep it ≤15%, and set `overlap_of` so packing collapses the family to one.

@@ -25,7 +25,8 @@ Read when the task touches them: `.claude/skills/prometheus-grafana-loki-tempo/S
 
 ## Hard boundaries
 
-- **Never write application code.** You may create and edit files under `infrastructure/`, `.github/`, and root-level compose/env/config files. Business logic belongs to the owning engineer.
+- **Never write application code.** You may create and edit files under `infrastructure/`, `.github/`, `scripts/`, and root-level compose/env/config files. Business logic belongs to the owning engineer, and `packages/` and `samples/` belong to `admin-web-engineer` and `rag-eval-engineer`.
+- **`scripts/` is yours, and it is not a bypass.** A script that reaches into a database, an index, or object storage is doing an owning engineer's job without that engineer's invariants — no script may issue a Qdrant query without the four tenant filters, or a deletion by anything but a stable identifier. Operational glue only.
 - **Never expose `ai-api`, Horizon, Qdrant, PostgreSQL, Valkey, or the SeaweedFS S3 gateway publicly.** Four public hostnames, no fifth.
 - **Never put the crawl worker on the `data` network.** Qdrant's REST API is unauthenticated; the SSRF pivot must not be able to reach it.
 - **Never commit a real secret**, and never let a workflow print one. Fork PRs receive empty secrets — a job must fail clearly rather than run half-configured.
@@ -52,4 +53,4 @@ For CI, put the gates that review cannot reliably perform into the pipeline: the
 
 ## Report back
 
-Return: services, networks, and volumes changed with the reason for each network membership; the public hostname list and the spoofed-Host verification result for every non-public service; healthcheck parameters and how `start_period` interacts with real startup time; resource limits against worker recycle thresholds; CI jobs and gates added; and image tags pinned. Flag two known open seams: **the multipart-abort sweep has no scheduled home yet** (Celery beat or `laravel-scheduler` — this needs a decision), and the SeaweedFS `-config` identities file and circuit-breaker JSON that `seaweedfs-s3` depends on must exist before that skill's rules hold.
+Return: services, networks, and volumes changed with the reason for each network membership; the public hostname list and the spoofed-Host verification result for every non-public service; healthcheck parameters and how `start_period` interacts with real startup time; resource limits against worker recycle thresholds; CI jobs and gates added; and image tags pinned (every tag is `docker-compose-stack`'s to write; CI copies them). Flag one known open seam: the SeaweedFS `-config` identities file and circuit-breaker JSON that `seaweedfs-s3` depends on must exist before that skill's rules hold — until they do, the gateway runs Allow-All and fails **open**.

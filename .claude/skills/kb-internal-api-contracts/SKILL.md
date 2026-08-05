@@ -94,6 +94,20 @@ FastAPI stores `key → {method, path, body_hash, status, response}` in Valkey f
 
 Async jobs call back into `POST /internal/v1/callbacks/{group}` on Laravel — **Laravel never polls FastAPI**. Every callback carries `(job_id, sequence, stage, status)`; Laravel applies it under `WHERE sequence > progress_sequence` so a Celery retry cannot rewind the job. A nightly reconciliation sweep re-queries jobs that have gone silent past their timeout; that is the only place a poll is legal.
 
+### The public chat request body
+
+The seam has two halves and both are pinned here. This one is the **public** request every client sends to Laravel — it is not an internal endpoint, but it is the input side of the same contract, and leaving it unowned is how two clients ship two different field names against one FormRequest.
+
+```json
+POST /api/v1/chat/{conversation}/messages   ·   Accept: text/event-stream
+{"client_message_id": "01J…", "content": "Do you refund after 30 days?"}
+```
+
+- **Exactly two keys, and `extra` is rejected.** The message text is `content` — the same vocabulary as `messages.Content` (docs/11 §16) and as the provider adapter's `Message.content` (`kb-provider-adapter-contract`), so one name survives browser → Laravel → FastAPI → provider → `messages` row. `text` is *not* an accepted alias: it is already the `token` event's field, and one word meaning "the whole question" on the request and "one delta" on the response is how a client ends up sending a token frame's shape.
+- `client_message_id` is a **client-minted ULID, stable across re-renders and retries** of the same composed message. It is the fingerprint half of `chat.message`'s idempotency key, so a double-submit collapses instead of billing two generations.
+- A client that posts `text` gets `422` with `errors: {"content": ["The content field is required."]}` on **every** send — a total outage for that one client, invisible to the others and to any test that exercises only the surface that happens to be right.
+- Laravel derives everything else — organization, bot, actor — from the credential (`laravel-sanctum-auth`). A body field naming an org, a bot, or a model is privilege escalation, not configuration.
+
 ### Client-facing SSE event schema
 
 FastAPI emits normalized events; Laravel forwards an **approved subset** to the client. This is the contract every client codes against — widget, hosted chat, mobile, and playground all parse exactly this.
@@ -132,73 +146,11 @@ event: error              data: {"error_class":"provider_rate_limit","message":"
 
 `errors` is `Record<string, string[]>` keyed by input field name, present **only** on `validation`, and absent everywhere else — never `null`, never `{}`. Without it a 422 cannot be rendered against the field that caused it, which is the difference between a form that explains itself and one where Save silently does nothing (`rhf-zod-forms`). A key that matches no rendered field must still surface somewhere; an error nobody can display is an infinite retry loop the user drives by hand.
 
-**Internal-only events Laravel consumes and does not forward:** `provider.usage` (token counts and cost → `usage` table), `provider.fallback` (a fallback model ran → analytics), `retrieval.trace` (candidate and reranker scores → returned only to the playground when `X-KB-Actor-Type=user` and the actor holds the diagnostics permission), `heartbeat`. Leaking any of these to a widget exposes internal topology and cost data.
+**Internal-only events Laravel consumes and does not forward:** `provider.usage` (token counts and cost → `usage` table; it carries the provider-native `input_tokens` / `output_tokens` / `cached_tokens` triple, which is deliberately **not** the `prompt_tokens` / `completion_tokens` pair on the client-facing `message.complete` — cache hit ratios are cost data and stop at Laravel, so the two are separate models on the FastAPI side, `pydantic-contracts`), `provider.fallback` (a fallback model ran → analytics), `retrieval.trace` (candidate and reranker scores → returned only to the playground when `X-KB-Actor-Type=user` and the actor holds the diagnostics permission), `heartbeat`. Leaking any of these to a widget exposes internal topology and cost data.
 
 ### Worked example — one streamed answer, including cancellation
 
-```
-1. Widget → Laravel   POST /api/v1/chat/{conversation}/messages  Accept: text/event-stream
-2. Laravel            validates session token + origin, checks org quota, resolves the config snapshot
-                      (bot, provider connection, decrypted key, model, pipeline params) → config_version 47
-3. Laravel → FastAPI  POST /internal/v1/chat/stream · Accept: text/event-stream · traceparent ·
-                      X-KB-Org-Id · X-KB-Bot-Id · X-KB-Actor-Type: anonymous_session · X-KB-Config-Version: 47 ·
-                      X-KB-Operation: chat.execute · X-KB-Idempotency-Key: sha256(org|chat.message|conv|client_msg)
-4. FastAPI            retrieve → fuse → rerank → pack (emits status), assigns citations, calls the provider
-5. FastAPI → Laravel  message.start · status · citations · token… · provider.usage · message.complete
-6. Laravel            relays all but provider.usage, flushing after each event
-7. Stream ends        FastAPI closes its span; Laravel writes message row + usage row (idempotency key
-                      `usage.finalize(message_id)`) + analytics event — in one finally block
-```
-
-Laravel's relay, with the cancellation path — the part that is actually easy to get wrong:
-
-```php
-// Deliberately response()->stream() and not response()->eventStream(): eventStream() can only emit
-// named events, and the mandated `: ping` heartbeat is an SSE *comment*. `event: heartbeat` is not a
-// substitute — it is on the never-forward list below. See `laravel-control-plane` for the mechanics.
-return response()->stream(function () use ($upstream, $ctx) {
-    $finalizer = new StreamFinalizer($ctx);       // idempotent on message_id; safe to reach twice
-    // MUST be true. At its default, PHP terminates the script the moment it detects the abort, so the
-    // connection_aborted() check below is unreachable, cancel() never runs, and `finally` is skipped —
-    // the stream bills tokens and writes no usage row. This one line is the bug in Gotcha 2.
-    ignore_user_abort(true);
-    try {
-        foreach ($upstream->events() as $event) { // generator over the FastAPI SSE stream;
-            if ($event === null) {                //   yields null on each idle read timeout
-                echo ": ping\n\n";                // an SSE comment — `event: heartbeat` is on the
-                ob_flush(); flush();              //   never-forward list and is not a substitute
-                if (connection_aborted()) {       // the heartbeat IS the disconnect probe: a silent
-                    throw new ClientGoneException();  //   provider means no writes, and with no write
-                }                                 //   PHP never notices the client left
-                continue;
-            }
-            if ($event->name === 'provider.usage') {
-                $finalizer->recordUsage($event->data);  // internal-only: never forwarded
-                continue;
-            }
-            $finalizer->countToken($event);       // running tally — do NOT wait for provider.usage,
-                                                  // a cut stream may never deliver it
-            echo "event: {$event->name}\ndata: {$event->json()}\n\n";
-            ob_flush(); flush();                  // one flush per event, or nothing streams
-            if (connection_aborted()) {           // only ever true AFTER a write attempt — see gotchas
-                throw new ClientGoneException();
-            }
-        }
-    } catch (ClientGoneException) {
-        $upstream->cancel();                      // closes the internal request → FastAPI sees
-                                                  // http.disconnect → provider call is cancelled
-        $finalizer->markCancelled();              // finish_reason=cancelled, usage_estimated=true
-    } finally {
-        $finalizer->commit();                     // message row + usage row + analytics, always
-    }
-}, 200, [
-    'Content-Type'  => 'text/event-stream',
-    'Cache-Control' => 'no-cache, no-transform',
-    'X-Accel-Buffering' => 'no',
-]);
-```
-
-Cancellation is a first-class outcome, not an error: `finish_reason: "cancelled"`, usage finalized from the running tally, `user_cancellation` recorded (docs/14 §19.1) — the cancellation-rate metric depends on it (docs/15 §20.2).
+The seven-step trace from widget POST to finalized usage row, and Laravel's relay loop with the cancellation path in full → **[references/streamed-answer-walkthrough.md](references/streamed-answer-walkthrough.md)**. Cancellation is a first-class outcome there, not an error: `finish_reason: "cancelled"`, usage finalized from the running tally, `user_cancellation` recorded (docs/14 §19.1).
 
 ## Gotchas
 
@@ -211,6 +163,7 @@ Cancellation is a first-class outcome, not an error: `finish_reason: "cancelled"
 - **Six tabs and the seventh request hangs.** Over HTTP/1.1 the browser allows ~6 connections per origin, and every open SSE stream holds one — a user with several hosted-chat tabs blocks ordinary XHR on the same origin, which reads exactly like a backend stall. TLS through Traefik negotiates HTTP/2 and the limit disappears; plain-HTTP local development does not, so reproduce this in dev before blaming the API.
 - **Out-of-order progress callbacks rewind a job.** A Celery retry re-emits stage 6 after stage 9 has landed. Without the `sequence` guard the admin progress bar runs backwards and, far worse, a `ready` source can be flipped back to `processing`, taking an already-published version out of retrieval. Guard on `(job_id, sequence)` in the `UPDATE`, and treat callbacks as idempotent.
 - **`Http::fake()` makes SSE bugs invisible.** A faked response body is a string, so the relay loop drains it instantly and every buffering, heartbeat, ordering, and disconnect bug passes. The Laravel↔FastAPI contract test must run against a real SSE fixture server that emits events with delays and can hang up mid-stream; the FastAPI side asserts its emitted event names and payloads against the same OpenAPI schema Laravel's client is generated from (docs/17 §22.2).
+- **One client can never send a message and the other three are fine.** The public request body was never pinned, so each client picked its own name for the message text — `text` in one, `content` in another — and Laravel's FormRequest can only accept one. The loser 422s on *every* send while the shared suite stays green, because the fixtures were written per client from the same source of truth the client was. Pin the body here, generate every client's type from it, and make the contract test post the canonical body against the real FormRequest rather than against a fixture.
 - **A `429` is not one thing.** Tenant quota, Laravel rate limit, and provider rate limit are all plausibly `429`, and their retry policies differ (never / after a window / after `Retry-After` with backoff). FastAPI must put the class in the body and Laravel must relay it unchanged — see `kb-error-taxonomy`.
 
 ## Official docs
@@ -225,6 +178,7 @@ Cancellation is a first-class outcome, not an error: `finish_reason: "cancelled"
 ## Definition of done
 
 - [ ] Endpoint lives under `/internal/v1/`, `X-KB-Contract-Version` is validated against the path, and the OpenAPI document in `packages/contracts/` is regenerated and committed with the Laravel client generated or validated from it.
+- [ ] The public chat request body is `{client_message_id, content}` and nothing else: every client's type is generated from `packages/contracts`, `rg -n "client_message_id" apps/` shows no sibling key other than `content`, and a test posts each client's exact body against the real FormRequest.
 - [ ] Contract tests exist on **both** sides — FastAPI asserts what it emits, Laravel asserts what it parses (docs/17 §22.2). All required headers are asserted present by a FastAPI dependency; missing `X-KB-Org-Id` returns `400` (test proves it).
 - [ ] Signature verified with a constant-time compare, timestamp skew ≤60s, `X-KB-Request-Id` replay-blocked in Valkey; a replayed request test returns `401`.
 - [ ] Mutations require `X-KB-Idempotency-Key` whose fingerprint includes every configuration version listed for the operation; tests cover same-key/same-body replay, same-key/different-body `422`, and concurrent in-flight `409`.

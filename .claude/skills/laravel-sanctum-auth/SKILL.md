@@ -24,7 +24,7 @@ Laravel **13.24** (2026-08-04, PHP 8.3–8.5) · **laravel/sanctum 4.3.3** (2026
 |---|---|---|---|---|---|
 | **Admin** `apps/web` | Sanctum **SPA cookie session** (`web` guard; `HttpOnly`, `Secure`, `SameSite=Lax`) + CSRF | one user; current org in the session, re-verified per request | session idle lifetime; re-auth for destructive actions (§18.3) | logout invalidates it; `AuthenticateSession` kills siblings on password change | full admin power for that org — but only from a browser the attacker already controls, since the cookie is not JS-readable |
 | **Hosted chat** `apps/web` | the **same opaque chat-session token** as the widget, origin-checked against our own origin | one bot, one visitor session | 30 min sliding, refreshable | Valkey TTL / `DEL` | chat with one bot as one anonymous visitor |
-| **Widget** `apps/widget` | opaque **origin-bound chat-session token** exchanged for the public bot id | one bot, one origin, one session | 30 min sliding, refreshed via the same origin-checked route | Valkey TTL / `DEL`; removing the domain kills it on the next request | the same one-bot chat ability, and only from a page on an allow-listed origin (non-browser caveat in Gotchas) |
+| **Widget** `apps/widget` | opaque **origin-bound chat-session token** exchanged for the public bot id | one bot, one origin, one session | 30 min sliding on every authorized request; when it does lapse the **loader** re-mints and hands the new token over the bridge — the frame never can (`references/widget-session-service.md` § *Refresh*) | Valkey TTL / `DEL`; removing the domain kills it on the next request | the same one-bot chat ability, and only from a page on an allow-listed origin (non-browser caveat in Gotchas) |
 | **Mobile** `apps/mobile` | Sanctum **personal access token**, `Authorization: Bearer` | one user, one org, one device, explicit abilities | hard `expires_at` (30 d); Sanctum has no refresh tokens — re-login | device list → `$user->tokens()->where('id', …)->delete()`; membership revocation via the callback below | that user's non-admin API surface until expiry or revocation |
 
 **Cookies for the admin, not a bearer token.** A bearer token in a browser SPA must live where JavaScript can read it, so one XSS becomes a stolen, long-lived, replayable credential; the `HttpOnly` cookie lets the same XSS *act* but exfiltrates nothing reusable. **The CSRF consequence is unavoidable:** Laravel 13's `PreventRequestForgery` skips token validation only on `Sec-Fetch-Site: same-origin`, and `app.…` → `api.…` is same-*site*, not same-*origin*, so every mutation falls through to token validation. So — `$middleware->statefulApi()`, `GET /sanctum/csrf-cookie` before login, the URL-decoded `XSRF-TOKEN` echoed as `X-XSRF-TOKEN` on every mutation, `supports_credentials => true` in `config/cors.php`, and exact hosts (with ports) in `SANCTUM_STATEFUL_DOMAINS` — never a pattern.
@@ -70,107 +70,7 @@ RateLimiter::for('sdk-bootstrap', fn (Request $r) => Limit::perMinute(10)
 
 ### Minting and verifying the origin-bound widget session
 
-```php
-// services/core-api/app/Services/Sdk/WidgetSessionService.php
-declare(strict_types=1); namespace App\Services\Sdk;
-use App\Models\Bot; use Illuminate\Support\Facades\Redis;
-
-final class WidgetSessionService
-{
-    private const TTL  = 1800;  // sliding; the `sess:` family and its TTL belong to valkey-keyspaces
-    private const SKEW = 120;   // clock skew tolerated on customer-signed metadata
-
-    public function __construct(private readonly BotDomainMatcher $domains) {}
-
-    /** POST /api/v1/sdk/session. $origin is the request HEADER — never a body or query field. */
-    public function mint(string $publicBotId, ?string $origin, ?string $userToken, string $ip): array
-    {
-        // Public/SDK surface: every rejection here is 404, indistinguishable. A 403 would answer
-        // "that bot id is real, your domain just is not on its list".
-        $bot = Bot::query()->where('public_id', $publicBotId)->first();
-        abort_if($bot === null || ! $bot->isLive(), 404);
-        // Origin is the only host-page fact page script cannot forge (Referer can be suppressed); an
-        // absent Origin is a rejection, never a default-allow.
-        abort_if($origin === null || ! $this->domains->matches($bot, $origin), 404);
-        $endUser = $userToken === null ? null : $this->verifyUserToken($bot, $userToken);
-        $secret  = rtrim(strtr(base64_encode(random_bytes(32)), '+/', '-_'), '=');
-        // The org and bot segments are public and untrusted: they only route the lookup, and a forged
-        // pair simply misses. Store only the HASH — a Valkey dump must not be a set of credentials.
-        Redis::setex($this->key($bot->organization_id, $bot->id, $secret), self::TTL, json_encode([
-            'org_id' => $bot->organization_id,  'bot_id' => $bot->id,
-            'origin' => $origin,                                // re-checked on every later request
-            'token_hash' => hash('sha256', $secret),
-            'end_user'   => $endUser,                           // never re-accepted from the client
-            'abilities'  => ['chat:send', 'chat:read', 'feedback:submit'],
-            'ip_hash'    => hash_hmac('sha256', $ip, config('app.key')),
-        ], JSON_THROW_ON_ERROR));
-        return ['token' => "kbw_{$bot->organization_id}.{$bot->id}.{$secret}", 'expires_in' => self::TTL];
-    }
-
-    /** The guard path, run before anything touches a bot, a conversation, or a provider. */
-    public function resolve(?string $bearer, ?string $origin): WidgetSession
-    {
-        abort_if($bearer === null || ! str_starts_with($bearer, 'kbw_'), 401);   // authentication
-        [$orgId, $botId, $secret] = array_pad(explode('.', substr($bearer, 4), 3), 3, null);
-        // ULID, not integer. Every id in this system is a ULID char(26) in Crockford base32
-        // (`postgresql-patterns`), so `ctype_digit` here would reject every real token and 401
-        // every widget session ever minted. Excluded letters: I, L, O, U.
-        $ulid = '/^[0-9A-HJKMNP-TV-Z]{26}$/';
-        abort_if($secret === null || ! preg_match($ulid, (string) $orgId)
-                                  || ! preg_match($ulid, (string) $botId), 401);
-        $raw = Redis::get($this->key($orgId, $botId, $secret));
-        abort_if($raw === null, 401);                                           // expired or revoked
-        $s = json_decode($raw, true, flags: JSON_THROW_ON_ERROR);
-        // The key is a truncated digest, so confirm the full one — timing-safely, always, on a credential.
-        abort_unless(hash_equals($s['token_hash'], hash('sha256', $secret)), 401);
-        // Origin binding is proven AT MINT ONLY, and this is the subtlety that makes the widget work at
-        // all. `mint()` runs on a POST from the customer's page, so its Origin is the embedder's and is
-        // unforgeable. Every request after the handshake comes from the IFRAME, whose Origin is always
-        // our own widget origin — so comparing $origin to $s['origin'] here would 404 every chat message
-        // ever sent (`iframe-postmessage-bridge`). What we check now is that the caller is our own
-        // surface, and that the origin we bound at mint is STILL allow-listed.
-        $bot = Bot::query()->find($s['bot_id']);
-        abort_if($bot === null || ! in_array($origin, self::OUR_EMBED_ORIGINS, true), 404);
-        // Re-validate the STORED embedder origin against the LIVE allow-list and status, never the
-        // snapshot: a removed domain must stop working now, not when the TTL lapses.
-        abort_unless(hash_equals($bot->organization_id, $orgId) && $bot->isLive()
-            && $this->domains->matches($bot, $s['origin']), 404);
-        // A custom X-KB-Embedder-Origin header is NOT a substitute: page script sets fetch headers
-        // freely, so it would be forgeable and the binding worthless.
-
-        return new WidgetSession($s['org_id'], $s['bot_id'], $s['end_user'], $s['abilities']);
-    }
-
-    // §18.5 control 3 — the CUSTOMER'S BACKEND signs {sub,name,email,iat,exp} with a per-bot shared
-    // secret. Anything the loader could have written is display data at best (docs/04 §8.20), so a
-    // failure here is a rejection, not a silent downgrade to anonymous.
-    private function verifyUserToken(Bot $bot, string $token): array
-    {
-        [$h, $p, $sig] = array_pad(explode('.', $token, 3), 3, null);
-        abort_if($sig === null, 404);
-        // The algorithm is pinned from OUR config, never read from the token — trusting the header's
-        // `alg` is the alg-confusion class ("alg":"none", HS/RS swap).
-        $header = json_decode($this->b64d($h), true) ?: [];
-        abort_unless(($header['typ'] ?? null) === 'JWT', 404);
-        // `kid` selects a secret VERSION, so the customer rotates without a window of downtime.
-        $sharedSecret = $bot->userTokenSecret($header['kid'] ?? null);
-        abort_if($sharedSecret === null, 404);
-        // hash_equals, not ===: byte-at-a-time comparison of an HMAC is a forgery oracle.
-        $expected = hash_hmac('sha256', "{$h}.{$p}", $sharedSecret, binary: true);
-        abort_unless(hash_equals($expected, $this->b64d($sig)), 404);
-        $c = json_decode($this->b64d($p), true, flags: JSON_THROW_ON_ERROR); $now = time();
-        abort_unless(isset($c['sub'], $c['iat'], $c['exp'])
-            && $c['iat'] <= $now + self::SKEW && $c['exp'] > $now - self::SKEW, 404);
-        // Display identity and the customer's own scoping key — it never selects our organization, our
-        // bot, or any permission; scope comes from the bot, not the visitor.
-        return ['sub' => (string) $c['sub'], 'name' => $c['name'] ?? null, 'email' => $c['email'] ?? null];
-    }
-
-    // The session id is a one-way function of the token: derivable from the bearer, useless alone.
-    private function key(string $o, string $b, string $s): string { return "sess:{$o}:{$b}:".substr(hash('sha256', $s), 0, 32); }
-    private function b64d(string $s): string { return base64_decode(strtr($s, '-_', '+/'), true) ?: ''; }
-}
-```
+**`WidgetSessionService` lives in full in [`references/widget-session-service.md`](references/widget-session-service.md)**: `mint()` (404 on every rejection, `Origin` from the header only, the stored hash rather than the token), `resolve()` (the ULID id check, the `hash_equals` digest and organization checks, and why the embedder origin is proven at mint but re-validated against the live allow-list afterwards), and `verifyUserToken()` (pinned algorithm, `kid` selection, `hash_equals` on the HMAC). Read it before changing a rejection code. It also carries **§ *Refresh*** — the two renewal tiers (sliding TTL inside `resolve()`, then a loader-driven re-mint over a `session-expiring` → `session` message pair that is deliberately *not* a second `init`), why the frame can never refresh itself, and how a send queued during a refresh survives it.
 
 **Not defined here.** Policies, roles, the permission catalog, `OrgScopedPolicy` → `laravel-rbac-policies`. CSP, `frame-ancestors`, iframe `sandbox`, `postMessage`, CHIPS storage, and full-origin matching rules → `kb-security-baseline` / `widget-sdk-engineer`. Statuses and retry semantics → `kb-error-taxonomy`. App shape, middleware ordering, the SSE relay → `laravel-control-plane`. The HMAC on the Laravel↔FastAPI seam is a *service* credential and belongs to `kb-internal-api-contracts`.
 
@@ -183,7 +83,7 @@ final class WidgetSessionService
 - **`$user->createToken('mobile')` mints a god token and nothing fails.** The abilities argument defaults to `['*']`. Route every mint through one factory that requires an explicit list, and assert in a test that no `personal_access_tokens` row has `abilities = ["*"]`.
 - **Every device is logged out at once, hours after a deploy nobody connects it to.** `Guard::isValidAccessToken()` evaluates `created_at > now()->subMinutes(config('sanctum.expiration'))` **at request time**, so lowering `expiration` retroactively expires tokens already issued. Keep `'expiration' => null`, set per-token `expires_at` via `createToken($name, $abilities, $expiresAt)`, and schedule `sanctum:prune-expired --hours=24`.
 - **`personal_access_tokens` becomes the hottest write table in the database.** Sanctum's guard `save()`s `last_used_at` on *every* token-authenticated request — one UPDATE per stream, per poll, per prefetch. Set `'last_used_at' => false` in `config/sanctum.php` (undocumented; read as `config('sanctum.last_used_at', true)` by `SanctumServiceProvider::createGuard()`) and derive last use from `usage_events`.
-- **The widget iframe arrives carrying an admin session cookie — and a subdomain takeover becomes a CSRF platform.** Both come from wildcard domain scoping. `'domain' => '.ourdomain.example'` (the Sanctum SPA guide's advice) covers *every* subdomain including `widget.ourdomain.example`, so the widget document holds a real admin credential on customer pages and CHIPS cannot help, because the cookie is not the widget's. Separately, `fromFrontend()` strips the scheme and `Str::is`-matches only the host, so `*.ourdomain.example` in `SANCTUM_STATEFUL_DOMAINS` matches a dangling DNS record *and* matches over plain `http://`. Serve the widget from a **separate registrable domain**, scope the session cookie to the admin and API hosts, and list exact stateful hosts with ports.
+- **The widget iframe arrives carrying an admin session cookie — and a subdomain takeover becomes a CSRF platform.** Both come from wildcard domain scoping. `'domain' => '.<domain>'` (the Sanctum SPA guide's advice) covers *every* subdomain of the parent, so the moment the widget is served as a `widget.<domain>` sibling of `app.<domain>` instead of from `<widget-domain>`, the widget document holds a real admin credential inside an iframe on a hostile customer page — and CHIPS cannot help, because the cookie is not the widget's. Separately, `fromFrontend()` strips the scheme and `Str::is`-matches only the host, so `*.<domain>` in `SANCTUM_STATEFUL_DOMAINS` matches a dangling DNS record *and* matches over plain `http://`. Serve the widget from `<widget-domain>`, a **separate registrable domain** with its own eTLD+1 (`traefik-routing`), scope the session cookie to the admin and API hosts, and list exact stateful hosts with ports.
 - **The widget's preflight fails with an opaque browser CORS error and the server log is empty.** `config/cors.php` is unpublished in Laravel 11+ and its `paths` default to `['api/*', 'sanctum/csrf-cookie']`; an SDK route mounted outside `api/` never gets CORS headers, so the browser rejects the OPTIONS before any controller runs. Publish it, add the SDK prefix, keep `Vary: Origin` (`kb-security-baseline`).
 - **An ex-employee's mobile app keeps answering, and audit rows show their user id inside an org they left.** `createToken()` wrote a row; nothing ever re-reads `organization_users`. The callback above plus deleting that org's tokens on revocation is the fix — and a token with a null `organization_id` must fail closed.
 - **One five-minute network blip logs out every mobile user permanently.** Sanctum has **no refresh tokens**; when the access token expires the user re-enters a password. Price the expiry against that, keep the token in Expo SecureStore (Keychain/Keystore) and never AsyncStorage, which is plaintext on disk. SecureStore is not a defence against a rooted device or a full device backup — that residual is priced by the 30-day expiry and the revocable device list, not by the storage API.
