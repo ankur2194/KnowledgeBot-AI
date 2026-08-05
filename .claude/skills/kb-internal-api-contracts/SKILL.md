@@ -13,6 +13,7 @@ Laravel control plane (`services/core-api`) ↔ FastAPI AI data plane (`services
 - **No client ever reaches FastAPI.** Next.js, the Preact widget, and the React Native app speak only to Laravel over HTTPS (docs/06 §11.1). That single rule is what buys centralized authentication, centralized authorization, one rate-limit surface, provider credentials that never leave the server, a hidden internal topology, and versionable public APIs. `ai-api` joins `application` and `data` only — never `edge`, never a Traefik router label, never a host `ports:` mapping.
 - **Every internal request carries the full metadata header set below.** A request without `X-KB-Org-Id` is rejected `400` at the FastAPI dependency, never defaulted and never inferred from the body — FastAPI cannot build a tenant-safe Qdrant filter without it (`kb-tenancy-isolation`).
 - **Contracts are versioned from day one.** `/internal/v1/...`, mirrored by `X-KB-Contract-Version`. A shipped shape is never silently changed; add a field or add `/internal/v2`. Public APIs are versioned independently (docs/12 §17) — the two version numbers move at different rates and must not be conflated.
+- **The provider credential crosses this wire as a top-level `provider_credential` field, never inside the configuration snapshot.** Decision 1 in docs/22 is resolved: Laravel decrypts per request and attaches the key beside `config`, not within it, typed `SecretStr` on the FastAPI side (`pydantic-contracts`, `laravel-control-plane`). It is excluded from the snapshot hash and from every idempotency fingerprint, and it is on the never-forward list below — never an SSE frame, an error envelope, a span attribute, a log field, or an audit detail (CLAUDE.md non-negotiable 9). The trust-boundary argument that permits it, and the condition that reopens it, belong to `kb-security-baseline`.
 - **Every mutation carries an idempotency key whose fingerprint includes the configuration version.** A key derived from content alone silently swallows a legitimate reprocess (docs/08 §13.3).
 - **Error classes and retry eligibility cross the wire verbatim.** Laravel relays the class FastAPI assigned; it never re-derives one from an HTTP status. `kb-error-taxonomy` defines the classes and the retry policy.
 - **HTTP contracts are OpenAPI documents in `packages/contracts/`, and both sides are covered by contract tests** (docs/17 §22.2). The FastAPI-generated schema is exported into that package; Laravel's client is validated against it in CI.
@@ -47,6 +48,12 @@ X-KB-Signature = key_id + ":" + hex(hmac_sha256(secret[key_id], canonical))
 - Request bodies are always fully buffered and small — only *responses* stream — so body signing never conflicts with SSE. HMAC gives integrity and authenticity, not confidentiality; that comes from the network being private. If the seam ever spans hosts, add TLS underneath rather than changing the signing scheme.
 - Two key ids are live at once during rotation; verifiers accept both, signers use the newer. `key_id` in the signature is what makes that possible.
 
+**The prefix is `KB1` and it stays `KB1`.** Spec defect 13 rewrote the canonical string to cover every `X-KB-*` header before any signer had ever been deployed, so `KB1` has never meant anything on the wire; that rewrite is **absorbed into `v1`** (docs/22 decision 8, resolved). A wire version describes *deployment* history, not authoring history — bumping to `KB2` for a shape nothing ever spoke turns the prefix into a changelog of drafts, which is the opposite of what it is for. From the first deployed release, the rule takes effect:
+
+- Any change to the canonical string, to the covered header set, or to the hash function bumps the prefix.
+- During a bump the **verifier accepts both prefixes for one release window** while the signer emits only the new one. Signer and verifier deploy at different times; that window is the only thing that keeps a rolling deploy from 401-ing every internal call.
+- The accepted-prefix set is **configuration, not a constant**, and dropping the old prefix is a deliberate second deploy — never part of the first.
+
 ### Required internal request headers
 
 | Header | When | Value and rule |
@@ -65,6 +72,8 @@ X-KB-Signature = key_id + ":" + hex(hmac_sha256(secret[key_id], canonical))
 | `X-KB-Timestamp`, `X-KB-Signature` | always | Above. `X-KB-Signature` is redacted from every log line. |
 
 **Configuration snapshot vs version.** Laravel resolves bot settings, provider connection, model, pipeline parameters and pinned model versions, and sends the **whole snapshot in the request body**; the header carries only its version. FastAPI never queries Laravel's tables and never caches config across requests — the snapshot is the input, so a replayed job reproduces byte-identically and the playground can run a temporary override without mutating anything (docs/04 §8.24).
+
+**The credential rides beside the snapshot, not in it.** The internal chat body is `{…, "config": {…}, "provider_credential": "sk-…"}` — a sibling of `config`, and deliberately not a member of it. It is excluded from whatever is hashed to produce `configuration_version` and from every idempotency fingerprint, because two requests that differ only in a rotated key are the *same configuration*: hash it in and every key rotation invalidates every cached answer and stops every replayed job reproducing byte-identically. Sending it at all is safe only because `sha256(raw_body)` is inside the canonical string (integrity in transit) and the channel is the private `application` network with no public route — `kb-security-baseline` owns that argument, the two options it rejected, and the deployment change that reopens it.
 
 ### Idempotency keys
 
@@ -96,17 +105,7 @@ Async jobs call back into `POST /internal/v1/callbacks/{group}` on Laravel — *
 
 ### The public chat request body
 
-The seam has two halves and both are pinned here. This one is the **public** request every client sends to Laravel — it is not an internal endpoint, but it is the input side of the same contract, and leaving it unowned is how two clients ship two different field names against one FormRequest.
-
-```json
-POST /api/v1/chat/{conversation}/messages   ·   Accept: text/event-stream
-{"client_message_id": "01J…", "content": "Do you refund after 30 days?"}
-```
-
-- **Exactly two keys, and `extra` is rejected.** The message text is `content` — the same vocabulary as `messages.Content` (docs/11 §16) and as the provider adapter's `Message.content` (`kb-provider-adapter-contract`), so one name survives browser → Laravel → FastAPI → provider → `messages` row. `text` is *not* an accepted alias: it is already the `token` event's field, and one word meaning "the whole question" on the request and "one delta" on the response is how a client ends up sending a token frame's shape.
-- `client_message_id` is a **client-minted ULID, stable across re-renders and retries** of the same composed message. It is the fingerprint half of `chat.message`'s idempotency key, so a double-submit collapses instead of billing two generations.
-- A client that posts `text` gets `422` with `errors: {"content": ["The content field is required."]}` on **every** send — a total outage for that one client, invisible to the others and to any test that exercises only the surface that happens to be right.
-- Laravel derives everything else — organization, bot, actor — from the credential (`laravel-sanctum-auth`). A body field naming an org, a bot, or a model is privilege escalation, not configuration.
+The seam has two halves and both are pinned here. The **public** body is exactly `{client_message_id, content}` with `extra` rejected — why `content` and not `text`, why `client_message_id` is client-minted, and what the losing client sees → **[references/public-chat-request-body.md](references/public-chat-request-body.md)**. It is not an internal endpoint, but it is the input side of the same contract, and leaving it unowned is how two clients ship two different field names against one FormRequest.
 
 ### Client-facing SSE event schema
 
@@ -148,6 +147,8 @@ event: error              data: {"error_class":"provider_rate_limit","message":"
 
 **Internal-only events Laravel consumes and does not forward:** `provider.usage` (token counts and cost → `usage` table; it carries the provider-native `input_tokens` / `output_tokens` / `cached_tokens` triple, which is deliberately **not** the `prompt_tokens` / `completion_tokens` pair on the client-facing `message.complete` — cache hit ratios are cost data and stop at Laravel, so the two are separate models on the FastAPI side, `pydantic-contracts`), `provider.fallback` (a fallback model ran → analytics), `retrieval.trace` (candidate and reranker scores → returned only to the playground when `X-KB-Actor-Type=user` and the actor holds the diagnostics permission), `heartbeat`. Leaking any of these to a widget exposes internal topology and cost data.
 
+**The never-forward list is fields, not just events.** `provider_credential` appears in exactly one place — the internal request body — and never in an SSE frame, an error envelope, an OpenAPI example, a span attribute, a log field, a job payload, or an audit detail, in either service. `X-KB-Signature` is likewise redacted from every log line. Both are excluded at the point of construction rather than filtered on the way out: a redaction filter that has to *recognise* a value has already had the value in a string, one `str()` away from a log.
+
 ### Worked example — one streamed answer, including cancellation
 
 The seven-step trace from widget POST to finalized usage row, and Laravel's relay loop with the cancellation path in full → **[references/streamed-answer-walkthrough.md](references/streamed-answer-walkthrough.md)**. Cancellation is a first-class outcome there, not an error: `finish_reason: "cancelled"`, usage finalized from the running tally, `user_cancellation` recorded (docs/14 §19.1).
@@ -164,6 +165,7 @@ The seven-step trace from widget POST to finalized usage row, and Laravel's rela
 - **Out-of-order progress callbacks rewind a job.** A Celery retry re-emits stage 6 after stage 9 has landed. Without the `sequence` guard the admin progress bar runs backwards and, far worse, a `ready` source can be flipped back to `processing`, taking an already-published version out of retrieval. Guard on `(job_id, sequence)` in the `UPDATE`, and treat callbacks as idempotent.
 - **`Http::fake()` makes SSE bugs invisible.** A faked response body is a string, so the relay loop drains it instantly and every buffering, heartbeat, ordering, and disconnect bug passes. The Laravel↔FastAPI contract test must run against a real SSE fixture server that emits events with delays and can hang up mid-stream; the FastAPI side asserts its emitted event names and payloads against the same OpenAPI schema Laravel's client is generated from (docs/17 §22.2).
 - **One client can never send a message and the other three are fine.** The public request body was never pinned, so each client picked its own name for the message text — `text` in one, `content` in another — and Laravel's FormRequest can only accept one. The loser 422s on *every* send while the shared suite stays green, because the fixtures were written per client from the same source of truth the client was. Pin the body here, generate every client's type from it, and make the contract test post the canonical body against the real FormRequest rather than against a fixture.
+- **A plaintext provider API key is sitting in a `retrieval_traces` row, in a column nobody classified as sensitive.** The credential was modelled as a member of the configuration snapshot instead of a sibling of it, and two things follow, both silent. It is hashed into `configuration_version`, so it becomes part of every cache key and of replay identity — rotate a key and every cached answer misses and every replayed job stops reproducing. And the snapshot is *designed* to be persisted and replayed, so every path that stores one — the playground request record, the retrieval trace, the queued job body — stores the key with it, into columns no redaction fixture covers and no operator greps. Top-level `provider_credential`, `SecretStr`, excluded from the hash.
 - **A `429` is not one thing.** Tenant quota, Laravel rate limit, and provider rate limit are all plausibly `429`, and their retry policies differ (never / after a window / after `Retry-After` with backoff). FastAPI must put the class in the body and Laravel must relay it unchanged — see `kb-error-taxonomy`.
 
 ## Official docs
@@ -180,7 +182,8 @@ The seven-step trace from widget POST to finalized usage row, and Laravel's rela
 - [ ] Endpoint lives under `/internal/v1/`, `X-KB-Contract-Version` is validated against the path, and the OpenAPI document in `packages/contracts/` is regenerated and committed with the Laravel client generated or validated from it.
 - [ ] The public chat request body is `{client_message_id, content}` and nothing else: every client's type is generated from `packages/contracts`, `rg -n "client_message_id" apps/` shows no sibling key other than `content`, and a test posts each client's exact body against the real FormRequest.
 - [ ] Contract tests exist on **both** sides — FastAPI asserts what it emits, Laravel asserts what it parses (docs/17 §22.2). All required headers are asserted present by a FastAPI dependency; missing `X-KB-Org-Id` returns `400` (test proves it).
-- [ ] Signature verified with a constant-time compare, timestamp skew ≤60s, `X-KB-Request-Id` replay-blocked in Valkey; a replayed request test returns `401`.
+- [ ] Signature verified with a constant-time compare, timestamp skew ≤60s, `X-KB-Request-Id` replay-blocked in Valkey; a replayed request test returns `401`. The prefix is `KB1`, and the verifier reads its accepted-prefix set from configuration — a test proves it accepts a two-prefix set while the signer emits one.
+- [ ] `provider_credential` is a top-level body field, excluded from the snapshot hash and from every idempotency fingerprint: a test rotates only the key and asserts `X-KB-Config-Version` and `X-KB-Idempotency-Key` are both unchanged, and a second test greps a full SSE capture, the error envelope, the exported spans, the log output, and any persisted snapshot for the fixture key.
 - [ ] Mutations require `X-KB-Idempotency-Key` whose fingerprint includes every configuration version listed for the operation; tests cover same-key/same-body replay, same-key/different-body `422`, and concurrent in-flight `409`.
 - [ ] Async jobs return `202` with an id and report via signed callbacks; no polling loop added; callbacks guarded on `(job_id, sequence)`.
 - [ ] For streaming changes: an integration test asserts inter-event timing (not just the final body), heartbeat presence, exactly one terminal event, and correct finalization after a mid-stream client hangup.

@@ -24,7 +24,7 @@ Cite sections as `docs/<file>.md §<n>`.
 | [16-evaluation.md](16-evaluation.md) | §21 | Evaluation datasets, metrics, experiments, regression gate |
 | [17-testing-performance.md](17-testing-performance.md) | §22–23 | Unit/contract/integration/e2e/security/perf tests, latency targets |
 | [18-deployment-backup-cicd.md](18-deployment-backup-cicd.md) | §24–26 | Compose services, networks, profiles, sizing, backup/DR, CI/CD pipeline |
-| [19-repo-structure-adrs.md](19-repo-structure-adrs.md) | §27–28 | Monorepo layout and ADR-001…010 |
+| [19-repo-structure-adrs.md](19-repo-structure-adrs.md) | §27–28 | Monorepo layout and ADR-001…018 |
 | [20-roadmap-mvp-demo.md](20-roadmap-mvp-demo.md) | §29–33 | MVP set, post-MVP, phases 0–7, acceptance criteria, demo script |
 | [21-risks-licensing-glossary.md](21-risks-licensing-glossary.md) | §34–40 | Risk table, licensing, docs deliverables, glossary, official reference links |
 
@@ -33,7 +33,7 @@ building the skill library and record what reading the spec closely revealed:
 
 | File | Holds |
 |---|---|
-| [22-spec-findings-and-decisions.md](22-spec-findings-and-decisions.md) | Spec defects found during research, open decisions, ADR candidates, and external constraints |
+| [22-spec-findings-and-decisions.md](22-spec-findings-and-decisions.md) | Spec defects found during research, the eight resolved decisions behind ADR-011…018 with their rejected alternatives, and external constraints |
 | [23-unverified-claims.md](23-unverified-claims.md) | Every `UNVERIFIED` marker in the skill library, triaged by how it closes |
 
 ## Where the invariants live

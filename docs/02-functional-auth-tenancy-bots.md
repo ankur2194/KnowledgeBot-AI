@@ -197,7 +197,7 @@ Fallback should be allowed for:
 - Connection timeout.
 - Temporary server error.
 - Rate-limit response when configured.
-- Model temporarily unavailable.
+- Model temporarily unavailable — **meaning provider-side capacity** (overload, a model still loading, an upstream 502), identified by the vendor's own error code. **ADR-014:** an unrecognised model id (`model_not_found`, a retired slug) is *not* this. It came from the bot's configuration snapshot, so it is a misconfiguration the tenant must see, and it stays `provider_permanent_request` — non-retryable and non-fallback-eligible.
 
 Fallback should not automatically occur for:
 

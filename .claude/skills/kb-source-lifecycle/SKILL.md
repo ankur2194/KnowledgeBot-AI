@@ -113,41 +113,47 @@ def publish_version(v: SourceVersion, chunks: list[Chunk]) -> None:
         raise VerificationFailed(v.id, expected=len(chunks), found=indexed)
         # -> Failed. The prior version was never touched and still serves.
 
-    # 3+4. MARK READY and SWITCH THE POINTER in ONE transaction. Readers move at
-    #      commit, so no query ever observes two active versions or none.
-    with db.begin():
-        prior_id = db.scalar(select(SourceItem.current_version_id)
-                             .where(SourceItem.id == v.source_item_id)
-                             .with_for_update())
-        db.execute(update(SourceVersion).where(SourceVersion.id == v.id)
-                   .values(status=v.terminal_ready_status(), activated_at=func.now()))
-        db.execute(update(SourceItem).where(SourceItem.id == v.source_item_id)
-                   .values(current_version_id=v.id))
-        if prior_id:                                    # 5. RETIRE the old row
-            db.execute(update(SourceVersion).where(SourceVersion.id == prior_id)
-                       .values(retired_at=func.now()))
+    # 3. REPORT READINESS. The data plane's last act. ADR-012: FastAPI writes only
+    #    chunks, document_elements, retrieval_traces, evaluation_results — never
+    #    source_versions, never source_items, and it never performs an activation.
+    report_ingestion_status(v.id, state="indexed_verified", chunk_count=indexed)
+```
 
-    # 6. INVALIDATE caches keyed to the retired version (§13.2 stage 18), then delete its
-    #    vectors only after a grace period — in-flight answers still hold its ids.
-    invalidate_answer_cache(v.source_item_id)
-    if prior_id:
-        delete_retired_vectors.apply_async((prior_id,), countdown=RETIREMENT_GRACE_SECONDS)
+**Steps 4–6 are Laravel's, inside one transaction, on that callback** (ADR-012). Readers move at
+commit, so no query observes two active versions or none:
+
+```php
+DB::transaction(function () use ($v) {
+    $priorId = SourceItem::whereKey($v->source_item_id)   // 4. MARK READY + SWITCH POINTER
+        ->lockForUpdate()->value('current_version_id');
+    SourceVersion::whereKey($v->id)->update([
+        'status' => $v->terminalReadyStatus(), 'activated_at' => now(),
+    ]);
+    SourceItem::whereKey($v->source_item_id)->update(['current_version_id' => $v->id]);
+    if ($priorId) {                                       // 5. RETIRE the old row
+        SourceVersion::whereKey($priorId)->update(['retired_at' => now()]);
+    }
+});
+// 6. INVALIDATE caches keyed to the retired version (§13.2 stage 18), then delete its
+//    vectors only after a grace period — in-flight answers still hold its ids.
+InvalidateAnswerCache::dispatch($v->source_item_id);
+if ($priorId) DeleteRetiredVectors::dispatch($priorId)->delay(RETIREMENT_GRACE_SECONDS);
 ```
 
 Do not reorder. Verify before ready, ready before switch, switch before retire, retire before delete.
 
+**Why the split is not bureaucracy.** The verification in step 2 is a data-plane fact — only the
+worker that wrote the points can count them — while the pointer flip is the single act that decides
+what every tenant's next query sees. Putting both in the worker gives two services write access to the
+one column the partial unique index guards, and the failure is not a race that loses a write: it is an
+`IntegrityError` raised inside a Celery task, which retries, which raises again. The ingest reports
+success, the bot keeps answering from the previous version, and the queue quietly burns a worker
+forever. Laravel is where activation belongs because Laravel is where the audit row, the policy check,
+and the retention clock already are.
+
 ### Restartable failure recovery
 
-A stage is complete only when its output is committed to PostgreSQL or object storage. On restart, resume at the first stage whose output is missing — never mid-stage, never from the top.
-
-| Safe boundary | Committed output | A retry after it must not |
-|---|---|---|
-| Acquisition + hashing | object in SeaweedFS, `content_hash` | refetch the URL or re-upload |
-| Normalization | `document_elements` | reparse or re-OCR |
-| Chunking | `chunks` rows | rechunk |
-| Indexing | points under the new version id | re-embed (§13.7) |
-
-Partial OCR success is a configurable outcome, not a failure (§13.7). A permanent unsupported-file error goes straight to `Failed` with no retry — retrying it forever burns a worker slot per source.
+A stage is complete only when its output is committed to PostgreSQL or object storage. On restart, resume at the first stage whose output is missing — never mid-stage, never from the top. The four safe boundaries, what each commits, and what a retry after it must **not** redo → **[references/restartable-recovery.md](references/restartable-recovery.md)**.
 
 ### Not this skill
 

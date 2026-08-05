@@ -5,7 +5,7 @@ description: The 20-stage grounded-answer contract for KnowledgeBot AI — rewri
 
 # RAG Query Contract
 
-Stack: FastAPI + Python in `services/ai-service/`, Qdrant (dense + sparse), BGE-M3 embeddings, `bge-reranker-v2-m3` cross-encoder, and an explicit stage runner we own. **No Haystack** — its Qdrant retrievers cannot carry our tenant filter and its fusion discards the per-branch ranks stage 9 requires; the evidence is in `haystack-pipelines`.
+Stack: FastAPI + Python in `services/ai-service/`, Qdrant (dense + sparse), BGE-M3 embeddings, `bge-reranker-v2-m3` cross-encoder, and an explicit stage runner we own. **No Haystack (ADR-016 — not adopted)**: its Qdrant retrievers cannot carry our tenant filter and its fusion discards the per-branch ranks stage 9 requires. The four verified findings are in `haystack-pipelines`; reopening needs an ADR superseding 016, never an import.
 **Authoritative spec:** docs/07-rag-query-pipeline.md §12, docs/04-functional-channels-chat.md §8.24, docs/16-evaluation.md §21, docs/15-observability.md §20.2, docs/11-data-model.md §16.6
 
 ## Non-negotiables

@@ -141,7 +141,8 @@ class NimAdapter:
 |---|---|---|
 | 401/403 on `Authorization` | `provider_auth` | Deterministic; a retry hides a revoked key |
 | 422 validation failed | `provider_permanent_request` | Our params broke a per-model range — our bug |
-| 404 on a previously valid model id | `provider_temporary` | Catalog churn is capacity/lifecycle, not config |
+| 404 on a previously valid model id | `provider_permanent_request` | **ADR-014.** Catalog churn *looks* like lifecycle, but the id came from the bot's config snapshot, so falling back would silently answer from a different model on a `Ready` bot. Raise the stale-model warning on the connection instead — which is what this skill's own gotcha and DoD already prescribe |
+| 503 while the model loads or is scaled to zero | `provider_temporary` | Capacity. Fallback-eligible: this is the signal §8.7 actually means |
 | 429 | `provider_rate_limit` | Leave `Diagnostics.rate_limit` **empty** — no header schema is published |
 | 500 "invocation ended with an error" | `provider_temporary` | Non-deterministic |
 | **202 + `requestId`** | `provider_temporary` | Queued, not failed. Fallback-eligible: nothing was generated |

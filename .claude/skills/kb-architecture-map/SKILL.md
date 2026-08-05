@@ -12,7 +12,7 @@ Laravel (control plane) · FastAPI (AI data plane) · PostgreSQL · Qdrant · Va
 
 - **Browsers, the widget, and mobile talk to Laravel. Only Laravel talks to FastAPI.** (§11.1) Authentication, org resolution, bot authorization, quota, and rate limiting exist exactly once, in Laravel. The moment a second caller can reach `ai-api`, every one of those checks has a bypass, and provider credentials plus internal topology are on the public side of the boundary. The internal AI API has no Traefik router and no published host port — not in dev, not behind a "temporary" override (§17.5).
 - **PostgreSQL is truth; Qdrant is a derived index that must survive being dropped.** (§10.3, ADR-010, §15.5) Nothing may live in a Qdrant payload that cannot be recomputed from `chunks`, `source_versions`, `bots`, and the normalized artifacts in SeaweedFS. If a rebuild changes what the bot answers, Qdrant had become authoritative and the ADR is already broken.
-- **Laravel decides, FastAPI executes.** FastAPI never re-derives *who is asking* or *whether they may*. It receives an authorized, resolved instruction — org, bot, source scope, config snapshot — and performs work. It does not open a session, consult `organization_users`, or fall back to "look up the bot and check its status."
+- **Laravel decides, FastAPI executes.** FastAPI never re-derives *who is asking* or *whether they may*. It receives an authorized, resolved instruction — org, bot, source scope, config snapshot — and performs work. It does not open a session, consult `organization_users`, or fall back to "look up the bot and check its status." It writes four derived tables and no others, and it never performs an activation — see the allow-list under *Who owns what*.
 - **Valkey and SeaweedFS hold nothing authoritative.** Valkey is queues, locks, rate-limit counters, idempotency keys, and short-lived session/cache data (§9.8) — a `FLUSHALL` must cost throughput, never data. SeaweedFS holds originals and derived artifacts behind an S3-compatible abstraction so it is replaceable without touching business logic (§9.9).
 - **One responsibility, one top-level area.** A change lands in exactly one of `apps/`, `services/`, `packages/`, `infrastructure/`. If it must land in two, the shared part is a versioned contract in `packages/contracts` — not a copied type, not a duplicated constant.
 
@@ -45,19 +45,23 @@ Laravel (control plane) · FastAPI (AI data plane) · PostgreSQL · Qdrant · Va
 | Users, orgs, roles, invitations | Laravel | PostgreSQL | §9.4 |
 | Bots, appearance, allowed origins, retrieval config | Laravel | PostgreSQL | FastAPI receives a snapshot, never edits |
 | Provider connections + **encrypted credentials** | Laravel | PostgreSQL | Never in a response, log, or audit detail (§18.2) |
-| Knowledge-source metadata, versions, lifecycle state | Laravel | PostgreSQL | The 15-state machine is control-plane state (§8.9 enumerates 15; `kb-source-lifecycle` owns it) |
+| Knowledge-source metadata, versions, lifecycle state | Laravel | PostgreSQL | The 15-state machine is control-plane state (§8.9 enumerates 15; `kb-source-lifecycle` owns it), **including the `source_items.current_version_id` flip** |
 | Conversations, messages, usage, audit, quotas | Laravel | PostgreSQL | Written on the Laravel side of the stream |
 | Public + admin APIs, session issuance, rate limits | Laravel | — | §17.1–17.4 |
-| Parsing, OCR, chunking, embedding, sparse vectors | FastAPI | → PG `chunks` + SeaweedFS | §10.3 |
+| Parsing, OCR, chunking, embedding, sparse vectors | FastAPI | → PG `chunks`, `document_elements` + SeaweedFS | §10.3, and the allow-list below |
 | Crawling and page fetch | FastAPI (`ai-worker-crawl`) | → PG + SeaweedFS | Egress-restricted (§18.8) |
-| Retrieval, fusion, rerank, context + prompt build | FastAPI | reads Qdrant + PG | §10.3 |
+| Retrieval, fusion, rerank, context + prompt build | FastAPI | reads Qdrant + PG → `retrieval_traces` | §10.3 |
 | Provider calls and stream normalization | FastAPI | — | Laravel forwards approved events (§11.3) |
 | Vector upsert, index verification, index deletion | FastAPI | Qdrant | §10.3, §15.5 |
 | Evaluation execution | FastAPI | → PG `evaluation_results` | §10.3 |
 
 Rule of thumb for a new capability: **if it answers "may this happen?" it is Laravel; if it answers "what is the content?" it is FastAPI.**
 
-<!-- UNVERIFIED --> The spec never says whether FastAPI writes `chunks`/`document_elements` to PostgreSQL directly or reports them back through the ingestion status callback (§17.5). Until an ADR settles it, treat direct writes by FastAPI as limited to the derived tables above — never to `bots`, `knowledge_sources`, `conversations`, or anything a Laravel policy guards.
+**FastAPI's PostgreSQL write allow-list is exactly four tables** — `chunks`, `document_elements`, `retrieval_traces`, `evaluation_results` — **and nothing else.** Every other table is Laravel's, read and write. This narrows the ownership rule rather than breaking it: **Laravel owns every table the public API reads or writes, and owns all migrations.** The four are derived, rebuildable artifacts of the data plane — the relational half of the same index whose vector half already lives in Qdrant, which FastAPI has always written. Their schema still lives in Laravel migrations; FastAPI writes rows into a schema it does not define.
+
+- **Not a callback, and record why.** Per chunk it is thousands of HTTP round trips per document. In bulk it ships every chunk's full text through a PHP request body — precisely the payload PHP-FPM memory limits and the internal wire are worst at — to be written verbatim into a table Laravel never reads. And chunk text is *derived data*: reconstructible from the original object in SeaweedFS plus `parser_cfg_version`, which is exactly what ADR-010's rebuild proof already depends on.
+- **Why it is safe against atomic publication — this is the argument that settles it.** FastAPI writes those rows against the **new, not-yet-active `source_version_id`** while the previous version continues to serve. A direct write cannot corrupt live state, because nothing reads those rows until Laravel flips the pointer.
+- **And that flip is Laravel's.** `source_items.current_version_id` is a control-plane column and FastAPI does **not** touch it: FastAPI writes rows, then reports terminal state — counts, checksum, the version's readiness — through §17.5's ingestion status callback, and **Laravel** performs the activation (`kb-source-lifecycle`). Getting this backwards puts two writers on the one column that decides which version is live, and `postgresql-patterns`' partial unique index ("at most one active version per item") converts a lifecycle bug into a constraint violation inside a Celery task, retried forever.
 
 ### Monorepo layout (§27)
 
@@ -93,7 +97,7 @@ services:
                                           # variation. Stream paths route here (traefik-routing).
 
   web:                                    # Next.js is a client of Laravel, not a peer of ai-api
-    networks: [edge]                      # deliberately NOT on `application` — see Gotcha 1
+    networks: [edge]                      # NOT `application` — ratified, not a proposal (Gotcha 1)
     labels: ["traefik.enable=true"]
 
   ai-api:
@@ -116,14 +120,9 @@ services:
                                            # + egress allow-list denying private ranges.
 ```
 
-§24.3 sketches `web` as a member of `application`. We narrow that deliberately: with `web` on that network, a Next.js route handler can reach `ai-api` and the "clients never call FastAPI" invariant becomes a convention instead of a fact.
+**`web` is on `edge` only — ratified.** §24.3 sketches it as a member of `application` too; that sketch is not followed, and the deviation is settled doctrine rather than a proposal. `apps/web` has no Server Actions and produces no organization-scoped byte on the server, so the Next.js server has nothing it could legitimately ask `ai-api` for. Leaving it on `application` would make "clients never reach FastAPI" a convention enforced by nobody — one route handler and it is false, with no network to stop it and nothing in review reliably catching a `fetch('http://ai-api:8000/…')` in a file full of ordinary fetches. The set-equality check in the Definition of done is the enforcement.
 
-### Keeping Qdrant genuinely derived — four mechanics, not aspirations; together they are what ADR-010 actually costs
-
-- **Application code never names a concrete collection** — always an alias. Alias updates in Qdrant are atomic (*"no concurrent requests will be affected during the switch"*), so build the new collection in the background and swap in one `update_aliases` call. Retrofitting the alias later is itself an outage.
-- **The payload is a projection, not a record.** Build it through one serializer derived from primary rows; ban ad-hoc `set_payload` outside it. If a field can't be produced from PostgreSQL, it can't enter the payload.
-- **Between rebuilds, sync through a transactional outbox, not dual writes.** No transaction spans PostgreSQL and Qdrant, so a dual write that half-fails is silent until a user searches. Writing the chunk row and its index event in one PG transaction turns a correctness problem into a lag problem you can alert on.
-- **Rebuild is a CI check, not a recovery script.** A seeded fixture rebuilt from PostgreSQL must reproduce the same point count, payload keys, and payload values. Snapshot restore is the RTO tool (§25.3 option 1); rebuild is the correctness proof (option 2). Only the second one is a test.
+### Keeping Qdrant genuinely derived — the alias rule, the payload-as-projection rule, the outbox, and rebuild-as-CI-check are in [`references/qdrant-derived-mechanics.md`](references/qdrant-derived-mechanics.md); together they are what ADR-010 costs, and Gotchas 5–7 are what each one prevents.
 
 ### Owned elsewhere — cite, do not restate
 
@@ -190,11 +189,12 @@ Tenant scoping of queries, filters, storage paths and cache keys → `kb-tenancy
 - [ ] The change lives in exactly one of `apps/`, `services/`, `packages/`, `infrastructure/`; anything shared is in `packages/contracts`.
 - [ ] `grep -rn "ai-api\|ai-service" apps/ infrastructure/docker/` shows no client, route handler, or dev proxy targeting the AI service.
 - [ ] `docker compose config` shows no `ports:` and no `traefik.enable=true` on `ai-api` or any `ai-worker-*`, in base or any override.
-- [ ] `docker compose config` shows the services on both `edge` and `application` to be exactly `{laravel-api, laravel-api-stream}` — that set, closed: a third service there fails the check, and so does a missing one. `web` is on `edge` only; `ai-worker-crawl` is off `data`; `valkey-core` is the one store also on `application`.
+- [ ] `docker compose config` shows the services on both `edge` and `application` to be exactly `{laravel-api, laravel-api-stream}` — that set, closed: a third service there fails the check, and so does a missing one. **`web` is on `edge` only** (ratified; §24.3's `application` membership is deliberately not followed); `ai-worker-crawl` is off `data`; `valkey-core` is the one store also on `application`.
 - [ ] All four networks exist — `edge`, `application`, `data`, `observability` — with `data` and `observability` `internal: true` and `application` not.
 - [ ] Every new Qdrant payload key maps to a named PostgreSQL column, and the rebuild job asserts it.
 - [ ] A rebuild-from-PostgreSQL of the touched sources reproduces the same point count, payload keys, and top-k for the evaluation dataset.
 - [ ] No code names a concrete Qdrant collection; payload indexes exist on the new collection *before* any alias swap.
 - [ ] Any new internal endpoint verifies the signed tenant claim itself — it does not infer authority from the caller's address.
 - [ ] New authorization decisions were added in Laravel, not in FastAPI.
+- [ ] No write in `services/ai-service` targets a PostgreSQL table outside `{chunks, document_elements, retrieval_traces, evaluation_results}`, no migration lives there, and nothing in the data plane assigns `current_version_id` — CI's allow-list gate (`github-actions-pipeline`) fails on the fifth table name, and activation happens in Laravel on the §17.5 callback.
 - [ ] Any invariant restated here is cited to its owning `kb-*` skill, not redefined.

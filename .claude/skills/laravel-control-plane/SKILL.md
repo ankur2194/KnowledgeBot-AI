@@ -16,7 +16,8 @@ Laravel **13.x** (released 17 Mar 2026; PHP 8.3–8.5; bug fixes to Q3 2027, sec
 - **Usage is finalized on every terminal path, including client abort.** A cancelled stream still billed tokens; `finish_reason: "cancelled"` with `usage_estimated` is a normal outcome, not an error (docs/14 §19.1). This is what forces `ignore_user_abort(true)` — see Gotcha 1.
 - **The error class FastAPI assigned crosses to the client verbatim.** Laravel never re-derives a class from an HTTP status, and never renders a provider message to an end user (`kb-error-taxonomy`).
 - **Every tenant-owned query, cache key, storage path, and queue payload carries the organization** (`kb-tenancy-isolation`). A global scope is the backstop; the explicit scope is the mechanism.
-- **A decrypted provider credential exists only inside the request that uses it** — resolved into the signed request body, never into a log line, an API Resource, an audit `details` payload, or an exception message (`kb-security-baseline`).
+- **A decrypted provider credential exists only inside the request that uses it**, and it goes into the signed body as the **top-level `provider_credential` field — never merged into the configuration snapshot** (docs/22 decision 1, resolved). Laravel is the only process that decrypts it; it never reaches a log line, an API Resource, an audit `details` payload, or an exception message (`kb-security-baseline`, `kb-internal-api-contracts`).
+- **Laravel 13's first-party AI APIs are out of bounds in `services/core-api`** — the AI SDK, `Str::toEmbeddings()`, and `DB::whereVectorSimilarTo()`. ADR-001/003/005 are **reaffirmed** against them (docs/22 decision 7, resolved), and the reason is **custody, not API quality**, so a good release note is not grounds to reopen it per-feature. The AI SDK would put provider credentials, spend accounting, and token-usage normalization inside the control plane and outside `kb-provider-adapter-contract`: a call made that way appears in no `provider_calls` row, no `usage_events` row, and no quota check. `Str::toEmbeddings()` is that same provider call wearing a string helper's clothes, with the identical accounting gap. `DB::whereVectorSimilarTo()` is the serious one — a **second retrieval path carrying none of the four mandatory Qdrant filters**, no rerank, and no evidence threshold; one such query in a controller is a cross-tenant read that reviews as one line of ORM (`kb-tenancy-isolation`). Revisit only if Qdrant is dropped in favour of pgvector as the vector store, and even then the AI SDK stays out: credential custody is a separate argument from where vectors live.
 
 ## How we use it
 
@@ -54,7 +55,16 @@ public function openChatStream(ConfigSnapshot $snap, ChatContext $ctx, int $dead
 {
     // Serialize ONCE and sign those exact bytes. Re-encoding JSON to hash it is not
     // byte-stable and produces intermittent 401s (kb-internal-api-contracts).
-    $body = json_encode($snap->toArray(), JSON_THROW_ON_ERROR);
+    //
+    // The credential is decrypted HERE, into a local that dies with this method, and attached
+    // as a TOP-LEVEL field beside `config` — never merged into the snapshot (docs/22 decision 1).
+    // Inside the snapshot it would be hashed into $snap->version, so every rotation would move
+    // configuration_version and invalidate every cached answer; and every path that persists a
+    // snapshot — playground record, retrieval trace, queued job body — would persist a plaintext
+    // key with it, into a column nobody redacts (kb-security-baseline).
+    $body = json_encode($snap->toArray() + [
+        'provider_credential' => $this->credentials->decryptFor($snap->connectionId),
+    ], JSON_THROW_ON_ERROR);
     $ts   = (string) time();
 
     // Build the X-KB-* set ONCE and derive both the signature and the request from it.
@@ -78,6 +88,9 @@ public function openChatStream(ConfigSnapshot $snap, ChatContext $ctx, int $dead
     // request forgeable: X-KB-Org-Id is the tenant scope for the entire data plane, so an
     // unsigned org header means a legitimately signed request can be replayed against
     // another organization by flipping one value (kb-internal-api-contracts).
+    // KB1 absorbed defect 13's header coverage before anything was deployed, so the prefix stays.
+    // It bumps only for a canonical-string change made after a release — and the verifier accepts
+    // both prefixes for one window while this signer emits one (kb-internal-api-contracts).
     $canonical = "KB1\nPOST\n/internal/v1/chat/stream\n{$ts}\n".hash('sha256', $body)."\n";
     $names = array_map('strtolower', array_keys($kb));    // lowercased name, trimmed value
     $lines = array_map(fn ($n, $v) => $n.':'.trim($v), $names, array_values($kb));
@@ -128,7 +141,7 @@ Sanctum tokens, sessions, widget session tokens → `laravel-sanctum-auth`. Poli
 - **A stream route sits behind session middleware and a second tab hangs.** Common advice says call `Session::save()` first because native PHP sessions hold an exclusive lock for the request. Laravel does not use native sessions — `FileSessionHandler` takes no request-long lock (`sharedGet` on read, locked `put` on write), so the classic block does not occur. The real defect is that session middleware has no business on a token-authenticated stream route at all; `StartSession` writes on `terminate()`, i.e. after the stream closes, which is exactly the wrong ordering for anything you wanted persisted mid-answer.
 - **FastAPI's spans show up as their own root trace.** `opentelemetry-auto-laravel` does **not** instrument the HTTP client; `traceparent` rides out only because `opentelemetry-auto-guzzle` hooks `GuzzleHttp\Client::transfer()`. Miss that package and every internal call is unparented, with no error anywhere. Details and the assertion to write: `kb-observability-conventions`.
 - **`abort_unless($x->organization_id === $orgId, 403)` on a public route is an enumeration oracle.** On the public runtime and SDK surfaces a foreign identifier must 404; the `error_class` stays `authorization` either way and nothing branches on the status (`kb-error-taxonomy`, `laravel-rbac-policies`).
-- **Laravel 13 ships an AI SDK, `Str::toEmbeddings()`, and `DB::whereVectorSimilarTo()`.** None of them are used here. Provider calls, embedding, and retrieval belong to the data plane (ADR-001, ADR-003, ADR-005); a control-plane shortcut into any of the three puts provider credentials, token spend, and an unfiltered similarity query outside every guarantee this architecture makes. `kb-tenancy-isolation` has no way to reach a query the control plane issued directly against pgvector.
+- **A tenant's provider bill exceeds the sum of their `usage_events` rows — or one bot answers out of another organization's documents.** Someone reached for Laravel 13's first-party AI, embedding, or vector-search APIs from a controller or a job. Neither failure raises anything: a call through the AI SDK or `Str::toEmbeddings()` writes no `provider_calls` row, no `usage_events` row, and passes no quota check, so the spend is invisible to accounting rather than wrong; `DB::whereVectorSimilarTo()` returns rows perfectly happily with no organization filter, because the tenant filter lives in the Qdrant query builder and pgvector never sees it. Both are decided boundaries, not judgement calls — see the non-negotiable above for the reasoning and the one condition that reopens it.
 - **A callback from FastAPI rewinds a job.** Progress callbacks arrive out of order after a Celery retry; the `UPDATE` must be guarded `WHERE sequence > progress_sequence`, or a `ready` source flips back to `processing` and an already-published version leaves retrieval (`kb-internal-api-contracts`).
 
 ## Official docs
@@ -145,7 +158,10 @@ Sanctum tokens, sessions, widget session tokens → `laravel-sanctum-auth`. Poli
 
 - [ ] `grep -rn "ai-api\|services.ai.url" services/core-api/app | grep -v Services/Internal` is empty — one caller only, and it carries every header in the `kb-internal-api-contracts` table.
 - [ ] No `->retry(` anywhere on the internal chat client; `X-KB-Deadline` is absolute epoch ms derived from `LARAVEL_START`, asserted by a test.
-- [ ] The signed bytes are the sent bytes: one `json_encode`, hashed and passed to `withBody()`; a round-trip test against the FastAPI verifier passes, and a replayed `X-KB-Request-Id` returns 401.
+- [ ] The signed bytes are the sent bytes: one `json_encode`, hashed and passed to `withBody()`; a round-trip test against the FastAPI verifier passes, and a replayed `X-KB-Request-Id` returns 401. The canonical prefix is `KB1`.
+- [ ] `rg -n 'provider_credential' services/core-api/app` shows exactly one construction site, in `InternalAiClient`, at the top level of the body and not inside the snapshot; a test rotates only the credential and asserts `X-KB-Config-Version` and `X-KB-Idempotency-Key` are unchanged, and that the key appears in no log line, API Resource, audit `details`, or exception message.
+- [ ] `rg -n 'toEmbeddings\(|whereVectorSimilarTo\(|use\s+(Illuminate|Laravel)\\(AI|Ai)\\' services/core-api/` returns nothing, and the same grep runs as a required CI check (`github-actions-pipeline`) alongside the tenancy greps. <!-- UNVERIFIED: the exact namespace Laravel 13 ships its AI SDK under was not confirmed against the release; widen the third alternative to whatever `composer show` reports rather than narrowing it -->
+- [ ] `services/core-api/database/migrations/` creates no `vector` extension and no vector column, and no repository issues a similarity query; retrieval is reachable from Laravel only through `InternalAiClient` (`kb-architecture-map`).
 - [ ] Streaming test runs against a real SSE fixture server (never `Http::fake()`) and asserts: inter-event wall-clock gaps, a `: ping` at least every 20 s, exactly one terminal event, and a `usage` row written after a mid-stream client hangup.
 - [ ] `ignore_user_abort(true)` is set in every stream callback and the finalizer is idempotent on `message_id`; a test proves the abort path and the completion path together write exactly one usage row.
 - [ ] Upstream cancellation is asserted: after a simulated client hangup the fixture server observes the connection closed within one event interval.

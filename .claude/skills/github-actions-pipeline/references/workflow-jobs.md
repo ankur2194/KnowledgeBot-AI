@@ -123,15 +123,23 @@ Both steps are pure text passes with no containers and no secrets, so they run i
           # on the side that actually queries Qdrant. Failure mode (kb-tenancy-isolation):
           # HTTP 200, normal latency, no log line, another tenant's chunks.
           #
+          # ACCUMULATE, never `! grep`. Under `set -e` bash IGNORES the failure of a command
+          # whose status is inverted with `!`, so in a step with two checks only the LAST one
+          # can fail the job — the first is silently advisory and reads exactly like a gate.
+          set -u; fail=0
+          flag() { [ -n "${1//[[:space:]]/}" ] || return 0; printf '%s\n' "$1"; echo "::error::$2"; fail=1; }
+
           # Every retrieval entry point must take a filter positionally — no default, and
           # no `filter or models.Filter()`, because Filter(must=[]) is a MATCH-ALL.
-          ! grep -rnE 'query_points\(|\.search\(|scroll\(|count\(' \
-              services/ai-service/app --include=*.py \
-            | grep -v 'tenancy-exempt:' \
-            | grep -vF 'app/retrieval/search.py'   # the one wrapper that builds the filter
+          flag "$( grep -rnE 'query_points\(|\.search\(|scroll\(|count\(' \
+                     services/ai-service/app --include=*.py \
+                   | grep -v 'tenancy-exempt:' \
+                   | grep -vF 'app/retrieval/search.py' || true )" \
+               "retrieval call outside the one filter-building wrapper"
           # And no prefetch leaf may go out unfiltered.
-          ! grep -rn 'Prefetch(' services/ai-service/app --include=*.py \
-            | grep -v 'query_filter='
+          flag "$( grep -rn 'Prefetch(' services/ai-service/app --include=*.py \
+                   | grep -v 'query_filter=' || true )" "unfiltered Prefetch leaf"
+          exit $fail
 
       - name: Deletion targets identifiers, never text
         run: |
@@ -149,11 +157,17 @@ Both steps are pure text passes with no containers and no secrets, so they run i
           # key (text, content, content_hash, title, heading_path, excerpt, url) is a
           # content match wearing a filter's clothes. Escape hatch on the same line, same
           # shape as the tenancy grep: `deletion-key-exempt: <reason>`.
-          ! grep -rnE 'FieldCondition\(\s*key=' \
+          # Accumulator, not `! grep` — see the tenancy step: under `set -e` a negated
+          # command's failure is ignored, so check (a) below could never fail the job.
+          set -u; fail=0
+          flag() { [ -n "${1//[[:space:]]/}" ] || return 0; printf '%s\n' "$1"; echo "::error::$2"; fail=1; }
+          flag "$( grep -rnE 'FieldCondition\(\s*key=' \
               services/ai-service/app --include=*.py \
             | grep -vE "key=[\"'](org_id|bot_ids|source_id|source_item_id|source_version_id|source_status|chunk_id)[\"']" \
             | grep -v 'deletion-key-exempt:' \
-            | grep -vF 'app/deletion/filters.py'   # the one builder; its keys come from the
+            | grep -vF 'app/deletion/filters.py' || true )" \
+            "filter key outside the seven-key delete allow-list"
+                                                   # the one builder; its keys come from the
                                                    # DELETE_KEYS tuple, unit-tested against all
                                                    # SEVEN keys above — the six-field payload
                                                    # contract PLUS chunk_id, which deletion
@@ -163,9 +177,71 @@ Both steps are pure text passes with no containers and no secrets, so they run i
           # text/content/hash kwarg. Lexical matching in this platform is BGE-M3 sparse
           # vectors (bge-m3-embeddings), never MatchText — so a MatchText in the data plane
           # is either a delete filter or a retrieval path that bypasses fusion. Both are bugs.
-          ! grep -rnE 'MatchText\(|(delete|count)[a-z_]*\([^)]*(text|content|content_hash)=' \
+          flag "$( grep -rnE 'MatchText\(|(delete|count)[a-z_]*\([^)]*(text|content|content_hash)=' \
               services/ai-service/app --include=*.py \
-            | grep -v 'deletion-key-exempt:'
+            | grep -v 'deletion-key-exempt:' || true )" \
+            "full-text matcher or text/hash kwarg on a delete or count"
+          exit $fail
+
+      - name: The data plane writes only its four allow-listed tables
+        run: |
+          # Open decision 2, RESOLVED (kb-architecture-map, fastapi-service): services/ai-service
+          # writes chunks, document_elements, retrieval_traces and evaluation_results — the four
+          # derived, rebuildable tables — and NOTHING else. Every other table is Laravel's, read
+          # and write, and Laravel owns all migrations. Failure mode: a data-plane INSERT/UPDATE
+          # into a control-plane table lands beside Laravel's own writer with no policy check, no
+          # audit row, and no framework-applied tenant scope. Nothing errors; the row is just
+          # there, and it is found by a customer, not by a test.
+          #
+          # ALLOW-LIST, not a deny-list of bad table names — same reasoning as the deletion-key
+          # gate above: a deny-list cannot see the table somebody invents tomorrow. So detect
+          # every write statement, then subtract the four allowed names; whatever is left fails.
+          # Escape hatch on the same line, same shape as the other two greps:
+          # `table-write-exempt: <reason>`. A second exempted line is a review stop, not a merge.
+          #
+          # NOT `! grep …` here, deliberately. `set -e` is specified to ignore the failure of a
+          # command whose status is inverted with `!`, so in a multi-check step only the LAST
+          # `! grep` can fail the job — every earlier one reports and passes. Accumulate instead
+          # and `exit $fail`.
+          set -u
+          ALLOWED='chunks|document_elements|retrieval_traces|evaluation_results'
+          WRITE='(insert[[:space:]]+into|update|delete[[:space:]]+from|copy)[[:space:]]+"?[a-z_][a-z0-9_]*"?'
+          fail=0
+          flag() { [ -n "${1//[[:space:]]/}" ] || return 0; printf '%s\n' "$1"; echo "::error::$2"; fail=1; }
+
+          # (a) Every SQL write names a table; subtract the four. `WRITE` requires whitespace
+          # after the keyword, so Python's `d.update(...)` / `cfg.update(other)` never match.
+          flag "$( grep -rniE "$WRITE" services/ai-service/app --include=*.py --include=*.sql \
+                 | grep -v 'table-write-exempt:' \
+                 | grep -viE "(insert[[:space:]]+into|update|delete[[:space:]]+from|copy)[[:space:]]+\"?($ALLOWED)\"?[^a-z0-9_]" \
+                 || true )" "write outside the four allow-listed tables"
+
+          # (b) grep is line-based, so a write whose table sits on the NEXT line would be seen by
+          # (a) and subtracted by nothing. Uppercase-only, so prose like "# needs update" is safe.
+          flag "$( grep -rnE '\b(INSERT INTO|UPDATE|DELETE FROM|COPY)[[:space:]]*$' \
+                     services/ai-service/app --include=*.py --include=*.sql \
+                 | grep -v 'table-write-exempt:' || true )" "SQL write with no table name on its line"
+
+          # (c) The data plane defines no schema and has no ORM to hide table targets behind:
+          # writes are psycopg text (opentelemetry-instrumentation pins PsycopgInstrumentor).
+          # If an ORM ever lands, this fails and (a)/(b) must grow a model-symbol allow-list
+          # in the same commit — that is the point of failing here rather than degrading quietly.
+          flag "$( grep -rniE 'create[[:space:]]+table|alter[[:space:]]+table|drop[[:space:]]+table|\balembic\b|sqlalchemy|sqlmodel|tortoise' \
+                     services/ai-service/app services/ai-service/pyproject.toml \
+                 || true )" "the data plane owns no schema and no ORM"
+
+          # (d) Atomic publication: FastAPI writes rows against the NEW, not-yet-active
+          # source_version_id and reports readiness on the §17.5 callback; LARAVEL flips
+          # source_items.current_version_id. Two writers on that column meet the partial unique
+          # index ("at most one active version per item", postgresql-patterns) as an IntegrityError
+          # inside a Celery task that retries forever. Naming the column in a callback payload
+          # model is fine — `IngestionStatus(current_version_id=…)` does not match; assigning it
+          # (`item.current_version_id =`) or `SET current_version_id =` does.
+          flag "$( grep -rniE 'set[[:space:]]+"?current_version_id"?[[:space:]]*=|\.current_version_id[[:space:]]*=[^=]' \
+                     services/ai-service/app --include=*.py --include=*.sql \
+                 | grep -v 'table-write-exempt:' || true )" "activation is Laravel's; report readiness instead"
+
+          exit $fail
 ```
 
 ## `qdrant-rebuild-proof` — ADR-010 as a merge gate

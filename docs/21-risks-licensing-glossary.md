@@ -161,7 +161,7 @@ The following official project and provider documentation should be treated as t
 
 ### RAG and Data Processing
 
-- Haystack documentation: https://docs.haystack.deepset.ai/
+- Haystack documentation: https://docs.haystack.deepset.ai/ — *not adopted (ADR-016); retained for verifying the evaluation evidence only.*
 - Qdrant documentation: https://qdrant.tech/documentation/
 - Qdrant hybrid search: https://qdrant.tech/documentation/search/hybrid-queries/
 - Docling documentation: https://docling-project.github.io/docling/
@@ -208,7 +208,7 @@ For the initial production-oriented showcase, use the following fixed architectu
 - **Crawl4AI** for website and sitemap crawling.
 - **BGE-M3** as the initial embedding model.
 - **BGE reranker** as the initial reranking model.
-- **Haystack** as a selective internal RAG pipeline toolkit.
+- ~~**Haystack** as a selective internal RAG pipeline toolkit.~~ **Not adopted — superseded by ADR-016:** no Haystack component can carry our mandatory tenant filter (`filter_policy` defaults to `REPLACE`), so the RAG pipeline is an explicit stage runner we own. See `.claude/skills/haystack-pipelines/SKILL.md`.
 - **Ragas** for evaluation.
 - **OpenTelemetry, Prometheus, Grafana, Loki, and Tempo or Jaeger** for observability.
 - **Traefik** as the only public reverse proxy.

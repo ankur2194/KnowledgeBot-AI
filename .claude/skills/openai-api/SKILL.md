@@ -156,10 +156,10 @@ class OpenAIAdapter:
 | `APIConnectionError`, `APITimeoutError`, no first token in budget | `provider_temporary` | yes |
 | `InternalServerError` (500 `server_error`, 503 overloaded) | `provider_temporary` | yes |
 | `RateLimitError` 429 `rate_limit_exceeded` | `provider_rate_limit` | when configured |
-| **`RateLimitError` 429 `insufficient_quota`** | **`provider_auth`** | **no** |
+| **`RateLimitError` 429 `insufficient_quota`** | **`provider_billing`** | **no** — pages immediately |
 | `AuthenticationError` 401, `PermissionDeniedError` 403 | `provider_auth` | no |
-| `NotFoundError` 404 `model_not_found`, model **is** enabled in our catalog | `provider_temporary` | yes |
-| `NotFoundError` 404, model not in our catalog | `provider_permanent_request` | no |
+| `NotFoundError` 404 `model_not_found` — **whether or not** the model is in our catalog | `provider_permanent_request` | **no** (ADR-014) |
+| 503, `InternalServerError` 500 `server_error` | `provider_temporary` | yes — this is the capacity signal §8.7 means |
 | `BadRequestError` 400 (`context_length_exceeded`, `unsupported_value`, bad schema) | `provider_permanent_request` | no |
 | `status="failed"`, or any unmapped code | `provider_permanent_request` + alert | no |
 

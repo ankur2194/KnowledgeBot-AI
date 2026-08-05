@@ -13,6 +13,7 @@ Pydantic **2.13.4** (2026-05-06, latest stable — verified against the publishe
 - **`extra="forbid"` on every model we receive from our own code.** Pydantic's default is `extra="ignore"`. A field Laravel renamed — `top_k` → `dense_top_k` — is then silently dropped: the caller believes it configured retrieval, FastAPI runs its default, no error is raised anywhere, and `config_version` still asserts the two sides agree. The only exceptions are the two boundaries named below.
 - **`strict=True` on every inbound contract model.** Lax mode turns `"8"` into `8` and `1` into `True`. The whole point of shipping the configuration snapshot in the body (docs/06 §11.2) is that a replayed job reproduces byte-identically; a snapshot whose meaning changes during parsing breaks that guarantee silently.
 - **Every credential field is `SecretStr`, and no model holding one is ever serialized anywhere but into the provider call.** `model_dump()` yields the masked object, `model_dump_json()` yields `"**********"` — protective for logs, destructive for anything that has to survive a round trip. `kb-security-baseline` owns the rule; this file owns the type.
+- **The provider credential is a top-level field on the request model — never a member of `ConfigSnapshot` or of anything reachable from it.** `provider_credential: SecretStr` sits beside `config`, and the snapshot hash is computed over `config` alone (docs/22 decision 1, resolved; wire shape in `kb-internal-api-contracts`). Inside the snapshot it is hashed into `configuration_version` *and* persisted by every path that stores a snapshot — see the gotcha, which is the reason this is a rule and not a preference.
 - **A `ValidationError` never reaches a log, a span, or an error envelope with its defaults.** `errors()` and `json()` default to `include_input=True`, so the rejected value — the tenant's question, or the API key — is rendered verbatim. Validation failures map to the `validation` class (422, never retried) in `kb-error-taxonomy`.
 - **Any union crossing the wire carries a discriminator.** An untagged union validates every member and reports every member's failure; during an incident the error names the wrong variant. Tagged, a bad tag is one `union_tag_invalid` naming the value actually received.
 - **A shipped model shape never changes in place.** Additive only, or a new `/internal/v2` (`kb-internal-api-contracts`). With `extra="forbid"`, *removing* a field is as breaking as adding a required one — see the versioning table.
@@ -27,7 +28,28 @@ The per-model `extra` table — with its **two** exceptions, raw provider respon
 
 ### The internal chat request, complete
 
-`Inbound` (strict + forbid + frozen, and why each of the three does a different job), `ReasoningEffort`'s seven members, `ProviderConnection`, `RetrievalConfig`, `ConfigSnapshot`, `ChatExecuteRequest`, and `parse_request()`'s redaction of `ValidationError.errors()` → **[references/internal-chat-request.md](references/internal-chat-request.md)**. They share the module below and the `Ulid` declared in it.
+`Inbound` (strict + forbid + frozen, and why each of the three does a different job), `ReasoningEffort`'s seven members, `ProviderConnection`, `RetrievalConfig`, `ConfigSnapshot`, `ChatExecuteRequest`, and `parse_request()`'s redaction of `ValidationError.errors()` → **[references/internal-chat-request.md](references/internal-chat-request.md)**. They share the module below and the `Ulid` declared in it. It carries ADR-011's shape: `provider_credential` is a sibling of `config` on `ChatExecuteRequest`, and `ProviderConnection` has **no** `api_key` field — the comment there records why, because moving it back inside is the reflexive tidy-up.
+
+### The credential, and the two places it is not
+
+```python
+class ChatExecuteRequest(Inbound):
+    ...
+    config: ConfigSnapshot          # everything hashed into configuration_version
+    provider_credential: SecretStr  # sibling of config, NOT a member of it. Decrypted by
+                                    # Laravel per request (laravel-control-plane); excluded
+                                    # from the snapshot hash and from every idempotency
+                                    # fingerprint, so a key rotation moves neither.
+
+def snapshot_hash(req: ChatExecuteRequest) -> str:
+    """Over `config` only — never over the request model. Hashing the request would pull the
+    credential in, and SecretStr would hide that it had: model_dump_json() writes
+    "**********", so the digest looks stable for the wrong reason and stops moving when the
+    configuration genuinely changes. Masking is a display property, not a hashing strategy."""
+    return hashlib.sha256(req.config.model_dump_json().encode()).hexdigest()
+```
+
+`get_secret_value()` is called in exactly one place, inside the provider adapter (`kb-provider-adapter-contract`). Everywhere else `repr()`, `str()`, `model_dump()` and `model_dump_json()` all yield `**********`, so extracting the key is an intentional, greppable act rather than an accident of serialization.
 
 ### The outbound stream, as a discriminated union
 
@@ -121,6 +143,7 @@ The shape-vs-content version distinction, the nine-row table of what is and is n
 ## Gotchas
 
 - **Every async job fails with "invalid API key" while the provider connection test passes green.** The snapshot was re-serialized on its way to Celery: `model_dump_json()` on a model holding a `SecretStr` writes the literal `"**********"`, the worker calls the provider with that, gets 401, and the adapter classifies `provider_auth` — which is neither retryable nor fallback-eligible, so the tenant is told to rotate a key that was never wrong. Sync chat keeps working, which is why it reads as an ingestion bug. Never put a credential-bearing model on the broker; pass `connection_id` and re-resolve inside the task.
+- **A key rotation invalidates every cached answer — and last week's playground records now hold a plaintext API key.** The credential was declared inside `ConfigSnapshot` rather than beside it. Two consequences, neither of which raises. It is hashed into `configuration_version`, so cache keys and replay identity move every time a tenant rotates. And the snapshot exists *to be persisted and replayed*, so the playground request record, `retrieval_traces`, and the Celery job body each stored the key into a column no redaction fixture covers. `SecretStr` does not rescue you: it masks `model_dump()`, so a hash taken over the containing model digests `"**********"` and therefore stops moving when the configuration genuinely changes — the same bug pointing the other way. Declare it top-level on `ChatExecuteRequest`; hash `config` only.
 - **A 422 body in the Laravel log contains the tenant's question and the provider key.** `ValidationError.errors()` and `.json()` default `include_input=True`, `include_context=True`, `include_url=True`. FastAPI registers a `RequestValidationError` handler by default and it renders `exc.errors()` into the response body, so the value crosses the wire as well as landing in a log. <!-- UNVERIFIED: that the default handler's output includes the `input` key was not re-checked against the pinned FastAPI 0.141.1 --> `fastapi-service` owns registering the override; this file owns what it may emit — `type` + `loc` + `msg`, nothing else.
 - **A payload that passes the unit test 422s against the running service with `datetime_type` / `uuid_type` / `decimal_type`.** Strict mode is *looser* from JSON than from Python: `TypeAdapter(date).validate_json('"2000-01-01"', strict=True)` succeeds, `validate_python('2000-01-01', strict=True)` raises, because JSON has no native date type. The test called `model_validate_json`; the server validated a dict someone had already parsed. Decision: no `datetime`, `UUID`, or `Decimal` field on a strict inbound model — epoch milliseconds (`X-KB-Deadline` already is one), ULID `str`, money as `str` converted explicitly. Contract tests go through an HTTP client, never straight into `model_validate_json`.
 - **One malformed event produces five validation errors naming the wrong variant.** An untagged `Union` runs in smart mode: it tries every member and reports every member's failures, so a missing `stage` on a `status` event is reported as a broken `token`, a broken `citations`, and a broken `message.complete`. `Field(discriminator="event")` validates exactly one member and yields a single `union_tag_invalid` carrying the tag it actually saw. It is also the documented performance recommendation — N type-checks become one dict lookup.
@@ -147,6 +170,7 @@ The shape-vs-content version distinction, the nine-row table of what is and is n
 - [ ] `extra="ignore"` appears only on raw-provider-response models and broker/Valkey payload models, each with a one-line comment naming which exception it is.
 - [ ] No `datetime`, `UUID`, or `Decimal` field on a strict inbound model; ids are the constrained ULID `str`; a test drives the payload through an HTTP client, not `model_validate_json`.
 - [ ] Every credential field is `SecretStr`; `grep -rn "get_secret_value" services/ai-service/` returns only adapter call sites; a test asserts no Celery task signature accepts a model containing one.
+- [ ] `provider_credential: SecretStr` is declared on `ChatExecuteRequest` and on nothing reachable from `ConfigSnapshot`; a test walks `ConfigSnapshot.model_fields` recursively asserting no `SecretStr` among them, and asserts two requests differing only in the credential produce an identical snapshot hash and an identical idempotency key.
 - [ ] The `RequestValidationError` handler (`fastapi-service`) emits `type`/`loc`/`msg` only; a fixture with a known API key and a known question asserts neither appears in the 422 body or in any log line.
 - [ ] Every wire-crossing union is `Annotated[..., Field(discriminator=...)]`; a test asserts a bad tag yields exactly one `union_tag_invalid`.
 - [ ] A contract test serializes one instance of every `Event` subclass and asserts the key set equals the SSE block in `kb-internal-api-contracts` — `citations[].index/title/url/score`, `message.start.created_at`, `message.complete.usage.{prompt_tokens,completion_tokens}` — and that no forwarded frame contains `cached_tokens` or a nested `event` key.

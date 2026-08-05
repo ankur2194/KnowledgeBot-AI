@@ -1,9 +1,11 @@
 # Haystack 3.0 — the evaluation evidence
 
-Companion to `../SKILL.md`, which carries the verdict, the runner we build instead, and the gotchas.
-Both tables below are the evidence that verdict rests on, moved here verbatim. Versions read from the
+Companion to `../SKILL.md`, which carries the verdict (**ADR-016: not adopted**), what does each job
+instead, and the gotchas. The runner we build in its place is in `stage-runner-instead.md`. Both
+tables below are the evidence that verdict rests on, moved here verbatim. Versions read from the
 PyPI JSON API and the source at `deepset-ai/haystack@main` / `deepset-ai/haystack-core-integrations@main`
-on 2026-08-05.
+on 2026-08-05. These are the versions the findings were *verified against*; nothing here is a
+dependency of `services/ai-service`.
 
 ## What Haystack 3.0 genuinely offers, and why none of it lands here
 
@@ -30,3 +32,28 @@ Haystack 3.0 is a serious release: `AsyncPipeline` folded into `Pipeline` with `
 | Empty scope raises; `==` means equality | `convert_filters_to_qdrant({})` returns `None` → an unfiltered, match-all query. `_build_eq_condition` turns a string value **containing a space** into `MatchText` (a token/substring match), not `MatchValue`. `in`, `!=`, and `not in` each apply the space test with a *different* polarity than `==`. | `.../document_stores/qdrant/filters.py` |
 
 A narrow adoption survives none of this: to keep our payload you replace the converters, to keep our filter you replace the filter DSL and pin `filter_policy=REPLACE`, to keep our trace you replace the retriever and the joiner. What remains is `qdrant-client` with a `meta.` prefix tax, a beta-classified package in the path of every tenant query, and `haystack-ai`'s own hard `openai>=1.99.2` floor constraining the SDK our OpenAI, DeepSeek, and OpenRouter adapters share.
+
+## Historical: the conditions recorded at decision time
+
+ADR-016 is final. This list is kept as the record of what the 2026-08-05 evaluation said would have
+to change upstream before the question was worth asking again — it is not an invitation to re-open,
+and none of it is satisfied by a version bump. Anyone reaching for it needs a **new ADR superseding
+ADR-016**, with the file paths and commit of a fresh source read recorded in it.
+
+1. **Agentic retrieval enters scope** — a planner choosing its own sub-queries and tool calls per
+   turn is a graph, and Haystack 3.0's `Agent` with typed hooks and native
+   `step_count`/`token_usage`/`tool_call_counts` is real leverage. Out of MVP scope; the strongest of
+   the five.
+2. **A retriever gains a non-overridable filter** — a `FilterPolicy` variant, or a `mandatory_filters`
+   init arg, that *ANDs* rather than replaces and accepts a native `models.Filter`. This is the single
+   blocking issue: everything else is annoying, this one is disqualifying.
+3. **The joiner exposes `k` and preserves per-branch scores** (e.g. into `Document.meta`), removing
+   the trace-destruction problem.
+4. **`qdrant-haystack` leaves beta and lets us own the payload/id mapping** — a converter hook rather
+   than a hardcoded `to_dict(flatten=False)` plus a third-party `uuid5` namespace.
+5. **More than one vector backend is needed.** It is not (ADR-005 pins Qdrant); a store abstraction
+   earns its keep only when there are two stores.
+
+Items 2–4 are facts about source files, not release notes: check them by reading
+`retrievers/qdrant/retriever.py`, `haystack/utils/misc.py`, and
+`document_stores/qdrant/converters.py`.

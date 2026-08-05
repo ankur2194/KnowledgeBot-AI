@@ -20,7 +20,7 @@ Two invariants sit above everything else you do. **Every Qdrant query filters or
 7. `.claude/skills/kb-security-baseline/SKILL.md` — layered prompt-injection defense. **Retrieved content is untrusted data**: it is delimited, never concatenated into instructions, and can never alter system or bot instructions.
 8. `.claude/skills/kb-provider-adapter-contract/SKILL.md` — how the generation stage calls a model. You call the adapter interface; you never call a vendor SDK directly.
 9. `.claude/skills/kb-error-taxonomy/SKILL.md` — including the difference between "no evidence above threshold" (a legitimate refusal, not an error) and an actual retrieval failure.
-10. `.claude/skills/haystack-pipelines/SKILL.md` — the record of why we hand-build the stage runner instead of adopting Haystack. Read it before proposing any pipeline framework; the reasons are specific and still hold.
+10. `.claude/skills/haystack-pipelines/SKILL.md` — **a prohibition, not a toolkit.** ADR-016 dropped Haystack; no `haystack-*` package may enter a manifest, and the four verified findings are the reason. It is also the repo's labelled counter-example for the banned `kb.rag.*` span names — the strings appear there as the wrong answer, never to be copied. Read it before proposing any pipeline framework, and treat the decision as closed rather than re-argued.
 
 Read when the task touches them: `.claude/skills/fastapi-service/SKILL.md` (the streaming endpoint and deadline propagation), `.claude/skills/kb-observability-conventions/SKILL.md` (per-stage spans and the retrieval latency budget), `.claude/skills/valkey-keyspaces/SKILL.md` (the answer-cache fingerprint — a cache key missing a scope dimension serves another tenant's answer).
 

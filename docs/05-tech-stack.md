@@ -82,7 +82,7 @@ Laravel will own:
 |---|---|---|
 | Framework | FastAPI | Internal AI/RAG service API |
 | Language | Python | Access to RAG, document, OCR, embedding, and evaluation ecosystem |
-| Pipeline framework | Haystack, used selectively | Composable indexing and query pipelines |
+| Pipeline framework | ~~Haystack, used selectively~~ — **not adopted, superseded by ADR-016** | ~~Composable indexing and query pipelines~~ — replaced by an explicit stage runner in `app/rag/` |
 | Background jobs | Celery | Parsing, OCR, crawling, embedding, deletion, and evaluation jobs |
 | Data validation | Pydantic | Typed internal contracts |
 | HTTP clients | Official provider SDKs or official documented HTTP clients | Direct provider integration |
@@ -90,7 +90,9 @@ Laravel will own:
 
 Python is preferred over Node.js for the AI service because the document-processing, OCR, embedding, reranking, evaluation, and RAG ecosystem is substantially stronger and more direct in Python.
 
-Haystack should be used as an internal pipeline toolkit, not as the application's domain architecture. KnowledgeBot-owned interfaces and data models remain authoritative.
+~~Haystack should be used as an internal pipeline toolkit, not as the application's domain architecture. KnowledgeBot-owned interfaces and data models remain authoritative.~~
+
+> **Not adopted — superseded by ADR-016.** The fence above is not buildable: Haystack's Qdrant retrievers default to `filter_policy=REPLACE`, so no configuration lets our tenant filter and a caller's facet filter both survive, and its fusion discards the per-branch ranks and scores stage 9 records. The line is kept rather than deleted because the decision only makes sense against it. Retrieval, fusion, parsing, crawling, embedding, reranking, evaluation and provider calls each already have an owner; the mapping and the verified evidence are in `.claude/skills/haystack-pipelines/SKILL.md`.
 
 ## 9.6 Relational Database
 

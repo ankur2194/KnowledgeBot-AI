@@ -106,7 +106,7 @@ Read `error.metadata.error_type` first; the status is the tiebreak. Envelope is 
 | Evidence | `error_class` | Notes |
 |---|---|---|
 | `authentication` / 401 | `provider_auth` | Key revoked or disabled. No retry, no fallback. |
-| `payment_required` / 402 | `provider_auth` | **Depleted credits, including a negative balance, and it hits `:free` models too.** Deliberate mapping: its policy — never retry, never fall back, alert the operator — is the one we want; `provider_permanent_request` would page it as our bug. |
+| `payment_required` / 402 | `provider_billing` | **Depleted credits, including a negative balance, and it hits `:free` models too.** This is what class 18 exists for — never retry, never fall back, page the operator. It was mapped to `provider_auth` before `provider_billing` existed; the policy is identical, but the class is what a dashboard and a runbook key on, so an exhausted balance must not read as a revoked key. |
 | `rate_limit_exceeded` / 429 | `provider_rate_limit` | `X-RateLimit-Limit/Remaining/Reset`; `Retry-After` only when every attempted upstream sent a hint. |
 | `content_policy_violation`, `refusal`, moderation 403 | `provider_permanent_request` + `StopReason.REFUSAL` | Terminal. Fallback re-asks a banned question and bills for it. |
 | `permission_denied` / 403, `invalid_request`, `context_length_exceeded`, `max_tokens_exceeded`, `payload_too_large`, `invalid_image` | `provider_permanent_request` | Our request. Never retried, never fallen back. |

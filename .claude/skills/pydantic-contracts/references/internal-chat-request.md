@@ -34,8 +34,12 @@ class ProviderConnection(Inbound):
     connection_id: Ulid
     provider: Literal["openai", "anthropic", "deepseek", "nvidia_nim", "openrouter"]
     model: str
-    api_key: SecretStr          # repr/str -> '**********'; get_secret_value() appears
-    base_url: str | None = None # exactly once in the codebase, inside the adapter
+    base_url: str | None = None
+    # NO api_key here. ADR-011 puts the credential on ChatExecuteRequest, outside the
+    # snapshot, because ConfigSnapshot is hashed into configuration_version and persisted
+    # into retrieval_traces and the playground. A SecretStr inside it would digest as
+    # '**********' — so the hash looks stable for the wrong reason — and every rotation
+    # would move a version that nothing about the configuration actually changed.
 
 class RetrievalConfig(Inbound):
     dense_top_k: int = Field(ge=1, le=200)
@@ -64,6 +68,11 @@ class ChatExecuteRequest(Inbound):
     query: str = Field(min_length=1, max_length=32_000)
     deadline_epoch_ms: int = Field(ge=0)   # absolute, per kb-internal-api-contracts.
     config: ConfigSnapshot                 # int, not datetime — see the strict-mode gotcha.
+    provider_credential: SecretStr         # ADR-011: a sibling of `config`, never inside it.
+    # repr/str/model_dump() -> '**********'. get_secret_value() appears exactly once in the
+    # codebase, inside the adapter. Excluded from snapshot_hash() and from every idempotency
+    # fingerprint: a rotated key must not move configuration_version, or it invalidates every
+    # cached answer and stops replayed jobs reproducing byte-identically.
 
 def parse_request(raw: bytes) -> ChatExecuteRequest:
     try:

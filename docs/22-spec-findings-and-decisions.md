@@ -2,72 +2,190 @@
 
 > Not part of the original specification. This records defects, ambiguities, and decisions surfaced while authoring the skill library — the places where implementing `KnowledgeBot-AI.md` literally would produce a bug, and the places where it leaves a real choice open.
 >
-> Items marked **OPEN** need a decision. Items marked **DECIDED** were resolved during authoring and should be ratified as ADRs.
+> Items marked **DECIDED** were resolved during authoring and should be ratified as ADRs. **There are no open items left in this file** — the eight that were open are resolved below as ADR-011…018.
 
-## Open decisions
+## The eight architectural decisions — resolved
 
-These are genuine architectural choices the spec leaves unresolved. Each changes implementation materially.
+These were the genuine choices the spec left unresolved. Each is now decided, and each carries the
+argument that ruled the alternatives out, because an unrecorded reason gets re-litigated the first
+time the decision is inconvenient. ADR numbering continues from ADR-010.
 
-### 1. Does the provider API key cross the Laravel→FastAPI wire?
+### ADR-011 — the provider credential crosses the wire, as its own field, outside the snapshot
 
-§9.4 gives Laravel the encrypted credentials. §18.2 permits decryption "in the trusted backend **or** the AI service". §11.2 says requests carry "configuration snapshot **or** configuration version". The two `or`s interact: `kb-internal-api-contracts` has decided the configuration snapshot travels in the request body, so if the credential is part of that snapshot, the key is on the wire on every request.
+**Decided: option (a), with three constraints that are the actual substance of the decision.** Laravel
+decrypts the credential and sends it in the internal request body as a top-level `provider_credential`
+typed `SecretStr` — deliberately **not** a member of the configuration snapshot.
 
-| Option | Blast radius on AI-service compromise |
-|---|---|
-| (a) Laravel decrypts, sends the key per request | Key exposed in every internal request and in any request-logging path |
-| (b) FastAPI holds the decryption key, receives only a credential *reference* | Key never transits; AI service compromise still yields plaintext keys |
-| (c) FastAPI fetches the credential from Laravel over a separate audited endpoint | Narrowest exposure, most moving parts, adds a hop to the hot path |
+The two rejected options both looked safer than they are. **(b) FastAPI holds the KEK and receives a
+credential reference** forces FastAPI to read `provider_connections` from PostgreSQL, breaking *both*
+"Laravel owns the relational store" and "FastAPI never reads Laravel's tables" — and it does not reduce
+blast radius at all, since an AI service holding the KEK yields plaintext keys on compromise anyway.
+**(c) a separate audited fetch endpoint** adds a synchronous round trip to every generation against
+§23's 4-second first-token target, and relocates the same plaintext key onto a different request.
 
-### 2. Who writes `chunks` and `document_elements`?
+What makes (a) acceptable is the separation, not the transport:
 
-FastAPI performs chunking (§10.3) and PostgreSQL holds chunk text (§16.4), but §9.4's "Laravel will own" list omits both tables, and §17.5 defines an "ingestion status callback". Direct FastAPI write breaks "Laravel owns the relational store"; callback-to-Laravel makes ingestion chatty and slow. Undecided.
+1. `provider_credential` is **excluded from the configuration snapshot hash**, so it never contributes
+   to `configuration_version`. Two requests differing only in a rotated key must produce the same
+   snapshot version — otherwise every rotation invalidates every cached answer and every replayed job
+   stops reproducing byte-identically.
+2. `SecretStr` means `repr()`, `str()`, and `model_dump()` all yield `**********`. Serializing it is an
+   explicit, greppable act.
+3. It is on the **never-forward list** — no SSE frame, no error envelope, no span attribute, no log
+   field, no audit detail. That is CLAUDE.md non-negotiable 9, unchanged.
 
-### 3. `web` on the `application` network (§24.3)
+The symptom if the credential rides *inside* the snapshot instead: it is hashed into
+`configuration_version` and so silently becomes part of cache keys and replay identity — and every path
+that persists the snapshot for the playground or the retrieval trace persists a plaintext API key into a
+column nobody treats as sensitive.
 
-As specified, a Next.js route handler can reach `ai-api` directly, which makes "clients never call FastAPI" a convention rather than a fact. `kb-architecture-map` narrowed `web` off `application` and flagged the deviation. Needs ratification.
+**Revisit condition:** the whole argument rests on Laravel and FastAPI sharing one trust boundary. If the
+AI service is ever deployed outside it — multi-tenant hosting, a third-party inference host, a shared
+cluster — option (c) becomes mandatory.
 
-### 4. Is §8.7's "model temporarily unavailable" fallback trigger reachable?
+### ADR-012 — FastAPI writes four tables directly; the ownership rule is narrowed, not broken
 
-It has no home among §19.1's 17 error classes. Providers deliver it as a 404/400 `model_not_found`, which classifies as `provider_permanent_request` — non-retryable *and* non-fallback-eligible, contradicting §8.7. `kb-error-taxonomy` kept the taxonomy internally consistent rather than adding an 18th class, which leaves that fallback bullet dead unless `kb-provider-adapter-contract` special-cases those provider codes into `provider_temporary`.
+**Decided: direct write, against a closed allow-list.** `services/ai-service` writes `chunks`,
+`document_elements`, `retrieval_traces`, and `evaluation_results` — and nothing else. Every other table
+is Laravel's. The rule is restated precisely: **Laravel owns every table the public API reads or writes,
+and owns all migrations.** The four are derived, rebuildable artifacts — the relational half of the same
+index whose vector half FastAPI has always written, into a schema Laravel still defines.
 
-### 5. What does a deletion actually reach — and who owns the erasure sweep?
+The callback lost on arithmetic, not on principle. Per-chunk it is thousands of round trips per
+document; bulk, it ships every chunk's full text through a PHP request body — the payload PHP-FPM memory
+limits are worst at — to be written verbatim to a table Laravel never reads.
 
-§8.17's artifact list does not mention `citations` at all, yet §16.4/§16.6 give `citations` a `chunk_id` FK into `chunks`. Deleting chunk rows therefore either cascades (destroying past answers) or dangles, and the spec never says which. Worse, **verbatim source text survives a source deletion in three tables outside §8.17's list** — `citations.excerpt`, `retrieval_traces.selected_evidence`, and `evaluation_results.retrieved_evidence`.
+The argument that actually settles it is atomic publication: FastAPI writes chunk rows against the
+**new, not-yet-active `source_version_id`** while the previous version keeps serving. A direct write
+cannot corrupt live state, because nothing reads those rows until the pointer flips.
 
-For a *source* deletion that is arguably correct: the transcript should stay readable. For a §18.10 **data-subject erasure request** it is a compliance failure, and §18.10 only says the project "should provide deletion workflows for users, conversations, sources, and organizations" without saying whether the source workflow reaches the conversation-side copies or vice versa. §18.10 and §8.17 do not cross-reference each other at all, so nobody owns the sweep.
+**And the flip is Laravel's** — which closes unenforceable-doctrine item 5 below. FastAPI writes rows,
+then reports terminal state through §17.5's ingestion status callback; Laravel performs the activation.
+Getting this backwards puts two writers on the one column deciding which version is live, so the partial
+unique index enforcing "at most one active version per item" turns a lifecycle bug into a constraint
+violation inside a Celery task, retried forever.
 
-Interim rule in `kb-deletion-and-verification`: **break the link, do not cascade** — null the chunk reference and keep `citation_label` / `display_title` / `location_metadata` so old transcripts stay readable. The erasure-scope question needs an ADR, or §8.17's artifact list needs extending.
+Gated in CI as an allow-list, never a deny-list of bad table names — a deny-list cannot see a table
+invented tomorrow.
 
-### 6. Haystack is named by the spec but cannot be used — needs ADR-011
+### ADR-013 — `web` is on `edge` only. Ratified
 
-**Recommendation: drop Haystack entirely.** It appears three times in 3,816 lines — one tech-stack row, one fencing sentence (§9.5: *"an internal pipeline toolkit, not the application's domain architecture"*), and one glossary bullet. It has no ADR, no §12 stage, and no §21 role, and the spec has already independently assigned every job it would do: Ragas for evaluation, Docling for parsing, Crawl4AI for crawling, BGE for embedding and reranking, ADR-001 for providers.
+`kb-architecture-map`'s deviation from §24.3 is now the topology, not a deviation. `apps/web` has no
+Server Actions and produces no organization-scoped byte on the server, so the Next.js server has nothing
+it could legitimately ask `ai-api` for. Leaving it on `application` would make "clients never reach
+FastAPI" a convention enforced by nobody: one route handler and it is false, with no network to stop it
+and nothing in review reliably catching a `fetch('http://ai-api:8000/...')` in a file full of ordinary
+fetches. The existing set-equality DoD check is the enforcement.
 
-The §9.5 fence is not buildable. Verified against `deepset-ai/haystack@main` and `haystack-core-integrations@main`:
+### ADR-014 — §8.7's fallback trigger is reachable via capacity signals only; `model_not_found` stays permanent
 
-- **`filter_policy` defaults to `REPLACE`**, so a runtime `filters=` on any Qdrant retriever replaces the init filter outright — and the `MERGE` alternative explicitly raises on a native `models.Filter`. **There is no configuration in which our tenant filter and a facet filter both survive.** The first facet-filtered query returns another org's chunks, and every test that omits runtime filters passes.
-- **Fusion destroys the trace.** `DocumentJoiner._reciprocal_rank_fusion` hardcodes `k = 61` with no parameter and returns `replace(doc, score=fused)`, discarding the per-branch score. Stage 9 and the §8.24 playground both require both input ranks *and* both scores per candidate.
-- **Identity is not ours.** Point ids are `uuid5(<a constant in their package>, document.id)` over a SHA-256 of content+meta+embedding, and payload nests every field under `meta.*`. Delete-by-filter on `source_version_id` matches nothing and reports success — which `kb-deletion-and-verification` reads as proof of removal.
-- Incidental but disqualifying for a self-hostable product: `HAYSTACK_TELEMETRY_ENABLED` defaults to `"true"`, posting the component inventory to `eu.posthog.com` with errors swallowed.
+**Decided: split the signal, add no class.** The provider is telling us two different things under one
+heading, and §8.7 means only the first.
 
-An ADR-011 would supersede `docs/05-tech-stack.md` §9.5 and the `docs/21-risks-licensing-glossary.md` glossary entry. No agent-roster change is needed — no `haystack-engineer` was ever defined.
+- **Provider-side capacity or overload** → `provider_temporary`: retryable, **fallback-eligible**. This
+  is what §8.7's bullet actually means and what makes it reachable. Anthropic's `overloaded_error`,
+  OpenAI's 503, NIM's 503 while a model loads or is scaled to zero, OpenRouter's upstream 502,
+  DeepSeek's 503. Each adapter owns its own mapping table; the internal class is the same.
+- **A model name the provider does not recognise** (`model_not_found`, a retired OpenRouter slug) →
+  stays `provider_permanent_request`: non-retryable, **not** fallback-eligible.
 
-### 7. Laravel 13 ships first-party AI, embedding, and vector-search APIs the spec predates
+The second branch is the one worth arguing. That model name came from the bot's configuration snapshot,
+so an unrecognised model is a **misconfiguration the tenant needs to see** — a deprecated pin, a typo, a
+model the vendor retired. Falling back would silently serve every answer from a different model at a
+different price and a different quality, with a `Ready` bot and no error anywhere; the admin finds out
+from a bill or a quality complaint months later. The fallback ladder is the wrong tool for a
+configuration defect. So §8.7's "model temporarily unavailable" is **clarified to mean provider-side
+capacity**, not a missing model.
 
-§9.4 and ADR-001/003/005 assign every provider call, every embedding, and every vector search to
-FastAPI. Laravel 13 now ships an AI SDK, `Str::toEmbeddings()`, and `DB::whereVectorSimilarTo()`
-against pgvector. Nothing in the spec anticipates them, and they are an attractive shortcut precisely
-where a shortcut is most expensive: using them would put provider credentials, spend accounting, and an
-**unfiltered similarity query** inside the control plane, outside the tenant-isolation contract and
-outside the provider-adapter contract's usage accounting. The decision needed is not "are these good
-APIs" but whether ADR-001/003/005 are reaffirmed against a materially changed framework. Recommend
-reaffirming, with the reason recorded so the question is not reopened per-feature.
+Adapters must distinguish the two by the vendor's **error code**, never by string-matching the message:
+vendors change error prose without notice, and a substring match on "unavailable" reclassifies on a copy
+edit — in the dangerous direction, turning a config error into a silent fallback.
 
-### 8. The internal signing scheme changed shape — does `v1` absorb it or bump?
+### ADR-015 — deletion and erasure are two workflows with different reach
 
-Defect 13 below is a security fix to the canonical string, i.e. a change to the wire format of an
-already-specified contract. No implementation exists yet, so absorbing it into `v1` costs nothing
-today. Recorded because the contract version is meant to mean something, and this is the first change
-that would have broken a deployed signer.
+**Decided: the interim break-the-link rule is ratified for deletion; erasure is a strict superset.**
+
+**Source deletion (§8.17)** breaks the link and does not cascade: null `citations.chunk_id`, keep
+`citation_label` / `display_title` / `location_metadata`, and **retain** the three verbatim-text columns.
+A conversation records what the bot said and what it said it from; destroying that because an admin
+removed a stale PDF rewrites history and leaves the audit log describing answers nobody can inspect.
+
+**Data-subject erasure (§18.10)** does everything deletion does, plus a sweep over
+`citations.excerpt`, `retrieval_traces.selected_evidence`, and `evaluation_results.retrieved_evidence` —
+the three places verbatim source text survives outside §8.17's artifact list, which is now extended to
+name them, each marked *source deletion: retain / erasure: purge*.
+
+Four rules govern the sweep. It **overwrites in place and keeps the row**, because deleting rows would
+silently move historical evaluation scores and retrieval metrics for a compliance action nobody would
+ever reconcile. It runs under the same **two-phase-plus-proof** contract as every other deletion here —
+erasure without verification is a compliance claim with no evidence. **Scope follows §18.10's four
+workflows**, and a *source*-scoped request reaches those columns only when raised explicitly as an
+erasure, which is the entire reason there are two workflows. And an erasure colliding with a **legal hold
+is refused and recorded as a conflict, never partially executed** — a half-erased subject satisfies
+neither obligation and destroys the evidence needed to explain which parts ran.
+
+Ownership: `kb-deletion-and-verification` and `deletion-engineer`. The `UNVERIFIED` marker saying no spec
+section assigned the sweep is retired.
+
+### ADR-016 — Haystack is dropped
+
+**Decided: drop it entirely**, superseding `docs/05-tech-stack.md` §9.5 and the `docs/21` glossary entry.
+It appears three times in 3,816 lines with no ADR, no §12 stage, and no §21 role, while the spec
+independently assigns every job it would do: Ragas for evaluation, Docling for parsing, Crawl4AI for
+crawling, BGE for embedding and reranking, ADR-001 for providers.
+
+The §9.5 fence — *"an internal pipeline toolkit, not the application's domain architecture"* — is not
+buildable. Verified against `deepset-ai/haystack@main` and `haystack-core-integrations@main`:
+
+- **`filter_policy` defaults to `REPLACE`**, so a runtime `filters=` on any Qdrant retriever replaces the
+  init filter outright — and the `MERGE` alternative explicitly raises on a native `models.Filter`.
+  **There is no configuration in which our tenant filter and a facet filter both survive.** The first
+  facet-filtered query returns another org's chunks, and every test that omits runtime filters passes.
+- **Fusion destroys the trace.** `DocumentJoiner._reciprocal_rank_fusion` hardcodes `k = 61` with no
+  parameter and returns `replace(doc, score=fused)`, discarding the per-branch score. Stage 9 and the
+  §8.24 playground both require both input ranks *and* both scores per candidate.
+- **Identity is not ours.** Point ids are `uuid5(<a constant in their package>, document.id)` over a
+  SHA-256 of content+meta+embedding, and payload nests every field under `meta.*`. Delete-by-filter on
+  `source_version_id` matches nothing **and reports success** — which `kb-deletion-and-verification`
+  reads as proof of removal.
+- Incidental but disqualifying for a self-hostable product: `HAYSTACK_TELEMETRY_ENABLED` defaults to
+  `"true"`, posting the component inventory to `eu.posthog.com` with errors swallowed.
+
+The `haystack-pipelines` skill is **retained and retargeted** rather than deleted: it is now the record
+of why not, the mapping of each job to what does it instead, and the labelled counter-example carrying
+the banned `kb.rag.*` span names. No agent-roster change — no `haystack-engineer` was ever defined.
+
+### ADR-017 — ADR-001/003/005 are reaffirmed against Laravel 13's first-party AI APIs
+
+**Decided: the control plane uses none of them.** Laravel 13's AI SDK, `Str::toEmbeddings()`, and
+`DB::whereVectorSimilarTo()` are out of bounds in `services/core-api`.
+
+The reason is **custody, not API quality** — stated that way deliberately, so this is not reopened
+per-feature every time one of them gets a good release note. The AI SDK would put provider credentials,
+spend accounting, and token normalization inside the control plane, outside the adapter contract, so a
+call made that way appears in no `provider_calls` row, no `usage_events` row, and no quota check.
+`Str::toEmbeddings()` is the same provider call wearing a string helper's clothes. And
+`DB::whereVectorSimilarTo()` is the serious one: a **second retrieval path with none of the four
+mandatory filters**, no rerank, and no evidence threshold — a cross-tenant read that reviews as one line
+of ORM.
+
+**Revisit condition:** reopen only if Qdrant is dropped for pgvector as the vector store — and even then
+the AI SDK stays out, because credential custody is a separate argument from where vectors live.
+Enforced by a CI grep over `services/core-api`.
+
+### ADR-018 — the signing change absorbs into `v1`; the prefix stays `KB1`
+
+**Decided: absorb.** Spec defect 13 rewrote the canonical string to append every `X-KB-*` header. No
+signer has ever been deployed, so `KB1` has never meant anything on the wire, and bumping to `KB2` before
+`KB1` ever ran would make the version prefix describe authoring history instead of deployment history —
+the opposite of what a wire version is for.
+
+The rule that takes effect from the first deployed release, which is the reason this was worth recording
+at all: any change to the canonical string, the covered header set, or the hash **bumps the prefix**; the
+**verifier accepts both prefixes for one release window** while the signer emits only the new one,
+because signer and verifier deploy at different times and that window is the only thing keeping a rolling
+deploy from 401-ing every internal call; and dropping the old prefix is a deliberate second deploy, never
+part of the first.
 
 ## Decided during authoring — ratify as ADRs
 
@@ -174,9 +292,9 @@ A read-only audit at the close of Pass 4 checked every shared surface for
 contradictions. Nine blocking or high-value defects were fixed in that pass and
 thirteen (A1–A13) plus the drift, ownership, and unenforceable-doctrine lists
 were deferred. A second audit round then found seventeen more (S1–S17) plus
-several structural defects. **All of them are now closed except one**, which is
-open decision 2 wearing a different hat. None was a spec defect — each was drift
-between two skills, or doctrine with no enforcement.
+several structural defects. **All of them are now closed** — the last holdout was
+open decision 2 wearing a different hat, and ADR-012 closed it. None was a spec
+defect; each was drift between two skills, or doctrine with no enforcement.
 
 This section is history, not a checklist: for each item it records the symptom,
 which side won the contradiction, and where the resolution actually lives, so a
@@ -214,13 +332,13 @@ later reader can tell a deliberate ruling from an accident.
 - **`packages/`, `samples/`, `scripts/`.** All three now have an owner row in `CLAUDE.md`: `packages/contracts` and `packages/design-tokens` to `admin-web-engineer` (import, never fork — *"a second copy of the frame parser is the drift `contract-steward` exists to catch"*), `samples/` to `rag-eval-engineer`, `scripts/` to `platform-devops-engineer`. Every agent that can write now carries the corresponding hard boundary: twelve name the directories explicitly, `platform-devops-engineer` names its allow-list plus the two exceptions, and `rag-eval-engineer` expresses it as a closed allow-list (*"anything outside `app/evaluation/` and `samples/`"*) which is stricter than a named denial. The two read-only reviewers, `security-auditor` and `contract-steward`, have no write tools at all. Two of the denials carry their own reason rather than a rule: a purge helper in `scripts/` would sit outside every gate that makes deletion provable, and a collector script parked there runs outside every gate that keeps the metric catalog closed.
 - **The multipart-abort sweep** now has a beat home. `celery-workers` declares **exactly six** entries, all crontab, all routed to `maintenance`, with `sweep-abandoned-multipart-uploads` (`crontab(minute=17, hour=4)`, aborting uploads older than 24 h) as the sixth, and a test asserting the count and the entry names so a seventh fails CI until the skill is updated too. `kb-deletion-and-verification` points at it from the matching gotcha — abandoned multipart parts are invisible to both `ListObjectsV2` and `ListObjectVersions`, so `assert_prefix_empty()` passes and the deletion is attested while the parts of a half-uploaded original are still on disk.
 
-### Doctrine stated but unenforceable — three gated, one still open
+### Doctrine stated but unenforceable — all four now gated or decided
 
 1. ~~No Python-side tenancy grep in CI~~ — **fixed in Pass 4.**
 2. ~~"Deletion never matches on text" has no gate.~~ **Gated.** `ai-service` CI greps for `MatchText(` and for `(delete|count)…(text|content|content_hash)=` anywhere under `services/ai-service/app`, as a required check. The interesting part is the exemption: `app/deletion/filters.py` is the single **named** file allowed to construct keys dynamically, because the original grep was defeatable by `FieldCondition(key=field, …)` inside a loop, and it earns the exemption by unit-testing its `DELETE_KEYS` tuple. Which produced a finding of its own — see S16 below on why that tuple has seven keys and not six. A second file appearing in the exemption list is a review stop, not a merge.
 3. ~~ADR-010's Qdrant rebuild proof is scheduled, not a merge gate.~~ **Now a merge gate.** `qdrant-rebuild-proof` runs in the merge queue against a fixture org and asserts the reconstructed payload, not counts — the failure it catches is a payload key that exists nowhere in PostgreSQL, which counts cannot see. The full-corpus rebuild stays on the nightly.
 4. ~~Three telemetry gates each side assumes the other runs.~~ **All three are in CI**, in an `observability-rules` job on `infrastructure/observability/**`: alert label/annotation completeness, Alertmanager route coverage, and `promtool check rules` + `test rules`. Two of the three needed a specific shape to be worth anything, and both traps are recorded: `amtool config routes test` **exits 0 for a severity that routes nowhere** because a fall-through to the default *is* a resolution, so the gate compares the resolved receiver name against a deliberately-named black hole `kb-unrouted`; and a line `grep` is unfit for the label check because a stray `severity:` anywhere in the file satisfies it while the alert beside it carries nothing, so that check is driven off the parsed document with `yq`. A third trap sits beside them: `promtool test rules` resolves `rule_files:` relative to the **CWD**, so a passing run of zero tests looks identical to a passing run.
-5. **"Laravel decides, FastAPI executes" is still unresolved for the lifecycle tables.** `kb-source-lifecycle` has FastAPI flip `source_items.current_version_id`, a column `kb-architecture-map` assigns to Laravel, while two other skills insist FastAPI never queries Laravel's tables. **This is open decision 2 and it is still open** — it is a decision, not drift, so no audit round could close it. `ingestion-engineer` is forbidden from `services/core-api/` and so cannot raise it as code.
+5. ~~"Laravel decides, FastAPI executes" is unresolved for the lifecycle tables.~~ **Closed by ADR-012.** `kb-source-lifecycle` had FastAPI flip `source_items.current_version_id`, a column `kb-architecture-map` assigns to Laravel, while two other skills insisted FastAPI never queries Laravel's tables. The ruling splits it: FastAPI writes rows into the four allow-listed derived tables against the **new, not-yet-active** version, and **Laravel** flips the pointer on the §17.5 callback. This was a decision rather than drift, which is why no audit round could close it.
 
 ### Second round — S1–S17 and structural defects, all closed
 
@@ -245,17 +363,27 @@ later reader can tell a deliberate ruling from an accident.
 | S17 | Candidates dropped by the rerank retain cap were not recorded as exclusions, so the playground showed fewer results than the trace implied with no explanation | `above_retain_limit` is recorded at the retain cap, in both `bge-reranker` and `kb-rag-query-contract`. It is the drop that gets forgotten because `[: cfg.rerank_retain]` looks like a slice rather than a filter; §8.24 requires "excluded results *and reasons*", and a stage that filters without recording makes the whole panel untrustworthy. A test asserts reranked-count minus packed-count is fully accounted for by exclusion reasons |
 | — | Several skills exceeded the 200-line budget, which is what pushed detail out of sight of the file that owns it | Split into `references/` siblings, keeping `SKILL.md` as the map: `github-actions-pipeline` → `workflow-jobs.md`, `kb-observability-conventions` → `metric-catalog.md` + `logs-health-audit.md`, `kb-rag-query-contract` → `pipeline-stages.md`, `laravel-sanctum-auth` → `widget-session-service.md`, `nextjs-app-router` → `stream-read-loop.md`, `preact-vite-library` → `vite-config.md`, `tanstack-query-table` → `sources-table-example.md`, `vitest-playwright` → `sse-fixture-server.md`, and others. Every `SKILL.md` is now ≤ 200 lines. **Consequence for anyone auditing:** a grep restricted to `SKILL.md` now misses seven files carrying eleven `UNVERIFIED` markers — see `docs/23` |
 
-### Still needing your decision: the eight numbered items at the top of this file
+### The eight numbered decisions — closed as ADR-011…018
 
-None of the remediation above resolved any of them, and none should be read as
-having done so. They are decisions, not drift, and an audit cannot close a
-decision:
+The audit rounds could not close these, because they were decisions rather than
+drift. They are decided now, at the top of this file, and propagated into the
+skills that have to obey them:
 
-1. **Does the provider API key cross the Laravel→FastAPI wire?** — still (a) / (b) / (c).
-2. **Who writes `chunks` and `document_elements`?** — still open, and it now has the concrete symptom recorded above as unenforceable-doctrine item 5.
-3. **`web` on the `application` network (§24.3)** — `kb-architecture-map`'s deviation is unchanged and unratified.
-4. **Is §8.7's "model temporarily unavailable" fallback trigger reachable?** — still dead unless `kb-provider-adapter-contract` special-cases those provider codes into `provider_temporary`. *One correction to the item as written:* it says the taxonomy "kept the taxonomy internally consistent rather than adding an 18th class". The taxonomy has since grown an eighteenth class — but it is `provider_billing`, added for a different problem (an exhausted account arriving as OpenAI's 429 `insufficient_quota` and being retried, then silently falling back), and it does nothing for `model_not_found`. The decision stands exactly as posed.
-5. **What does a deletion actually reach — and who owns the erasure sweep?** — the interim break-the-link rule still stands in `kb-deletion-and-verification`, and the `UNVERIFIED` marker at its line 163 is still there because no spec section assigns the sweep.
-6. **Haystack — needs ADR-011.** The recommendation to drop it is unchanged; `haystack-pipelines` still exists as the record of why, and is now the file that carries the banned `kb.rag.*` span names as a counter-example.
-7. **Laravel 13's first-party AI, embedding, and vector-search APIs** — ADR-001/003/005 have not been reaffirmed against them.
-8. **Does the internal signing scheme's new canonical string absorb into `v1` or bump?** — unchanged.
+| Was | Now | Landed in |
+|---|---|---|
+| 1. Provider key on the wire? | **ADR-011** — yes, as `provider_credential: SecretStr`, outside the snapshot hash, on the never-forward list | `kb-internal-api-contracts`, `pydantic-contracts`, `laravel-control-plane`, `kb-security-baseline` |
+| 2. Who writes `chunks` / `document_elements`? | **ADR-012** — FastAPI, against a four-table allow-list; Laravel still flips the active-version pointer | `kb-architecture-map`, `fastapi-service`, `github-actions-pipeline` |
+| 3. `web` on `application`? | **ADR-013** — no; `edge` only, ratified | `kb-architecture-map` |
+| 4. Is §8.7's fallback trigger reachable? | **ADR-014** — yes via capacity codes only; `model_not_found` stays permanent and non-eligible. Still 18 classes | `kb-provider-adapter-contract`, `kb-error-taxonomy` |
+| 5. Deletion reach and erasure ownership | **ADR-015** — two workflows; deletion retains the three text columns, erasure purges them, legal hold refuses | `kb-deletion-and-verification` |
+| 6. Haystack | **ADR-016** — dropped; the skill is retargeted as the record of why | `haystack-pipelines`, `docs/05`, `docs/21`, `retrieval-engineer` |
+| 7. Laravel 13's AI APIs | **ADR-017** — ADR-001/003/005 reaffirmed; custody, not API quality | `laravel-control-plane` |
+| 8. Signing scheme version | **ADR-018** — absorbed into `v1`; bump-plus-dual-accept rule applies from first deploy | `kb-internal-api-contracts` |
+
+*One correction carried forward from the item as originally written:* decision 4
+said the taxonomy "kept the taxonomy internally consistent rather than adding an
+18th class". The taxonomy has since grown an eighteenth — `provider_billing`,
+added for a different problem (an exhausted account arriving as OpenAI's 429
+`insufficient_quota`, retried and then silently falling back). It does nothing
+for `model_not_found`, so ADR-014 stands exactly as posed and the count stays at
+18.
