@@ -1,0 +1,44 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Dependencies
+node_modules/
+vendor/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Build output
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# Test & tooling caches
+coverage/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.phpunit.result.cache
+storage/phpstan/
+playwright-report/
+test-results/
+
+# Local data volumes
+/data/
+*.sqlite
+*.db
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+!.vscode/extensions.json
+*.swp
