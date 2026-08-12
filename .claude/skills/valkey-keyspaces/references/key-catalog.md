@@ -19,6 +19,14 @@ implementer needs once. Every family below is `{family}:{org_id}:…` unless not
 | `rl:` | string | integer | `INCRBY` inside the Lua below; TTL set in the same script. |
 | `cb:` | hash | `state`, `opened_at`, `failures`, `successes`, `half_open_probes` | `EXPIRE` refreshed on every write so an idle breaker ages out; a *missing* breaker means closed, which is why this family is never evictable. |
 | `sess:` | hash | `bot_id`, `origin`, `issued_at`, `end_user_ref` | Never the session token itself — the key *is* the token lookup. No provider credential, ever. |
+| `{queue}\x06\x16{pri}` | list | the same JSON message body as the bare queue | kombu's priority split, `priority_steps = [0, 3, 6, 9]`; priority 0 is the bare name. Polled by every `BRPOP` whether or not anything publishes a priority. |
+| `unacked_mutex` | string | random token | `SET … PX 300000 NX`, released by a compare-and-delete Lua. Held for microseconds in the normal case and for the full 300 s if the holder dies mid-sweep. |
+| `{uuid}.reply.celery.pidbox` | list | one JSON reply frame per responding worker | Created by the worker, drained and `DEL`ed by the caller. No TTL: the caller's `DEL` is the deleter, so an abandoned `inspect` leaves a key until someone reaps it. |
+
+The three Celery families above carry **no org segment**, and that is correct rather than an
+exception to bless: they are transport-internal, one broker serves every tenant, and the tenant
+scope lives inside the message body. They are also the reason the org-purge sweep is a list of
+org-scoped families rather than a keyspace walk.
 
 ## Cardinality — what actually bounds each family
 

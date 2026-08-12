@@ -1,0 +1,90 @@
+# §21.2 — Multilingual questions, "if supported".
+#
+# CONDITIONAL CATEGORY. If the product does not claim multilingual support, delete this file and
+# the two multilingual fixtures and bump VERSION. Do not keep the cases and mark them
+# expected-to-fail: a permanently red row is a row everyone learns to skip past, including on the
+# day it turns red for a new reason.
+#
+# Three cases, three different properties. m-001 and m-002 can pass on lexical overlap alone;
+# only m-003 tests cross-lingual alignment, which is what BGE-M3 is chosen for.
+#
+# Answer language is graded by the human reviewer, not by a judge call. It is cheap to check and
+# an LLM judge asked "is this in Spanish" is a provider call spent on something `langdetect`
+# answers for free.
+
+dataset: kb-platform-golden
+corpus_version: corpus-2026.08.1
+category: multilingual
+
+cases:
+  - id: m-001
+    question: "Wie viele Urlaubstage stehen neuen Mitarbeitenden zu?"
+    language: de
+    unanswerable: false
+    expected_sources: [handbook-de-v1]
+    difficulty: medium
+    reference: >-
+      Neue Mitarbeitende erhalten 26 Urlaubstage pro Jahr, zuzüglich eines weiteren Tages für je
+      fünf abgeschlossene Dienstjahre, maximal 30 Tage.
+    expected_answer: >-
+      Neue Mitarbeitende haben Anspruch auf 26 Urlaubstage pro Jahr. Für je fünf abgeschlossene
+      Dienstjahre kommt ein weiterer Tag hinzu, höchstens jedoch 30 Tage.
+    required_facts: ["26"]
+    forbidden_claims: ["30 als Anfangsanspruch"]
+    locators: ["handbook-de-v1 §3 Urlaub"]
+    tags: [multilingual, german, same-language]
+    grading_notes: >-
+      answer_language: de. The German fixture states the same numbers as the English handbook, so
+      retrieving the English document and answering correctly in German is NOT a failure of fact —
+      but it is a failure of source selection, and the retrieval trace shows which document won.
+      expected_sources lists only the German fixture deliberately: a question asked in German
+      should ground in the German edition when one exists.
+
+  - id: m-002
+    question: "¿Cada cuánto se recomienda calibrar un instrumento en uso continuo en campo?"
+    language: es
+    unanswerable: false
+    expected_sources: [faq-es-v1, site-kelpwright-www]
+    difficulty: medium
+    reference: >-
+      El intervalo de calibración recomendado es de 12 meses, pero los instrumentos en uso continuo
+      en campo deben calibrarse cada 6 meses.
+    expected_answer: >-
+      Cada 6 meses para instrumentos en uso continuo en campo. El intervalo general recomendado es
+      de 12 meses.
+    required_facts: ["6"]
+    forbidden_claims: ["12 meses para uso continuo en campo"]
+    locators: ["faq-es-v1", "site support/calibration.html"]
+    tags: [multilingual, spanish, restated-fact]
+    grading_notes: >-
+      answer_language: es. The fact exists in both Spanish and English, so this case grades the
+      ANSWER LANGUAGE independently of retrieval — either source contains the answer and only one
+      is Spanish. Both ids are listed in expected_sources because either is a legitimate grounding;
+      answering in English is the failure here, not citing the English page.
+      The distractor is the general 12-month interval in the same sentence.
+
+  - id: m-003
+    question: "When does the works council meet?"
+    language: en
+    unanswerable: false
+    expected_sources: [handbook-de-v1]
+    difficulty: hard
+    reference: >-
+      The works council (Betriebsrat) meets on the second Tuesday of each month, per the German
+      appendix of the localized handbook. Items must be submitted at least one week in advance.
+    expected_answer: >-
+      The works council meets on the second Tuesday of every month. Submissions must be in at least
+      a week beforehand. This is set out in the German appendix (Anhang DE) of the handbook.
+    required_facts: ["second Tuesday"]
+    forbidden_claims: ["any other meeting schedule"]
+    locators: ["handbook-de-v1 Anhang DE — Betriebsrat"]
+    tags: [multilingual, cross-lingual, embedding-alignment, the-real-test]
+    grading_notes: >-
+      THE ACTUAL CROSS-LINGUAL TEST. An English question whose only answer is a German paragraph
+      containing none of the query terms — "works council" never appears, only "Betriebsrat". No
+      lexical path exists, so the sparse half of hybrid retrieval contributes nothing and this
+      succeeds or fails entirely on the dense embedding's cross-lingual alignment. answer_language:
+      en — the answer must be in the question's language even though the source is not. If m-001 and
+      m-002 pass while this fails, the embedding model is not aligning across languages and the
+      other two were passing on lexical overlap; report to retrieval-engineer with this case as the
+      evidence.

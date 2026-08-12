@@ -1,0 +1,114 @@
+# scripts/security/rules/kb-ts-boundary.yaml
+# ORIGINAL WORK. Not derived from any registry ruleset — see LICENCES.md.
+# Scope: apps/web, apps/widget, apps/mobile, packages/.
+
+rules:
+  - id: kb-ts-client-reaches-ai-service
+    languages: [typescript, javascript, tsx]
+    severity: ERROR
+    message: >-
+      Browsers, the widget and mobile talk to Laravel. ONLY Laravel talks to FastAPI. Authentication,
+      org resolution, bot authorization, quota and rate limiting exist exactly once, in Laravel, so
+      the moment a second caller can reach ai-api every one of those checks has a bypass — and
+      provider credentials plus the internal topology are on the public side of the boundary. The
+      `application` network is what makes this resolvable in dev and 404 in prod, so the failure
+      mode is "works locally, dies at the edge", with the requests that DID succeed having skipped
+      auth, quota and usage_events entirely.
+    metadata:
+      kb-invariant: "kb-architecture-map NN1 / ADR-013 — clients never reach FastAPI"
+    pattern-regex: '["\x27`]https?://ai-api(:\d+)?[/"\x27`]'
+
+  - id: kb-ts-postmessage-wildcard-target
+    languages: [typescript, javascript, tsx]
+    severity: ERROR
+    message: >-
+      `postMessage(data, '*')` delivers to whatever document currently occupies the frame,
+      including one a hostile host page navigated there after the handshake. Always pass an
+      explicit targetOrigin. The host page is hostile by assumption and the bridge carries no
+      authority — but the session token it carries is still a credential.
+    metadata:
+      kb-invariant: "iframe-postmessage-bridge — exact-origin checks in both directions"
+    pattern-either:
+      - pattern: $W.postMessage($DATA, "*")
+      - pattern: $W.postMessage($DATA, '*')
+
+  - id: kb-ts-origin-check-by-prefix
+    languages: [typescript, javascript, tsx]
+    severity: ERROR
+    message: >-
+      `startsWith`, `indexOf` and loose regexes on `event.origin` all accept
+      https://ourdomain.com.evil.com. Compare the FULL string against the allow-list, and check
+      `event.source` as well. Note the related trap: dropping `allow-same-origin` from the iframe
+      sandbox gives the frame an OPAQUE origin, so event.origin becomes the literal string "null" —
+      indistinguishable from any data: or sandboxed frame anywhere — and every origin check here
+      fails open or closed at random.
+    metadata:
+      kb-invariant: "kb-security-baseline §18.5 — exact-match origin checks"
+    pattern-either:
+      - pattern: $E.origin.startsWith(...)
+      - pattern: $E.origin.indexOf(...) $OP $N
+      - pattern: $E.origin.includes(...)
+      - pattern: $RE.test($E.origin)
+
+  - id: kb-ts-eventsource-for-chat
+    languages: [typescript, javascript, tsx]
+    severity: ERROR
+    message: >-
+      EventSource is GET-only and its constructor's only option is `withCredentials`, so it carries
+      neither our POST body nor a header. Its automatic Last-Event-ID reconnect is separately
+      forbidden: token streams are NOT resumable, and a silent reconnect re-bills the whole answer.
+      Every surface streams with fetch() + response.body.getReader(). On React Native, Hermes' XHR
+      fetch exposes no ReadableStream and fails SILENTLY — use expo/fetch there.
+    metadata:
+      kb-invariant: "ADR-008 / kb-internal-api-contracts — SSE via fetch, never EventSource"
+    pattern-either:
+      - pattern: new EventSource(...)
+      - pattern: new window.EventSource(...)
+
+  - id: kb-ts-second-sse-frame-parser
+    languages: [typescript, javascript, tsx]
+    severity: WARNING
+    message: >-
+      The SSE frame parser lives in packages/contracts and is imported, never forked. Three clients
+      read the same stream; three hand-written parsers is three ways to disagree about `: ping`,
+      about a multi-line `data:` field, and about where an event ends. A second copy is the drift
+      the contract steward exists to catch — and it drifts silently, because both copies work on
+      the happy path.
+    metadata:
+      kb-invariant: "CLAUDE.md — packages/contracts is imported, never forked"
+    patterns:
+      - pattern-regex: '(split\(["\x27]\\n\\n["\x27]\)|startsWith\(["\x27]data:["\x27]\))'
+      - pattern-not-inside: |
+          // contracts-parser: ...
+          ...
+
+  - id: kb-ts-org-scoped-fetch-cached-by-url
+    languages: [typescript, tsx]
+    severity: ERROR
+    message: >-
+      Every Next cache is keyed by URL, fetch arguments, or function arguments —
+      `current_organization_id` lives in the SESSION COOKIE and is in none of them. A cache hit is
+      therefore a 200 with correct-looking data belonging to ANOTHER TENANT, with no exception and
+      no log line. No organization-scoped byte is produced by the Next server at all; not
+      "produced and marked no-store", not produced.
+    metadata:
+      kb-invariant: "nextjs-app-router NN1 / kb-tenancy-isolation"
+    pattern-either:
+      - pattern: 'fetch($URL, {..., next: {revalidate: $N}, ...})'
+      - pattern: 'fetch($URL, {..., cache: "force-cache", ...})'
+      - pattern: unstable_cache(...)
+
+  - id: kb-ts-otel-in-widget-bundle
+    languages: [typescript, javascript, tsx]
+    severity: ERROR
+    message: >-
+      The embedded widget gets NO OpenTelemetry. It runs on a hostile third-party page, so a
+      cross-origin exporter is a data-exfiltration surface, and doctrine already forbids returning
+      trace context to clients. It would also blow the 5 kB loader budget on its own. Correlate
+      with X-KB-Request-Id instead.
+    metadata:
+      kb-invariant: "opentelemetry-instrumentation — browser tracing is apps/web only"
+    paths:
+      include:
+        - "apps/widget/**"
+    pattern-regex: 'from\s+["\x27]@opentelemetry/'

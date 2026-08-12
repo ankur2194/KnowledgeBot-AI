@@ -1,0 +1,23 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Zod 4's subpath exports do not resolve under "node10"/"node"; the schemas in
+    // @kb/contracts/forms fail to typecheck with an error that blames the package, not the setting.
+    "moduleResolution": "bundler",
+    "lib": ["DOM", "DOM.Iterable", "ES2023"],
+    "jsx": "preserve",
+    "allowJs": true,
+    "incremental": true,
+    "types": ["node"],
+    "plugins": [{ "name": "next" }],
+    // tailwind-shadcn: components.json's aliases resolve through @/* -> src/*. A mismatch here
+    // scatters shadcn output into a second component tree that compiles, renders, and is invisible
+    // to every rg over src/.
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+    "noEmit": true
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules", ".next", "dist"]
+}

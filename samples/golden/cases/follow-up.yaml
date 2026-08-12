@@ -1,0 +1,113 @@
+# §21.2 — Follow-up questions.
+#
+# Each case carries `history`: preceding questions the harness runs through the REAL pipeline, in
+# order, in the same conversation, letting the pipeline's own answers become the assistant turns.
+# The graded question is the final one. See schema.md — hand-written assistant replies would test
+# a conversation the bot never had, and query rewriting (stage 2) resolves the follow-up against
+# whatever was actually said.
+#
+# Two consequences worth stating before anyone reads a number from this category:
+#   * each case costs more than one pipeline run, so its latency and cost figures are not
+#     comparable with a single-turn case and must not be pooled into the same mean;
+#   * variance is higher, because two stochastic turns compose. The noise floor is measured
+#     per-category for exactly this reason (expected/noise-floor.md).
+
+dataset: kb-platform-golden
+corpus_version: corpus-2026.08.1
+category: follow-up
+
+cases:
+  - id: fu-001
+    history:
+      - question: "What is the list price of KW-2200-B?"
+    question: "And the field variant?"
+    unanswerable: false
+    expected_sources: [pricing-catalog-v1]
+    difficulty: medium
+    reference: >-
+      The field variant is KW-2200-F, the Tideline 2200F, with a list price of 21,750 EUR.
+    expected_answer: "The field variant, KW-2200-F, lists at 21,750 EUR."
+    required_facts: ["21750"]
+    forbidden_claims: ["18400 as the field variant's price"]
+    locators: ["pricing sheet Instruments, row KW-2200-F"]
+    tags: [follow-up, elliptical, entity-carry-over]
+    grading_notes: >-
+      The minimal follow-up: three words, no verb, no entity. The rewriter must carry "the 2200"
+      and "list price" from the first turn. If the answer repeats the first turn's 18,400 EUR, the
+      rewrite dropped the "field variant" qualifier rather than the subject — a different failure
+      from ignoring the history entirely, and the retrieval trace will show which.
+
+  - id: fu-002
+    history:
+      - question: "How much annual leave do employees get?"
+    question: "What about after ten years?"
+    unanswerable: false
+    expected_sources: [handbook-en-v1]
+    difficulty: hard
+    reference: >-
+      Annual leave is 26 days, plus one additional day for every five completed years of service,
+      capped at 30 days. After ten completed years that is 28 days.
+    expected_answer: >-
+      After ten years of service you would have two additional days, so 28 days — the base 26 plus
+      one day per five completed years, up to the 30-day cap.
+    required_facts: ["28"]
+    forbidden_claims: ["30", "26 as the answer after ten years"]
+    locators: ["handbook §3 Leave"]
+    tags: [follow-up, arithmetic, cap-temptation]
+    grading_notes: >-
+      Requires carrying the topic AND applying the accrual rule: 26 + (10 / 5) = 28. Two specific
+      wrong answers to watch for — 30, which is the cap and the largest number in the chunk, and 26,
+      which means the follow-up was answered as though it were the first turn. Per the arithmetic
+      rule in pricing/README.md, an answer that states the rule and the base without computing is
+      acceptable; a stated total of 28 with no derivation is also acceptable, since the inputs are
+      in the cited chunk.
+
+  - id: fu-003
+    history:
+      - question: "What does the SP-PLUS service plan include?"
+    question: "How much would that be for the 3400?"
+    unanswerable: false
+    expected_sources: [pricing-catalog-v1]
+    difficulty: hard
+    reference: >-
+      SP-PLUS is charged at 18% of list price per year. The Tideline 3400 is KW-3400-B with a list
+      price of 31,000 EUR, so SP-PLUS costs 5,580 EUR per year for that instrument.
+    expected_answer: >-
+      SP-PLUS is 18% of list price a year. The Tideline 3400 (KW-3400-B) lists at 31,000 EUR, so
+      that is 5,580 EUR per year.
+    required_facts: ["18", "31000"]
+    forbidden_claims: ["any product other than 5580 presented as the annual fee"]
+    locators: ["pricing sheets Service plans and Instruments"]
+    tags: [follow-up, cross-sheet, arithmetic, model-to-code]
+    grading_notes: >-
+      Three hops in one turn: carry SP-PLUS from the history, resolve "the 3400" to KW-3400-B, and
+      combine two sheets. required_facts holds the two inputs rather than the product, per the
+      arithmetic rule — stating both and declining to multiply is acceptable, a wrong product is
+      not, and a bare total with neither input is ungrounded.
+
+  - id: fu-004
+    history:
+      - question: "What are the standard warranty terms for a Tideline benchtop instrument?"
+    question: "Does it cover consumables?"
+    unanswerable: true
+    unanswerable_kind: absent_fact
+    expected_sources: []
+    difficulty: hard
+    expected_answer: >-
+      The warranty documents do not say whether consumables are covered. They state the warranty
+      period and when it starts, but not what it covers.
+    forbidden_claims:
+      - "any statement that consumables are covered"
+      - "any statement that consumables are excluded"
+    locators: ["conflicting/ fixtures — both deliberately silent on consumables"]
+    tags: [follow-up, unanswerable-after-answerable, context-momentum]
+    grading_notes: >-
+      THE UNANSWERABLE FOLLOW-UP, and the reason the unanswerable count for this dataset is nine
+      rather than eight. The preceding turn succeeded and filled the context with relevant warranty
+      text; the model now has momentum, a satisfied user, and a plausible-sounding question. That is
+      a materially different refusal test from a cold unanswerable question, because refusing
+      mid-conversation after answering well is harder than refusing at the start.
+      "Consumables are excluded" is the failure to expect — it is what most warranties say, and the
+      corpus does not say it. Both directions are forbidden: the sources are silent, not negative.
+      This case is counted in false_answer_rate alongside the u-* cases; report it separately as
+      well, since a threshold tuned on single-turn refusals may not hold across turns.

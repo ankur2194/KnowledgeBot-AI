@@ -1,0 +1,101 @@
+# scripts/security/rules/kb-php-tenancy.yaml
+# ORIGINAL WORK. Not derived from any registry ruleset — see LICENCES.md for why that matters here.
+# Engine: Opengrep (LGPL-2.1). Scope: services/core-api/.
+#
+# Every rule below catches something SILENT: green tests, HTTP 200, no error, no log line.
+
+rules:
+  - id: kb-php-raw-query-escapes-tenant-scope
+    languages: [php]
+    severity: ERROR
+    message: >-
+      Raw query builder use bypasses the global organization scope. `DB::table()`, `DB::select()`
+      and `withoutGlobalScopes()` all produce a query with NO tenant predicate — a legal,
+      successful, cross-tenant read at HTTP 200 and normal latency. Isolation is enforced in code
+      at seven layers and this is layer one. Use a tenant-scoped Eloquent model, or annotate the
+      line `// tenancy-exempt: <reason>` if it genuinely operates outside any organization
+      (migrations, platform-operator reporting).
+    metadata:
+      kb-invariant: "kb-tenancy-isolation NN1 — every relational query is org-scoped"
+      exemption: "// tenancy-exempt: <reason>"
+    patterns:
+      - pattern-either:
+          - pattern: DB::table(...)
+          - pattern: DB::select(...)
+          - pattern: DB::statement(...)
+          - pattern: $X->withoutGlobalScopes(...)
+          - pattern: $X->withoutGlobalScope(...)
+      - pattern-not-inside: |
+          // tenancy-exempt: ...
+          ...
+
+  - id: kb-php-horizon-gate-returns-true
+    languages: [php]
+    severity: ERROR
+    message: >-
+      The Horizon dashboard renders EVERY organization's job payloads, tags and exception traces
+      side by side. A `viewHorizon` gate that returns true — or that only checks authentication —
+      makes any tenant admin who can reach /horizon a cross-tenant breach, not a UX problem. The
+      gate must resolve a PLATFORM OPERATOR. Note the published default is local-only: keeping it
+      in production is a lockout, replacing it with `true` is the breach.
+    metadata:
+      kb-invariant: "laravel-queues-valkey — Horizon is a cross-tenant surface"
+    patterns:
+      - pattern-inside: |
+          Gate::define('viewHorizon', function(...) { ... });
+      - pattern-either:
+          - pattern: return true;
+          - pattern: return $user !== null;
+          - pattern: return auth()->check();
+
+  - id: kb-php-audit-details-from-request
+    languages: [php]
+    severity: ERROR
+    message: >-
+      Building an audit `details` payload from the whole request writes the value being audited
+      into the audit table — which is append-only and outlives the record it describes. On a
+      credential rotation that is the plaintext provider key, in a column no redaction fixture
+      covers and nobody thinks of as sensitive. Allow-list the fields; fingerprint, never echo.
+    metadata:
+      kb-invariant: "kb-security-baseline §18.11 — the audit row never contains the secret"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $A->record(..., $request->all(), ...)
+          - pattern: |
+              ['details' => $request->all()]
+          - pattern: |
+              ['details' => request()->all()]
+          - pattern: |
+              ['details' => $request->input()]
+
+  - id: kb-php-laravel-ai-apis-forbidden
+    languages: [php]
+    severity: ERROR
+    message: >-
+      ADR-017: the control plane uses none of Laravel 13's AI SDK. `Str::toEmbeddings()` sits
+      outside the provider adapter contract's usage accounting, and `DB::whereVectorSimilarTo()`
+      is a SECOND retrieval path carrying none of the four mandatory Qdrant filters. This is about
+      custody, not API quality.
+    metadata:
+      kb-invariant: "ADR-017 — reaffirms ADR-001/003/005 against Laravel 13's AI APIs"
+    pattern-either:
+      - pattern: Str::toEmbeddings(...)
+      - pattern: $X->whereVectorSimilarTo(...)
+      - pattern: DB::whereVectorSimilarTo(...)
+
+  - id: kb-php-job-without-overlapping-no-ttl
+    languages: [php]
+    severity: WARNING
+    message: >-
+      `WithoutOverlapping` and `ShouldBeUnique` both default `$expiresAfter` to 0, which
+      `Cache::lock($key, 0)` reads as NEVER EXPIRES. The middleware releases in a `finally`, so a
+      normal failure is fine — but a `--timeout` SIGKILL, an OOM kill or a container stop holds the
+      lock forever and every later dispatch for that key is silently released or dropped, with
+      nothing in failed_jobs. Set `expireAfter()` ABOVE the connection's `retry_after`.
+    metadata:
+      kb-invariant: "laravel-queues-valkey — --timeout < retry_after < lock TTL"
+    patterns:
+      - pattern: new WithoutOverlapping(...)
+      - pattern-not: (new WithoutOverlapping(...))->expireAfter(...)
+      - pattern-not: (new WithoutOverlapping(...))->$M(...)->expireAfter(...)

@@ -110,7 +110,15 @@ function boot(publicBotId: string, position: string) {
   frame.src = `${__KB_WIDGET_ORIGIN__}/embed?bot=${encodeURIComponent(publicBotId)}`
             + `&origin=${encodeURIComponent(location.origin)}&ch=${ch}`
   frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox')
-  frame.setAttribute('referrerpolicy', 'strict-origin'); frame.title = 'Support chat'; frame.loading = 'lazy'
+  frame.setAttribute('referrerpolicy', 'strict-origin'); frame.title = 'Support chat'
+  // NO `frame.loading = 'lazy'`. This sketch carried it until 2026-08-07 and it was a SHIPPING BUG,
+  // measured in a browser on a page with no CSP and everything permitted: the frame starts hidden
+  // (the launcher is what is visible), a `display: none` iframe is never near the viewport, lazy
+  // loading therefore never fires, `/embed` is never requested at all, `load` never fires — and the
+  // 10 s timer below concludes the frame was BLOCKED. Every visitor who did not open the chat within
+  // ten seconds watched the launcher turn into a "Chat with us" link, and the customer's analytics
+  // received a `frame_blocked` naming a CSP problem that did not exist. `loading = 'lazy'` and that
+  // timer are mutually exclusive; keep the timer, since it is the only detector of a real block.
 
   // If the customer's CSP lacks `frame-src`, the frame silently never loads: no onerror, nothing in our
   // logs. Watch both signals; degrade() swaps in an anchor to the bot's hosted-chat URL on
@@ -120,6 +128,9 @@ function boot(publicBotId: string, position: string) {
   const onViolation = (e: SecurityPolicyViolationEvent) =>
     { if (e.blockedURI.startsWith(__KB_WIDGET_ORIGIN__)) degrade(root, publicBotId) }
   document.addEventListener('securitypolicyviolation', onViolation)
+  // Load-bearing, and the reason `loading = 'lazy'` is banned above: this timer cannot distinguish
+  // "the host page blocked us" from "we never asked for the document", so anything that suppresses
+  // the request turns into a false CSP diagnosis on someone else's site.
   setTimeout(() => { if (!loaded) degrade(root, publicBotId) }, 10_000)
 
   root.append(buildLauncher(root, frame), frame)

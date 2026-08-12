@@ -1,0 +1,111 @@
+# Loki 3.7.5 — single-binary, filesystem-backed, 30-day retention.
+#
+# LOKI STREAM LABELS ARE `service`, `env`, `level`, `container`. NOTHING ELSE.
+# The metric-label allow-list from kb-observability-conventions binds Loki at least as hard as it
+# binds Prometheus, and here it is an operational failure as well as a privacy one: a Loki stream
+# is one chunk per unique label-set, so promoting `org_id` (or `job_id`, or `url`, or
+# `error_class`) to a label multiplies streams combinatorially and each one holds an under-filled
+# chunk in memory. The symptom arrives days after the "small" logging change: "maximum active
+# stream limit exceeded" on writes, queries timing out, ingesters OOMing.
+#
+# `org_id`, `bot_id`, `job_id`, `request_id`, `trace_id` and `error_class` live INSIDE the JSON
+# line and are queried with `| json | org_id="..."`. Line filters are fast because the label set
+# has already narrowed the stream to one service. That is the design, not a compromise.
+#
+# The label set itself is enforced where the labels are attached — the Collector's `file_log`
+# receiver and `otlp_http/loki` exporter (infrastructure/docker/otel/collector.yaml,
+# platform-devops-engineer) — because Loki accepts whatever it is sent. This file's contribution
+# is retention, schema, and the structured-metadata support the Tempo links depend on.
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: info
+  # Ingest bodies are batched by the Collector and can be large; the default 4 MB gRPC limit is
+  # what a "sudden burst of dropped logs with no error in the app" usually turns out to be.
+  grpc_server_max_recv_msg_size: 8388608
+  grpc_server_max_send_msg_size: 8388608
+
+common:
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    # SCHEMA ENTRIES ARE IMMUTABLE AND ADDITIVE. A chunk is read with the schema in force at its
+    # own timestamp, so editing this entry's `from`, `store` or `schema` orphans every chunk ever
+    # written under it — all historical logs vanish from queries, with no error anywhere. To
+    # migrate, APPEND a new entry with a FUTURE `from` date and leave this one alone.
+    #
+    # tsdb + v13 are required, not preferred: structured metadata (which is how `trace_id` rides
+    # along beside the line, and therefore how the Grafana derived field finds it) is rejected on
+    # v12, and the Tempo links quietly stop working.
+    - from: "2026-01-01"
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # 30 days. Logs are the tenant-incident record — `org_id` is a FIELD, so debugging one tenant
+  # means reading a month of JSON. Cheapest of the four stores per byte.
+  #
+  # RETENTION IS NOT RETROACTIVE. Shortening this window does not reclaim yesterday's disk; it
+  # only stops tomorrow's. And on its own this setting does nothing at all — see the compactor
+  # block below, which is the half everyone forgets.
+  retention_period: 720h
+
+  # Required for the `trace_id` structured metadata the Loki→Tempo derived field matches on.
+  allow_structured_metadata: true
+
+  # A backdated line is almost always a clock problem or a replayed buffer, and accepting it
+  # silently corrupts the retention window it lands in.
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h
+
+  # The tripwire for the label-cardinality failure above. 5000 streams is far beyond what four
+  # services × three environments × four levels can produce (≈50), so hitting it means a label
+  # was promoted that should not have been, and the write rejection is the alarm. Raising this
+  # number is the wrong response to that alarm.
+  max_global_streams_per_user: 5000
+
+compactor:
+  working_directory: /loki/compactor
+
+  # WITHOUT THIS, `retention_period` ABOVE DOES NOTHING. It defaults to false, and with it false
+  # the compactor happily compacts indices and deletes not one byte — disk grows forever while
+  # the config file says 720h.
+  retention_enabled: true
+
+  # And retention needs somewhere to record delete requests. Omitting it is a startup failure in
+  # 3.x rather than a silent no-op, which is the one merciful part of this trap.
+  delete_request_store: filesystem
+
+  compaction_interval: 10m
+  retention_delete_delay: 2h
+  retention_delete_worker_count: 150
+
+  # THE COMPACTOR IS A SINGLETON. Two of them applying retention corrupt each other's markers.
+  # Monolithic Loki runs exactly one by construction; if this deployment is ever split into
+  # targets, exactly ONE process runs `-target=compactor` and every other one points at it with
+  # `compactor_address`. There is no "just run two for availability".
+
+analytics:
+  reporting_enabled: false
+
+# No `ruler` block. Alerting lives in Prometheus + Alertmanager: rules there evaluate whether or
+# not Loki is running, they are the same PromQL as the recording rules they consume, and a second
+# evaluation engine with its own state is a second thing to debug at 03:00. Log-derived alerting
+# would also mean alerting on a lossy, TTL'd store — see kb-observability-conventions on why
+# telemetry is never a business record.

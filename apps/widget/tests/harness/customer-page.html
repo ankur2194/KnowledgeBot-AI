@@ -1,0 +1,87 @@
+<!doctype html>
+<!--
+  THE FIXTURE CUSTOMER PAGE — served from a SECOND ORIGIN by tests/harness/customer-origin.mjs.
+
+  This is the whole point of the harness. A same-origin test passes with every origin check
+  removed, so a fixture page that shares an origin with the iframe is worse than no fixture at all:
+  it is a green suite over a widget that accepts postMessage from anyone.
+
+  The server templates four markers, so one file covers every hostile variant. Their names are
+  spelled WITHOUT the surrounding double underscores below, and that is deliberate — see the
+  "exactly once" assertion in customer-origin.mjs:
+
+    WIDGET_ORIGIN   the widget origin, injected because the loader URL cannot be hard-coded
+    EXTRA_SCRIPT    a SECOND copy of the snippet (the tag-manager double-injection case)
+    HOSTILE_CSS     a customer's aggressive global reset
+    ATTACK_FRAME    a sibling iframe on the CUSTOMER's own origin, which is the forgery case an
+                    origin-only check cannot catch
+
+  Writing the real token here once cost three specs. `String.replace()` with a string pattern
+  substitutes the FIRST occurrence only, so the server was filling in the copy inside THIS COMMENT
+  and leaving the real marker below as literal text: the hostile stylesheet, the second script tag
+  and the attacker frame all landed inside an HTML comment and did nothing. Two specs then failed
+  honestly and a third — "typography inside the shadow root is unchanged" — PASSED, because
+  unchanged is trivially true when no hostile CSS was ever applied.
+
+  CSP is a RESPONSE HEADER and is set by the server, not here: `frame-ancestors` cannot be set in
+  <meta> at all, and the degrade path is driven by a policy the browser enforces.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Acme Corp — fixture customer page</title>
+    __HOSTILE_CSS__
+  </head>
+  <body>
+    <h1>Acme Corp</h1>
+    <p>Fixture host page. Everything on it is hostile by assumption.</p>
+
+    <!--
+      THE DOCUMENTED IDENTITY PATH: the window.kbq queue, drained by the loader on boot.
+
+      Never a direct KB.init(...) — the script below is `async`, so on a fast connection a direct
+      call runs before we exist and throws in the customer's console. And never a `data-*`
+      attribute for the signed identity token: any script on this page can rewrite an attribute
+      before our code reads it.
+
+      In production this <script> block is the customer's own; the ZERO-CONFIG install needs no
+      inline script at all, which matters because a customer on `script-src 'nonce-…'` cannot add
+      one for us.
+    -->
+    <script>
+      window.kbq = window.kbq || [];
+      window.kbq.push([
+        'on',
+        {
+          event: 'error',
+          handler: function (payload) {
+            (window.__kbEvents = window.__kbEvents || []).push(['error', payload]);
+          },
+        },
+      ]);
+      window.kbq.push([
+        'on',
+        {
+          event: 'conversation.started',
+          handler: function (payload) {
+            (window.__kbEvents = window.__kbEvents || []).push(['conversation.started', payload]);
+          },
+        },
+      ]);
+    </script>
+
+    <!--
+      THE EMBED SNIPPET. One classic script, async, configuration in data-* attributes.
+      No integrity=: SRI pins exact bytes and /v1/kb-widget.js is mutable within the major, so an
+      SRI hash would take the widget down on our next patch.
+    -->
+    <script
+      src="__WIDGET_ORIGIN__/v1/kb-widget.js"
+      async
+      data-kb-bot="pub_01J8FIXTUREBOT0000000000"
+      data-kb-position="right"
+    ></script>
+
+    __EXTRA_SCRIPT__ __ATTACK_FRAME__
+  </body>
+</html>

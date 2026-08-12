@@ -1,0 +1,89 @@
+# The platform golden evaluation dataset.
+#
+# This is the SYNTHETIC, tenant-free dataset that CI's §21.5 regression gate runs against.
+# Per-tenant datasets live in `evaluation_datasets` (docs/11 §16.7), are org-scoped, and are
+# never committed here. The two never mix.
+
+[dataset]
+id = "kb-platform-golden"
+name = "KnowledgeBot AI platform golden set"
+version = "2026.08.1"
+description = """
+Forty-six hand-authored questions over ten synthetic fixture documents, covering the ten
+question categories of docs/16-evaluation.md §21.2. Built to make specific pipeline failures
+diagnosable rather than to produce a high average: the notes-only facts fail loudly if PPTX
+speaker notes stop parsing, the superseded-rates appendix catches an answer that is grounded and
+wrong, the robots-disallowed page catches a crawler that exceeded its scope, and the
+unanswerable set is the only thing in the suite that can tell an evidence threshold of 0 from
+one of 10.
+"""
+
+# The corpus this dataset is valid against. A run whose corpus VERSION differs from this value
+# is REFUSED, not compared -- see ../README.md. Both this file and samples/VERSION are bumped
+# together whenever a fixture's bytes or a case's question/reference/expected_sources change.
+corpus_version = "corpus-2026.08.1"
+
+[composition]
+case_count = 46
+categories = 10
+unanswerable_count = 9          # 8 in cases/unanswerable.yaml PLUS follow-up case fu-004, which
+                                # is unanswerable after an answerable first turn. 20% of the set;
+                                # cases/unanswerable.yaml explains why it is that large.
+answerable_count = 37
+cases_with_reference = 37       # the 9 unanswerable cases omit `reference`; ContextRecall is
+                                # SKIPPED for those, never zeroed. See schema.md.
+clarification_ok_count = 4      # ambiguous cases excluded from the false-refusal denominator
+fixture_count = 10
+formats = ["pdf", "pdf-scanned", "docx", "xlsx", "pptx", "html"]
+languages = ["en", "de", "es"]
+
+[files]
+schema = "golden/schema.md"
+cases_dir = "golden/cases/"
+manifest = "corpus/manifest.toml"
+baseline = "expected/baseline.json"
+noise_floor = "expected/noise-floor.md"
+
+[cases]
+# One file per §21.2 category.
+#
+# THE INVARIANT: each number below must equal the number of cases in the matching
+# `cases/<category>.yaml`, and their sum must equal `case_count` above. A case file that silently
+# failed to parse is a smaller dataset scoring differently for no visible reason, so when the
+# loader exists a mismatch must be a LOAD ERROR and not a warning.
+#
+# WHAT ENFORCES IT TODAY: nothing automated. `services/ai-service/app/evaluation/` contains only
+# `__init__.py` -- there is no loader, no harness, and no seeding step -- so the only control on
+# these numbers right now is review of a `samples/`-only commit.
+#
+# It does not have to wait for the loader. Count consistency is CHEAPLY CHECKABLE RIGHT NOW: two
+# commands, no lockfile, no install, no interpreter beyond POSIX awk and grep. Both are green as of
+# corpus-2026.08.1 and neither is vacuous -- they compare the table below against 46 real case
+# entries in ten files. Run from `samples/`:
+#
+#   diff <(awk '/^\[cases\]/{c=1;next} /^\[/{c=0} c&&/^[^#]/&&/=/{gsub(/"/,"",$1); print $1, $3}' golden/dataset.toml | sort) \
+#        <(grep -c '^  - id:' golden/cases/*.yaml | awk -F'[/:]' '{n=$(NF-1); sub(/\.yaml$/,"",n); print n, $NF}' | sort)
+#   # -> prints nothing, exits 0
+#
+#   grep -h '^  - id:' golden/cases/*.yaml | wc -l
+#   # -> 46, which must equal case_count above
+#
+# Wiring those into a gate is a `samples/`-scoped job that does not depend on any ecosystem
+# lockfile. The richer checks -- schema validity, unknown-key rejection, the three-way
+# `corpus_version` agreement of schema.md -- do need the loader, and are not claimed here.
+factual = 6
+"exact-codes" = 5
+synthesis = 4
+tables = 4
+"date-sensitive" = 4
+ambiguous = 4
+unanswerable = 8
+conflicting = 4
+"follow-up" = 4
+multilingual = 3
+
+[review]
+# §21.3: automated metrics must be supplemented with human review. The gate samples cases for
+# human review; these are the settings that sampling obeys.
+human_review_sample_size = 10
+human_review_always_include = ["unanswerable", "conflicting"]

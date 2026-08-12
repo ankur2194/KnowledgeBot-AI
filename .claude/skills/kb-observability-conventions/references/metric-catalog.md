@@ -19,7 +19,8 @@ is added to the allow-list in the same commit, or the allow-list unit test fails
 | `kb_chat_first_token_seconds` | Histogram | `model` | §23's "first visible token below 4 s", measured end to end |
 | `kb_chat_duration_seconds` | Histogram | `outcome` | Total latency, split so a fast failure cannot flatter p95 |
 | `kb_retrieval_duration_seconds` | Histogram | `stage` | The 1.5 s budget per stage: `embed` `dense` `sparse` `fuse` `dedupe` `rerank` `pack` |
-| `kb_retrieval_empty_total` | Counter | `reason` | Empty-retrieval rate → refusals. `reason` ∈ `no_match` `below_threshold` `filtered` |
+| `kb_retrieval_empty_total` | Counter | `reason` | Empty-retrieval rate → refusals. `reason` ∈ `no_match` `below_threshold` `filtered` `no_branch_agreement`. The fourth value is **only** reachable on the degraded path: with reranking capability-gated (ADR-030) a run that skipped stage 11 has no score and therefore no threshold, and selects on branch agreement instead — so a degraded run that drops everything is not `below_threshold`, which would claim a threshold ran (`bge-reranker`, `ExclusionReason.NO_BRANCH_AGREEMENT`) |
+| `kb_retrieval_rerank_skips_total` | Counter | `reason` | How often stage 11 did not run, and why. `reason` is `RerankSkipReason`, closed at **five**: `provider_lacks_capability` `provider_scale_uncalibrated` `model_not_configured` `disabled_by_configuration` `insufficient_deadline` — **all five decidable before the call, none of them an error**. A provider *outage* is an error with its own `error_class` and never appears here; the enum contains no member for it, which is what stops an incident being laundered into a skip. **The two capability reasons are not one reason** (finding #47): `provider_lacks_capability` means the *vendor* publishes no ranking route (OpenAI, Anthropic, DeepSeek) and is fixed by moving the bot; `provider_scale_uncalibrated` means the vendor does publish one and *this platform* cannot threshold what comes back (OpenRouter, a gateway fronting several upstream cross-encoders on one credential), which no evaluation run fixes — so a panel summing the two reports a vendor limitation for a platform one. This family is why the capability gap needs **no alert**: it is a permanent, expected, per-org configuration fact, and the per-tenant question is a PostgreSQL one. `insufficient_deadline` is the one member that moves with load and is worth a dashboard eye — rising, it means the retrieval leg is being squeezed upstream and answers are getting worse before anything else notices |
 | `kb_provider_requests_total` | Counter | `provider`, `model`, `outcome`, `error_class` | Request count, success rate, rate-limit rate, timeout rate — four §20.2 bullets, one counter |
 | `kb_provider_duration_seconds` | Histogram | `provider`, `model` | Latency by model |
 | `kb_provider_first_token_seconds` | Histogram | `provider`, `model` | Provider-side TTFT. **Attribution only** — never the headline number |
@@ -29,7 +30,7 @@ is added to the allow-list in the same commit, or the allow-list unit test fails
 | `kb_retrieval_candidates` | Histogram | `stage` | Candidates entering each stage — where the funnel collapses |
 | `kb_chat_fallbacks_total` | Counter | `from_model`, `to_model`, `error_class` | Fallback rate and trigger (§8.7) — a silent fallback scores the wrong model |
 | `kb_retrieval_evidence_selected` | Histogram | — | Selected evidence count after thresholding |
-| `kb_retrieval_evidence_score` | Histogram | — | Average evidence score is `_sum / _count`; the buckets show what the average hides |
+| `kb_retrieval_evidence_score` | Histogram | `scale` | Average evidence score is `_sum / _count`; the buckets show what the average hides. **`scale` is mandatory and every query must select or group by it.** Since ADR-030 the score scale is a property of the `(provider, model)` pair, not of this repository: NVIDIA's ranking models return an unbounded logit, a Cohere-shaped API returns a bounded 0–1 relevance score, and `0.30` is a valid float on both while meaning roughly opposite things. A histogram summed across scales mixes distributions that are not comparable — the same defect `Scored.scale` prevents one layer down. Values are `RerankScale`, closed at four; `uncalibrated` is unreachable here because no calibration can carry it, so a score on that scale never survives stage 12. **`logit` is deliberately not recorded, ruled 2026-08-12** (`docs/22` § G18): the SDK drops negative samples, so recording a logit's positive half would be a truncated distribution indistinguishable from a healthy one. Since NIM is the only rerank-eligible provider and it returns `LOGIT`, **this histogram records nothing in the one working configuration today** — that is expected, not a broken exporter, and logit evidence quality is read from the **evaluation suite** instead. Revisits on a bounded-scale provider becoming eligible, or on an SDK that accepts negative amounts |
 | `kb_provider_cost_usd_total` | Counter | `provider`, `model` | Estimated cost. The `usage` table in PostgreSQL is the billing truth |
 
 ## Ingestion — docs/15 §20.2, stages in docs/08 §13.2
@@ -95,10 +96,24 @@ produces two numbers for one fact that disagree during exactly the incident you 
 | `kb_internal_scheduler_tick_timestamp_seconds` | Gauge | `task` | Unix time of each scheduled task's last tick, **exported by the always-scraped API from a PostgreSQL row, not by the scheduler**. Seed the row in the migration: a scheduler that never started after a deploy must read as an ancient timestamp, not a missing series, because a series that never existed cannot be threshold-alerted (`laravel-scheduler`) |
 | `kb_internal_scheduler_tasks_total` | Counter | `task`, `outcome` | Scheduled-task runs. This is the one family where `outcome` may be `skipped` — see below |
 
-`dependency` values are fixed: `postgres` `valkey` `qdrant` `object_storage` `embedding` `reranker`
-`ai_api` `core_api`. A per-org provider credential is **not** a dependency label — breaker state per
+`dependency` values are fixed at **six**: `postgres` `valkey` `qdrant` `object_storage` `ai_api`
+`core_api`. A per-org provider credential is **not** a dependency label — breaker state per
 `(org_id, credential, model)` is per-tenant data and belongs in PostgreSQL, surfaced on the admin
 dashboard (§19.3), not in a metric label.
+
+**`embedding` and `reranker` were removed by ADR-030 and must not come back.** They were dependency
+values while both ran as local models in-process, where a readiness probe could answer for them.
+Both are provider API calls now, and `/health/ready` **must never probe an external provider**
+(`services/ai-service/app/api/health.py`): provider reachability is per-bot and per-credential, so
+one tenant's revoked key would otherwise pull every replica out of the edge at once, with Traefik
+dropping them and nothing able to put them back. Nothing can therefore produce
+`kb_dependency_up{dependency="reranker"}` or `{dependency="embedding"}` — and nothing can produce
+`kb_circuit_breaker_state` for them either, because the surviving breakers are keyed per
+`(org, credential, model)` and that key set is banned from this label. A rule matching those series
+is silent forever while reading as coverage, which is worse than an absent rule. What replaces them:
+`kb_retrieval_rerank_skips_total{reason}` for the capability gap, the provider families
+(`kb_provider_requests_total{error_class}`) for an outage, and the admin dashboard for per-tenant
+breaker state.
 
 **`skipped` is the fifth `outcome` value and exists only on `kb_internal_scheduler_tasks_total`.**
 `withoutOverlapping()` registers a *skip filter*, so a task blocked by its own mutex emits
@@ -117,6 +132,27 @@ One bucket set per unit class, defined once and shared, so PromQL can add histog
 | User-visible latency (`chat_duration`, `first_token`, `provider_duration`) | `.1 .25 .5 1 2 4 6 10 15 30 60` — 4 s is a bucket edge because §23 targets it |
 | Job duration (`ingestion_stage`, `crawl`) | `1 5 15 30 60 120 300 600 900` |
 | Counts (`candidates`, `evidence_selected`) | `1 2 5 10 20 50 100 200` |
+| Reranker score (`evidence_score`, **always with `scale`**) | `0 .1 .25 .5 .75 .9 1 2 5 10` |
+
+The reranker-score set is a **union of two ranges, not a compromise between them**. It has to be one
+set because explicit bucket boundaries are a property of the *instrument*, and no OTel view can vary
+them per attribute value — so a single `kb_retrieval_evidence_score` cannot carry one edge list for a
+logit and another for a bounded score. The union gives each scale its own sub-range: `0 … 1` for
+`sigmoid` and `unit_interval`, out to `10` for the positive half of a `logit`. **The `scale` label is
+what makes that safe, and a query that aggregates it away gets a number with no meaning.**
+
+**It stops at zero because the SDK will not carry a negative sample.**
+`opentelemetry-sdk` 1.44.0 `Histogram.record()` discards any negative amount with a WARNING and no
+error anywhere. The *aggregation* accepts negative bucket edges quite happily, so an edge list
+spanning `-10 … 10` looks right, exports right, and receives nothing below zero — the negative half
+of every logit distribution vanishes, the surviving half reads as the whole, and "p10 of accepted
+evidence" is biased upward by precisely the samples that were weakest. Since NVIDIA NIM is the only
+configured provider that can rank and its scale is `LOGIT`, **the logit case is an open gap, not a
+solved one**: a call site must record nothing on `scale="logit"` rather than record its positive
+half, and how a logit distribution is carried at all is a decision for `retrieval-engineer` and
+`rag-eval-engineer` (a monotone σ transform preserves quantiles but is arithmetic on a score and
+must never be relabelled `scale="sigmoid"`; a threshold-relative family is the alternative). Recorded
+at the instrument in `app/observability/instruments.py`.
 
 A histogram costs `buckets + 2` series per label combination. The user-visible set is 11 buckets, so
 `kb_chat_first_token_seconds` with 20 model values is 260 series — which is the whole reason `model`

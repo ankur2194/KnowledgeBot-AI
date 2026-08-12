@@ -5,6 +5,19 @@ before anything touches a bot, a conversation or a provider, and the verificatio
 token the customer's backend signs. Spec: `docs/13-security.md` §18.5, `docs/04-functional-channels-chat.md` §8.20.
 Every 404 here is deliberate and every comment is the reasoning, not decoration.
 
+**The mint is `POST /sdk/v1/session`, and the prefix is a security boundary, not a naming choice.**
+`services/core-api/bootstrap/app.php` mounts four disjoint groups — `api/v1` (admin: cookie session
++ CSRF, the only group on Laravel's `api` middleware group), `rt/v1` (public chat runtime),
+`sdk/v1` (this one) and `internal/v1`. Posting this mint under `api/v1/...` would hand a request
+made from a **hostile customer page** to the admin group's session, CSRF and cookie stack — exactly
+the inheritance the four-group split exists to prevent — and it would be served by a group that has
+no `sdk` route to serve it. `sdk/*` also sits **outside** `api/` deliberately: Laravel 11+ leaves
+`config/cors.php` unpublished with `paths` defaulting to `['api/*', 'sanctum/csrf-cookie']`, so
+this route needs its own explicit entry or the browser rejects the preflight before any controller
+runs and the server log is empty. This document said `api/v1/sdk/session` for several revisions
+while three shipped clients had the same bug (ruling D1); the shipped loader is now
+`apps/widget/src/loader/bridge.ts`, and its docblock is the second copy of this argument.
+
 ```php
 // services/core-api/app/Services/Sdk/WidgetSessionService.php
 declare(strict_types=1); namespace App\Services\Sdk;
@@ -17,7 +30,7 @@ final class WidgetSessionService
 
     public function __construct(private readonly BotDomainMatcher $domains) {}
 
-    /** POST /api/v1/sdk/session. $origin is the request HEADER — never a body or query field. */
+    /** POST /sdk/v1/session — NOT api/v1/*. $origin is the request HEADER — never a body or query field. */
     public function mint(string $publicBotId, ?string $origin, ?string $userToken, string $ip): array
     {
         // Public/SDK surface: every rejection here is 404, indistinguishable. A 403 would answer
@@ -114,7 +127,7 @@ final class WidgetSessionService
 
 ## Refresh — how a widget session survives its own TTL
 
-There is no refresh endpoint the iframe can call. Every request the frame makes carries `Origin: https://<widget-domain>` — our own origin — which proves nothing about which page is embedding us, and `iframe-postmessage-bridge` accepts exactly **one** `init` per frame, so "just handshake again" is not available either. Origin proof exists in one place only: the loader's `POST /api/v1/sdk/session` from the customer's page. Renewal therefore has two tiers, and the re-mint is driven by the **loader**, never by the frame.
+There is no refresh endpoint the iframe can call. Every request the frame makes carries `Origin: https://<widget-domain>` — our own origin — which proves nothing about which page is embedding us, and `iframe-postmessage-bridge` accepts exactly **one** `init` per frame, so "just handshake again" is not available either. Origin proof exists in one place only: the loader's `POST /sdk/v1/session` from the customer's page. Renewal therefore has two tiers, and the re-mint is driven by the **loader**, never by the frame.
 
 **The symptom this closes.** A visitor opens the widget, leaves the tab over lunch, comes back and sends a question. The bearer is past its TTL, `resolve()` 401s, and with no re-mint path the composer clears, nothing streams, and the conversation stays dead until a full page reload — on a customer's site, in front of their customer. One 401 in the console, no retry, no error state: that is the signature.
 
@@ -124,7 +137,7 @@ There is no refresh endpoint the iframe can call. Every request the frame makes 
 
 1. **The frame notices, and asks — it does not act.** Trigger is either a `401` with `error_class: authentication` on any API call, or the proactive one: `expires_in` (returned by `mint()`) is within 5 minutes of lapsing. The frame never calls `/sdk/session` itself; from inside the frame that POST carries an origin nobody should care about.
 2. **`{kb:1, ch, type:'session-expiring'}`, frame → host**, `targetOrigin` = its `?origin=`, same envelope and same `ch` as everything else on this channel. A **distinct type**, deliberately: the one-`init`-per-frame rule is untouched and a second `init` stays ignored, because `init` is a state-machine reset and a token swap is not one.
-3. **The loader re-issues exactly the boot mint.** After the usual `event.source` → `event.origin` → `ch` checks it repeats `POST https://api.<domain>/api/v1/sdk/session`, `mode: 'cors'`, `credentials: 'omit'`, body `{bot_id, user_token}` built from **its own boot configuration**. Nothing in the body comes from the message; the message is a ping, not a request with parameters. That POST is made by a document on the customer's page, so the browser sets `Origin: https://customer.example` and page script cannot forge it — the one host-page fact worth anything, produced *fresh at refresh time* rather than replayed from mint time.
+3. **The loader re-issues exactly the boot mint.** After the usual `event.source` → `event.origin` → `ch` checks it repeats `POST https://api.<domain>/sdk/v1/session`, `mode: 'cors'`, `credentials: 'omit'`, body `{bot_id, user_token}` built from **its own boot configuration**. Nothing in the body comes from the message; the message is a ping, not a request with parameters. That POST is made by a document on the customer's page, so the browser sets `Origin: https://customer.example` and page script cannot forge it — the one host-page fact worth anything, produced *fresh at refresh time* rather than replayed from mint time.
 4. **Laravel treats it as a plain mint.** Same route, same `sdk-bootstrap` limiter, same 404 on every rejection, `matches($bot, $origin)` against the header. The result is a **new session record with a new secret and its own TTL**, not an extension; the old key is left to lapse. Signed identity is re-verified from scratch, which matters for control-3 bots: the customer's backend mints `userToken` with `exp` ≤ 5 minutes, so the boot token is long dead. The loader obtains a fresh one from the host page before re-minting (the customer's identity callback); a stale token is a 404 like any other and is **never** downgraded to an anonymous session.
 5. **`{kb:1, ch, type:'session', payload:{session:{token, expires_in}}}`, host → frame.** The frame replaces its module-scoped bearer and nothing else — no re-boot, no conversation reset, and it re-reads no bot id, origin, end-user identity or ability from the payload. Everything except the token string is ignored, so the best a hostile host page achieves is handing us a token that fails its own `resolve()`.
 6. **No token in a URL, fragment included.** The new token exists in exactly two places: that `postMessage` payload and the `Authorization` header of the frame's own fetches. Never `iframe.src`, never `location.hash` — a fragment is not sent to the server but it still lands in `location`, in the frame's history entry, and in whatever the customer's analytics scrapes off the DOM (SKILL.md NN 4). The frame is not re-navigated at all; re-navigation would destroy conversation state and demand a second `init`.

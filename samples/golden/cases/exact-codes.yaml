@@ -1,0 +1,107 @@
+# §21.2 — Exact names and codes.
+#
+# This category is the sparse/lexical half of hybrid retrieval on trial. KW-2200-B and KW-2200-F
+# are one character apart; dense embeddings do not separate them, and a dense-only pipeline
+# answers these fluently and wrongly. If every case here degrades at once, look at the sparse
+# vectors before looking at the prompt.
+
+dataset: kb-platform-golden
+corpus_version: corpus-2026.08.1
+category: exact-codes
+
+cases:
+  - id: e-001
+    question: "What is the list price of part KW-2200-B?"
+    unanswerable: false
+    expected_sources: [pricing-catalog-v1]
+    difficulty: easy
+    reference: >-
+      KW-2200-B, the Tideline 2200 benchtop analyser, has a list price of 18,400 EUR.
+    expected_answer: "KW-2200-B (Tideline 2200 benchtop analyser) lists at 18,400 EUR."
+    required_facts: ["18400"]
+    forbidden_claims: ["21750", "9200", "31000"]
+    locators: ["pricing sheet Instruments, row KW-2200-B"]
+    tags: [table, exact-code, baseline]
+    grading_notes: >-
+      The forbidden list is every other price on the sheet. A row-wise serialization failure shows
+      up here as a confidently cited wrong number, not as a refusal, which is why the deterministic
+      required/forbidden check matters more than any judged metric on this case.
+
+  - id: e-002
+    question: "Which part code is the field version of the Tideline 2200, and what is its lead time?"
+    unanswerable: false
+    expected_sources: [pricing-catalog-v1]
+    difficulty: medium
+    reference: >-
+      The field version is KW-2200-F, the Tideline 2200F (IP67, 8 channels), with a lead time of
+      9 weeks.
+    expected_answer: "KW-2200-F, the IP67 field analyser, with a 9-week lead time."
+    required_facts: ["KW-2200-F", "9 weeks"]
+    forbidden_claims: ["KW-2200-B as the field version", "6 weeks"]
+    locators: ["pricing sheet Instruments, row KW-2200-F"]
+    tags: [table, exact-code, adjacent-row]
+    grading_notes: >-
+      The adjacent row's lead time is 6 weeks. Returning the right code with the neighbouring row's
+      number is the classic table-flattening failure and must be marked wrong even though both
+      values appear in the evidence.
+
+  - id: e-003
+    question: "What is in a CN-118 pack, how is it sold, and what does it cost?"
+    unanswerable: false
+    expected_sources: [pricing-catalog-v1]
+    difficulty: easy
+    reference: >-
+      CN-118 is a chloride reagent pack, sold as a box of 12, priced at 245 EUR.
+    expected_answer: "CN-118 is the chloride reagent pack. It is sold in boxes of 12 at 245 EUR."
+    required_facts: ["box of 12", "245"]
+    forbidden_claims: ["265", "nitrate"]
+    locators: ["pricing sheet Consumables, row CN-118"]
+    tags: [table, exact-code, three-column]
+    grading_notes: >-
+      Three columns from one row must survive together. CN-119 is the nitrate pack at 265 EUR and
+      is the neighbouring row; either of its values appearing here is a row-association failure.
+
+  - id: e-004
+    question: "What did purchase order PO-88214 cover, and when was it raised?"
+    unanswerable: false
+    expected_sources: [scanned-po-88214]
+    difficulty: hard
+    reference: >-
+      Purchase order PO-88214, dated 2026-02-11, was raised by Harbourline Water Authority for two
+      KW-1100-B Tideline 1100 benchtop analysers at 9,200 EUR each, 18,400 EUR in total, for
+      delivery to Dock 7, Harbourline Depot, Fairmont.
+    expected_answer: >-
+      PO-88214 was raised by Harbourline Water Authority on 11 February 2026 for two KW-1100-B
+      analysers (9,200 EUR each, 18,400 EUR total), delivered to Dock 7, Harbourline Depot.
+    required_facts: ["PO-88214", "2026-02-11", "KW-1100-B", "2"]
+    forbidden_claims: ["any quantity other than 2", "any 2025 date"]
+    locators: ["scanned PO pages 1 and 2 — CLEAN pages only"]
+    tags: [ocr, exact-code, cross-page]
+    grading_notes: >-
+      The only case whose evidence comes from OCR, and the only one spanning two pages of a scanned
+      document. Every fact required here is on the CLEAN pages 1 and 2. Nothing in this case may
+      ever depend on page 3, which is deliberately degraded — see the scanned/ README. A failure
+      here after an OCR engine or DPI change is an ingestion finding, not a retrieval finding.
+      The total 18,400 EUR coincides with KW-2200-B's list price; that collision is a useful
+      accident, since a bot conflating them will be visible in the cited source.
+
+  - id: e-005
+    question: "Which firmware version added the chloride channel, and what bootloader does it need?"
+    unanswerable: false
+    expected_sources: [site-kelpwright-www]
+    difficulty: medium
+    reference: >-
+      Firmware 3.2, released on 2026-06-18, adds the chloride channel and requires bootloader 1.4
+      or later.
+    expected_answer: >-
+      Firmware 3.2 (released 18 June 2026) added the chloride channel. It requires bootloader 1.4
+      or later.
+    required_facts: ["3.2", "1.4"]
+    forbidden_claims: ["bootloader 3.2", "firmware 1.4"]
+    locators: ["site news/2026-06-firmware-3-2.html"]
+    tags: [crawl, exact-code, version-numbers]
+    grading_notes: >-
+      Two bare version numbers in one sentence, each attached to a different component. Swapping
+      them is the failure mode; both numbers appear in the evidence either way, so only the
+      pairing distinguishes a correct answer. Evidence comes from the crawled tree, so a failure
+      here may be crawl extraction rather than retrieval — check whether the page was fetched at all.

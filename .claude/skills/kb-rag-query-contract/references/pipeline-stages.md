@@ -34,7 +34,7 @@ Owned by `kb-tenancy-isolation`. Qdrant filter syntax by `qdrant-hybrid-search`.
 
 ## 7–8. Dense and sparse retrieval
 
-Dense (BGE-M3) finds semantic matches; sparse finds exact lexical matches — product codes, error strings, names, acronyms, quoted phrases, numbers, legal wording. Both default to ~20 candidates. Run them concurrently; their latencies are separate metrics (docs/15-observability.md §20.2).
+Dense (a provider embedding, ADR-030) finds semantic matches; sparse finds exact lexical matches — product codes, error strings, names, acronyms, quoted phrases, numbers, legal wording. Both default to ~20 candidates. Run them concurrently; their latencies are separate metrics (docs/15-observability.md §20.2).
 
 Record per candidate: score and rank, per branch, independently. A candidate found by only one branch keeps a null rank for the other — that asymmetry is the most diagnostic thing in the playground.
 
@@ -48,20 +48,20 @@ Reciprocal Rank Fusion, `score(d) = Σ 1/(k + rank)`, 1-indexed, absent document
 
 Sources of near-duplicates: repeated navigation, duplicate documents, repeated headers and footers, copied policy text across pages.
 
-- Exact duplicates (normalized text hash) are removed.
-- Near duplicates are **penalized**, not deleted — a penalty is recoverable by the reranker, a deletion is not.
+- Exact duplicates (`content_hash`) are removed.
+- **There is no near-duplicate penalty, and its absence is a ruling (2026-08-12), not a gap.** §12.10's "penalize near duplicates" is superseded; `penalize_near_duplicates` and the `near_duplicate_penalized` exclusion reason are both deleted. Three reasons, and a fourth that settles it: no near-duplicate detector exists in this tree (`grep -rn simhash services/ai-service/app` returns only the ruling's own docstring); a penalty would have to adjust `fused_score`, which RRF makes magnitude-free, so the adjustment would re-order by an amount unrelated to similarity; and the reason described a *retained* candidate, so recording it through `run.exclude` would have broken the scored − packed = excluded identity. The fourth: the only detector this tree could offer is the chunker's `overlap_of`, which always points at the immediately preceding chunk, so its firing set is a **subset** of the adjacency exemption below — the penalty could never once apply. Reopening it needs all three of a real detector, a penalty expressed in ranks, and a second trace verb meaning "adjusted, not dropped". The full record is `dedup_and_diversify`'s docstring in `app/rag/evidence.py`.
 - `diversity.max_per_document` caps how many chunks one document contributes when broader evidence would help.
 - **Adjacency exemption:** a chunk adjacent by `(source_version_id, chunk_index)` to an already-retained chunk is never dropped by dedup or by the per-document cap. §12.10 requires keeping adjacent chunks that complete a passage.
 
 ## 11. Reranking
 
-Cross-encoder over `(retrieval_query, chunk_text)`. Consumes `rerank.candidates` (20–30 default), retains `rerank.retain` (6–10 default). The reranker cannot recover recall stage 7–8 never had — raising candidate depth is the first tuning experiment.
+**Capability-gated** (ADR-030). A provider `rerank()` call over `(retrieval_query, chunk_text)`. Consumes `rerank.candidates` (20–30 default), retains `rerank.retain` (6–10 default). Whether an org's provider can rerank is **two questions** — does the vendor publish a ranking route, and can this platform threshold the scores it returns — and the answer is a lookup in `app/providers/capabilities.py`, never a vendor name restated here (`bge-reranker` carries the measuring command; measured 2026-08-12, two vendors publish a route and one is eligible). So this stage may not run at all — when it does not, the stage is **not jumped**: it records a closed `RerankSkipReason` and the pipeline serves the RRF-fused order. A skip is never a laundered failure. The reranker cannot recover recall stage 7–8 never had — raising candidate depth is the first tuning experiment, and it is the *only* lever for an org that cannot rerank.
 
 The reranker score must be visible in the playground (§12.11). Model, batching, sequence-length truncation, and score scale: `bge-reranker`.
 
 ## 12. Evidence threshold
 
-Applied to the reranker score only, on the **sigmoid** scale that `bge-reranker` owns (`evidence.min_score` = 0.30, with `evidence.scale` stored beside it). Candidates that clear the threshold but fall outside `rerank.retain` are excluded here too, as `above_retain_limit` — a cap is a drop and needs a recorded reason like any other. When nothing passes: state the answer was not found in the available sources, do not invent one, optionally suggest a narrower question, and record an `insufficient_evidence` event (it is a §20.2 chat metric, not just a log line).
+Applied to the rerank score only, on the scale that `(provider, model)` calibration names — there is no repo-wide scale or default since ADR-030, and an uncalibrated pair raises rather than borrowing a number. **If stage 11 was skipped there is no score and therefore no threshold**; keep only candidates carrying both a dense and a sparse rank (branch agreement is the one relevance signal RRF preserves), or refuse. Candidates that clear the threshold but fall outside `rerank.retain` are excluded here too, as `above_retain_limit` — a cap is a drop and needs a recorded reason like any other. When nothing passes: state the answer was not found in the available sources, do not invent one, optionally suggest a narrower question, and record an `insufficient_evidence` event (it is a §20.2 chat metric, not just a log line).
 
 The threshold is calibrated against the unanswerable and ambiguous cases in the evaluation dataset (§21.2), measured by refusal accuracy against hallucination rate (§21.3). Intuition is not an acceptable input.
 
@@ -94,15 +94,19 @@ Usage lands in `provider_calls` (tokens, cost, first-token and total latency, fa
 
 ## Exclusion-reason vocabulary
 
-Fixed strings; the playground groups on them and evaluation counts them.
+Fixed strings; the playground groups on them and evaluation counts them. The authoritative list is `ExclusionReason` in `services/ai-service/app/rag/stages.py`; this table must hold **exactly its members** — an incomplete closed vocabulary is a panel that groups on a value it does not know. Re-measure with:
+
+```bash
+/usr/bin/grep -nE '^\s+[A-Z_]+ = "' services/ai-service/app/rag/stages.py
+```
 
 | Reason | Stage |
 |---|---|
 | `exact_duplicate` | 10 |
-| `near_duplicate_penalized` | 10 (retained, score adjusted) |
 | `document_diversity_cap` | 10 |
 | `below_rerank_candidate_cutoff` | 11 |
 | `below_evidence_threshold` | 12 |
+| `no_branch_agreement` | 12 — **degraded path only.** Stage 11 was skipped, so there is no score and no threshold; selection falls back to branch agreement and a candidate present in only one branch is dropped for this reason. It must never be recorded as `below_evidence_threshold`, which would claim a threshold ran (`kb_retrieval_empty_total{reason}` carries the same distinction) |
 | `above_retain_limit` | 12 |
 | `context_budget_exhausted` | 13 |
 | `unknown_citation_label` | 18 |

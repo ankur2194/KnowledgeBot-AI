@@ -1,0 +1,405 @@
+[project]
+name = "kb-ai-service"
+version = "0.1.0"
+description = "KnowledgeBot AI data plane — providers, retrieval, ingestion, crawling, deletion, evaluation."
+# 3.13 rather than 3.14 only because the torch/onnxruntime/tokenizers wheel matrix is the
+# gating constraint. The floor that is NOT a preference is >= 3.12.4, a security floor
+# (CVE-2024-4032, kb-security-baseline).
+requires-python = "==3.13.*"
+
+dependencies = [
+  # ── core ───────────────────────────────────────────────────────────────────
+  # Plain fastapi[standard] pulls fastapi-cloud-cli into the runtime image.
+  # Floor 0.140.13: .12 fixed multi-line SSE `data` framing, .13 fixed status_code
+  # being ignored on SSE endpoints. Both are on our critical path.
+  "fastapi[standard-no-fastapi-cloud-cli]==0.141.1",
+  "starlette==1.3.1",
+  "uvicorn==0.52.1",
+  "pydantic==2.13.4",
+  # 2.14.0 is a FLOOR set by docling-core 2.90.0, not a preference: pinning 2.13.0 makes the
+  # whole resolution unsatisfiable. See the note in app/core/config.py — the `extra="forbid"`
+  # behaviour was re-verified against this version, and it is unchanged.
+  "pydantic-settings==2.14.2",
+  "anyio==4.14.2",
+  "httpx==0.28.1",
+  # psycopg text writes only. There is deliberately no ORM: this service writes exactly
+  # four derived tables into a schema Laravel's migrations define (kb-architecture-map).
+  "psycopg[binary,pool]==3.2.10",
+  "celery==5.6.3",
+  # The broker URL is redis://, never valkey:// — kombu has no valkey transport alias and the
+  # scheme raises "No such transport".
+  "kombu[redis]==5.6.2",
+  # DECLARED DIRECTLY, THOUGH `kombu[redis]` ALREADY PULLS IT. Two modules import redis-py by
+  # name and neither goes through kombu: `app/api/deps.py`'s replay-nonce store and
+  # `app/core/idempotency.py`'s claim record both speak to `coordination_url`, which is a
+  # different logical DB from the broker and is reached with an ordinary client. A direct
+  # import satisfied by a transitive dependency is an ImportError waiting for an unrelated
+  # kombu bump — it disappears with no change to this file and no entry in any diff that
+  # mentions Valkey. Pinned to the version already resolved in uv.lock, so this is a
+  # declaration rather than a resolution change.
+  "redis==6.4.0",
+  "boto3>=1.36",
+
+  # ── providers ──────────────────────────────────────────────────────────────
+  # openai is also the transport for DeepSeek and NVIDIA NIM. OpenRouter is raw httpx
+  # by design — it needs response fields no SDK surfaces.
+  "openai==2.53.0",
+  "anthropic==0.120.2",
+
+  # ── ingestion / parsing ────────────────────────────────────────────────────
+  "docling==2.118.0",
+  "docling-core==2.90.0",
+  "lxml>=6.1.0",
+
+  # ── ocr ────────────────────────────────────────────────────────────────────
+  "rapidocr==3.9.2",
+  # onnxruntime IS RAPIDOCR'S INFERENCE ENGINE. IT IS NOT A TORCH LEFTOVER — DO NOT REMOVE IT.
+  # RapidOCR ships ONNX weights and has no torch in its dependency closure at all (verified:
+  # rapidocr -> colorlog, numpy, omegaconf, opencv-python, pillow, pyclipper, pyyaml, requests,
+  # shapely, six, tqdm). It does not declare onnxruntime itself — it expects the caller to choose
+  # the CPU or GPU build — so this line is the only thing that puts a runtime under it. Delete it
+  # while "removing the ML stack" and OCR fails at first use with a bare ImportError, in a worker,
+  # on a tenant's document.
+  # This is the CPU build deliberately; `onnxruntime-gpu` is a different distribution.
+  "onnxruntime==1.28.0",
+  "pillow>=12.3.0",
+  "pymupdf>=1.26.7",
+  # THIS LINE ALONE DOES NOT GET YOU ONE OpenCV. rapidocr declares plain `opencv-python` (see the
+  # closure above), which installs the SAME `cv2/cv2.abi3.so` from a Qt/X11-linked wheel; both
+  # were installed and the winner was unpack order. The `[tool.uv] override-dependencies` entry
+  # near the bottom of this file is what drops that edge — read it before touching either line.
+  "opencv-python-headless>=4.10",
+
+  # ── crawl ──────────────────────────────────────────────────────────────────
+  # Library mode only. Crawl4AI never fetches for us — every byte comes through our own
+  # guarded httpx fetch and is handed to it as raw:<html>. Playwright browsers install
+  # at image build via crawl4ai-setup, not from here.
+  "crawl4ai==0.9.2",
+
+  # ── vectors ────────────────────────────────────────────────────────────────
+  # NO LOCAL EMBEDDING OR RERANKING MODEL. FlagEmbedding (BGE-M3) and transformers were removed
+  # when embeddings and reranking moved to the provider adapter layer: they are API calls now,
+  # billed to the org's own credential, with the same quota accounting and error taxonomy as chat.
+  # Re-adding either here re-adds a local inference stack that nothing in this service loads.
+  #
+  # torch AND torchvision ARE STILL LISTED, AND NOT BECAUSE ANYTHING HERE RUNS A MODEL WE WROTE.
+  # ------------------------------------------------------------------------------------------
+  # They are docling's: `docling -> docling-slim[standard] -> docling-ibm-models -> torch`. That
+  # is the layout model and TableFormer, i.e. the thing that turns a PDF into structured elements,
+  # which Ankur's scoping answer explicitly keeps. They would therefore be installed whether or
+  # not they appeared here.
+  #
+  # They appear here ANYWAY for one reason: `[tool.uv.sources]` IS NOT APPLIED TO PURELY
+  # TRANSITIVE DEPENDENCIES. uv respects a source only for a requirement the project declares
+  # itself. Delete these two lines and the pytorch-cpu redirect below silently stops applying —
+  # not with an error, but by resolving the stock PyPI wheel, which is the CUDA build, and adding
+  # fifteen `nvidia-*` packages plus `triton` (~3.4 GB) to every image. That regression was
+  # observed, here, by counting the lock after removing them.
+  #
+  # So: these are a DECLARATION OF WHERE A TRANSITIVE DEPENDENCY COMES FROM, not a decision to do
+  # local inference. The version floor is deliberately loose — docling picks the version; we only
+  # pick the index.
+  "torch>=2.5",
+  "torchvision>=0.20",
+  # ADR-021: 1.18.0, matching server v1.18.3. Client and server minors are pinned and
+  # bumped together; a client two minors ahead of the server is silent wire drift.
+  "qdrant-client==1.18.0",
+
+  # ── telemetry ──────────────────────────────────────────────────────────────
+  "opentelemetry-sdk==1.44.0",
+  "opentelemetry-exporter-otlp-proto-http==1.44.0",
+  "opentelemetry-semantic-conventions==0.65b0",
+  "opentelemetry-instrumentation-fastapi==0.65b0",
+  "opentelemetry-instrumentation-httpx==0.65b0",
+  "opentelemetry-instrumentation-redis==0.65b0",
+  "opentelemetry-instrumentation-psycopg==0.65b0",
+  "opentelemetry-instrumentation-celery==0.65b0",
+  "opentelemetry-instrumentation-logging==0.65b0",
+]
+
+[project.optional-dependencies]
+# An EXTRA, not a dependency-group: ragas is a runtime dependency of exactly one
+# deployment (ai-worker-evaluation), so it belongs in wheel metadata. Dependency groups
+# are dev-facing and never installed into an image.
+#
+# ragas hard-depends on langchain, langchain-core, langchain-community, langchain_openai,
+# datasets, networkx and scikit-network — none of them optional. The Dockerfile's
+# `runtime-evaluation` stage runs `uv sync --extra evaluation`; every other stage does
+# not, and a test asserts `import ragas` RAISES in the API image.
+#
+# THE langchain-community CEILING IS RAGAS' BUG, CARRIED HERE BECAUSE RAGAS DECLARES NO BOUND.
+# ------------------------------------------------------------------------------------------------
+# ragas 0.4.3 requires `langchain-community` with NO version specifier at all (verified in the
+# 0.4.3 wheel METADATA — the four langchain requirements are bare names), and then does, at
+# ragas/llms/base.py:12, an unconditional module-level:
+#
+#     from langchain_community.chat_models.vertexai import ChatVertexAI
+#
+# `langchain_community/chat_models/vertexai.py` is present in 0.3.31, 0.4 and 0.4.1, and is GONE
+# from 0.4.2 (2026-05-22), which sunset the package and moved its integrations out to standalone
+# distributions. Unbounded, uv resolves 0.4.2 and `import ragas` dies with
+# `ModuleNotFoundError: No module named 'langchain_community.chat_models.vertexai'` — before any
+# eval code runs, so the whole ai-worker-evaluation image is dead at boot. The `runtime-evaluation`
+# stage's `python -c "import ragas"` assertion catches it at build time; that assertion is the
+# reason this pin exists and must not be relaxed to make a build pass.
+#
+# There is no forward fix available: 0.4.3 IS the latest ragas, and the import is still there. So
+# the constraint is a ceiling rather than a bump, and it is the loosest one that is true —
+# `< 0.4.2`, the exact release that removed the module, not `== 0.4.1`. When ragas ships a release
+# that no longer imports the vertexai shim, DELETE this line; do not widen it.
+#
+# Second, independent reason 0.4.2 is unusable here even if the module came back: importing it
+# emits a `DeprecationWarning` ("langchain-community is being sunset"), and [tool.pytest] runs
+# `-W error::DeprecationWarning`. 0.4.1 imports clean under that flag; 0.4.2 does not.
+evaluation = [
+  "ragas==0.4.3",
+  "langchain-community<0.4.2",
+]
+
+# Multi-script alternative to RapidOCR. Not installed by default; selecting it is an
+# ocr-pipeline decision, not a dependency-resolution accident.
+ocr-tesseract = ["tesserocr==2.11.0"]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# torch IS STILL HERE, AND IT IS DOCLING'S, NOT OURS. READ THIS BEFORE "FINISHING" THE REMOVAL.
+# ══════════════════════════════════════════════════════════════════════════════
+# When embeddings and reranking moved to the provider API, the obvious next step looked like
+# deleting torch outright. IT CANNOT BE DELETED, and the reason is not a leftover:
+#
+#     docling==2.118.0  ->  docling-slim[standard]  ->  docling-ibm-models  ->  torch, torchvision
+#
+# `docling` is a meta-package whose ONLY dependency is `docling-slim[standard]` — the `standard`
+# extra is not optional for us, it is what the meta-package requests — and docling-ibm-models is
+# the LAYOUT MODEL and TABLEFORMER. Those are PyTorch models, and they are the thing that turns a
+# PDF into structured elements. Ankur's scoping answer keeps document processing, so it keeps
+# torch. `pip uninstall torch` here does not produce a leaner image; it produces a service that
+# cannot read a PDF.
+#
+# What DID leave with the embedding stack: FlagEmbedding, sentence-transformers, peft, datasets,
+# ir-datasets, scikit-learn, sentencepiece, pyarrow. `transformers` also stays, transitively, via
+# docling-core and docling-ibm-models — it is simply no longer OUR declared dependency.
+#
+# THIS INDEX PIN IS THEREFORE LOAD-BEARING AND MUST NOT BE REMOVED WITH THE `cpu`/`cuda` EXTRAS.
+# ------------------------------------------------------------------------------------------------
+# The `cpu` / `cuda` extras and the `[tool.uv] conflicts` block ARE gone — that split existed to
+# let a GPU deployment pick a CUDA build, and there is no GPU deployment any more. But the index
+# redirect below is a different mechanism with an independent job, and it is now the ONLY thing
+# standing between this image and 3.4 GB of CUDA:
+#
+#   the wheel published as `torch` on PyPI IS the CUDA build — fifteen `nvidia-*` wheels plus
+#   `triton`, MEASURED at 2.7 GB + 691 MB. Nothing in this service can execute a CUDA kernel any
+#   more, so every byte of that is dead weight in every image, for every self-hoster.
+#
+# Because the redirect is unconditional (no `extra =` qualifier), it governs the package NAME
+# across the whole resolution — which is what lets it reach the docling-ibm-models -> torch edge
+# that we do not declare and cannot see from this file. torchvision is redirected for the same
+# reason: the PyPI torchvision wheel is built against the CUDA torch and drags it back.
+#
+# VERIFY BY COUNTING, NEVER BY READING THIS BLOCK. The Dockerfile asserts the installed
+# distribution list, because every way this regresses leaves this file looking correct.
+[tool.uv]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EXACTLY ONE OpenCV. THE OVERRIDE IS A CORRECTNESS FIX, NOT A SIZE OPTIMISATION.
+# ══════════════════════════════════════════════════════════════════════════════
+# `opencv-python` and `opencv-python-headless` are two distributions that install THE SAME FILES:
+# both RECORDs claim `cv2/cv2.abi3.so`, and neither declares a conflict with the other. Install
+# both and the winner is whichever uv unpacked last — MEASURED, from the two builds this fix came
+# out of:
+#
+#   * knowledgebot/ai-service:dev (built 2026-08-10) — both dist-infos present, and the shipped
+#     cv2.abi3.so hashes to the HEADLESS RECORD entry. `import cv2` worked.
+#   * a cold-cache rebuild of the same tree — the plain wheel landed last, and the model-download
+#     step died with `ImportError: libxcb.so.1: cannot open shared object file` out of
+#     `rapidocr -> cv2`. The plain wheel bundles libQt5XcbQpa / libX11-xcb and needs the system
+#     X libraries; the base stage installs none of them, correctly.
+#
+# So the image's OCR behaviour was not determined by its manifest. That is the defect. The size
+# difference (~74 MB of Qt/X11) is real but secondary.
+#
+# WHY AN OVERRIDE AND NOT `apt-get install libxcb1`. Adding X11 to a server image would make the
+# build pass while leaving BOTH distributions installed and the winner still decided by unpack
+# order — it hides the nondeterminism instead of removing it. `ai-worker-crawl` is a separate
+# target precisely so Chromium's X/font/audio libraries exist in ONE image; pulling a subset of
+# them into `runtime` (which sits on the `data` network) walks that back for no gain.
+#
+# HOW IT WORKS, because the syntax reads like a typo: `rapidocr==3.9.2` declares plain
+# `opencv-python`, and we cannot edit rapidocr. A uv override REPLACES every requirement for a
+# package name across the whole resolution, so overriding it with a requirement carrying a marker
+# that can never be true (requires-python is `==3.13.*`) drops the edge entirely. uv reports
+# `Removed opencv-python v5.0.0.93` and records the override in uv.lock's `[manifest]` block, so
+# `uv sync --frozen` fails if this line and the lock ever disagree. cv2 is then supplied by the
+# `opencv-python-headless` we declare ourselves, above.
+#
+# RAPIDOCR IS VERIFIED AGAINST HEADLESS, NOT ASSUMED. headless ships the highgui symbols but not
+# the Qt/GTK backends behind them — MEASURED: `hasattr(cv2, "imshow")` is True, and calling it
+# raises `cv2.error ... (-2:Unspecified error) The function is not implemented. Rebuild the
+# library with ...`. So `hasattr` proves nothing, and if any RapidOCR path CALLED one, this
+# override would convert a build failure into a runtime failure inside OCR on a tenant's
+# document, which is strictly worse. Two checks, both run against a built image:
+#
+#   cd .venv/.../site-packages/rapidocr && grep -rhoE 'cv2\.[A-Za-z_0-9]+' . | sort -u
+#     -> 30 symbols, ALL array/drawing ops present in headless: cvtColor, resize, dilate,
+#        warpPerspective, getPerspectiveTransform, minAreaRect, boxPoints, findContours,
+#        fillPoly, polylines, putText, copyMakeBorder, imencode, imwrite, rotate, invert,
+#        bitwise_*, add, mean, and their flag constants. NO GUI symbol.
+#   grep -rn 'cv2\.\(imshow\|waitKey\|namedWindow\|destroyAllWindows\|setMouseCallback\)'
+#        over ALL of site-packages except cv2 itself -> zero hits.
+#
+# And a real end-to-end OCR call over a fixture page is run against the built image. Re-run that,
+# not `import cv2`, if this line ever changes.
+override-dependencies = [
+  "opencv-python ; python_version < '3'",
+]
+
+# `explicit = true` is load-bearing: it means NOTHING resolves from this index unless a
+# [tool.uv.sources] entry names it. Without it, download.pytorch.org becomes a general-purpose
+# index for the whole resolution and any package it happens to host shadows PyPI — which is a
+# dependency-confusion surface, not a convenience.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+torchvision = [{ index = "pytorch-cpu" }]
+
+[dependency-groups]
+dev = [
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
+  "pytest-cov==7.1.0",
+  "pytest-xdist==3.8.0",
+  # Import from testcontainers.community.* — the old top-level paths are shims that warn,
+  # and `-W error::DeprecationWarning` in addopts turns those warnings into failures.
+  "testcontainers[qdrant]==4.15.0",
+  "asgi-lifespan==2.1.0",
+  "freezegun==1.5.1",
+  # Non-streaming cassettes only. A recorded cassette cannot reproduce inter-event
+  # timing, and the timing is what the streaming tests exist to check.
+  "vcrpy==7.0.0",
+  "ruff==0.14.2",
+  "mypy==1.18.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+# ── pytest ───────────────────────────────────────────────────────────────────
+# pytest 9 also reads [tool.pytest] and pytest.toml. The two tables cannot both be
+# present; this is the one we keep.
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# BOTH, explicitly, to the SAME value. Their defaults disagree, and the resulting
+# "attached to a different loop" failure lands on the SECOND test, not the first.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+#
+# `-W error::DeprecationWarning` STAYS, AND THE TWO EXEMPTIONS BELOW ARE NOT A RELAXATION.
+# ─────────────────────────────────────────────────────────────────────────────
+# Three things depend on the flag staying strict, so read all three before touching it:
+# `langchain-community` sunsetting (the comment at :150-157 — 0.4.1 imports clean under this
+# flag and 0.4.2 does not, which is how that dependency ceiling is currently *enforced* rather
+# than merely declared), the testcontainers top-level shims (:274-276), and the deprecated
+# `LayoutOptions` at app/ingestion/parsing/converter.py:405-412, where the flag is what stops a
+# deprecated pipeline object being constructed silently.
+#
+# WHAT THE BLANKET FLAG BROKE. Two upstream advisories fire inside a real parse, and promoted to
+# exceptions they make correct documents read as corrupt:
+#
+#   * `RapidOcrModel.__init__` reads its own `rec_font_path`, a field pydantic has marked
+#     deprecated — so merely *constructing* the OCR stage raises, before any document is opened.
+#   * `docling_core.DoclingDocument.add_list_item` warns when a list item's parent is not a
+#     `ListGroup`. This fires during document *assembly*, inside the pipeline's own
+#     `except Exception`, so the whole document comes back `ConversionStatus.FAILURE` and
+#     `parse_document` raises `error_class="parsing"`, non-retryable, on a document that parsed
+#     fine. MEASURED 2026-08-12 against docling 2.118.0 / docling-core, in
+#     knowledgebot/ai-service:dev: `samples/corpus/documents/scanned/scanned-po-88214.pdf` fails
+#     with "docling returned failure ... ListItem parent must be a list group" and parses to 36
+#     elements once exempted. The trigger is NARROWER than "any bare list item" — every backend
+#     that builds lists directly (DOCX, PPTX, HTML, Markdown) creates the group first. It is
+#     `readingorder_model._add_child_elements`, reached only when the layout model nests a list
+#     item inside a form, key-value region, picture, or rich table cell — i.e. forms, invoices
+#     and purchase orders. Neither advisory reaches a production worker; `-W` is a test setting.
+#
+# PRECEDENCE IS THE TRAP, AND IT IS WHY THESE ARE `-W` AND NOT `filterwarnings`. pytest applies
+# ini `filterwarnings` FIRST and command-line `-W` SECOND (`_pytest/config.apply_warning_filters`),
+# and every filter is PREPENDED, so the last one applied wins. Exemptions written in a
+# `filterwarnings` list would therefore lose to this `-W error` and change nothing at all. They
+# have to sit in this same list, AFTER it.
+#
+# Scoped by message AND module, never by category alone. `-W` parses with escaping on, so the
+# module field is anchored (`re.escape(module) + r"\Z"`) and matches that upstream module
+# exactly — a DeprecationWarning raised by OUR code, or by any other dependency, still fails the
+# suite. `default` rather than `ignore` so both stay visible in the run's warning summary and
+# can be deleted the day upstream fixes them.
+addopts = """
+  --strict-markers --strict-config -ra --import-mode=importlib
+  -W error::DeprecationWarning
+  -W default:deprecated:DeprecationWarning:docling.models.stages.ocr.rapid_ocr_model
+  -W 'default:ListItem parent must be a list group:DeprecationWarning:docling_core.types.doc.document'
+"""
+testpaths = ["tests"]
+markers = [
+  "integration: needs real containers",
+  "security: the docs/17 §22.5 suite; runs in every CI tier",
+]
+
+# ── ruff (ADR-020) ───────────────────────────────────────────────────────────
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+# ".", not ["app", "tests"]. Naming the packages makes isort classify `app.*` and `tests.*` as
+# THIRD-PARTY, so `import pytest` and `from app.core.errors import ...` merge into one block —
+# every import section in the repo then reads as if our own modules were external.
+src = ["."]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "DTZ", "T20", "SIM", "RUF", "ASYNC", "S"]
+ignore = [
+  # assert is how tests assert.
+  "S101",
+  # RUF002/RUF003 flag "ambiguous" Unicode in docstrings and comments. The rule exists to
+  # catch homoglyph attacks in identifiers; these modules are deliberately prose-heavy and
+  # use en dashes and arrows in explanatory text, where the character is intentional and
+  # cannot reach an identifier. Left on for RUF001 (identifiers), which is the real risk.
+  "RUF002",
+  "RUF003",
+  # N818 wants every exception suffixed `Error`. This codebase names them in the past
+  # participle instead — CrawlRejected, OcrRejected, DeletionVerificationFailed,
+  # ProviderCallFailed — which reads correctly at the raise site and was arrived at
+  # independently by four separate authors. Consistency here is worth more than the suffix.
+  "N818",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may hardcode fixture credentials and print.
+"tests/**" = ["S105", "S106", "T20"]
+
+# ── mypy (ADR-020) ───────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["app"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = [
+  # No "FlagEmbedding.*": the local embedder is gone. Embeddings and reranking are provider API
+  # calls now, and those clients are typed.
+  "docling.*",
+  "docling_core.*",
+  "crawl4ai.*",
+  "rapidocr.*",
+  "ragas.*",
+  "celery.*",
+  "kombu.*",
+  "cv2.*",
+  "fitz.*",
+]
+ignore_missing_imports = true

@@ -1,0 +1,321 @@
+# infrastructure/docker/traefik/traefik.yaml — STATIC configuration, Traefik v3.7.
+#
+# ================================================================================================
+# NOTE THE ONE THING THAT IS NOT IN THIS FILE: the ACME email.
+# ================================================================================================
+# Compose interpolates the COMPOSE FILE. It does not interpolate a file it mounts. A
+# `email: "${ACME_EMAIL}"` written here would be read by Traefik as the literal 13-character
+# string "${ACME_EMAIL}" and registered as the account contact — no error, no warning, and the
+# only symptom is expiry notices going nowhere. The email is passed as a command-line flag on the
+# traefik service instead:
+#     command: ["--certificatesresolvers.le.acme.email=${ACME_EMAIL}"]
+# ================================================================================================
+# THAT PREMISE IS FALSE. VERIFIED AGAINST traefik:v3.7.10, 2026-08-07. READ THIS BEFORE ADDING
+# ANY `command:` FLAG OR `TRAEFIK_*` ENVIRONMENT VARIABLE TO THE traefik SERVICE.
+# ================================================================================================
+# The old text here said "flags override file values in Traefik's static-configuration
+# precedence". They do not. The three static-configuration sources are MUTUALLY EXCLUSIVE and the
+# FILE WINS: Traefik tries its loaders in order and STOPS at the first one that returns a
+# configuration, and the file loader is first. So a mounted static file silently discards every
+# CLI flag and every TRAEFIK_* environment variable.
+#
+# Measured, three ways, against this exact file:
+#   A. file mounted + `--log.level=DEBUG`         -> no debug lines. File's `INFO` won.
+#   B. NO file mounted + `--log.level=DEBUG`      -> "DBG Static configuration loaded",
+#                                                    staticConfiguration shows level DEBUG.
+#   C. file mounted + `TRAEFIK_LOG_LEVEL=DEBUG`   -> no debug lines. File won again.
+#   D. file at a NON-default path via `--configfile=` + `--log.level=DEBUG` -> still no debug.
+#      The short-circuit is in the LOADER, not in the path.
+#
+# ================================================================================================
+# AND THE OTHER HALF, WHICH THE ABOVE DOES NOT SAY: WHAT HAPPENS WHEN THIS FILE IS NOT HERE.
+# Re-measured against traefik:v3.7.10, 2026-08-07 (image digest
+# sha256:9c3b91d5fb7770853ca5c1124a23c34bf2d9b47ffaebeab2614cbaf410dcb2ac).
+# ================================================================================================
+# "The file wins" is a statement about a file that LOADS. Four of the five ways this file can go
+# wrong stop Traefik before it serves a byte; the fifth is silent. None of them is permissive.
+#
+#   E. mount source missing (Docker then creates a DIRECTORY at the destination — the classic
+#      bind-mount failure) -> exit 1:
+#        "command traefik error: read /etc/traefik/traefik.yaml: is a directory"
+#   F. file exists, ZERO BYTES -> exit 1:
+#        "command traefik error: no configuration found in file: /etc/traefik/traefik.yaml"
+#   G. file exists, unparseable YAML -> exit 1:
+#        "command traefik error: yaml: line 1: did not find expected key"
+#   H. file TRUNCATED mid-write so `docker:` ends up with a null value (a real deploy hazard: an
+#      interrupted rsync, a half-saved editor buffer, `head -123` of this very file) -> exit 1:
+#        "command traefik error: providers cannot be a standalone element (type *static.Providers)"
+#   I. the VOLUME LINE IS DELETED from compose.yaml, so there is no file to fail on -> Traefik
+#      boots, and this is the only quiet one. The Docker provider is NOT enabled by default: the
+#      resolved staticConfiguration is `"providers":{"providersThrottleDuration":"2s"}` with no
+#      `docker` key, so there are no routers, every host gets 404 — and `docker logs` returns
+#      ZERO LINES. A total edge outage with no diagnostic. compose.yaml's traefik healthcheck
+#      exists for this case and for the one below.
+#
+# So a missing or broken static configuration FAILS CLOSED. What actually exposes containers is
+# an EDIT to the file: with both latches below removed, an unlabelled container on the same Docker
+# network answers `curl -H 'Host: <container-name>'` with 200 (measured). Either latch alone holds
+# it at 404. Nothing in Traefik's log marks that transition, because a latch-less config is a
+# perfectly valid one — which is why the check is a healthcheck grep, not a log alert.
+#
+# ONE CONSEQUENCE FOR THE ENV CHANNEL, AND IT IS SHARPER THAN "THE FILE WINS" SUGGESTS. There are
+# three loaders — FILE, then FLAGS, then ENV — mutually exclusive, first match wins:
+#
+#   J. no file, no flags, env `TRAEFIK_PROVIDERS_DOCKER_WATCH=true` and NOTHING ELSE -> the Docker
+#      provider is instantiated with exposedByDefault TRUE and defaultRule Host(`{{normalize
+#      .Name}}`), and an unlabelled container on the same network answers a spoofed Host header
+#      with 200. One innocuous-looking env var is a wide-open edge.
+#   K. same, plus TRAEFIK_PROVIDERS_DOCKER_EXPOSEDBYDEFAULT=false -> 404. The latch works over env.
+#   L. same as J, plus ONE unrelated CLI flag (`--log.level=INFO`) -> no Docker provider at all.
+#      The FLAG loader wins and the whole env block is discarded.
+#
+# compose.yaml therefore carries TRAEFIK_PROVIDERS_DOCKER_EXPOSEDBYDEFAULT=false and
+# TRAEFIK_PROVIDERS_DOCKER_CONSTRAINTS as latch 3, and carries NO `command:` key — per L, one flag
+# would disarm latch 3. Corollary worth knowing before you export a TRAEFIK_* variable "just for
+# debugging": it will look like it does nothing, in every environment where this file is present,
+# right up until the day it is not.
+#
+# Consequences, all of which were live in this repo until this file was corrected:
+#   * `--certificatesresolvers.le.acme.email=${ACME_EMAIL}` on the traefik service HAS NEVER BEEN
+#     APPLIED. The ACME account was registered with no contact — which is exactly the
+#     "expiry notices go nowhere" failure this header was written to prevent, arriving through
+#     the very mechanism chosen to prevent it. `email` now lives in the resolver blocks below.
+#   * compose.override.yaml's `--certificatesresolvers.le.acme.caserver=<staging>` never applied
+#     either: the dev stack made 853 failed order attempts against PRODUCTION Let's Encrypt.
+#   * compose.override.yaml's `--log.level=DEBUG` and `--accesslog.filepath` never applied.
+#
+# THE RULE THAT FOLLOWS: anything that must vary per environment cannot be a flag and cannot be an
+# env var. It is either written in this file, or it is expressed as a DOCKER LABEL in compose.yaml
+# — labels are dynamic configuration, they are interpolated by Compose, and they are how
+# `certresolver` is now selected per environment. Debugging tip: run Traefik once with no file and
+# `--log.level=DEBUG` to make it print its fully resolved `staticConfiguration`.
+#
+# Everything below is v3 spelling. A v2 config file LOADS WITHOUT COMPLAINT and half of it does
+# nothing: IPWhiteList -> IPAllowList, Headers/HeadersRegexp matchers -> Header/HeaderRegexp,
+# HostHeader removed, PathPrefix is no longer a regex, StripPrefix lost forceSlash, the Headers
+# middleware lost sslRedirect/sslHost/featurePolicy. A dropped middleware option is not an error;
+# it is a security control that stopped existing. `core.defaultRuleSyntax: v2` exists as a bridge
+# and is deliberately unset here — it hides exactly the mismatch you need to see.
+
+entryPoints:
+  web:
+    address: ":80"
+    # asDefault:false everywhere. A router with no `entrypoints` option attaches to EVERY
+    # entrypoint unless some entrypoint is marked default — which is how an HTTPS-only service ends
+    # up answering unredirected on :80.
+    asDefault: false
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+    # PORT 80 STAYS OPEN. HTTP-01 challenges are answered here, ahead of the redirect. Firewalling
+    # it "because everything is HTTPS anyway" does not break anything today — it breaks renewal
+    # about thirty days later, which is the hardest kind of outage to connect to its cause.
+
+  websecure:
+    address: ":443"
+    asDefault: false
+    http:
+      tls:
+        # Entrypoint-level FALLBACK only: every one of our eight routers sets its own
+        # `tls.certresolver` label, so this applies to nothing we ship. It is `le-staging`
+        # rather than `le` for the same reason the label default is — a router that reaches
+        # production without an explicit choice should fail visibly on an untrusted certificate,
+        # not silently consume the production ACME rate limit. See certificatesResolvers below.
+        certResolver: le-staging
+    transport:
+      respondingTimeouts:
+        # Request READ only. Chat bodies are a few kilobytes and arrive instantly; uploads are
+        # capped by the buffering middleware on their own router.
+        readTimeout: 60s
+
+        # ============================================================================
+        # writeTimeout: 0s  —  0 MEANS NO DEADLINE, AND IT MUST STAY 0.
+        # ============================================================================
+        # Go sets the write deadline ONCE, covering the entire response. A non-zero value therefore
+        # cuts every SSE answer at exactly that wall-clock time, with no error line anywhere: the
+        # deadline closes the connection cleanly, so the client sees a normal end-of-stream and
+        # renders a truncated answer as complete. The symptom is "every long answer stops at the
+        # same number of seconds", and the fix people reach for first —
+        # responseForwarding.flushInterval: -1 — changes nothing, because ReverseProxy already
+        # flushes streaming responses immediately and ignores flushInterval for them.
+        writeTimeout: 0s
+
+        # Keep-alive idle BETWEEN requests. An in-flight response is not idle, so this does not
+        # touch a live stream.
+        idleTimeout: 180s
+      lifeCycle:
+        # A Traefik restart cuts in-flight streams at this value. The default is 10s, which would
+        # truncate almost every answer during a deploy. 120s >= the p99 answer duration.
+        graceTimeOut: 120s
+    forwardedHeaders:
+      # Empty list = trust nobody. Populate ONLY with the CIDR of an upstream proxy you actually
+      # run. Never `insecure: true` — that trusts a client-supplied X-Forwarded-For from anyone on
+      # the internet. Behind an existing reverse proxy, omitting this makes Traefik rewrite
+      # X-Forwarded-Proto to http, Laravel builds http:// URLs, Secure cookies are refused, and the
+      # admin login loops with no error message.
+      trustedIPs: []
+
+providers:
+  docker:
+    # ============================================================================================
+    # THE TWO LATCHES. Both are required; neither is sufficient.
+    # ============================================================================================
+    # Without latch 1 the Docker provider's default is exposedByDefault:true with a defaultRule of
+    # Host(`{{ normalize .Name }}`), so EVERY container gets a router keyed on its own name. A
+    # container with no labels and no published port is then reachable from the internet with one
+    #     curl -H 'Host: ai-api' https://<public-ip>/internal/v1/health
+    # There is no DNS record, nothing looks wrong in `docker compose ps`, and it lands on a service
+    # that trusts its caller by design.
+    #
+    # THESE TWO LINES ARE GREPPED BY THE traefik HEALTHCHECK IN compose.yaml. The patterns are
+    #     ^[[:space:]]*exposedByDefault:[[:space:]]*false
+    #     ^[[:space:]]*constraints:[[:space:]]*"Label\(`kb\.edge`,`true`\)"
+    # Reformatting either line — different quoting, a line break, moving the value to an anchor —
+    # turns the edge container UNHEALTHY even though Traefik is configured correctly. That is the
+    # deliberate cost of the only check that can see a latch being removed: Traefik itself reports
+    # nothing, because a latch-less config is a valid config. Change the line and the pattern
+    # together, or the next person will "fix" the healthcheck by deleting it.
+    exposedByDefault: false                 # latch 1
+    # Latch 2 is a label we control. `traefik.enable=true` is the most copy-pasted line in this
+    # ecosystem and arrives in a PR that looks routine; `kb.edge=true` does not, and a service
+    # cannot acquire a route by accident with both latches in place.
+    #
+    # Measured on 2026-08-07: EITHER latch alone is sufficient against an unlabelled container
+    # (both hold it at 404); only removing BOTH produces a 200 on a spoofed Host header. They are
+    # still both required, because latch 2 is the one that survives a service arriving with
+    # `traefik.enable=true` in it.
+    constraints: "Label(`kb.edge`,`true`)"  # latch 2
+
+    # ============================================================================================
+    # THIS IS THE DOCKER NETWORK NAME, NOT THE COMPOSE SERVICE-LEVEL KEY. `edge` WAS WRONG.
+    # ============================================================================================
+    # Compose prefixes every network it creates with the project name, so the Compose key `edge`
+    # is the Docker network `knowledgebot_edge`. Traefik matches on the DOCKER name. With `edge`
+    # here it found nothing and fell back to "first available network" — per container, in map
+    # order, NON-DETERMINISTICALLY: measured picking `knowledgebot_application` on one boot and
+    # `knowledgebot_observability` on the next, for the same container.
+    #
+    # The consequence was not cosmetic. Traefik is on `edge` ONLY, so it dialled laravel-api's
+    # 172.26.x (application) address, which it has no route to. Measured from inside the traefik
+    # container: 172.26.0.4:8080 -> unreachable; 172.25.0.7:8080 (edge) -> HTTP/1.1 200 OK. The
+    # public API answered curl with a 20 s timeout while `docker compose ps` said healthy and
+    # every static check in the repo passed. `web` and `sdk` worked only because their fallback
+    # happened to land on the right network.
+    #
+    # WHY A LITERAL AND NOT AN INTERPOLATION: Compose does not interpolate a file it mounts, and
+    # per this file's header a flag or env var cannot reach a Traefik that has a static file. So
+    # the name cannot be derived here. Instead the DOCKER NAME IS PINNED at the other end —
+    # compose.yaml declares `networks.edge.name: knowledgebot_edge` — which makes this literal
+    # correct even under `-p othername` or COMPOSE_PROJECT_NAME. There is nothing left to derive,
+    # and a project rename can no longer desync the two.
+    network: knowledgebot_edge
+    watch: true
+    # `endpoint` is left at the default unix socket, mounted :ro on the service. Prefer a
+    # read-only socket proxy exposing only container and event endpoints: write access to the
+    # Docker socket is host root, and Traefik is a root-equivalent process on the public internet.
+
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+# ==================================================================================================
+# TWO RESOLVERS, AND THE CHOICE BETWEEN THEM IS A LABEL, NOT A FLAG.
+# ==================================================================================================
+# Both are defined here because this file is the only static-configuration source Traefik will
+# read (see the header). Selection happens in compose.yaml, on each router:
+#     traefik.http.routers.<name>.tls.certresolver: ${CERT_RESOLVER:-le-staging}
+# Labels are DYNAMIC configuration — Compose interpolates them, and Traefik honours them — so the
+# per-environment choice lives where a variable actually works.
+#
+# THE DEFAULT IS STAGING, DELIBERATELY, AND THE DIRECTION IS THE POINT. Getting it wrong toward
+# staging ships an untrusted certificate: every browser refuses it loudly, on the first request,
+# and the fix is one variable. Getting it wrong toward production burns Let's Encrypt's
+# 5-failures-per-identifier-per-hour budget silently — this stack logged 853 failed orders against
+# the production directory before anyone looked — and those limits are per ACCOUNT and slow to
+# recover. Production sets CERT_RESOLVER=le explicitly in its own .env; a deployment that forgets
+# is visibly broken rather than quietly rate-limited.
+certificatesResolvers:
+  le:
+    acme:
+      # THE EMAIL IS HERE NOW, NOT A FLAG. The header explains why the flag never applied and why
+      # the account has been registering with no contact address. Bootstrap/deploy rewrites this
+      # value the same way it rewrites seaweedfs/identities.json and valkey/users.acl — a
+      # committed placeholder, replaced in place, because a mounted file cannot be interpolated.
+      email: ops@knowledgebot.example   # CHANGE-ME-bootstrap-rewrites-this
+      #
+      # NAMED VOLUME, not a bind mount. If the host path in a bind mount does not exist, Docker
+      # creates a DIRECTORY there and the ACME store can never be written. Traefik does not refuse
+      # to start over this and does not audit the path, so the only symptom is every request being
+      # served with "TRAEFIK DEFAULT CERT" and an empty ACME log.
+      storage: /acme/acme.json
+      httpChallenge:
+        entryPoint: web
+      # HTTP-01 issues all four hostnames including the widget's separate registrable domain. No
+      # wildcard is needed, which is why there is no DNS-01 provider and no DNS API credential.
+      #
+      # No `caServer` key: absent means the PRODUCTION Let's Encrypt directory. This resolver is
+      # the one production selects with CERT_RESOLVER=le. The advice that used to live here —
+      # "while iterating, uncomment the staging directory, compose.override.yaml already sets it
+      # in dev" — was wrong twice: the override set it as a CLI FLAG, which a static file
+      # discards (see the header), and commenting a line in and out of a shared file is a
+      # per-environment switch that cannot be committed in two states at once.
+
+  # The same resolver against the staging directory. It is a SEPARATE resolver rather than a
+  # commented-out line because both environments must be expressible simultaneously in one
+  # committed file — that is the whole reason the choice moved to a label.
+  #
+  # Separate ACME storage is not optional. acme.json holds the ACCOUNT registration, and an
+  # account is bound to the directory it registered with; sharing one file between the two
+  # resolvers is how a stack that "switched back to production" keeps serving staging-issued,
+  # untrusted certificates with nothing in the log to explain it. Distinct resolver names get
+  # distinct keys inside acme.json, and the volume is shared safely.
+  le-staging:
+    acme:
+      email: ops@knowledgebot.example   # CHANGE-ME-bootstrap-rewrites-this
+      storage: /acme/acme-staging.json
+      httpChallenge:
+        entryPoint: web
+      caServer: https://acme-staging-v02.api.letsencrypt.org/directory
+
+accessLog:
+  format: json
+  fields:
+    # ALLOW-LIST, not a deny-list. This log ships to Loki, which has no per-tenant access control
+    # and long retention.
+    defaultMode: drop
+    names:
+      StartUTC: keep
+      Duration: keep
+      RouterName: keep
+      ServiceName: keep
+      # The edge's only abuse signal. Retention belongs to the log stack.
+      ClientHost: keep
+      RequestMethod: keep
+      RequestHost: keep
+      OriginStatus: keep
+      DownstreamStatus: keep
+      # RequestPath is DELIBERATELY ABSENT. Traefik builds it from urlCopy.String(), so it carries
+      # the QUERY STRING — one GET with ?q=<the customer's question> puts tenant text in Loki
+      # forever. "What was the request" is answered by Laravel's own field-allow-listed log.
+    headers:
+      defaultMode: drop     # Authorization and X-KB-Signature must never reach a log line
+      names:
+        traceparent: keep   # correlates the edge line to the application trace
+
+log:
+  level: INFO
+  format: json
+
+# `api:` is absent on purpose, and `api.insecure` (port 8080) is never set. The dashboard
+# enumerates every router, service and middleware — a complete map of the internal topology — which
+# is the same class of exposure as Horizon's job payloads, with a nicer UI.
+#
+# `metrics:` is absent too. Traefik's own Prometheus endpoint would be a second, uncatalogued
+# metric surface; the edge's numbers that matter (status class, duration) are already in the access
+# log, and the metric catalog is closed.
+#
+# `ping:` is absent, which is why the traefik service carries no Compose healthcheck: enabling it
+# would mean an extra entrypoint, and the edge's health is what you measure from OUTSIDE.

@@ -1,0 +1,76 @@
+/* apps/widget/src/app/styles.css — the IFRAME app's stylesheet.
+ *
+ * This is a different document on a different origin from the customer's page, so nothing here can
+ * leak out and nothing of theirs can reach in — not selectors and, unlike a shadow root, not
+ * inherited properties either. That is the whole reason the chat UI is in an iframe and only the
+ * launcher chrome is in a shadow root.
+ *
+ * @import must come first, and the order matters: Tailwind's own layers, then the shared tokens.
+ */
+
+@import 'tailwindcss';
+
+/* The :root and .dark custom-property defaults, shared BYTE-FOR-BYTE with apps/web so a customer's
+ * brand is identical between hosted chat and the embed. @kb/design-tokens is zero-runtime — CSS
+ * custom properties in a .css file, no JS — which is why it is one of only two packages the widget
+ * may import. It is DECLARED on this document's own :root rather than inherited from anywhere:
+ * custom properties pierce a shadow boundary, but there is no boundary here to pierce, and
+ * inheriting a customer's `--primary` is exactly the accident this avoids. */
+@import '@kb/design-tokens/tokens.css';
+
+/* Tailwind v4 has no `darkMode: 'class'`. shadcn's published variant is `(&:is(.dark *))`, which
+ * matches DESCENDANTS of .dark but not the .dark element itself, so a `dark:` utility on <html>
+ * silently does nothing. Both spellings compile and nothing warns. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* `inline` is LOAD-BEARING: without it `var(--primary)` resolves where this block is defined
+ * (:root) and is baked into --color-primary, so the per-bot theme scope is either ignored or leaks
+ * upward into the whole frame. With it, the utility emits `background-color: var(--primary)` and
+ * resolves at the element. */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-lg: var(--radius);
+}
+
+/* `set-theme` writes `data-theme` on <html> via dataset — a closed enum of three values, never a
+ * class name built from the message string. `.dark` is applied by the app, never by the host. */
+:root {
+  color-scheme: light dark;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  /* The frame is transparent over the customer's page until the panel paints its own surface. */
+  background: transparent;
+}
+
+#kb-root {
+  height: 100%;
+}
+
+/* A model-emitted image never loads (src/render/renderer.ts replaces it with this placeholder).
+ * It is styled so the visitor sees a deliberate, inert marker rather than a broken layout. */
+.md-image-blocked {
+  display: inline-block;
+  padding: 2px 6px;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}

@@ -1,0 +1,175 @@
+# Model weights this service loads, pinned by commit revision.
+#
+# Read by two things that must agree:
+#   * scripts/security/license_gate.py — a model with an unresolved revision or an
+#     unlisted licence blocks the build. `revision = "main"` is rejected outright.
+#   * picklescan — anything in a PICKLE container is scanned before it is loaded.
+#     safetensors and onnx are not pickle containers and are exempt; see the gate.
+#
+# ================================================================================================
+# THIS FILE IS NOW ABOUT PARSING AND OCR ONLY. IT IS NOT WHERE EMBEDDING IDENTITY LIVES.
+# ================================================================================================
+# The bge-m3 and bge-reranker-v2-m3 entries were removed when embeddings and reranking became
+# provider API calls. Nothing in this service loads an embedding or reranking model any more, so
+# there is no local revision to pin for either.
+#
+# THAT IS A LOSS, NOT A SIMPLIFICATION, AND IT IS NOT SOLVED HERE. The old `bge-m3@5617a9f` was a
+# CONTENT-ADDRESSED pin: the exact weights were named by sha, so `embedding_model_id` on every
+# chunk was falsifiable and a change was impossible to make silently. A provider model name like
+# `text-embedding-3-large` is an ALIAS the provider may re-point at will, with no version bump and
+# no notification — at which point every vector already in Qdrant was produced by a model that no
+# longer exists, and nothing detects it. That belongs with SOURCE VERSION identity now, not in
+# this file; it is load-bearing for ADR-010 (Qdrant is rebuildable) and for atomic publication,
+# and it is recorded as a finding rather than papered over here.
+#
+# What remains below is genuinely local: docling's layout model and TableFormer (PyTorch, via
+# docling-ibm-models) and RapidOCR's ONNX weights. They read files, need no credential, and cost
+# nothing per call — which is exactly why the scoping decision kept them. Their revisions still
+# fold into parser_cfg_version, so "reprocess with new parser settings" stays falsifiable.
+#
+# Docling's own model specs default to revision = "main", which the licence gate rejects. One
+# entry per pipeline model, each resolved to a sha at image build.
+#
+# ------------------------------------------------------------------------------------------------
+# HOW THE REVISIONS BELOW WERE RESOLVED (2026-08-07), AND HOW TO REDO IT
+# ------------------------------------------------------------------------------------------------
+# Every `revision` was resolved twice, by two independent mechanisms, because a plausible-looking
+# hex string that resolves to nothing is worse than the placeholder it replaced: the placeholder
+# is honestly red, a bad sha is silently wrong.
+#
+#   1. the host's REST API      — https://huggingface.co/api/models/<repo>/refs
+#                                 https://www.modelscope.cn/api/v1/models/<repo>/revisions
+#   2. `git ls-remote <clone-url>`, which is the git protocol and cannot be fabricated by a
+#      metadata cache that is stale for a different reason than the API is.
+#
+# WHICH revision to pin is NOT a judgement call — it is read out of the installed docling 2.118.0,
+# because pinning a sha the code never requests is a pin that changes nothing:
+#
+#   docling/models/stages/table_structure/table_structure_model.py:104
+#       download_hf_model(repo_id="docling-project/docling-models", revision="v2.3.0")
+#   docling/datamodel/layout_model_specs.py:79
+#       DOCLING_LAYOUT_HERON = LayoutModelConfig(repo_id="docling-project/docling-layout-heron",
+#                                                revision="main")
+#   docling/models/stages/ocr/rapid_ocr_model.py:455  ->  rapidocr's own registry, whose URLs
+#       point at ModelScope, not Hugging Face, at the tag matching the rapidocr package version.
+#
+# `format` is not taken on trust either. The file list at each pinned revision was read from the
+# host and contains ONLY `.safetensors` / `.onnx` — no `.bin`, `.pt`, `.pth` or `.ckpt`. That is
+# what makes the picklescan exemption in license_gate.py's NON_PICKLE_FORMATS correct here rather
+# than merely convenient; a resolved revision that shipped a `.bin` would need a recorded
+# picklescan pass and the gate would demand one.
+#
+# TWO CORRECTIONS FELL OUT OF DOING THIS, AND BOTH WERE INVISIBLE WHILE THE REVISION READ "TODO":
+#
+#   * `docling-layout` pointed at `ds4sd/docling-models`. That repository no longer contains a
+#     layout model at all — at every revision reachable today it holds TableFormer and nothing
+#     else. The layout model moved to its own repository, and the entry now names it. A sha
+#     resolved against the old repo would have been a real sha for the wrong weights.
+#   * BOTH docling entries claimed `license = "MIT"`. Neither is MIT. Heron's model card is
+#     Apache-2.0 and docling-models' card at v2.3.0 is CDLA-Permissive-2.0. The MIT claim is
+#     presumably inherited from docling's *source* licence, which is exactly the confusion the
+#     model arm of the licence gate exists to catch — Surya is the standing example of code and
+#     weights carrying different terms, and it is called out in license_gate.py's own docstring.
+#
+# CDLA-Permissive-2.0 is NOT in scripts/security/policy/licences.toml's allow list, so this file
+# is now honestly red where it used to be dishonestly green. That policy file is not ours to edit;
+# the required change is reported, not made.
+#
+# ------------------------------------------------------------------------------------------------
+
+[[model]]
+id = "docling-layout"
+repo = "docling-project/docling-layout-heron"
+repo_host = "huggingface"
+revision = "8f39ad3c0b4c58e9c2d2c84a38465abf757272d8"
+license = "Apache-2.0"
+format = "safetensors"
+shipped = true
+used_by = ["ai-worker-ingestion"]
+resolved_on = "2026-08-07"
+resolved_from = "refs/heads/main"
+artifacts = ["model.safetensors"]
+notes = """
+The default layout model of docling 2.118.0 (`DOCLING_LAYOUT_HERON`), and the repository the
+`ds4sd/docling-models` entry used to point at does not contain it — `ds4sd/*` also redirects to
+`docling-project/*` after an org rename, so the canonical name is used here.
+
+THIS PIN IS ONLY REAL IF THE CODE PASSES IT. `LayoutModelConfig.revision` is "main" upstream, a
+moving branch: `docling-tools models download` snapshots whatever main is at build time, and a
+rebuilt image then parses the same corpus differently while `docling.__version__` is unchanged.
+`app/ingestion/parsing/converter.py` must construct the layout options with this revision
+explicitly. `revision` here is main's head as of `resolved_on`, which is the only thing there is
+to pin — this repository publishes no tags.
+"""
+
+[[model]]
+id = "docling-tableformer"
+repo = "docling-project/docling-models"
+repo_host = "huggingface"
+revision = "fc0f2d45e2218ea24bce5045f58a389aed16dc23"
+license = "CDLA-Permissive-2.0"
+format = "safetensors"
+shipped = true
+used_by = ["ai-worker-ingestion"]
+resolved_on = "2026-08-07"
+resolved_from = "refs/tags/v2.3.0"
+artifacts = [
+  "model_artifacts/tableformer/accurate/tableformer_accurate.safetensors",
+  "model_artifacts/tableformer/fast/tableformer_fast.safetensors",
+]
+notes = """
+`TableStructureModel.download_models` requests `revision="v2.3.0"`, not main — so the sha to pin
+is the one that tag names (a lightweight tag; the API's `targetCommit` and `git ls-remote` agree
+on it), and main's head is deliberately NOT used. We run `TableFormerMode.ACCURATE`, so the
+`accurate` artifact is the one that matters; the `fast` one arrives in the same snapshot.
+
+Licence: CDLA-Permissive-2.0, read from the model card AT THIS REVISION. The card on main
+additionally lists apache-2.0; that dual listing is not what we ship, and this row records the
+revision we do. CDLA-Permissive-2.0 puts no condition on the model's OUTPUT and no copyleft on our
+code, but it does require the agreement text to travel with redistributed Data — so a self-hoster
+receiving these weights inside our image must receive the licence text too.
+"""
+
+[[model]]
+id = "rapidocr-onnx"
+repo = "RapidAI/RapidOCR"
+repo_host = "modelscope"
+revision = "390c78b5e9a2e69bd9e33be9cd77f7b2622ce55b"
+license = "Apache-2.0"
+format = "onnx"
+shipped = true
+used_by = ["ai-worker-ingestion"]
+resolved_on = "2026-08-07"
+resolved_from = "refs/tags/v3.9.2"
+ppocr_version = "PP-OCRv6"
+artifacts = [
+  "onnx/PP-OCRv6/det/PP-OCRv6_det_small.onnx",
+  "onnx/PP-OCRv4/cls/ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+  "onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx",
+]
+sha256 = [
+  "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f",
+  "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c",
+  "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884",
+]
+notes = """
+ONNX is protobuf, not a pickle container, so picklescan does not apply — but the artifact hash must
+still be verified at image build, and unlike the two Hugging Face rows above there is a real digest
+to verify against: `sha256` is copied verbatim from the installed `rapidocr==3.9.2` model registry
+(`InferSession.get_model_url(FileInfo(...))["SHA256"]`), in the same order as `artifacts`.
+
+THE HOST IS MODELSCOPE, NOT HUGGING FACE, and the download is a direct file URL rather than a repo
+snapshot: docling asks rapidocr for the URL and streams it. The tag in that URL tracks the rapidocr
+PACKAGE version, so `pyproject.toml`'s `rapidocr==3.9.2` and `resolved_from` move together and a
+bump of one without the other is a mismatch this row makes visible.
+
+`revision` is the PEELED commit of the annotated tag v3.9.2 (the tag object itself is
+95f7506a2e780a6385f2d6ad904fde1bb33fe473 and is not what a `resolve/<ref>` URL serves). Verified by
+fetching the detection weights at BOTH `resolve/v3.9.2/...` and `resolve/390c78b5.../...`: both
+return 9 929 594 bytes hashing to the `090f04ab...` digest above, so the sha names exactly the
+bytes the tag does.
+
+The language route matters and is part of `ocr_cfg_version`, not just of this row: docling resolves
+`lang=["en"]` to PP-OCRv6 for detection and recognition and to PP-OCRv4 for the direction
+classifier. v5 and v6 are DIFFERENT MODELS, so a version move here is a re-ingest, not an upgrade.
+"""

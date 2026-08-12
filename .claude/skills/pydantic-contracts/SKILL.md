@@ -13,7 +13,7 @@ Pydantic **2.13.4** (2026-05-06, latest stable — verified against the publishe
 - **`extra="forbid"` on every model we receive from our own code.** Pydantic's default is `extra="ignore"`. A field Laravel renamed — `top_k` → `dense_top_k` — is then silently dropped: the caller believes it configured retrieval, FastAPI runs its default, no error is raised anywhere, and `config_version` still asserts the two sides agree. The only exceptions are the two boundaries named below.
 - **`strict=True` on every inbound contract model.** Lax mode turns `"8"` into `8` and `1` into `True`. The whole point of shipping the configuration snapshot in the body (docs/06 §11.2) is that a replayed job reproduces byte-identically; a snapshot whose meaning changes during parsing breaks that guarantee silently.
 - **Every credential field is `SecretStr`, and no model holding one is ever serialized anywhere but into the provider call.** `model_dump()` yields the masked object, `model_dump_json()` yields `"**********"` — protective for logs, destructive for anything that has to survive a round trip. `kb-security-baseline` owns the rule; this file owns the type.
-- **The provider credential is a top-level field on the request model — never a member of `ConfigSnapshot` or of anything reachable from it.** `provider_credential: SecretStr` sits beside `config`, and the snapshot hash is computed over `config` alone (docs/22 decision 1, resolved; wire shape in `kb-internal-api-contracts`). Inside the snapshot it is hashed into `configuration_version` *and* persisted by every path that stores a snapshot — see the gotcha, which is the reason this is a rule and not a preference.
+- **Provider credentials are a top-level field on the request model — never a member of `ConfigSnapshot` or of anything reachable from it.** `provider_credentials: dict[Ulid, SecretStr]` sits beside `config`, and the snapshot hash is computed over `config` alone (docs/22 decision 1, resolved as ADR-011; the map shape is finding F12, ruled 2026-08-12; wire shape in `kb-internal-api-contracts`). Inside the snapshot a credential is hashed into `configuration_version` *and* persisted by every path that stores a snapshot — see the gotcha, which is the reason this is a rule and not a preference. **It is a map because one turn can need up to three keys** (chat, embedding, rerank), keyed by the `connection_id` both planes already compute; the consequence for model design is that every rule below has to hold for the map's **values**, and a rule written against one field name holds vacuously against a map.
 - **A `ValidationError` never reaches a log, a span, or an error envelope with its defaults.** `errors()` and `json()` default to `include_input=True`, so the rejected value — the tenant's question, or the API key — is rendered verbatim. Validation failures map to the `validation` class (422, never retried) in `kb-error-taxonomy`.
 - **Any union crossing the wire carries a discriminator.** An untagged union validates every member and reports every member's failure; during an incident the error names the wrong variant. Tagged, a bad tag is one `union_tag_invalid` naming the value actually received.
 - **A shipped model shape never changes in place.** Additive only, or a new `/internal/v2` (`kb-internal-api-contracts`). With `extra="forbid"`, *removing* a field is as breaking as adding a required one — see the versioning table.
@@ -28,28 +28,42 @@ The per-model `extra` table — with its **two** exceptions, raw provider respon
 
 ### The internal chat request, complete
 
-`Inbound` (strict + forbid + frozen, and why each of the three does a different job), `ReasoningEffort`'s seven members, `ProviderConnection`, `RetrievalConfig`, `ConfigSnapshot`, `ChatExecuteRequest`, and `parse_request()`'s redaction of `ValidationError.errors()` → **[references/internal-chat-request.md](references/internal-chat-request.md)**. They share the module below and the `Ulid` declared in it. It carries ADR-011's shape: `provider_credential` is a sibling of `config` on `ChatExecuteRequest`, and `ProviderConnection` has **no** `api_key` field — the comment there records why, because moving it back inside is the reflexive tidy-up.
+`Inbound` (strict + forbid + frozen, and why each of the three does a different job), `ReasoningEffort`'s seven members, `ProviderConnection`, `RetrievalConfig`, `ConfigSnapshot`, `ChatExecuteRequest`, and `parse_request()`'s redaction of `ValidationError.errors()` → **[references/internal-chat-request.md](references/internal-chat-request.md)**. They share the module below and the `Ulid` declared in it. It carries ADR-011's shape: `provider_credentials` is a sibling of `config` on `ChatExecuteRequest`, and `ProviderConnection` has **no** `api_key` field — the comment there records why, because moving it back inside is the reflexive tidy-up.
+
+**None of that module exists yet.** `services/ai-service/app/contracts/internal/` holds an `__init__.py` and a `.gitkeep` and nothing else — the chat router and the five provider wire adapters are out of the current scope by explicit ruling, so `ChatExecuteRequest`, `ConfigSnapshot` and `parse_request` are a specification for whoever writes them, not a description of code. The models that *do* exist are the adapter-internal ones in `app/providers/contract.py` (`ChatRequest`, `EmbeddingRequest`, `RerankRequest`), and they are the opposite case on credentials: each carries **no credential field at all**, because the decrypted key is a per-call argument to `stream()` / `embed()` / `rerank()`. Both facts are the same rule seen from two sides — a credential is never a member of an object that gets held, hashed, replayed, or put in a span.
 
 ### The credential, and the two places it is not
 
 ```python
 class ChatExecuteRequest(Inbound):
     ...
-    config: ConfigSnapshot          # everything hashed into configuration_version
-    provider_credential: SecretStr  # sibling of config, NOT a member of it. Decrypted by
-                                    # Laravel per request (laravel-control-plane); excluded
-                                    # from the snapshot hash and from every idempotency
-                                    # fingerprint, so a key rotation moves neither.
+    config: ConfigSnapshot                       # everything hashed into configuration_version
+    provider_credentials: dict[Ulid, SecretStr]  # sibling of config, NOT a member of it.
+    # Keyed by connection_id — the identity both planes already compute (Laravel's
+    # EmbeddingCandidate, FastAPI's EmbeddingConnection), so neither module changes when this
+    # lands. One turn can need three: chat, embedding (ADR-031 lets it be a DIFFERENT
+    # connection), rerank. Decrypted by Laravel per request (laravel-control-plane); the whole
+    # map is excluded from the snapshot hash and from every idempotency fingerprint, so
+    # rotating any one entry moves neither. Ulid keys, not `str`: a plain dict has no
+    # extra="forbid" to protect it, and the key type is the only thing keeping this from
+    # becoming a free-form bag. Carries only the connections THIS turn needs — never every
+    # connection the org owns.
 
 def snapshot_hash(req: ChatExecuteRequest) -> str:
     """Over `config` only — never over the request model. Hashing the request would pull the
-    credential in, and SecretStr would hide that it had: model_dump_json() writes
+    credentials in, and SecretStr would hide that it had: model_dump_json() writes
     "**********", so the digest looks stable for the wrong reason and stops moving when the
     configuration genuinely changes. Masking is a display property, not a hashing strategy."""
     return hashlib.sha256(req.config.model_dump_json().encode()).hexdigest()
 ```
 
-`get_secret_value()` is called in exactly one place, inside the provider adapter (`kb-provider-adapter-contract`). Everywhere else `repr()`, `str()`, `model_dump()` and `model_dump_json()` all yield `**********`, so extracting the key is an intentional, greppable act rather than an accident of serialization.
+`get_secret_value()` is called in exactly one place, inside the provider adapter (`kb-provider-adapter-contract`), **on one entry at a time**. Everywhere else `repr()`, `str()`, `model_dump()` and `model_dump_json()` all yield `**********` — including for values nested in the map, since `SecretStr` masks in its own `repr()` — so extracting a key is an intentional, greppable act rather than an accident of serialization.
+
+**The map is where that guarantee is easiest to lose, and it is lost in one line.** `{k: v.get_secret_value() for k, v in req.provider_credentials.items()}`, written to "make a lookup the adapter can use", unwraps every entry at once and produces a plain `dict[str, str]` with no masking left anywhere in it: one `str()` of that object in an exception message, a debug line, or a span attribute prints all three keys in full. Never unwrap into a container. Look the entry up by `connection_id` at the call site that is about to make the request, and unwrap there. The mirror rule holds for tests: a redaction assertion naming a single field, or a fixture holding a single credential, passes vacuously against a three-entry map — assert over the values, with more than one entry present.
+
+**Absent key is a refusal, not a fallback.** A surface — embedding, rerank — whose `connection_id` is not in the map raises `validation`; it must never quietly reuse the chat credential, which would send a tenant's key to a vendor they did not choose for that surface and embed the question in the wrong vector space (`kb-internal-api-contracts`).
+
+**A `dict` field costs `frozen=True` its hashability, and `Inbound`'s docstring cites hashability as one of the three jobs `frozen` does.** Measured on the pinned Pydantic 2.13.4: a `frozen=True, strict=True` model with a `dict[Ulid, SecretStr]` field validates fine, masks correctly in `repr()` and `model_dump_json()` (both render `**********` per value, nested in the map), and rejects a non-ULID key with `string_pattern_mismatch` — but `hash(instance)` raises `TypeError: unhashable type: 'dict'`. That is **not** a reason to reach for a `frozendict` shim. Nothing may hash `ChatExecuteRequest` anyway: hashing it would pull the credentials in, which is the exact mistake `snapshot_hash` exists to prevent. The hashable object is `ConfigSnapshot` — no `dict` fields, still frozen, still hashable — and it is the correct per-request cache key. Keep `frozen=True` on the request for its other two jobs (a request is evidence, not scratch space) and let the hashability move down to the snapshot where it belongs.
 
 ### The outbound stream, as a discriminated union
 
@@ -94,7 +108,10 @@ class Citation(BaseModel):
     source_id: Ulid; source_version_id: Ulid; chunk_id: Ulid
     title: str                             # display title, always present
     url: str | None = None                 # crawled sources only; explicitly null for uploads
-    score: float                           # reranker score, on bge-reranker's scale
+    score: float                           # rerank score. The SCALE IS PROVIDER-AND-MODEL
+                                           # DEPENDENT (ADR-030) — carry it alongside, never
+                                           # assume sigmoid. Optional: rerank is capability-
+                                           # gated and may have been skipped (`bge-reranker`).
 class Citations(Event):
     # MANDATORY and easy to forget: kb-internal-api-contracts requires this BEFORE the first
     # token, because citations are assigned from evidence pre-generation. Leaving it out of the
@@ -170,7 +187,7 @@ The shape-vs-content version distinction, the nine-row table of what is and is n
 - [ ] `extra="ignore"` appears only on raw-provider-response models and broker/Valkey payload models, each with a one-line comment naming which exception it is.
 - [ ] No `datetime`, `UUID`, or `Decimal` field on a strict inbound model; ids are the constrained ULID `str`; a test drives the payload through an HTTP client, not `model_validate_json`.
 - [ ] Every credential field is `SecretStr`; `grep -rn "get_secret_value" services/ai-service/` returns only adapter call sites; a test asserts no Celery task signature accepts a model containing one.
-- [ ] `provider_credential: SecretStr` is declared on `ChatExecuteRequest` and on nothing reachable from `ConfigSnapshot`; a test walks `ConfigSnapshot.model_fields` recursively asserting no `SecretStr` among them, and asserts two requests differing only in the credential produce an identical snapshot hash and an identical idempotency key.
+- [ ] `provider_credentials: dict[Ulid, SecretStr]` is declared on `ChatExecuteRequest` and no `SecretStr` is reachable from `ConfigSnapshot`; a test walks `ConfigSnapshot.model_fields` recursively — **through container args too**, since the credential now hides inside a `dict` value and a walk that only inspects top-level annotations would miss it — and asserts two requests differing only in one credential produce an identical snapshot hash and an identical idempotency key. A non-ULID key is a `422`. **Nothing in the tree unwraps the map into a container**: `grep -n 'get_secret_value' services/ai-service/app/` shows one call site, on one entry, inside the adapter, and no comprehension over `.items()`. All of this is written against the specified shape — `app/contracts/internal/` is empty and the chat router is out of scope — so it is owed with the router, not overdue now.
 - [ ] The `RequestValidationError` handler (`fastapi-service`) emits `type`/`loc`/`msg` only; a fixture with a known API key and a known question asserts neither appears in the 422 body or in any log line.
 - [ ] Every wire-crossing union is `Annotated[..., Field(discriminator=...)]`; a test asserts a bad tag yields exactly one `union_tag_invalid`.
 - [ ] A contract test serializes one instance of every `Event` subclass and asserts the key set equals the SSE block in `kb-internal-api-contracts` — `citations[].index/title/url/score`, `message.start.created_at`, `message.complete.usage.{prompt_tokens,completion_tokens}` — and that no forwarded frame contains `cached_tokens` or a nested `event` key.

@@ -1,0 +1,251 @@
+{
+  "_file": "The last-accepted aggregate. The §21.5 regression gate compares a run against this and nothing else.",
+  "_status": "UNPOPULATED — every metric below is null. The corpus is now authored and verifies; the pipeline still cannot run end to end (chat_pipeline.answer, rerank, embed_passages, resolve_identity are all NotImplementedError), so no run has produced a number and every tolerance stays null.",
+  "_why_null": [
+    "No pipeline exists yet, so no run has produced a number.",
+    "A fabricated baseline is worse than none: the first real run would be scored against an invented target,",
+    "and whichever direction it missed would be investigated as a regression that never happened."
+  ],
+  "_populating_this_file": [
+    "1. Author the fixtures (done: tools/generate_corpus.py, all ten digests real).",
+    "2. Measure the noise floor per expected/noise-floor.md. This comes BEFORE any threshold.",
+    "3. Run the suite; record the run id.",
+    "4. Copy the run's aggregate into `metrics`, its provenance into `provenance` and `judge`,",
+    "   set `tolerance` from the measured spread, and fill `acceptance`.",
+    "5. Review it like any other change to a release gate."
+  ],
+
+  "schema_version": 1,
+
+  "provenance": {
+    "_comment": "Identifies the run this baseline came from. A run that cannot be reproduced from these fields is not a baseline.",
+    "run_id": null,
+    "run_finished_at": null,
+    "corpus_version": "corpus-2026.08.1",
+    "corpus_manifest_sha256": null,
+    "_corpus_manifest_sha256": "Digest over corpus/manifest.toml. Catches an edited fixture even when someone forgot to bump VERSION.",
+    "dataset_id": "kb-platform-golden",
+    "dataset_version": "2026.08.1",
+    "case_count": 46,
+    "pipeline_git_sha": null,
+    "retrieval_configuration_version": null,
+    "_retrieval_configuration_version": "The immutable §21.4 config snapshot. Defaults belong to kb-rag-query-contract and are never restated here.",
+    "source_version_pins": null,
+    "_source_version_pins": "manifest id -> source_version_id, materialised by the seeding step. See golden/schema.md."
+  },
+
+  "pipeline": {
+    "_comment": [
+      "ADR-030: embedding and reranking are provider API calls, so the pipeline is no longer a property of the image.",
+      "Every field here can move a score with no code change, which is why each one refuses a comparison rather than",
+      "producing a delta. Built by app/evaluation/run.py's BaselineKey; a run that cannot produce one has no baseline."
+    ],
+    "embedding_provider": null,
+    "embedding_model": null,
+    "embedding_dimensions": null,
+    "embedding_distance": null,
+    "embedding_canary_digest": null,
+    "_embedding_canary_digest": [
+      "The measured half of embedding identity — a hash over the vectors the provider returns for a fixed in-repo probe set.",
+      "It is the ONLY detector of a vendor re-training behind an unchanged alias: the served-model string is the alias echoed",
+      "back, and cosine distance is defined between any two vectors of equal width, so nothing else moves. Never part of the",
+      "collection name; a vendor blip would then silently open a second collection instead of failing."
+    ],
+
+    "rerank_applied": null,
+    "_rerank_applied": [
+      "Reranking is CAPABILITY-GATED. Of the five providers only NVIDIA NIM exposes a ranking endpoint. A run where stage 11",
+      "was skipped served the RRF-fused order and applied NO evidence threshold at all, so its refusal rate, its packed",
+      "evidence and its faithfulness belong to a different pipeline. Such a run is recorded and reported — it is what an org",
+      "on a provider without a ranking endpoint actually experiences — and it is EXCLUDED FROM THIS BASELINE, structurally:",
+      "EvaluationRunRecord.rerank is a union whose skipped arm carries no provider, no model, no scale and no threshold, and",
+      "the only constructor of a BaselineKey raises on it. There is no value to forget to check.",
+      "One skipped case makes the whole run skipped — averaging reranked and fused cases yields a figure belonging to neither."
+    ],
+    "rerank_skip_reason": null,
+    "_rerank_skip_reason": "Populated only on an ineligible run. RerankSkipReason is closed and has no member meaning the provider errored; an outage laundered into a skip degrades ranking AND hides an incident.",
+    "rerank_provider": null,
+    "rerank_model": null,
+    "rerank_scale": null,
+    "_rerank_scale": "logit | sigmoid | unit_interval. 0.30 is a valid float on all three and means roughly opposite things; the scale travels with every score and with the threshold.",
+    "rerank_calibration_derived_from": null,
+    "_rerank_calibration_derived_from": [
+      "The evaluation run id that produced the (provider, model) threshold. There is NO portable evidence threshold any more:",
+      "app/rag/rerank.py's CALIBRATIONS is empty on purpose, and an uncalibrated model is one a bot may not threshold against.",
+      "An eval run is what PRODUCES a calibration — derive min_score as the 5th percentile of the answerable top-1 rerank",
+      "score distribution over >=50 answerable and >=50 unanswerable questions, then report the resulting false-answer rate.",
+      "Two runs against two calibrations of the same model are two experiments: the threshold IS the refusal behaviour."
+    ]
+  },
+
+  "judge": {
+    "_comment": "Scores are not comparable across judge models, judge versions, or ragas versions. All of it is recorded so the gate can refuse rather than guess.",
+    "provider_connection_id": null,
+    "requested_model": null,
+    "_requested_model": [
+      "Must be a dated snapshot. As of 2026-08 neither of the catalogued families publishes one:",
+      "the gpt-5.6 line has no dated aliases (gpt-5.6 floats to gpt-5.6-sol) and deepseek-v4-* rolls",
+      "forward in place. Until a dated id exists, the pin is (resolved_model_id, system_fingerprint)",
+      "read back off the response, and a change in EITHER refuses the comparison. Choosing the judge",
+      "is a decision for whoever wires the first run; it needs Capability.STRUCTURED_OUTPUT."
+    ],
+    "resolved_model_id": null,
+    "_resolved_model_id": "response.model, read back off the call. Never assumed equal to requested_model.",
+    "system_fingerprint": null,
+    "_system_fingerprint": "The only observable that moves when the weights move under a floating alias.",
+    "temperature": 0.0,
+    "_temperature": "Set at OUR adapter. Ragas' own InstructorModelArgs default is temperature=0.01, top_p=0.1 — not zero. Temperature 0 is not deterministic at the provider either; see noise-floor.md.",
+    "ragas_version": "0.4.3",
+    "metrics_used": ["Faithfulness", "ContextRecall"],
+    "_metrics_used": "3 judge calls per scored case: Faithfulness costs 2, ContextRecall 1. Everything else in `metrics.deterministic` costs zero LLM calls."
+  },
+
+  "comparability": {
+    "_comment": "A run failing any of these is REFUSED, not compared. The gate emits 'incomparable' and no delta.",
+    "refuse_if_differs": [
+      "provenance.corpus_version",
+      "provenance.corpus_manifest_sha256",
+      "provenance.dataset_version",
+      "provenance.retrieval_configuration_version",
+      "pipeline.embedding_provider",
+      "pipeline.embedding_model",
+      "pipeline.embedding_dimensions",
+      "pipeline.embedding_distance",
+      "pipeline.embedding_canary_digest",
+      "pipeline.rerank_provider",
+      "pipeline.rerank_model",
+      "pipeline.rerank_scale",
+      "pipeline.rerank_calibration_derived_from",
+      "judge.resolved_model_id",
+      "judge.system_fingerprint",
+      "judge.temperature",
+      "judge.ragas_version"
+    ],
+    "_refuse_if_differs": "This list is app/evaluation/run.py's BaselineKey, field for field. A field present in one and not the other is recorded, displayed, and silently not compared — which is the worst of the three states, because it looks checked. A test asserts every BaselineKey field participates in the comparison.",
+    "refuse_if_false": ["pipeline.rerank_applied"],
+    "_refuse_if_false": "A skipped-rerank run measured a different pipeline. It is recorded, never compared. This line is documentation of a property the types already enforce, not the enforcement.",
+    "refuse_if_nonzero": [
+      "metrics.judged.faithfulness_errored",
+      "metrics.judged.context_recall_errored",
+      "metrics.integrity.cases_errored"
+    ],
+    "_refuse_if_nonzero": "A run with failed judge calls is a FAILED run, not a slightly lower score. Never average over the survivors.",
+    "refuse_if_changed": ["metrics.integrity.stale_case_count"],
+    "_refuse_if_changed": "A changed stale count means the question set effectively changed. That comparison is how a chunker change gets read as a prompt regression."
+  },
+
+  "metrics": {
+    "judged": {
+      "_comment": "The LLM-judged half. Expensive, noisy, wide tolerance, scheduled cadence only.",
+      "faithfulness_mean": null,
+      "faithfulness_n": null,
+      "faithfulness_skipped": null,
+      "faithfulness_errored": null,
+      "_faithfulness_triple": [
+        "The mean is meaningless without n and skipped, and this is not stylistic.",
+        "Ragas returns nan when statement extraction yields nothing — exactly what a refusal produces —",
+        "and np.nanmean drops those rows from the denominator. So a run with more refusals reports a",
+        "HIGHER faithfulness, and improving refusal behaviour raises the score. Refusals are skipped",
+        "explicitly, n is reported beside every mean, and the gate fails when skipped moves at all.",
+        "`errored` is separate from `skipped`: a skip is a decision, an error is a failure."
+      ],
+      "context_recall_mean": null,
+      "context_recall_n": null,
+      "context_recall_skipped": null,
+      "context_recall_errored": null,
+      "_context_recall_skipped": "The 9 unanswerable cases carry no `reference`, so ContextRecall cannot run on them. They are SKIPPED, never scored 0. Expected skip count: 9."
+    },
+
+    "deterministic": {
+      "_comment": "Zero LLM calls, computed from retrieval_traces and citations. More actionable, cannot drift, runs on every change.",
+
+      "refusal": {
+        "false_refusal_rate": null,
+        "_false_refusal_rate": "refused AND answerable. Threshold too high. Denominator excludes the 4 clarification_ok cases that produced a clarifying question.",
+        "false_answer_rate": null,
+        "_false_answer_rate": "answered AND unanswerable. Threshold too low, or the model filled a gap from priors. Denominator is the 9 unanswerable cases.",
+        "clarification_rate": null,
+        "_clarification_rate": "Denominator is the 4 clarification_ok cases only. Reported, never gated on alone.",
+        "clarification_ok_excluded": null,
+        "crag_mean": null,
+        "_crag_mean": "+1 correct answer, 0 refusal, -1 wrong-or-hallucinated. The one number that moves in the right direction for both threshold failure modes.",
+        "false_answer_by_kind": null,
+        "_false_answer_by_kind": "Broken down by unanswerable_kind. A threshold change that trades absent_fact refusals for not_yet_published hallucinations is a different decision from a uniform improvement, and an aggregate rate hides it."
+      },
+
+      "retrieval": {
+        "hit_rate": null,
+        "_hit_rate": "Fraction of answerable cases where at least one expected source appears in the packed evidence.",
+        "source_recall": null,
+        "_source_recall": "Fraction of expected_sources retrieved, averaged over answerable cases. The metric that catches a synthesis answer built from one of two required sources.",
+        "source_recall_by_category": null,
+        "stale_excluded": null
+      },
+
+      "citation": {
+        "correctness": null,
+        "_correctness": "Every citation resolves to a chunk that was actually packed. Citations are assigned from retrieved evidence before generation, so anything else is a pipeline bug, not a model quirk.",
+        "completeness": null,
+        "_completeness": "Every claim-bearing sentence carries a citation."
+      },
+
+      "latency": {
+        "p50_ms": null,
+        "p95_ms": null,
+        "retrieval_p95_ms": null,
+        "_note": "Single-turn cases only. The 4 follow-up cases run 2 pipeline turns each and are reported separately; pooling them shifts p95 for a reason unrelated to performance.",
+        "followup_p95_ms": null
+      },
+
+      "cost": {
+        "run_total_usd": null,
+        "pipeline_calls": null,
+        "judge_calls": null,
+        "_judge_calls": "3 per scored case. 37 answerable cases scored by Faithfulness + 37 with a reference for ContextRecall ≈ 111 judge calls per full run, before retries. Refusals skip both metrics, so the real count drops as the bot refuses more — budget from the answerable count, not the case count.",
+        "judge_usd": null,
+        "_accounting": "Every judge call is a provider call: one provider_calls row, operation=\"evaluation.judge\", the run id carried through, counted against the evaluation org's quota. Ragas' own CostCallbackHandler cannot see this path at all; metering is ours."
+      },
+
+      "integrity": {
+        "_comment": "Not quality metrics. These decide whether the run produced a publishable score at all.",
+        "cases_total": 46,
+        "cases_scored": null,
+        "cases_errored": null,
+        "stale_case_count": null,
+        "corpus_hash_verified": null
+      }
+    }
+  },
+
+  "per_category": null,
+  "_per_category": "Populated with one entry per §21.2 category. An aggregate with no drill-down cannot explain a regression, which is the only moment anyone looks at it. Per-CASE detail lives in evaluation_results, not here — this file stays diffable.",
+
+  "tolerance": {
+    "_comment": "Set from the MEASURED spread in expected/noise-floor.md, never guessed. A gate tighter than the noise floor fails randomly and teaches everyone to ignore it.",
+    "_method": "Paired differences on the same question set with standard errors clustered by source_version_id, per arXiv:2411.00640. The gate compares intervals, not point estimates: several cases share one fixture, and treating them as independent understates the interval badly.",
+    "faithfulness_mean_drop": null,
+    "context_recall_mean_drop": null,
+    "false_answer_rate_rise": null,
+    "crag_mean_drop": null,
+    "hit_rate_drop": null,
+    "source_recall_drop": null,
+    "citation_correctness_drop": null,
+    "p95_ms_rise": null,
+    "cost_rise_pct": null,
+    "faithfulness_skipped_delta": 0,
+    "_faithfulness_skipped_delta": "Zero, and not a measurement. Any movement in the skip count changes what the mean is a mean OF, so the two numbers cannot be compared at all. This is the one tolerance that is a rule rather than a band."
+  },
+
+  "acceptance": {
+    "accepted_by": null,
+    "accepted_at": null,
+    "supersedes_run_id": null,
+    "human_review": {
+      "sample_size": null,
+      "reviewed_by": null,
+      "disagreements_with_judge": null,
+      "_comment": "§21.3 requires human review, and it is not advice. Ragas' instance-level agreement with humans is ~0.08 Pearson for faithfulness — below plain ROUGE-L. System-level ranking is usable; a single judged score is never a gate on its own."
+    },
+    "notes": null
+  }
+}

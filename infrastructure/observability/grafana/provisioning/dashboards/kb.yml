@@ -1,0 +1,34 @@
+# Dashboard provisioning. The JSON files in ../../dashboards/ are the dashboards; Grafana's own
+# database holds sessions and users and nothing else.
+#
+# docs/18 §25.1 requires Grafana dashboards to be backed up. Provisioned from git, THE REPOSITORY
+# IS THAT BACKUP and a restore is `docker compose up` — see ../../../README.md, which discharges
+# the requirement in writing. Taken literally, "back up the dashboards" would mean preserving a
+# SQLite file nobody diffs, from which nobody could tell what changed or when.
+apiVersion: 1
+
+providers:
+  - name: kb
+    orgId: 1
+    folder: ""
+    type: file
+
+    # allowUiUpdates: false DISABLES the Save button rather than letting it diverge. With it true,
+    # a panel edited mid-incident is written to grafana.db, survives until the next provisioning
+    # reload, and then vanishes — and no reviewer ever saw the change. This is the same reasoning
+    # as Alertmanager: a silence is ephemeral state, a dashboard is code.
+    allowUiUpdates: false
+
+    # false, so a dashboard REMOVED from git is removed from Grafana too. Otherwise a deleted file
+    # leaves an orphan dashboard in the UI that no longer exists anywhere in the repository, and
+    # its panels keep answering questions with whatever metric names they were last saved with.
+    disableDeletion: false
+
+    updateIntervalSeconds: 30
+
+    options:
+      path: /var/lib/grafana/dashboards
+      # Subdirectories become folders. There are none today — five dashboards, one flat folder —
+      # but this is what makes adding one a matter of creating a directory rather than editing
+      # provisioning.
+      foldersFromFilesStructure: true

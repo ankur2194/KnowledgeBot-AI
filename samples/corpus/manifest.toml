@@ -1,0 +1,230 @@
+# Fixture manifest for the KnowledgeBot AI platform golden corpus.
+#
+# One entry per fixture document. This file defines the ID SPACE that golden cases
+# reference. A case's `expected_sources` lists MANIFEST IDS, never filesystem paths,
+# so renaming or reorganising a file is a manifest edit and not a silent break in
+# forty-five YAML files.
+#
+# Rules:
+#   * `id` is stable forever. Reusing an id for different content is the one edit
+#     that makes historical runs lie. Retire an id, never recycle it.
+#   * `sha256` is verified by the seeding step before any run. A mismatch aborts the
+#     run; it never warns and continues.
+#   * `synthetic` is true for every entry, and must stay true. See ../README.md.
+#   * Changing any `sha256` requires bumping ../VERSION.
+#
+# ---------------------------------------------------------------------------
+# ALL TEN FIXTURES ARE AUTHORED AND EVERY DIGEST BELOW IS REAL. No placeholders
+# remain. The placeholder literal is deliberately not repeated anywhere in this
+# comment block: it used to be, and the effect was that a line-counting grep for it
+# returned ELEVEN for ten fixtures and could never reach zero however many fixtures
+# were authored — a completion check structurally unable to report completion. Count
+# rows, not lines: `app/evaluation/corpus.py` parses the TOML and reports per fixture.
+#
+# THE FIXTURES ARE GENERATED, NOT HAND-BUILT, AND THAT IS WHAT MAKES THE DIGESTS MEAN
+# ANYTHING. `../tools/generate_corpus.py` writes all ten from the specifications in
+# `documents/*/README.md`. Every generator clock is pinned — reportlab's invariant
+# mode, OOXML zip entry timestamps, and `docProps/core.xml`, which openpyxl rewrites
+# with the current time inside `save()` no matter what the workbook properties say.
+# Regenerating on another machine, in another timezone, at another moment reproduces
+# these exact bytes; `--verify` proves it before anyone trusts it.
+#
+# `page_count` is reconciled against the artefact and asserted by the generator, not
+# copied from a README. Its unit differs per format and each entry says which.
+#
+# WHAT ENFORCES THIS: `services/ai-service/app/evaluation/corpus.py`.
+# `verify_corpus()` recomputes every digest here and refuses the run on any mismatch,
+# missing fixture, placeholder, or path escaping this directory. It is called first
+# thing by `kb.evaluate.start_run`, and `EvaluationRunRecord` cannot be constructed
+# without the `CorpusVerification` it returns — so an eval run that skipped the check
+# cannot produce a comparable result. It carries two non-vacuity floors (at least ten
+# fixtures declared, at least ten files actually read) because a hash check over an
+# empty corpus exits 0 and logs exactly like one that verified everything.
+#
+# A directory fixture's digest is a TREE digest, defined byte-for-byte in that module
+# under `TREE_DIGEST_SCHEME`. Do not invent a second definition of it.
+#
+# EDITING A FIXTURE IS EDITING A TEST. Almost every string in these documents is
+# load-bearing for a named golden case, and several are load-bearing by being ABSENT —
+# the handbook says nothing about parental leave (u-001), the price list has no
+# KW-2200-C (u-004), the warranty pair is silent on consumables (fu-004), and the
+# quarterly deck states no revenue total (u-007). Read the directory README's "must
+# NOT contain" section before changing anything, then regenerate, then bump ../VERSION.
+# ---------------------------------------------------------------------------
+
+manifest_version = 1
+corpus_version = "corpus-2026.08.1"
+
+[[fixture]]
+id = "handbook-en-v1"
+path = "corpus/documents/handbook/handbook-en-v1.pdf"
+sha256 = "d4ff6fd0b7d40ad66638472ba19f09a77b130643ee098be0923ab456a479d393" # generated 2026-08-07
+format = "application/pdf"
+page_count = 14                                    # pages, asserted by the generator
+licence = "CC0-1.0"                                # authored for this repository
+synthetic = true
+notes = """
+Multi-section employee handbook, digital text (no OCR path). Exercises heading-aware
+chunking and direct factual lookup. Carries a per-page footer that is the only copy of
+the revision string, which is the FURNITURE content-layer regression fixture.
+"""
+
+[[fixture]]
+id = "pricing-catalog-v1"
+path = "corpus/documents/pricing/pricing-catalog-v1.xlsx"
+sha256 = "e4c6ac47020fb47ae0b262e820aedd21d62d56c4c7eecad668888b6a1c175624" # generated 2026-08-07
+format = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+page_count = 3                                     # sheets, not pages
+licence = "CC0-1.0"
+synthetic = true
+notes = """
+Three-sheet price list. Exercises row-wise table serialization, header retention across
+a merged title row, and exact part-code lookup. Values only, no formulas, so a parsed
+number never depends on recalculation.
+"""
+
+[[fixture]]
+id = "quarterly-review-q2-2026"
+path = "corpus/documents/quarterly/quarterly-review-q2-2026.pptx"
+sha256 = "b57b887f54b2f24de58cbc2af98e160b68e9218ef64d59573b18160b231cf2f0" # generated 2026-08-07
+format = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+page_count = 12                                    # slides
+licence = "CC0-1.0"
+synthetic = true
+notes = """
+THE DOCLING SPEAKER-NOTES REGRESSION FIXTURE. Four load-bearing facts exist ONLY in the
+slide notes (ContentLayer.NOTES), never on a slide. If the parser reverts to a body-only
+walk, four golden cases go unanswerable at once and the failure is unambiguous.
+"""
+
+[[fixture]]
+id = "travel-policy-v3"
+path = "corpus/documents/policy/travel-policy-v3.docx"
+sha256 = "9627e94fb84fa16b416880aa5344ce056a4807a6606cb196d488ac4f34f9f89e" # generated 2026-08-07
+format = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+page_count = 8                                     # top-level sections; DOCX has no page count
+licence = "CC0-1.0"
+synthetic = true
+notes = """
+Date-sensitive policy: current rates plus a superseded-rates appendix with explicit
+effective dates. Exercises the pipeline's ability to prefer current values without
+losing the historical ones, which is a different failure from retrieval missing them.
+"""
+
+[[fixture]]
+id = "scanned-po-88214"
+path = "corpus/documents/scanned/scanned-po-88214.pdf"
+sha256 = "92508c21ac9b127fa66f64cf1d0d372d67a3f22496fbcbbe87b10a264f91fe59" # generated 2026-08-07
+format = "application/pdf"                         # image-only, no text layer
+page_count = 4                                     # pages, asserted by the generator
+licence = "CC0-1.0"
+synthetic = true
+notes = """
+Image-only scanned purchase order -- NO TEXT LAYER on any page, asserted by the
+generator, because a stray text layer routes the file around OCR and silently turns this
+into an ordinary PDF fixture that passes. Page 3 is DELIBERATELY DEGRADED.
+
+MEASURED against rapidocr 3.9.2 / PP-OCRv6, not assumed. BOTH OCR warnings fire on page 3
+and neither fires on a clean page: low-confidence character mass 0.6161 and ink-in-box
+coverage 0.2070, against 0.1019/1.0000, 0.0000/0.9933 and 0.0000/0.9113 on pages 1, 2 and
+4. Every e-004 fact stays recoverable.
+
+CORRECTED 2026-08-07, and the superseded text is described rather than silently dropped
+because it was acted on. This block previously reported that the CONFIDENCE warning "does
+not -- and cannot, on this engine, at any degradation level" fire. The observation
+reproduced; the explanation was wrong, twice. Degradation on this engine is expressed as
+ABSENCE, not as low confidence, and the absence happens AT DETECTION: the detector
+proposes fewer regions as the page degrades and nothing downstream removes them, so the
+selection is made before recognition runs and therefore before any confidence statistic
+exists. Neither of the two earlier explanations survived measurement through the real
+entry point -- not the recogniser scoring only proposed boxes, and not the empty-box drop,
+which fires on 1 of 14 measured pages and on none of this fixture's. The signals
+accordingly read character mass below a per-cell trust floor and ink-in-box, never a mean
+over boxes.
+
+THE PAGE DID NOT CHANGE AND MUST NOT: ink = 0.150 ships exactly as authored, and the
+digest above is unmoved by this correction. The sweep behind the mechanism, and the trap
+that a fixture generator can measure things production never can, are in the directory
+README, which is where OCR numbers are recorded in full.
+
+No golden case depends on text unique to page 3 -- see the directory README for why.
+"""
+
+[[fixture]]
+id = "site-kelpwright-www"
+path = "corpus/documents/site/www/"
+sha256 = "bc64ffbf8028b29cc4d61d3d5fe7f81e31bb425fcc517c2d2f9b5a3aff2b8611" # tree digest over 12 files
+format = "text/html"                               # static tree, 9 pages + sitemap + robots
+page_count = 9                                     # crawlable pages; the tree holds 12 files
+licence = "CC0-1.0"
+synthetic = true
+notes = """
+Static HTML tree served by the Compose `test` profile on the internal network. NEVER
+fetched live. Exercises crawl discovery, robots scope, and footer-only content. Contains
+one robots-disallowed page whose content must never become answerable -- that page is the
+evidence for unanswerable case u-006. Its sha256 is a digest over the sorted file list
+and per-file digests, not over a single file; the seeder computes it the same way.
+"""
+
+[[fixture]]
+id = "warranty-datasheet-2025"
+path = "corpus/documents/conflicting/warranty-datasheet-2025.pdf"
+sha256 = "69bde2b54d7af36f5dc745cb62024071419789a40f8505eb4d02662369a9df23" # generated 2026-08-07
+format = "application/pdf"
+page_count = 2                                     # pages, asserted by the generator
+licence = "CC0-1.0"
+synthetic = true
+notes = """
+Half of the conflicting pair. States a 24-month warranty from date of shipment and
+next-business-day support "as standard". Both claims are contradicted elsewhere in the
+corpus ON PURPOSE. Both documents stay ACTIVE; a conflict resolved by disabling a source
+is not a conflict.
+"""
+
+[[fixture]]
+id = "warranty-terms-2026"
+path = "corpus/documents/conflicting/warranty-terms-2026.docx"
+sha256 = "d23c59a09ef2e2bfa2029dd5c5a1485fffb253b7a48632caf7884ffd34dea8e3" # generated 2026-08-07
+format = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+page_count = 5                                     # top-level sections; DOCX has no page count
+licence = "CC0-1.0"
+synthetic = true
+notes = """
+The other half of the conflicting pair. States 36 months from date of COMMISSIONING,
+effective 2026-01-01. Disagrees with warranty-datasheet-2025 on both the duration and
+the clock start, which is two independent conflicts in one pair.
+"""
+
+[[fixture]]
+id = "handbook-de-v1"
+path = "corpus/documents/multilingual/handbook-de-v1.docx"
+sha256 = "e6a3ecb98a7717bc1c855b533445c0360b6a2e8a744f2a2a1d283f5db3f3fcab" # generated 2026-08-07
+format = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+page_count = 3                                     # top-level sections; DOCX has no page count
+licence = "CC0-1.0"
+synthetic = true
+notes = """
+German localized handbook extract. Carries one country-specific appendix fact that
+exists in NO English document, which is the cross-lingual retrieval case (m-003).
+Optional per §21.2; drop the multilingual category wholesale rather than shipping a
+machine-translated fixture nobody can grade.
+"""
+
+[[fixture]]
+id = "faq-es-v1"
+path = "corpus/documents/multilingual/faq-es-v1.docx"
+sha256 = "e8a324b204a4867e02f69e8f05a0460ce36e57dcb91efd7e771617cf19421cee" # generated 2026-08-07
+format = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+page_count = 2                                     # top-level sections; DOCX has no page count
+licence = "CC0-1.0"
+synthetic = true
+notes = """
+Spanish support FAQ. Restates the calibration and RMA facts from site-kelpwright-www in
+Spanish, so a Spanish question has a Spanish-language source to ground in and the answer
+language can be graded independently of retrieval.
+"""
+
+# ---------------------------------------------------------------------------
+# Retired ids. Never reuse an id listed here.
+# (none yet)
+# ---------------------------------------------------------------------------

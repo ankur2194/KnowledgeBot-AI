@@ -17,7 +17,7 @@ Haystack 3.0 is a serious release: `AsyncPipeline` folded into `Pipeline` with `
 | `QdrantDocumentStore` + retrievers | `app/retrieval/` on `qdrant-client` | Bypassed — see the collisions below. |
 | `DocumentJoiner(join_mode="reciprocal_rank_fusion")` | `app/rag/evidence.py::fuse` | Bypassed. `k` is hardcoded 61 and per-branch scores are overwritten. |
 | Converters / `DocumentSplitter` | Docling + `kb-chunking-rules` | Bypassed. Our boundaries follow document structure, not word counts. |
-| Rankers | `bge-reranker-v2-m3` directly (`bge-reranker`) | Bypassed. Moved out of core in 3.0 anyway. |
+| Rankers | a provider `rerank()` call, capability-gated (`bge-reranker`) | Bypassed. Moved out of core in 3.0 anyway. |
 | Evaluators | Ragas (docs/21 §33) + §21.4 config snapshots | Bypassed. |
 | `Pipeline` DAG runtime + serialization | `app/rag/pipeline.py`, in `../SKILL.md` | Not needed. 20 stages, one order, no branch, no loop. |
 | Agent + hooks | — | Out of MVP scope. **This is the one that could change the answer.** |

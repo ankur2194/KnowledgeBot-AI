@@ -1,0 +1,7 @@
+Bot administration: the settings form (mirroring UpdateBotRequest via
+@kb/contracts/forms `botSettingsSchema`), the bots table, and the theme preview panel.
+
+Every query key here begins ['org', orgId, 'bots', …] — orgId is a cache NAMESPACE, never a request
+parameter; Laravel derives the real organization from the session cookie and ignores a
+client-supplied one. Tables are server-driven: no client sorting, filtering or pagination, because
+the browser holds one org-scoped page of a set it cannot see.

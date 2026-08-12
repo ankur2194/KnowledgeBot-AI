@@ -125,6 +125,14 @@ PDF and images run `StandardPdfPipeline` (layout → OCR → TableFormer → rea
 - **Symptom: speaker notes never appear in answers, and a per-page legal footer is missing from every document.** `iterate_items()` defaults to `DEFAULT_CONTENT_LAYERS = {ContentLayer.BODY}`. PPTX notes land in `NOTES`, page headers/footers in `FURNITURE`, watermarks in `BACKGROUND`. Pass `included_content_layers` explicitly and label at index time instead of dropping — §14.5 and `kb-chunking-rules`.
 - **Symptom: the intro paragraph of a crawled page is gone.** `HTMLBackendOptions.infer_furniture` defaults True — *everything before the first header* becomes furniture. Same fix as above; it is a labelling decision, not a deletion.
 - **Symptom: a rebuilt image parses the same corpus differently while `docling.__version__` is unchanged.** Every model spec pins `revision="main"` (`docling-layout-heron` last moved 2026-02-09). `docling-tools models download` snapshots whatever `main` is at build time. Resolve each `repo_id` to a commit SHA, pass it, and fold the SHAs into `parser_cfg_version`.
+> **Docling's torch is not a leftover, and deleting it breaks parsing.** ADR-030 removed local
+> model inference for *embedding and reranking*; parsing and OCR deliberately stay local — they
+> need no credential, cost nothing per call, and never send a customer document to a third party.
+> `docling -> docling-slim[standard] -> docling-ibm-models -> torch` is a real edge, so `torch` and
+> `torchvision` remain in `uv.lock` (redirected to the `pytorch-cpu` index) and the `/models`
+> volume, `HF_HOME` and `HF_HUB_OFFLINE=1` all stay. See `services/ai-service/pyproject.toml`
+> before "finishing" the removal.
+
 - **Symptom: the first document on a fresh worker takes minutes, then throughput is normal.** `InferenceSettings.compile_torch_models` defaults **True**, so torch.compile warms up on first inference — and again in every recycled prefork child (`worker_max_tasks_per_child`, see `celery-workers`). Either warm the pipeline in `worker_process_init` or set `DOCLING_INFERENCE_COMPILE_TORCH_MODELS=false`. torch.compile is also a known reproducibility hazard, which matters for §13.5's chunk-count verification.
 - **Symptom: a chunk contains the literal text `<!-- rich cell -->`.** A `RichTableCell` (a cell holding nested content) had `_get_text()` called without `doc`. Always thread `doc` and `doc_serializer` through.
 - **Symptom: a scanned page returns empty text while OCR is "on".** `OcrMode.DEFAULT` resolves to `PDF_AWARE_LAYOUT_REGIONS`: it OCRs only layout clusters that overlap a bitmap or overlap no PDF text cell. A page with a thin junk text layer therefore has its clusters eliminated and never reaches OCR. That is the `ocr-pipeline` escalation trigger — re-run the page with `OcrMode.FULL_PAGE`. `force_full_page_ocr` is deprecated; set `mode`.

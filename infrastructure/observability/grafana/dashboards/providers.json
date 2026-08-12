@@ -1,0 +1,120 @@
+{
+  "uid": "kb-providers",
+  "title": "Providers",
+  "tags": ["kb"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "timezone": "utc",
+  "refresh": "1m",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Provider success ratio by provider and model",
+      "description": "Success over all outcomes. model is drawn from the pinned model catalog and anything unrecognised folds to `other` before the instrument — a tenant can type any string into a provider connection, so the value set is bounded only because we bound it.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (provider, model) (rate(kb_provider_requests_total{outcome=\"success\"}[5m])) / sum by (provider, model) (rate(kb_provider_requests_total[5m]))"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Rate-limited share of calls by provider",
+      "description": "Recorded series kb:provider_rate_limit_ratio:5m — exactly the expression KbProviderRateLimitSustained alerts on, at a 0.10 threshold sustained for 15 minutes. A RATIO per provider rather than a raw 429 rate, so one tenant burning its own quota does not read as a fleet outage. Which tenant is a PostgreSQL question; the alert's runbook carries the SQL.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "kb:provider_rate_limit_ratio:5m"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Provider call duration, p95 (seconds)",
+      "description": "Total provider response time, budgeted at 45 s inside the 55 s internal call inside the 60 s chat deadline. A p95 approaching the budget means retries are being abandoned mid-ladder.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le, provider, model) (rate(kb_provider_duration_seconds_bucket[5m])))"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Provider time to first token, p95 (seconds)",
+      "description": "ATTRIBUTION ONLY — never the headline number and never an SLO. It starts at the provider call, so it excludes the retrieval leg that the user is also waiting through. It is also measured on the first chunk carrying non-empty text: providers open a stream with an empty role delta or a message_start, and timing those under-reports by design. The user-facing number is kb_chat_first_token_seconds on the Chat SLO dashboard.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le, provider, model) (rate(kb_provider_first_token_seconds_bucket[5m])))"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Tokens per second by provider, model and type",
+      "description": "token_type is input or output. Cached-token accounting differs per vendor — OpenAI's cached_tokens is a SUBSET of input_tokens while Anthropic reports sibling buckets — so this counter is the adapters' normalized view, not a raw echo of any provider's usage object.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (provider, model, token_type) (rate(kb_provider_tokens_total[5m]))"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Provider calls by error_class",
+      "description": "The taxonomy view of provider failures. provider_billing never self-heals and is never retried; provider_permanent_request is our bug; provider_temporary is the only one fallback may serve around. A class climbing against a flat success rate means a permanent error is misfiled as temporary and is being retried to the cap.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (provider, error_class) (rate(kb_provider_requests_total[5m]))"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Estimated provider spend per hour (USD)",
+      "description": "AN ESTIMATE, AND NOT A BUSINESS RECORD. This whole stack is sampled, TTL'd and permitted to fail silently. Billing truth is the `usage` table in PostgreSQL, which is written inside the operation and never sampled. Use this panel to notice a cost shape changing, never to answer what a tenant owes.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (provider, model) (increase(kb_provider_cost_usd_total[1h]))"
+        }
+      ]
+    }
+  ]
+}

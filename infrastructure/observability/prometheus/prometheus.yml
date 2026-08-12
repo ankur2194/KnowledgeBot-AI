@@ -1,0 +1,149 @@
+# Prometheus 3.13.2 — scrape configuration.
+#
+# RETENTION IS NOT IN THIS FILE. `--storage.tsdb.retention.time=15d` and
+# `--storage.tsdb.retention.size=20GB` are COMMAND-LINE FLAGS and live in the `command:` list of
+# the `prometheus` service in infrastructure/docker/compose.yaml (owned by platform-devops-
+# engineer). There is no `storage:` or `retention:` key in this file that does anything — writing
+# one here is accepted by the YAML parser, ignored by Prometheus, and never noticed until a disk
+# fills. If you are changing how long metrics live, change the compose `command:`.
+#
+# ONE METRIC PATH: Prometheus SCRAPES the Collector's `prometheus` exporter on :8889.
+# Not `prometheusremotewrite` from the Collector, not Prometheus's own OTLP receiver
+# (`--web.enable-otlp-receiver` is deliberately absent from the compose command). The reason is
+# the CI catalog gate: it reads the exact endpoint Prometheus reads, so "the gate is green" and
+# "the dashboards have data" are the same statement. A second ingest path makes them independent.
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  # Rule groups pin their own `interval: 30s`, which overrides this. This value only applies to a
+  # group that forgets to declare one.
+  evaluation_interval: 15s
+  # No `external_labels`. They are attached to every alert sent to Alertmanager and to every
+  # federated sample; with one Prometheus there is nothing to disambiguate, and an unexpected
+  # label breaks the `group_by: [alertname, service]` grouping contract in alertmanager.yml.
+
+rule_files:
+  # Only `rules/`. `tests/` sits alongside it and holds promtool unit tests, which are NOT rule
+  # files — a glob of `*.yml` one directory up would try to load them as rules and fail startup.
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  # ===========================================================================================
+  # THE kb_* SOURCE OF TRUTH
+  # ===========================================================================================
+  # Every `kb_*` family in kb-observability-conventions/references/metric-catalog.md arrives
+  # here and nowhere else. Transport is OTLP push from all four runtimes into the Collector; the
+  # Collector re-exposes them in Prometheus exposition format on :8889.
+  #
+  # Never scrape a service's own /metrics instead. Under PHP-FPM and Celery prefork each request
+  # lands in a different process, so a per-service endpoint returns one worker's fragment: the
+  # scrape succeeds, the numbers are a fraction of reality, and the catalog gate passes while
+  # checking almost nothing.
+  - job_name: otel-collector
+    # honor_labels because the exporter's output already carries `job`, `instance`, `service` and
+    # `env`, mapped from OTel resource attributes by the Collector. Without it Prometheus
+    # overwrites `job` and `instance` with this scrape config's values and every series in the
+    # store claims to come from the Collector rather than from ai-api / core-api / ai-worker /
+    # web — which silently collapses every `sum by (service, env, ...)` in rules/ and every
+    # dashboard panel grouped by service.
+    #
+    # BLOCKED ON infrastructure/docker/otel/collector.yaml (platform-devops-engineer). Its
+    # `prometheus` exporter sets `resource_to_telemetry_conversion: {enabled: false}` under a
+    # comment saying `service` and `env` must survive the resource-to-label projection. Those two
+    # statements contradict each other: with conversion disabled NOTHING is promoted, so kb_*
+    # series arrive carrying `job` and `instance` (derived from service.name) and NO `service` and
+    # NO `env` label at all.
+    #
+    # The consequence is quiet and total. `sum by (service, env, operation)` in
+    # rules/kb-recording.yml still evaluates — it just groups every runtime together under two
+    # empty label values. Every recorded series merges core-api into ai-api, every dashboard
+    # grouped by service draws one line, and Alertmanager's `group_by: [alertname, service]`
+    # groups the whole fleet into one notification. Nothing errors.
+    #
+    # The fix is NOT `enabled: true`, which promotes every resource attribute — service.version,
+    # telemetry.sdk.*, host.name — onto every datapoint of every family, and puts a git sha on
+    # series that must not churn. It is a `transform` processor on the metrics pipeline that
+    # projects exactly two attributes:
+    #     service   <- resource["service.name"]
+    #     env       <- resource["deployment.environment.name"]
+    #
+    # VERIFY BY HAND, because no test catches it: scrape :8889 and grep one kb_ family for
+    # `service=`. A missing label looks like a working dashboard.
+    honor_labels: true
+    static_configs:
+      - targets: ["otel-collector:8889"]
+
+  # Prometheus scraping itself. Not a kb_* source — `prometheus_*` and `up` are Prometheus's own
+  # and are outside the catalog by construction, which is why the catalog gate reads :8889 rather
+  # than querying Prometheus. Kept because dead-man's-switch debugging starts with
+  # `prometheus_notifications_dropped_total` and `prometheus_rule_evaluation_failures_total`.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # ===========================================================================================
+  # INFRASTRUCTURE EXPORTERS — see ../exporters/README.md for the do-not-re-implement table
+  # ===========================================================================================
+  # NETWORK PREREQUISITE, and the reason every target below is DOWN today: `observability` is
+  # `internal: true` and Prometheus is on it and nothing else. postgres, qdrant, valkey-core,
+  # valkey-cache and seaweedfs are on `data`. Each exporter (and each natively-instrumented
+  # service scraped directly) must join `observability` IN ADDITION to the network its target
+  # lives on. The alternative — putting Prometheus on `data` — is refused: it would give the
+  # metrics stack a route to the databases, which is exactly the boundary `data` exists to draw.
+  # These jobs are written correctly and will light up when platform-devops-engineer adds the
+  # exporter services; until then they read as DOWN, which is honest.
+
+  - job_name: node-exporter
+    static_configs:
+      - targets: ["node-exporter:9100"]
+
+  - job_name: cadvisor
+    # cAdvisor's default series set is very wide. If head cardinality becomes a problem, drop
+    # per-container filesystem and network series here with `metric_relabel_configs` rather than
+    # shortening retention — cAdvisor is the largest producer in this file by a wide margin.
+    static_configs:
+      - targets: ["cadvisor:8080"]
+
+  - job_name: postgres-exporter
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+
+  # Two Valkey instances, two exporters, two jobs. NOT one job with two targets: `redis_*` series
+  # from both would differ only by `instance`, and `valkey-cache` holds tenant answer and
+  # retrieval caches while `valkey-core` holds queues and locks — one wedged queue must not
+  # average out against a healthy cache. The `job` label is the thing that keeps them apart.
+  - job_name: redis-exporter-core
+    static_configs:
+      - targets: ["redis-exporter-core:9121"]
+
+  - job_name: redis-exporter-cache
+    static_configs:
+      - targets: ["redis-exporter-cache:9121"]
+
+  # Qdrant exposes Prometheus exposition on its own REST port; there is no separate exporter.
+  - job_name: qdrant
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["qdrant:6333"]
+    # Qdrant runs with an api-key (secrets: [qdrant_api_key] on the qdrant service), and /metrics
+    # is behind it: without a credential this target returns 401 and reads as DOWN.
+    # TODO(platform-devops-engineer): add `secrets: [qdrant_api_key]` to the `prometheus` service
+    # in compose.yaml, then uncomment. Left commented rather than enabled-and-broken because a
+    # credentials_file that is not mounted is a scrape error on every interval, and the noise
+    # buries the targets that are legitimately down.
+    # authorization:
+    #   type: Bearer
+    #   credentials_file: /run/secrets/qdrant_api_key
+
+  # SeaweedFS publishes on a port set by `-metricsPort` on the service command line. 9327 is the
+  # value this job assumes; it must agree with the `seaweedfs` service in compose.yaml, and a
+  # disagreement is silent (a closed port is just a DOWN target).
+  - job_name: seaweedfs
+    static_configs:
+      - targets: ["seaweedfs:9327"]

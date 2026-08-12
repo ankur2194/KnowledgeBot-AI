@@ -1,0 +1,58 @@
+# Recorded series. Four of them, and they exist so that no alert and no dashboard panel ever
+# re-derives an error matcher.
+#
+# THIS FILE IS THE ONLY PLACE IN THE REPOSITORY WHERE `outcome=~"error|timeout"` MAY APPEAR.
+# `timeout` is a fourth `outcome` value precisely because kb-error-taxonomy has no timeout class
+# (timeouts arrive as `provider_temporary` or `internal_dependency`), so the obvious matcher —
+# the one everybody writes — silently omits every timed-out request, which is the exact failure
+# mode the alert exists to catch. The panel then reads 0.4% during an outage in which a third of
+# chat requests time out, and nothing anywhere errors.
+#
+# `cancelled` stays out: a user hanging up is not our failure (kb-error-taxonomy, §20.2 tracks
+# cancellation rate separately, off the same counter). `skipped` exists only on the scheduler
+# family and has its own alert rather than a place in any ratio.
+#
+# Rules inside ONE group evaluate sequentially in file order; rules in DIFFERENT groups evaluate
+# concurrently. The alerts that consume these series live in kb-alerts.yml, i.e. in different
+# groups, so an alert can read the previous interval's value — and can read nothing at all for
+# the first interval after a reload. That is survivable ONLY because every alert consuming a
+# recorded series carries `for:` >= 10m, which is 20 evaluation intervals: a single stale or
+# absent read cannot fire an alert and cannot clear one. Do not add an alert with a short `for:`
+# over a recorded series without moving it into this file, next to the rule it depends on.
+#
+# Colons are reserved for recorded series. A rule named `kb_chat_requests_total` would merge with
+# the scraped series of the same name and PromQL would return doubled values with no warning.
+
+groups:
+  - name: kb_chat
+    interval: 30s
+    rules:
+      # Denominator, and the traffic-floor term for KbChatErrorRateHigh. Includes `cancelled`:
+      # a cancelled request IS traffic, it just is not a failure.
+      - record: kb:chat_requests:rate5m
+        expr: sum by (service, env, operation) (rate(kb_chat_requests_total[5m]))
+
+      # The ONE definition of "an error".
+      - record: kb:chat_errors:rate5m
+        expr: |
+          sum by (service, env, operation) (
+            rate(kb_chat_requests_total{outcome=~"error|timeout"}[5m])
+          )
+
+      # Absent, not zero, when nothing has failed AND no error/timeout series has ever been
+      # scraped — an empty selector produces no samples, so the division has nothing on the left.
+      # Alerts therefore test `> threshold` and never `== 0`; a rule written as "ratio == 0 means
+      # healthy" reads "no data means unhealthy" the moment a fresh deployment starts up.
+      - record: kb:chat_error_ratio:5m
+        expr: kb:chat_errors:rate5m / kb:chat_requests:rate5m
+
+  - name: kb_provider
+    interval: 30s
+    rules:
+      # A RATIO per provider, never a raw 429 rate. One tenant burning its own quota must not
+      # read as a fleet outage, and `org_id` is not and never will be a label — the runbook
+      # annotation on the alert carries the SQL that answers "which tenant".
+      - record: kb:provider_rate_limit_ratio:5m
+        expr: |
+          sum by (service, env, provider) (rate(kb_provider_requests_total{error_class="provider_rate_limit"}[5m]))
+            / sum by (service, env, provider) (rate(kb_provider_requests_total[5m]))

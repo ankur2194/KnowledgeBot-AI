@@ -1,0 +1,145 @@
+# §21.2 — Direct factual lookup.
+#
+# The floor of the suite: one fact, stated once, in one section, in one document. When these
+# fail, nothing further up is worth reading. Keep them boring on purpose.
+
+dataset: kb-platform-golden
+corpus_version: corpus-2026.08.1
+category: factual
+
+cases:
+  - id: f-001
+    question: "How many days of annual leave does a new employee get?"
+    unanswerable: false
+    expected_sources: [handbook-en-v1]
+    difficulty: easy
+    reference: >-
+      Employees receive 26 days of annual leave per year, plus one additional day for every five
+      completed years of service, capped at 30 days.
+    expected_answer: >-
+      A new employee receives 26 days of annual leave. Employees earn one extra day for every five
+      completed years of service, up to a maximum of 30 days.
+    required_facts: ["26 days"]
+    forbidden_claims:
+      - "30 days as the starting entitlement"
+      - "any statement that leave is unlimited or discretionary"
+    locators: ["handbook §3 Leave"]
+    tags: [hr, single-source, baseline]
+    grading_notes: >-
+      Must state 26. Mentioning the service accrual is correct and welcome, but quoting the 30-day
+      cap as the entitlement is a failure — it is the ceiling after 20 years of service, and a bot
+      that answers with the largest number in the chunk is doing lexical retrieval with extra steps.
+
+  - id: f-002
+    question: "What are the core working hours, and how long is the standard working week?"
+    unanswerable: false
+    expected_sources: [handbook-en-v1]
+    difficulty: easy
+    reference: >-
+      The standard working week is 38 hours. Core hours are 10:00 to 16:00, Monday to Friday, with
+      the remaining time flexible by agreement with the manager.
+    expected_answer: >-
+      Core hours are 10:00–16:00, Monday to Friday, and the standard week is 38 hours. Time outside
+      core hours is flexible with manager agreement.
+    required_facts: ["10:00", "16:00", "38"]
+    forbidden_claims: ["40-hour week", "9 to 5"]
+    locators: ["handbook §2 Working hours"]
+    tags: [hr, single-source, two-facts]
+    grading_notes: >-
+      Both facts required; the 38-hour week and the core-hours window are in the same section but
+      different sentences, so an answer that gives only one indicates the chunk was truncated
+      rather than that the question was misunderstood. "40-hour week" is the default-knowledge
+      answer and its presence means the model answered from priors, not from evidence.
+
+  - id: f-003
+    question: "How long is probation, and what notice period applies once it has been completed?"
+    unanswerable: false
+    expected_sources: [handbook-en-v1]
+    difficulty: easy
+    reference: >-
+      Probation lasts six months. After probation the notice period is eight weeks on either side;
+      during probation it is two weeks.
+    expected_answer: >-
+      Probation is six months. After probation, either party gives eight weeks' notice. During
+      probation the notice period is two weeks.
+    required_facts: ["6 months", "8 weeks"]
+    forbidden_claims: ["2 weeks' notice after probation"]
+    locators: ["handbook §4 Probation and notice"]
+    tags: [hr, single-source, near-miss-numbers]
+    grading_notes: >-
+      The two-week figure sits in the adjacent sentence and applies to the opposite condition.
+      Answering "two weeks" is the specific confusion this case exists to detect, and it is a
+      failure even though the number is present in the retrieved evidence.
+
+  - id: f-004
+    question: "How long do I have to submit an expense claim after a trip?"
+    unanswerable: false
+    expected_sources: [travel-policy-v3]
+    difficulty: easy
+    reference: >-
+      Expense claims must be submitted within 30 days of the trip end date. Later claims require
+      line-manager and finance approval.
+    expected_answer: >-
+      Within 30 days of the end of the trip. A later claim needs both line-manager and finance
+      approval.
+    required_facts: ["30 days"]
+    forbidden_claims: ["claims are refused after the deadline"]
+    locators: ["travel policy §6 Claims"]
+    tags: [policy, single-source]
+    grading_notes: >-
+      "Refused after 30 days" is a plausible tightening the document does not say — late claims are
+      allowed with additional approval. Inventing a stricter rule is as ungrounded as inventing a
+      looser one and is easier to miss in review.
+
+  - id: f-005
+    question: "Which revision of the employee handbook is currently in force?"
+    unanswerable: false
+    expected_sources: [handbook-en-v1]
+    difficulty: medium
+    reference: >-
+      Revision H, effective 2026-02-01.
+    expected_answer: "Revision H, effective 1 February 2026."
+    required_facts: ["Revision H"]
+    forbidden_claims: []
+    locators: ["handbook page footer, all 14 pages"]
+    tags: [content-layer, furniture, regression-fixture]
+    grading_notes: >-
+      THE FURNITURE REGRESSION CASE. The revision letter exists only in the per-page footer; the
+      title page states the effective date and not the revision. A parser whose iterate_items()
+      reverts to a body-only walk drops ContentLayer.FURNITURE and this case becomes unanswerable
+      while every other factual case still passes. If this is the only factual case that fails,
+      report it to ingestion-engineer as a content-layer regression, not to retrieval-engineer.
+
+  - id: f-006
+    question: "Can I carry unused annual leave into next year, and by when must it be used?"
+    unanswerable: false
+    expected_sources: [handbook-en-v1]
+    difficulty: medium
+    reference: >-
+      Up to 5 unused days of annual leave may be carried into the next year, and days carried
+      over in this way must be used by 31 March.
+    expected_answer: >-
+      Yes. Up to 5 unused days may be carried into the next year, and any days carried over must
+      be used by 31 March.
+    required_facts: ["5", "31 March"]
+    forbidden_claims:
+      - "any statement that unused leave cannot be carried over"
+      - "any carry-over allowance other than 5 days"
+      - "any deadline other than 31 March"
+    locators: ["handbook §3 Leave — the FINAL sentence of a deliberately long section"]
+    tags: [hr, single-source, truncation-fixture, regression-fixture]
+    grading_notes: >-
+      THE TRUNCATION REGRESSION CASE. Handbook §3 is one continuous run of prose carrying roughly
+      620 tokens BEFORE this sentence, and the carry-over rule is the last thing in the section.
+      That shape is deliberate: embedding is a provider API call now (ADR-030), the model's input
+      window is not discoverable from a response, and at least one vendor defaults to trimming a
+      long input rather than rejecting it. A chunk longer than the window is then indexed from its
+      first N tokens with its tail unsearchable — HTTP 200, a plausible vector, no error anywhere.
+      This case asks ONLY about that tail, so the failure has a name.
+      Read it together with f-001, which asks about the 26-day entitlement in the FIRST sentence of
+      the same section. f-001 passing while f-006 fails is the signature of a silently truncated
+      embedding input, and it is an ingestion/provider finding, not a retrieval one. Both failing
+      is ordinary retrieval. Note the case only fires if the chunker emits §3 as a single
+      over-window chunk; if chunking splits the section, this degrades to an ordinary lookup and
+      the truncation risk has moved rather than gone — check chunk boundaries before concluding
+      the pipeline is safe.

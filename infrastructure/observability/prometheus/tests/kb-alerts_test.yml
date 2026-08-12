@@ -1,0 +1,355 @@
+# promtool unit tests for rules/kb-alerts.yml.
+#
+#   cd infrastructure/observability/prometheus/tests
+#   promtool test rules kb-alerts_test.yml
+#
+# rule_files are listed in DEPENDENCY ORDER: kb-recording.yml first, because two of the alerts
+# consume recorded series and promtool evaluates groups in the order they are loaded. In
+# production they are separate groups and therefore concurrent, which is safe only because every
+# alert over a recorded series carries `for:` >= 10m — see the header of kb-recording.yml.
+#
+# ---------------------------------------------------------------------------------------------
+# WHY FIRING IS ASSERTED THROUGH `ALERTS` AND SILENCE THROUGH `alert_rule_test`
+#
+# `alert_rule_test` compares the full alert including its ANNOTATIONS, so asserting that an alert
+# fires means transcribing its summary and runbook prose into this file byte for byte. Two copies
+# of a paragraph in two files drift, and the drift shows up as a red test that says nothing about
+# the alert's behaviour — so people stop trusting the file. Instead:
+#
+#   * SILENCE is asserted with `alert_rule_test` + `exp_alerts: []`, which needs no annotations.
+#   * FIRING is asserted with a query over the `ALERTS` series Prometheus generates for every
+#     pending and firing alert, which carries labels but not annotations.
+#
+# Annotation RENDERING is still covered, once, in kb-scheduler_test.yml, where the templated text
+# is short enough to transcribe safely. Annotation PRESENCE (severity + summary + runbook on
+# every rule) is the CI metadata gate's job, not a unit test's.
+#
+# `alert_rule_test` reports firing alerts only; a pending alert is reported as no alert. Every
+# `exp_alerts: []` below therefore means "not firing", which may mean "correctly still pending".
+# ---------------------------------------------------------------------------------------------
+
+evaluation_interval: 30s
+
+rule_files:
+  - ../rules/kb-recording.yml
+  - ../rules/kb-alerts.yml
+
+tests:
+  # ===========================================================================================
+  # KbChatErrorRateHigh — a 10-minute error burst does not page; an 11-minute one does.
+  # ===========================================================================================
+  # 60 req/min, of which 5 error and 5 time out: ratio 10/60 = 0.167, well above the 0.05
+  # threshold, and traffic is far above the 0.1 req/s floor. The expression is satisfiable from
+  # t=1m — the first evaluation at which rate() has two samples — so `for: 10m` completes at
+  # t=11m. Nothing is asserted between 10m and 12m: that window belongs to the evaluation
+  # interval and to group ordering, and pinning it would make the test fail on an unrelated
+  # timing change rather than on a behaviour change.
+  - name: KbChatErrorRateHigh needs ten sustained minutes
+    interval: 1m
+    input_series:
+      - series: 'kb_chat_requests_total{service="ai-api",env="prod",operation="chat",outcome="success",error_class="none"}'
+        values: "0+40x40"
+      - series: 'kb_chat_requests_total{service="ai-api",env="prod",operation="chat",outcome="error",error_class="provider_temporary"}'
+        values: "0+5x40"
+      - series: 'kb_chat_requests_total{service="ai-api",env="prod",operation="chat",outcome="timeout",error_class="provider_temporary"}'
+        values: "0+5x40"
+      - series: 'kb_chat_requests_total{service="ai-api",env="prod",operation="chat",outcome="cancelled",error_class="user_cancellation"}'
+        values: "0+10x40"
+
+    alert_rule_test:
+      - alertname: KbChatErrorRateHigh
+        eval_time: 5m
+        exp_alerts: []
+      - alertname: KbChatErrorRateHigh
+        eval_time: 10m
+        exp_alerts: []
+
+    promql_expr_test:
+      - expr: ALERTS{alertname="KbChatErrorRateHigh", alertstate="firing"}
+        eval_time: 12m
+        exp_samples:
+          - labels: 'ALERTS{alertname="KbChatErrorRateHigh", alertstate="firing", service="ai-api", env="prod", operation="chat", severity="page"}'
+            value: 1
+
+  # ===========================================================================================
+  # KbChatErrorRateHigh — keep_firing_for holds the alert open across a recovery, then releases.
+  # ===========================================================================================
+  # Errors stop dead at t=20m. The 5-minute rate window drains over the following minutes, so the
+  # expression goes false somewhere around t=23m–24m; `keep_firing_for: 5m` holds the alert open
+  # past that, which is what stops a flapping provider paging four times in an hour. By t=35m it
+  # is long resolved.
+  - name: KbChatErrorRateHigh is held open by keep_firing_for after recovery
+    interval: 1m
+    input_series:
+      - series: 'kb_chat_requests_total{service="ai-api",env="prod",operation="chat",outcome="success",error_class="none"}'
+        values: "0+40x40"
+      - series: 'kb_chat_requests_total{service="ai-api",env="prod",operation="chat",outcome="error",error_class="provider_temporary"}'
+        values: "0+5x20 100+0x20"
+      - series: 'kb_chat_requests_total{service="ai-api",env="prod",operation="chat",outcome="timeout",error_class="provider_temporary"}'
+        values: "0+5x20 100+0x20"
+      - series: 'kb_chat_requests_total{service="ai-api",env="prod",operation="chat",outcome="cancelled",error_class="user_cancellation"}'
+        values: "0+10x40"
+
+    promql_expr_test:
+      # Still firing five minutes after the errors stopped.
+      - expr: ALERTS{alertname="KbChatErrorRateHigh", alertstate="firing"}
+        eval_time: 25m
+        exp_samples:
+          - labels: 'ALERTS{alertname="KbChatErrorRateHigh", alertstate="firing", service="ai-api", env="prod", operation="chat", severity="page"}'
+            value: 1
+
+    alert_rule_test:
+      # And released well before this.
+      - alertname: KbChatErrorRateHigh
+        eval_time: 35m
+        exp_alerts: []
+
+  # ===========================================================================================
+  # KbProviderRateLimitSustained — a ten-minute 429 burst must NEVER page.
+  # ===========================================================================================
+  # This is the alert's whole design: 15 minutes outlives every automatic remedy, so a burst that
+  # retry and fallback absorbed is not an incident. Here openai 429s half of all calls for ten
+  # minutes and then stops. The expression is true from t=1m until the burst leaves the 5-minute
+  # rate window at t=14m — thirteen minutes, two short of the `for:` — and the alert never fires
+  # at any evaluation, ever.
+  - name: KbProviderRateLimitSustained stays silent through a ten-minute burst
+    interval: 1m
+    input_series:
+      - series: 'kb_provider_requests_total{service="ai-api",env="prod",provider="openai",model="gpt-5.1",outcome="error",error_class="provider_rate_limit"}'
+        values: "0+50x10 500+0x30"
+      - series: 'kb_provider_requests_total{service="ai-api",env="prod",provider="openai",model="gpt-5.1",outcome="success",error_class="none"}'
+        values: "0+50x40"
+
+    alert_rule_test:
+      - alertname: KbProviderRateLimitSustained
+        eval_time: 10m
+        exp_alerts: []
+      - alertname: KbProviderRateLimitSustained
+        eval_time: 14m
+        exp_alerts: []
+      - alertname: KbProviderRateLimitSustained
+        eval_time: 16m
+        exp_alerts: []
+      - alertname: KbProviderRateLimitSustained
+        eval_time: 20m
+        exp_alerts: []
+      - alertname: KbProviderRateLimitSustained
+        eval_time: 40m
+        exp_alerts: []
+
+  # ===========================================================================================
+  # KbProviderRateLimitSustained — fifteen sustained minutes pages.
+  # ===========================================================================================
+  # Same provider, same 50% rate-limit ratio, but it does not stop. Silent at 10m, silent at 14m,
+  # firing by 17m. The gap between 15m and 17m is the same evaluation-interval slack as above:
+  # the expression is first satisfiable at t=1m because rate() needs two samples, so `for: 15m`
+  # completes at t=16m, not t=15m. That one-interval offset is not worth pinning and is worth
+  # understanding — it is the reason an alert with `for:` equal to the time you actually have is
+  # already too late.
+  - name: KbProviderRateLimitSustained pages after fifteen sustained minutes
+    interval: 1m
+    input_series:
+      - series: 'kb_provider_requests_total{service="ai-api",env="prod",provider="openai",model="gpt-5.1",outcome="error",error_class="provider_rate_limit"}'
+        values: "0+50x40"
+      - series: 'kb_provider_requests_total{service="ai-api",env="prod",provider="openai",model="gpt-5.1",outcome="success",error_class="none"}'
+        values: "0+50x40"
+
+    alert_rule_test:
+      - alertname: KbProviderRateLimitSustained
+        eval_time: 10m
+        exp_alerts: []
+      - alertname: KbProviderRateLimitSustained
+        eval_time: 14m
+        exp_alerts: []
+
+    promql_expr_test:
+      - expr: ALERTS{alertname="KbProviderRateLimitSustained", alertstate="firing"}
+        eval_time: 17m
+        exp_samples:
+          - labels: 'ALERTS{alertname="KbProviderRateLimitSustained", alertstate="firing", service="ai-api", env="prod", provider="openai", severity="page"}'
+            value: 1
+
+      # `model` never reaches the alert: the recorded ratio aggregated it away, so one page names
+      # the provider and the runbook does the rest. A per-model alert would page twice for one
+      # capped account.
+      - expr: count(ALERTS{alertname="KbProviderRateLimitSustained", alertstate="firing"})
+        eval_time: 17m
+        exp_samples:
+          - labels: "{}"
+            value: 1
+
+  # ===========================================================================================
+  # KbCircuitBreakerOpen — open (2) pages after five minutes, half-open (1) never does.
+  # ===========================================================================================
+  # The breaker reopens with a doubling backoff to a 5-minute cap, so a breaker that is still
+  # open after 5 minutes has failed at least ten half-open probe cycles. Half-open is a breaker
+  # doing its job and is not an alert; a rule written as `>= 1` would page on every recovery.
+  #
+  # The half-open series was `dependency="reranker"` until ADR-030 removed that value: there is no
+  # shared rerank dependency left to hold a global breaker, and the surviving per-(org, credential,
+  # model) breakers are banned from this label. `valkey` is a real shared-dependency breaker and
+  # carries the same meaning for this test.
+  - name: KbCircuitBreakerOpen pages on open only, never on half-open
+    interval: 1m
+    input_series:
+      - series: 'kb_circuit_breaker_state{service="ai-api",env="prod",dependency="qdrant"}'
+        values: "0+0x5 2+0x35"
+      - series: 'kb_circuit_breaker_state{service="ai-api",env="prod",dependency="valkey"}'
+        values: "1+0x40"
+
+    alert_rule_test:
+      - alertname: KbCircuitBreakerOpen
+        eval_time: 4m
+        exp_alerts: []
+      - alertname: KbCircuitBreakerOpen
+        eval_time: 10m
+        exp_alerts: []
+
+    promql_expr_test:
+      # Exactly one firing alert: qdrant. The valkey series sits at half-open for the whole
+      # test and appears nowhere.
+      - expr: ALERTS{alertname="KbCircuitBreakerOpen", alertstate="firing"}
+        eval_time: 12m
+        exp_samples:
+          - labels: 'ALERTS{alertname="KbCircuitBreakerOpen", alertstate="firing", service="ai-api", env="prod", dependency="qdrant", severity="page"}'
+            value: 1
+
+  # ===========================================================================================
+  # KbOptionalDependencyDown — only `required="false"` opens a ticket.
+  # ===========================================================================================
+  # A required dependency that is down already fails readiness and takes the container out of
+  # rotation, which surfaces as a chat error rate. An OPTIONAL one degrades silently by design —
+  # ingestion stops storing originals while chat keeps working — and nothing else in this file
+  # notices. That is the whole reason this rule exists, and it is also why a required dependency
+  # must NOT match it: a ticket is the wrong response to chat being down.
+  #
+  # THE SUBJECT OF THIS TEST CHANGED WITH THE RULE. It used to prove the alert fires for
+  # `dependency="reranker"`, which passed against a hand-written fixture and could never happen in
+  # production: reranking is a provider API call since ADR-030 and readiness must never probe a
+  # provider, so no process emits that series. `object_storage` is the one optional dependency on
+  # ai-api that a readiness check can actually answer for, and it is what the rewritten runbook
+  # describes. A unit test whose fixture is unproducible is the same defect class as the alert it
+  # was covering.
+  - name: KbOptionalDependencyDown fires for an optional dependency and ignores required ones
+    interval: 1m
+    input_series:
+      # Optional and down — the alert's subject.
+      - series: 'kb_dependency_up{service="ai-api",env="prod",dependency="object_storage",required="false"}'
+        values: "0+0x30"
+      # Required and down — readiness already handles this; a ticket would be the wrong response.
+      - series: 'kb_dependency_up{service="ai-api",env="prod",dependency="qdrant",required="true"}'
+        values: "0+0x30"
+      # Optional and up — must never match.
+      - series: 'kb_dependency_up{service="core-api",env="prod",dependency="object_storage",required="false"}'
+        values: "1+0x30"
+
+    alert_rule_test:
+      - alertname: KbOptionalDependencyDown
+        eval_time: 14m
+        exp_alerts: []
+
+    promql_expr_test:
+      - expr: ALERTS{alertname="KbOptionalDependencyDown", alertstate="firing"}
+        eval_time: 16m
+        exp_samples:
+          - labels: 'ALERTS{alertname="KbOptionalDependencyDown", alertstate="firing", service="ai-api", env="prod", dependency="object_storage", required="false", severity="ticket"}'
+            value: 1
+
+      # Exactly one instance: neither the required-and-down qdrant series nor the optional-but-up
+      # core-api one may contribute. Asserted as a count because `exp_samples` above proves only
+      # that the expected instance exists, not that it is the only one — an expression widened to
+      # match required dependencies would still satisfy the assertion above.
+      - expr: count(ALERTS{alertname="KbOptionalDependencyDown", alertstate="firing"})
+        eval_time: 16m
+        exp_samples:
+          - labels: "{}"
+            value: 1
+
+  # ===========================================================================================
+  # KbOptionalDependencyDown — a dependency that recovers inside the 15 minutes never fires.
+  # ===========================================================================================
+  # `for: 15m` is there so a rolling deployment does not open a ticket every release. Object
+  # storage is down for eight minutes and comes back; the alert is pending and then discarded,
+  # and nobody is notified.
+  - name: KbOptionalDependencyDown tolerates a blip shorter than fifteen minutes
+    interval: 1m
+    input_series:
+      - series: 'kb_dependency_up{service="ai-api",env="prod",dependency="object_storage",required="false"}'
+        values: "1+0x5 0+0x8 1+0x30"
+
+    alert_rule_test:
+      - alertname: KbOptionalDependencyDown
+        eval_time: 13m
+        exp_alerts: []
+      - alertname: KbOptionalDependencyDown
+        eval_time: 20m
+        exp_alerts: []
+      - alertname: KbOptionalDependencyDown
+        eval_time: 40m
+        exp_alerts: []
+
+  # ===========================================================================================
+  # KbCrawlSourcesOverdue — the backlog threshold and its thirty-minute patience.
+  # ===========================================================================================
+  # Layer 3 of the scheduler's three layers: the only signal that catches a scheduler ticking
+  # perfectly while the work does not happen. 30 minutes of patience because a large recrawl
+  # sweep legitimately runs a backlog up and back down.
+  - name: KbCrawlSourcesOverdue opens a ticket after thirty minutes over the threshold
+    interval: 1m
+    input_series:
+      - series: 'kb_crawl_sources_overdue{service="core-api",env="prod"}'
+        values: "60+0x40"
+
+    alert_rule_test:
+      - alertname: KbCrawlSourcesOverdue
+        eval_time: 29m
+        exp_alerts: []
+
+    promql_expr_test:
+      - expr: ALERTS{alertname="KbCrawlSourcesOverdue", alertstate="firing"}
+        eval_time: 31m
+        exp_samples:
+          - labels: 'ALERTS{alertname="KbCrawlSourcesOverdue", alertstate="firing", service="core-api", env="prod", severity="ticket"}'
+            value: 1
+
+  - name: KbCrawlSourcesOverdue tolerates a backlog below the threshold indefinitely
+    interval: 1m
+    input_series:
+      - series: 'kb_crawl_sources_overdue{service="core-api",env="prod"}'
+        values: "20+0x60"
+
+    alert_rule_test:
+      - alertname: KbCrawlSourcesOverdue
+        eval_time: 60m
+        exp_alerts: []
+
+  # ===========================================================================================
+  # KbDeadMansSwitch — always firing, carrying no service label.
+  # ===========================================================================================
+  # The heartbeat's SIGNAL IS ITS ABSENCE at an external monitor, so the only thing a unit test
+  # can prove is that it is unconditionally firing and that it depends on no input series
+  # whatsoever — the input below is unrelated filler that merely gives the test a timeline. If
+  # this alert ever stops firing in a test, it has acquired a dependency and is no longer a
+  # dead-man's switch.
+  #
+  # It carries NO `service` label, because `vector(1)` has no labels. Alertmanager groups by
+  # [alertname, service]; a missing group label groups every instance under the empty value,
+  # which for a single always-on alert is exactly right, and is the reason its route matches on
+  # alertname rather than on anything else.
+  - name: KbDeadMansSwitch fires unconditionally and depends on no series
+    interval: 1m
+    input_series:
+      - series: 'kb_chat_active_streams{service="ai-api",env="prod"}'
+        values: "0+0x10"
+
+    promql_expr_test:
+      - expr: ALERTS{alertname="KbDeadMansSwitch", alertstate="firing"}
+        eval_time: 1m
+        exp_samples:
+          - labels: 'ALERTS{alertname="KbDeadMansSwitch", alertstate="firing", severity="ticket", deadman="true"}'
+            value: 1
+      - expr: ALERTS{alertname="KbDeadMansSwitch", alertstate="firing"}
+        eval_time: 10m
+        exp_samples:
+          - labels: 'ALERTS{alertname="KbDeadMansSwitch", alertstate="firing", severity="ticket", deadman="true"}'
+            value: 1

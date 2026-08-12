@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+# Never commit an SBOM: it is wrong the moment a lockfile moves.
+sbom/
+# Model weights are baked into the image in prod and cached from the host in dev.
+/models/

@@ -1,0 +1,17 @@
+Playwright specs, in two folders matching the two projects in playwright.config.ts:
+
+  admin/   — storageState from the `setup` project (a real login against a real Laravel)
+  public/  — NO storageState: hosted chat holds an origin-bound chat-session token, not a cookie
+
+The specs that must exist here, because no other layer can own them:
+  - the ORG SWITCH: hold org B's request open with `page.route`, assert org A's canary never
+    renders inside that window, then soft-navigate back and assert again on the Router Cache path.
+    Every web-first assertion auto-retries, so `toHaveCount(0)` passes the moment the new org's
+    data lands — and the stale frame in between IS the bug.
+  - the positive control FIRST in every isolation spec: assert this org's canary is visible before
+    asserting the other's is absent, or a 500, a renamed test id, or an empty list satisfies it.
+  - a worker-scoped two-organization fixture with a per-test canary. A fixed "acme" tenant means
+    shard 3's canary lands in shard 1's assertion, and it only ever fails in CI.
+  - back button after sign-out: no authenticated payload renders.
+  - the chat path against tests/fixtures/sse-server.ts via `route.continue({ url })`.
+    `route.fulfill()` is banned on any text/event-stream route.

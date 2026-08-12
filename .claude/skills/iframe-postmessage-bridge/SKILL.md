@@ -104,7 +104,9 @@ export function attachBridge(frame: HTMLIFrameElement, ch: string, o: LoaderOpti
       // inside the frame is the whole reason signed end-user identity works. Every SDK rejection is
       // a 404 with a byte-identical body (laravel-sanctum-auth) — never branch on it.
       // `__KB_API_ORIGIN__` = https://api.<domain>: the main domain, NOT <widget-domain> (see above).
-      const r = await fetch(`${__KB_API_ORIGIN__}/api/v1/sdk/session`, { method: 'POST', mode: 'cors',
+      // `sdk/v1`, NOT `api/v1`: api/v1 is the admin cookie-session + CSRF group, and posting a mint
+      // made from a hostile customer page into it is the inheritance the group split prevents.
+      const r = await fetch(`${__KB_API_ORIGIN__}/sdk/v1/session`, { method: 'POST', mode: 'cors',
         credentials: 'omit', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ bot_id: o.botId, user_token: o.userToken ?? null }) });
       return r.ok ? send('init', { session: await r.json(), locale: navigator.language }) : o.onEvent?.('error', { error_class: 'authentication' });

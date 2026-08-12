@@ -1,0 +1,80 @@
+includes:
+    - vendor/larastan/larastan/extension.neon
+
+parameters:
+    # LEVEL 8, NOT 9 — and the difference is not ambition, it is what happens to the baseline.
+    # Level 9 reports every `mixed` as an error, and Eloquent is `mixed` by construction: every
+    # $model->attribute, every config() read, every request()->input() comes back mixed. The only
+    # way anyone ever ships level 9 on a Laravel codebase is by generating a baseline with a few
+    # thousand entries — and an analyser whose findings are all pre-approved is a disabled analyser
+    # that still costs 90 seconds of CI. Level 8 catches the nullable-return and undefined-method
+    # classes of bug without that trade.
+    level: 8
+
+    paths:
+        - app
+        - config
+        - database
+        - routes
+        - tests
+
+    # THERE IS DELIBERATELY NO phpstan-baseline.neon, AND ITS ABSENCE IS THE POINT.
+    # On an empty tree there is nothing to baseline. The moment one exists, every future violation
+    # has an obvious two-second fix ("regenerate the baseline") and the ratchet stops being a
+    # ratchet. If a genuine false positive appears, suppress it at the line with an explanatory
+    # `@phpstan-ignore-next-line` comment naming the reason — reviewable, greppable, and it dies
+    # with the code it annotates.
+
+    # Pest declares arch(), it(), test() and expect() through composer's autoload.files, which
+    # PHPStan does not read for symbol discovery — it builds its own table from analysed and
+    # scanned paths only. Without this, every file under tests/ reports "Function it() not found".
+    scanDirectories:
+        - vendor/pestphp/pest/src
+
+    # Larastan understands the facades, but not every dynamic property on a not-yet-written model.
+    treatPhpDocTypesAsCertain: false
+
+    ignoreErrors:
+        # bootstrap/app.php forward-references App\Http\Middleware\TenantContext in the middleware
+        # priority list before the class is written. `::class` does not autoload and
+        # SortedMiddleware compares priority entries as strings, so this is safe — and bootstrap/ is
+        # outside `paths` anyway. Listed here so the next person does not "fix" it by adding
+        # bootstrap/ to paths and then deleting the reference.
+        -
+            message: '#Class App\\Http\\Middleware\\TenantContext not found#'
+            reportUnmatched: false
+
+        # THE ONE PLACE THE ANALYSER IS ASKED TO LOOK AWAY, AND IT IS AN UPSTREAM STUB GAP RATHER
+        # THAN A CLAIM ABOUT OUR CODE.
+        #
+        # `arch()` is declared `function arch(?string, ?Closure): TestCall`, and `preset()` /
+        # `expect()` are not methods on TestCall — they are mixed into the test case at RUNTIME by
+        # `Plugin::uses(Architectable::class)` and reach TestCall through its `__call`. PHPStan
+        # cannot model a trait injected by a plugin at boot, and Pest's own authors gave up on the
+        # same problem in the same classes: `final class TestCall // @phpstan-ignore-line` and
+        # `trait Architectable // @phpstan-ignore-line` are both annotated upstream. Adding
+        # vendor/pestphp/pest-plugin-arch/src to scanDirectories was tried and changes nothing —
+        # the symbols are found, the method table is what is incomplete.
+        #
+        # Scoped three ways so it can never grow into a baseline: one class, two named methods, and
+        # only under tests/Arch. An undefined method anywhere else still fails. Delete this the day
+        # Pest ships `@method` annotations for the arch DSL.
+        -
+            message: '#Call to an undefined method Pest\\PendingCalls\\TestCall::(preset|expect)\(\)#'
+            path: tests/Arch/*.php
+            reportUnmatched: false
+
+        # Same gap, our side of it: `expect()->extend('toDenyAsNotFound', ...)` in tests/Pest.php
+        # registers a method on Pest\Expectation at RUNTIME, and PHPStan has no way to see a
+        # closure being bound into a vendor class by name. The alternative was a plain
+        # `assertDeniesAsNotFound($response, $prefix)` helper, which analyses cleanly — rejected
+        # because tests/Pest.php scaffolded this expectation by name and the call site
+        # `expect($response)->toDenyAsNotFound('rt/v1')` is what makes the property being asserted
+        # readable at a glance.
+        #
+        # The METHOD NAME is pinned, so an undefined method with any other name still fails here.
+        # Every new custom expectation must add its own line and justify itself.
+        -
+            message: '#Call to an undefined method Pest\\Expectation<.*>::toDenyAsNotFound\(\)#'
+            path: tests/*
+            reportUnmatched: false

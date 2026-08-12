@@ -1,0 +1,132 @@
+KnowledgeBot AI
+Copyright 2026 The KnowledgeBot AI Contributors
+
+This product includes software developed by The KnowledgeBot AI Contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this file except in compliance with the License. You may obtain a copy of the
+License in the LICENSE file distributed with this work, or at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied. See the License for the
+specific language governing permissions and limitations under the License.
+
+================================================================================
+THIRD-PARTY NOTICES
+================================================================================
+
+This file is the attribution mechanism required by section 4(d) of the Apache
+License and by the specification's open-source policy (docs/21 section 35). It
+is the accumulation point for attribution notices that must travel with a
+redistribution -- not a dependency inventory.
+
+The dependency inventory is the SBOM. A CycloneDX 1.6 SBOM is generated per
+image and per lockfile and attached to each release; see SECURITY.md. Do not
+duplicate it here, because a hand-maintained copy drifts from the build and a
+stale attribution list is worse than a generated one.
+
+What belongs in this file:
+
+  * A NOTICE file carried by an Apache-2.0 dependency. Section 4(d) requires
+    those contents to be reproduced in redistributions; that is not satisfied by
+    an SBOM row.
+
+  * Attribution required by a permissive licence that asks for it by name --
+    BSD-3-Clause, MIT where a project asks for the notice to travel, and similar.
+
+  * MODEL WEIGHT LICENCES. These are the attributions most likely to be missed,
+    because downloaded model artifacts appear in no SBOM, are invisible to every
+    dependency scanner, and carry their own terms. Each entry names the model,
+    its pinned revision, and its licence. The pins themselves live in
+    services/ai-service/models.manifest.toml, which the licence gate reads.
+
+  * Any component whose licence terms a self-hoster inherits by running our
+    images, where the terms require the notice to be visible to them.
+
+--------------------------------------------------------------------------------
+Model weights
+--------------------------------------------------------------------------------
+
+  These weights are SHIPPED INSIDE the ai-service image. A self-hoster who runs
+  that image receives them, which is what makes the terms below theirs and not
+  only ours. Identifiers and shas are the pinned values in
+  services/ai-service/models.manifest.toml; re-pinning a revision means editing
+  this section in the same change.
+
+  ------------------------------------------------------------------------------
+  docling-layout-heron
+  ------------------------------------------------------------------------------
+    Repository  docling-project/docling-layout-heron (Hugging Face)
+    Revision    8f39ad3c0b4c58e9c2d2c84a38465abf757272d8
+    Licence     Apache-2.0
+    Text        https://www.apache.org/licenses/LICENSE-2.0
+
+    Used for document layout analysis during parsing. Note the licence is
+    Apache-2.0, NOT docling's own MIT: the source project and these weights carry
+    different terms, and this file records the weights'.
+
+  ------------------------------------------------------------------------------
+  docling-models (TableFormer)
+  ------------------------------------------------------------------------------
+    Repository  docling-project/docling-models (Hugging Face)
+    Revision    fc0f2d45e2218ea24bce5045f58a389aed16dc23  (tag v2.3.0)
+    Artifacts   model_artifacts/tableformer/accurate/tableformer_accurate.safetensors
+                model_artifacts/tableformer/fast/tableformer_fast.safetensors
+    Licence     Community Data License Agreement - Permissive, Version 2.0
+                (CDLA-Permissive-2.0)
+    Text        https://cdla.dev/permissive-2-0/
+
+    THIS ENTRY EXISTS TO DISCHARGE AN OBLIGATION, NOT MERELY TO INFORM.
+    CDLA-Permissive-2.0 section 2.1 permits sharing the Data "so long as the Data
+    Recipient makes available the text of this agreement with the shared Data".
+    We share the Data by baking these weights into a distributed image, so the
+    agreement text must travel with it -- that is what the link above is for, and
+    why this entry may not be reduced to an SPDX identifier.
+
+    Section 3.1 ("No Restrictions on Results") imposes no obligation on model
+    OUTPUT, so nothing here reaches a tenant's documents, embeddings or answers.
+
+    The model card on the repository's main branch additionally lists Apache-2.0.
+    That dual listing is not what we ship; this entry records the licence as it
+    stood at the pinned revision above.
+
+  ------------------------------------------------------------------------------
+  RapidOCR (PP-OCRv6 / PP-OCRv4 ONNX weights)
+  ------------------------------------------------------------------------------
+    Repository  RapidAI/RapidOCR (ModelScope)
+    Revision    390c78b5e9a2e69bd9e33be9cd77f7b2622ce55b  (tag v3.9.2)
+    Artifacts   onnx/PP-OCRv6/det/PP-OCRv6_det_small.onnx
+                onnx/PP-OCRv4/cls/ch_ppocr_mobile_v2.0_cls_mobile.onnx
+                onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx
+    Licence     Apache-2.0
+    Text        https://www.apache.org/licenses/LICENSE-2.0
+
+  ------------------------------------------------------------------------------
+  Deliberately absent
+  ------------------------------------------------------------------------------
+    No embedding or reranking weights are shipped. ADR-030 moved both to provider
+    APIs, so bge-m3 and bge-reranker-v2-m3 are not in the image and not listed.
+
+    Surya (OCR) and OmniDocBench (evaluation) are NOT shipped and must not be:
+    Surya's weights are modified AI Pubs OpenRAIL-M with an operator-revenue cap
+    and a competing-product clause, and OmniDocBench is research-only. Both are on
+    the deny side of scripts/security/policy/licences.toml.
+
+--------------------------------------------------------------------------------
+Bundled and redistributed components
+--------------------------------------------------------------------------------
+
+  (Empty. Populate as dependencies are installed. Nothing is vendored into this
+  repository today.)
+
+--------------------------------------------------------------------------------
+External services
+--------------------------------------------------------------------------------
+
+  External LLM providers are separate services operated by third parties under
+  their own terms. This project calls them using credentials the operator
+  supplies; it neither includes, redistributes, nor resells them, and their
+  terms are not covered by this NOTICE.

@@ -1,9 +1,19 @@
 # Workflow jobs — the full YAML
 
 Companion to `SKILL.md`. The trigger table and the gate table there are the contract; this file is
-the YAML an implementer needs once. Every job below lives in `.github/workflows/ci.yml` unless
-noted. Data-service image tags are `docker-compose-stack`'s pin, not this skill's — keep every tag
-here byte-identical to the compose `test` profile.
+the YAML an implementer needs once. Data-service image tags are `docker-compose-stack`'s pin, not
+this skill's — keep every tag here byte-identical to the compose `test` profile.
+
+**Both workflows now exist, and where a job lives is not what this file's section headings imply.**
+`.github/workflows/gates.yml` holds the install-free jobs — `boundary-greps`, `enforcement-greps`,
+`observability-rules`, `compose-ci-tag-drift`, `compose-invariants`, `repo-artifact-consistency` —
+so the grep-shaped and telemetry sections below are `gates.yml`'s, not `ci.yml`'s. `ci.yml` holds
+the jobs that install something or run a container: `core-api`, `ai-service`, `node`, `images` and
+the scanners. **The shipped workflows are authoritative and have diverged from the YAML below in
+detail** (job splits, marker-scoped pytest steps, `load: true` on the core-api image build). Read
+this file for the *reasoning* — every comment here is an argument someone had to make once — and
+read the workflow for what actually runs. Where the two disagree on a mechanism rather than a
+detail, that is a finding, not a preference.
 
 ## Workflow top matter
 
@@ -34,9 +44,15 @@ jobs:
                             # the preinstalled PHP/Node/Python out from under us
     defaults: { run: { working-directory: services/core-api } }
     services:
-      postgres:
+      # Service alias, database, user and password are the FOUR canonical test-DB values, and
+      # they must match `services/core-api/phpunit.xml` and the compose `test` profile exactly.
+      # These three disagreed in three different ways until 2026-08-07, which is why
+      # `make test-up && vendor/bin/pest` had never worked. The alias is `postgres-test`, not
+      # `postgres`: a test database reachable as bare `postgres` is one connection-string typo
+      # away from a suite that truncates the real one.
+      postgres-test:
         image: postgres:18-alpine
-        env: { POSTGRES_PASSWORD: ci, POSTGRES_DB: kb_test }
+        env: { POSTGRES_USER: kb_test, POSTGRES_PASSWORD: kb_test, POSTGRES_DB: kb_test }
         ports: ['5432:5432']   # required: this job runs ON the runner, so the
                                # service label is not a resolvable hostname
         options: >-
@@ -92,7 +108,7 @@ jobs:
           # across pooled sessions). It must run as kb_ci_app, a NON-OWNER role:
           # the table owner bypasses RLS silently unless FORCE is set, which makes
           # the tripwire permanently green and proves nothing.
-          psql "postgres://postgres:ci@localhost:5432/kb_test" -f database/ci/enable-rls.sql
+          psql "postgres://kb_test:kb_test@localhost:5432/kb_test" -f database/ci/enable-rls.sql
 
       - run: php artisan test --parallel --processes=4
         env:
@@ -101,15 +117,27 @@ jobs:
           DB_USERNAME: kb_ci_app
           QDRANT_URL: http://localhost:6333
 
+      # Both generated artifacts are asserted with the generator's own `--check`, never with
+      # `dump && git diff --exit-code`. `git diff` CANNOT SEE AN UNTRACKED FILE, so on a tree
+      # where the artifact has never been committed the dump writes new files and the diff
+      # passes having compared nothing — a green required check standing for an assertion that
+      # never ran. `--check` writes nothing and exits non-zero if any file WOULD change.
+      - name: OpenAPI document is current
+        # Reads config('session.cookie') live into components.securitySchemes, so do not add a
+        # SESSION_COOKIE to this job (or to phpunit.xml) without regenerating the document.
+        run: php artisan kb:dump-openapi --check
+
       - name: Form-rules manifest is current
-        run: |
-          php artisan kb:dump-form-rules
-          git diff --exit-code -- ../../packages/contracts/rules
+        run: php artisan kb:dump-form-rules --check
 ```
 
 `packages/contracts/test/form-drift.test.ts` runs in the Node job and proves the Zod schemas and the
 FormRequests agree *behaviourally* (probe values, both directions) — the manifest diff alone only
 proves the dump is fresh (`rhf-zod-forms`).
+
+`kb:dump-openapi --check` has no behavioural twin — nothing exercises a generated client against a
+live server — so the committed document is held current by exactly two things: `OpenApiDocumentTest`
+inside the Pest suite, and this step. That is why it is a step and not a review habit.
 
 ## `ai-service` — the data-plane greps
 
@@ -174,8 +202,8 @@ Both steps are pure text passes with no containers and no secrets, so they run i
                                                    # targets and no query filter ever does.
                                                    # Not equal to the six on purpose (Gotchas).
           # (b) No full-text matcher reaches Qdrant at all, and no delete or count takes a
-          # text/content/hash kwarg. Lexical matching in this platform is BGE-M3 sparse
-          # vectors (bge-m3-embeddings), never MatchText — so a MatchText in the data plane
+          # text/content/hash kwarg. Lexical matching in this platform is a sparse vector
+          # (bge-m3-embeddings; its source is open — finding C2), never MatchText — so a MatchText in the data plane
           # is either a delete filter or a retrieval path that bypasses fusion. Both are bugs.
           flag "$( grep -rnE 'MatchText\(|(delete|count)[a-z_]*\([^)]*(text|content|content_hash)=' \
               services/ai-service/app --include=*.py \
@@ -183,38 +211,49 @@ Both steps are pure text passes with no containers and no secrets, so they run i
             "full-text matcher or text/hash kwarg on a delete or count"
           exit $fail
 
-      - name: The data plane writes only its four allow-listed tables
+      - name: The data plane writes only its allow-listed tables
         run: |
           # Open decision 2, RESOLVED (kb-architecture-map, fastapi-service): services/ai-service
-          # writes chunks, document_elements, retrieval_traces and evaluation_results — the four
-          # derived, rebuildable tables — and NOTHING else. Every other table is Laravel's, read
-          # and write, and Laravel owns all migrations. Failure mode: a data-plane INSERT/UPDATE
+          # writes only the names in ALLOWED_TABLES and NOTHING else. Every other table is
+          # Laravel's, read and write, and Laravel owns all migrations. Failure mode: a data-plane INSERT/UPDATE
           # into a control-plane table lands beside Laravel's own writer with no policy check, no
           # audit row, and no framework-applied tenant scope. Nothing errors; the row is just
           # there, and it is found by a customer, not by a test.
           #
           # ALLOW-LIST, not a deny-list of bad table names — same reasoning as the deletion-key
           # gate above: a deny-list cannot see the table somebody invents tomorrow. So detect
-          # every write statement, then subtract the four allowed names; whatever is left fails.
+          # every write statement, then subtract the allowed names; whatever is left fails.
           # Escape hatch on the same line, same shape as the other two greps:
           # `table-write-exempt: <reason>`. A second exempted line is a review stop, not a merge.
+          #
+          # IMPORT THE LIST, NEVER RESTATE IT, AND NEVER ASSERT ITS LENGTH. The shipped gate reads
+          # `from app.db.writes import ALLOWED_TABLES` and joins it with `|`. The literal below is
+          # what this reference used to carry and it is exactly the drift the rule exists to stop:
+          # the list grew from four names to six when ADR-032 restored the sparse arm, and a
+          # private copy keeps subtracting the OLD spelling — so a renamed table reads as a
+          # violation while the stale name keeps passing. Membership is pinned separately, by
+          # name, against a reviewed list, so an addition, a swap and a rename are all diffs a
+          # reviewer approves against ADR-033's three properties: the row is derived and
+          # rebuildable in the ADR-010 sense, no public API path reads or writes it, and Laravel
+          # owns its migration. A count admits a swap and a rename and blocks a correct addition.
           #
           # NOT `! grep …` here, deliberately. `set -e` is specified to ignore the failure of a
           # command whose status is inverted with `!`, so in a multi-check step only the LAST
           # `! grep` can fail the job — every earlier one reports and passes. Accumulate instead
           # and `exit $fail`.
           set -u
-          ALLOWED='chunks|document_elements|retrieval_traces|evaluation_results'
+          ALLOWED=$(python -c 'from app.db.writes import ALLOWED_TABLES; print("|".join(ALLOWED_TABLES))')
+          [ -n "$ALLOWED" ] || { echo "::error::ALLOWED_TABLES imported empty; every check below is vacuous"; exit 1; }
           WRITE='(insert[[:space:]]+into|update|delete[[:space:]]+from|copy)[[:space:]]+"?[a-z_][a-z0-9_]*"?'
           fail=0
           flag() { [ -n "${1//[[:space:]]/}" ] || return 0; printf '%s\n' "$1"; echo "::error::$2"; fail=1; }
 
-          # (a) Every SQL write names a table; subtract the four. `WRITE` requires whitespace
+          # (a) Every SQL write names a table; subtract the allow-list. `WRITE` requires whitespace
           # after the keyword, so Python's `d.update(...)` / `cfg.update(other)` never match.
           flag "$( grep -rniE "$WRITE" services/ai-service/app --include=*.py --include=*.sql \
                  | grep -v 'table-write-exempt:' \
                  | grep -viE "(insert[[:space:]]+into|update|delete[[:space:]]+from|copy)[[:space:]]+\"?($ALLOWED)\"?[^a-z0-9_]" \
-                 || true )" "write outside the four allow-listed tables"
+                 || true )" "write outside ALLOWED_TABLES"
 
           # (b) grep is line-based, so a write whose table sits on the NEXT line would be seen by
           # (a) and subtracted by nothing. Uppercase-only, so prose like "# needs update" is safe.
@@ -258,9 +297,15 @@ Both steps are pure text passes with no containers and no secrets, so they run i
     runs-on: ubuntu-24.04
     if: github.event_name == 'merge_group'
     services:
-      postgres:
+      # Service alias, database, user and password are the FOUR canonical test-DB values, and
+      # they must match `services/core-api/phpunit.xml` and the compose `test` profile exactly.
+      # These three disagreed in three different ways until 2026-08-07, which is why
+      # `make test-up && vendor/bin/pest` had never worked. The alias is `postgres-test`, not
+      # `postgres`: a test database reachable as bare `postgres` is one connection-string typo
+      # away from a suite that truncates the real one.
+      postgres-test:
         image: postgres:18-alpine
-        env: { POSTGRES_PASSWORD: ci, POSTGRES_DB: kb_test }
+        env: { POSTGRES_USER: kb_test, POSTGRES_PASSWORD: kb_test, POSTGRES_DB: kb_test }
         ports: ['5432:5432']
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 20

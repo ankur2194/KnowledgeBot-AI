@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // "bundler" is required for Zod 4's subpath exports to resolve at all (rhf-zod-forms).
+    // Inherited from the base, restated here because this package is the one that would fail
+    // silently: `import { z } from 'zod'` resolves, `zod/v4/core` internals do not.
+    "moduleResolution": "bundler",
+    // No DOM lib: the frame parser is string-in / object-out and runs identically in Node,
+    // Hermes and a browser. A DOM type sneaking in is how a "shared" contract stops building
+    // for apps/mobile.
+    "lib": ["ES2023"],
+    // Node types only, never DOM: the frame parser is string-in / object-out and must compile the
+    // same in Node, Hermes and a browser. `node` is here because the drift test reads the rules
+    // manifest off disk and the tsup/vitest configs are typechecked with the sources.
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "tsup.config.ts", "vitest.config.ts"]
+}

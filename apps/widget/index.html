@@ -1,0 +1,35 @@
+<!doctype html>
+<!--
+  The BUILD ENTRY for `vite build --mode app`, and in production nothing more than that.
+
+  dist/app/index.html is NEVER SERVED. traefik-routing sends <widget-domain>/embed/* to LARAVEL,
+  because `Content-Security-Policy: frame-ancestors <the one validated embedder origin>` is derived
+  per bot from a live allow-list on EVERY REQUEST and cannot be a static header — and
+  `frame-ancestors` cannot be set in a <meta> tag at all, HTTP response header only. Laravel emits
+  the document, reading dist/app/.vite/manifest.json for the hashed asset filenames. That is why
+  `build.manifest` is on.
+
+  Consequently there is no <meta http-equiv="Content-Security-Policy"> here, and there must not be:
+  a meta CSP would be silently ignored for frame-ancestors while looking exactly like the control.
+
+  This file is still used verbatim by `vite dev` and by `vite preview`, so it must stay a faithful
+  copy of what Laravel renders — minus the nonce, which only a server can generate per response.
+-->
+<html lang="en" data-theme="auto">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!-- The frame is third-party on every customer site; a referrer naming their page is theirs
+         to leak, not ours. -->
+    <meta name="referrer" content="strict-origin" />
+    <title>Chat</title>
+  </head>
+  <body>
+    <div id="kb-root"></div>
+    <!-- Laravel renders this tag with `nonce="{RANDOM}"` under `script-src 'nonce-…'
+         'strict-dynamic'`. Never a host allow-list: 94.72% of 26,011 measured real-world policies
+         contained a bypass, and 14 of the 15 most commonly allow-listed script hosts carry unsafe
+         endpoints. -->
+    <script type="module" src="/src/app/main.tsx"></script>
+  </body>
+</html>

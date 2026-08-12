@@ -1,0 +1,197 @@
+# scripts/security/rules/kb-python-tenancy.yaml
+# ORIGINAL WORK. Not derived from any registry ruleset — see LICENCES.md.
+# Scope: services/ai-service/.
+
+rules:
+  - id: kb-py-qdrant-filter-default-is-match-all
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `Filter(must=[])` is a MATCH-ALL, and `filter or models.Filter()` substitutes one whenever the
+      caller passed None. The result is an unfiltered vector search: HTTP 200, normal latency, no
+      log line, another tenant's chunks in the answer. No filter parameter in this service may have
+      a default value, and nothing may synthesize an empty Filter.
+    metadata:
+      kb-invariant: "qdrant-hybrid-search NN2 — no default filter, ever"
+    pattern-either:
+      - pattern: models.Filter(must=[])
+      - pattern: models.Filter()
+      - pattern: $F or models.Filter(...)
+      - pattern: $F if $F else models.Filter(...)
+      - pattern: |
+          def $FN(..., $ARG: models.Filter = None, ...):
+            ...
+      - pattern: |
+          def $FN(..., $ARG = models.Filter(), ...):
+            ...
+
+  - id: kb-py-qdrant-call-outside-search-module
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Every Qdrant read carries all four tenant terms in `must`, at the TOP LEVEL and in EVERY
+      Prefetch leaf — org_id, bot_ids, source_status, source_version_id — built by
+      `tenant_filter(...)`. Calls are confined to app/retrieval/search.py (queries) and
+      app/deletion/filters.py (deletes) so that "did this carry the filter" is answerable by
+      reading two files. A call anywhere else is not reviewable.
+    metadata:
+      kb-invariant: "kb-tenancy-isolation — the four mandatory Qdrant payload filters"
+      allowed-files: "app/retrieval/search.py, app/deletion/filters.py"
+    patterns:
+      - pattern-either:
+          - pattern: $CLIENT.query_points(...)
+          - pattern: $CLIENT.search(...)
+          - pattern: $CLIENT.scroll(...)
+          - pattern: $CLIENT.count(...)
+          - pattern: $CLIENT.search_batch(...)
+      - pattern-not-inside: |
+          # qdrant-call-exempt: ...
+          ...
+
+  - id: kb-py-delete-by-non-stable-identifier
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Deletion addresses points by a STABLE IDENTIFIER — the deterministic
+      uuid5(POINT_NS, "org:version:seq") stored back in chunks.vector_point_id — never by matching
+      text, a content hash, a title, or any other content-derived value. A text-matched delete cuts
+      a hole in a source nobody touched, in another tenant, and reports success. The allow-listed
+      FieldCondition keys are exactly seven: org_id, bot_ids, source_id, source_item_id,
+      source_version_id, source_status, chunk_id.
+    metadata:
+      kb-invariant: "kb-deletion-and-verification — stable identifiers, verified afterwards"
+      exemption: "# deletion-key-exempt: <reason>"
+    patterns:
+      - pattern-either:
+          - pattern: models.MatchText(...)
+          - pattern: models.FieldCondition(key="text", ...)
+          - pattern: models.FieldCondition(key="content", ...)
+          - pattern: models.FieldCondition(key="content_hash", ...)
+          - pattern: models.FieldCondition(key="title", ...)
+      - pattern-not-inside: |
+          # deletion-key-exempt: ...
+          ...
+
+  - id: kb-py-delete-without-wait
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `wait=True` on every delete. Without it the call returns before the operation is applied, the
+      verification pass that follows counts points that are still present, and the deletion is
+      reported as failed — or, worse, the verification runs late enough to pass while the caller
+      already recorded success on an unapplied delete.
+    metadata:
+      kb-invariant: "kb-deletion-and-verification — deletion is proven, not assumed"
+    patterns:
+      - pattern: $CLIENT.delete(...)
+      - pattern-not: $CLIENT.delete(..., wait=True, ...)
+
+  # ===============================================================================================
+  # THE ALLOW-LIST BELOW IS A COPY, AND IT IS THE ONLY *EXECUTABLE* ONE. READ THIS BEFORE EDITING.
+  # ===============================================================================================
+  # `services/ai-service/app/db/writes.py` owns the list and says so on the line above the tuple:
+  # "CI reads this module to enforce it, so the tuple is the single place the list exists — do not
+  # restate it in a docstring elsewhere." A regex cannot import a Python tuple, so this rule has to
+  # carry the names. Two things keep that from becoming the drift the module forbids:
+  #
+  #   * `gates.yml` `enforcement-greps` (b5) extracts the names out of the lookaheads below and
+  #     compares them to the imported `ALLOWED_TABLES`. Divergence fails that job on the next run.
+  #   * the names appear in the lookaheads and NOWHERE ELSE in this rule — not in the id, not in the
+  #     message, not in the metadata. That is the correction of record: until 2026-08-11 this rule
+  #     was `kb-py-write-outside-four-derived-tables`, its message named "exactly four tables", and
+  #     its lookahead allow-listed four. ADR-033 admitted the two BM25 corpus-statistics tables in
+  #     March, `docs/22` recorded the "exactly four" claim as CLOSED — and the closure was scoped to
+  #     `.claude/`, which is prose. THIS copy is the one that would have executed, and it would have
+  #     reported four legitimate ADR-033 writes at app/deletion/relational.py:226,233,241,248 as
+  #     ERRORs. No prose sweep can find a number encoded inside a lookahead.
+  #
+  # The rule is MEMBERSHIP, never cardinality: a name joins `ALLOWED_TABLES` by demonstrating the
+  # three properties in writes.py's docstring, not by being the fourth or the seventh.
+  - id: kb-py-write-outside-the-table-allow-list
+    languages: [python]
+    severity: ERROR
+    paths:
+      # `services/ai-service/tests/` writes control-plane tables DELIBERATELY: the integration
+      # fixtures INSERT and DELETE `organizations` to build the two-org tenancy fixture that a
+      # tenancy test is worthless without. That is scaffolding, not a data-plane write. Measured
+      # 2026-08-11 by simulating this rule's regexes over the tree (Opengrep itself is unpullable):
+      # 10 findings across the service, ALL of them under tests/, 0 under app/.
+      exclude:
+        - "tests/"
+        - "*/tests/*"
+    message: >-
+      ADR-033: the data plane writes only the tables listed in
+      services/ai-service/app/db/writes.py::ALLOWED_TABLES, and membership there is a rule rather
+      than a count — a name joins by demonstrating three properties (the row is derived and
+      rebuildable; no public API path reads or writes it; Laravel owns the migration). A write into
+      a control-plane table has no policy check, no audit row, no framework tenant scope, and no
+      error. In particular `source_items.current_version_id` is Laravel's: two writers on the one
+      column that decides which version is live turns a lifecycle bug into a unique-constraint
+      violation inside a Celery task, retried forever.
+    metadata:
+      kb-invariant: "ADR-033 / kb-architecture-map — FastAPI's PostgreSQL write allow-list"
+      allow-list-source: "services/ai-service/app/db/writes.py::ALLOWED_TABLES"
+      allow-list-sync: "gates.yml enforcement-greps (b5) fails if the lookaheads below drift from that tuple"
+      exemption: "# table-write-exempt: <reason>"
+    patterns:
+      - pattern-either:
+          # INSERT INTO / DELETE FROM are left unanchored on purpose. `DELETE FROM x` with no WHERE
+          # is valid SQL and is the worst case this rule exists to catch, so requiring a trailing
+          # clause would buy precision by dropping the dangerous form. Residual imprecision, stated
+          # rather than hidden: English "delete from the …" in a docstring still matches. It fires
+          # on nothing under app/ today, and tests/ — where it did fire — is excluded above.
+          - pattern-regex: '(?i)\b(INSERT\s+INTO|DELETE\s+FROM)\s+(?!chunks\b|document_elements\b|retrieval_traces\b|evaluation_results\b|sparse_version_statistics\b|sparse_term_frequencies\b)[a-z_]+'
+          # UPDATE and COPY ARE ANCHORED TO A FOLLOWING SQL TOKEN, AND THAT IS NOT TIDYING.
+          # Both were a single bare keyword in the alternation above, unanchored and `(?i)` — so
+          # they matched ENGLISH. Measured over services/ai-service/app on 2026-08-11: 12 findings,
+          # every one an ordinary docstring — "a copy of", "copy and", "copy does", "update when" —
+          # across api/deps.py:220, core/idempotency.py:75, ingestion/model_pins.py:12,
+          # observability/logging.py:290, providers/capabilities.py:171, providers/contract.py:775,
+          # providers/errors.py:141, rag/evidence.py:325 and four sites in rag/rerank.py. That is
+          # exactly the defect class CLAUDE.md names for gates.yml:709, one tier down, and a
+          # ruleset whose findings are all false is a ruleset people learn to skip.
+          # `UPDATE x SET` and `COPY x FROM|TO|(` are how the real statements are written; neither
+          # anchor can drop a valid write, because SQL requires the token.
+          - pattern-regex: '(?i)\bUPDATE\s+(?!chunks\b|document_elements\b|retrieval_traces\b|evaluation_results\b|sparse_version_statistics\b|sparse_term_frequencies\b)[a-z_]+\s+SET\b'
+          - pattern-regex: '(?i)\bCOPY\s+(?!chunks\b|document_elements\b|retrieval_traces\b|evaluation_results\b|sparse_version_statistics\b|sparse_term_frequencies\b)[a-z_]+\s*(\(|\bFROM\b|\bTO\b)'
+          - pattern: $OBJ.current_version_id = $V
+      - pattern-not-inside: |
+          # table-write-exempt: ...
+          ...
+
+  - id: kb-py-orm-in-data-plane
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Writes here are psycopg text on purpose. An ORM names no table anywhere —
+      `session.add(SourceItem(...))` is invisible to the table allow-list gate above — and an
+      alembic directory would be a second migration authority against a schema Laravel owns. If
+      this ever changes, the allow-list must grow a model-symbol clause IN THE SAME COMMIT.
+    metadata:
+      kb-invariant: "ADR-012 — Laravel owns all migrations"
+    pattern-either:
+      - pattern: import sqlalchemy
+      - pattern: import sqlmodel
+      - pattern: import alembic
+      - pattern: import tortoise
+      - pattern: from sqlalchemy import ...
+      - pattern: from sqlmodel import ...
+      - pattern: from alembic import ...
+
+  - id: kb-py-cache-key-without-org-segment
+    languages: [python]
+    severity: WARNING
+    message: >-
+      Every Valkey key's SECOND segment is {org_id}: `ans:{org_id}:…`, `lock:{org_id}:…`,
+      `idem:{org_id}:…`. A cache key without an org segment is a cross-tenant leak with a TTL. The
+      single documented exception is `nonce:{key_id}:{request_id}`, because the replay check runs
+      as part of SIGNATURE VERIFICATION, before any organization has been resolved — keying it on
+      the org header would make replay protection depend on a value verification has not yet
+      established.
+    metadata:
+      kb-invariant: "valkey-keyspaces — {family}:{org_id}:{scope}:{discriminator}"
+    patterns:
+      - pattern-regex: '["\x27](ans|retr|cfg|quota|idem|lock|fence|rl|cb|sess|ansidx):(?!\{org_id\}|\{ctx\.org_id\}|%s)'
+      - pattern-not-inside: |
+          # key-builder: ...
+          ...

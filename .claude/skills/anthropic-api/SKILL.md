@@ -159,8 +159,8 @@ def classify(exc: anthropic.APIStatusError, emitted: int) -> KbError:
         return KbError("provider_temporary", emitted=emitted, retry_after=retry_after(exc))
     if kind == "rate_limit_error":
         return KbError("provider_rate_limit", emitted=emitted, retry_after=retry_after(exc))
-    if kind in ("authentication_error", "billing_error", "permission_error"):
-        return KbError("provider_auth", emitted=emitted)                  # 401 / 402 / 403
+    if kind == "billing_error": return KbError("provider_billing", emitted=emitted)  # 402 — NOT provider_auth
+    if kind in ("authentication_error", "permission_error"): return KbError("provider_auth", emitted=emitted)  # 401/403
     return KbError("provider_permanent_request", emitted=emitted, detail=kind)  # incl. unknown
 ```
 
@@ -183,7 +183,7 @@ def classify(exc: anthropic.APIStatusError, emitted: int) -> KbError:
 
 - [Streaming Messages](https://platform.claude.com/docs/en/build-with-claude/streaming) — event flow, the cumulative-`usage` warning, `ping`, mid-stream `error` events, `display: "omitted"` behaviour.
 - [Handling stop reasons](https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons) and [Errors](https://platform.claude.com/docs/en/api/errors) — the stop-reason set; the status→`error.type` map including 402 `billing_error` and 504 `timeout_error`; the `request-id` header.
-- [Rate limits](https://platform.claude.com/docs/en/api/rate-limits) — cache-aware ITPM, the `anthropic-ratelimit-*` header set, `retry-after`. [Prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) — breakpoint placement, TTLs, per-model minimum prefix.
+- [Rate limits](https://platform.claude.com/docs/en/api/rate-limits) — cache-aware ITPM, the `anthropic-ratelimit-*` header set, `retry-after`. **The reset header is `anthropic-ratelimit-{bucket}-reset`: the bucket is an infix and `-reset` is a SUFFIX** — the opposite shape from OpenAI's `x-ratelimit-reset-{bucket}`, where `reset` is the prefix and the bucket trails. An adapter written against "the `x-ratelimit-reset-*` family" therefore reads **zero** Anthropic headers, and **the symptom is a missing backoff floor, not an error**: `retry_after_seconds` returns `None`, the caller falls back to its own backoff, nothing raises and no test fails. `app/providers/errors.py` is the implemented table — four buckets (`requests`, `tokens`, `input-tokens`, `output-tokens`), values **RFC 3339** (not OpenAI's Go-duration `6m0s` and not OpenRouter's epoch), plus the family pattern `anthropic-ratelimit-[a-z0-9-]+-reset` so a bucket Anthropic adds later still parses while another vendor's header does not. Read that table before writing a header name here. [Prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching) — breakpoint placement, TTLs, per-model minimum prefix.
 - [Adaptive thinking](https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking) and [Effort](https://platform.claude.com/docs/en/build-with-claude/effort) — the `adaptive` shape and the five effort levels. [anthropic-sdk-python](https://github.com/anthropics/anthropic-sdk-python) — `lib/streaming/_messages.py` (`build_events`), `_streaming.py` (mid-stream error raising).
 - Owned elsewhere: the request/response shape → `kb-provider-adapter-contract`; error classes, retry, backoff, breakers → `kb-error-taxonomy`; key storage and audit → `kb-security-baseline`; span and metric names → `kb-observability-conventions`; prompt section layout → `kb-rag-query-contract`.
 
@@ -195,6 +195,8 @@ def classify(exc: anthropic.APIStatusError, emitted: int) -> KbError:
 - [ ] Usage fixture with a cached prefix asserts `total_input_tokens == input + cache_read + cache_creation`, that `gen_ai.usage.input_tokens` carries the total, and that ITPM attribution excludes `cache_read_input_tokens`.
 - [ ] Recorded-stream test asserts each text token yields exactly one `Delta` (guards the synthetic-helper double-emit).
 - [ ] Mid-stream `event: error` fixture with `overloaded_error` classifies as `provider_temporary` despite `status_code == 200`.
+- [ ] `402 billing_error` classifies as `provider_billing` — never `provider_auth` and never `provider_rate_limit` — with retry `no`, fallback `no`, and no breaker credit; the same class OpenAI's `429 insufficient_quota` lands on.
+- [ ] A recorded 429 with real `anthropic-ratelimit-*-reset` headers yields a non-`None` `retry_after_seconds`. **This is the assertion that catches the suffix/prefix mistake**: an adapter matching OpenAI's `x-ratelimit-reset-*` shape returns `None` here and nothing else in the suite notices, because the failure is a missing backoff floor rather than an error. Assert on a parsed number, not on "did not raise".
 - [ ] Cancellation test aborts mid-stream: exactly one terminal `ChatResult` with `stop_reason=CANCELLED` and non-zero `input_tokens` from `message_start`; no `GeneratorExit` RuntimeError.
 - [ ] `emitted > 0` test asserts no retry and no fallback after the first `text_delta`.
 - [ ] `Diagnostics` snapshot greps clean for the API key, the system prompt, and any context-block text.

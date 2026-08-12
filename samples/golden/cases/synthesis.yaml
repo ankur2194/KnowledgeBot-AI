@@ -1,0 +1,112 @@
+# §21.2 — Multi-document synthesis.
+#
+# Every case here needs evidence from at least two fixtures in at least two formats. Source
+# recall is the metric that matters: an answer built from one of the two required sources is
+# half-grounded, and faithfulness will happily score it well because everything it said was
+# supported by what it retrieved.
+
+dataset: kb-platform-golden
+corpus_version: corpus-2026.08.1
+category: synthesis
+
+cases:
+  - id: s-001
+    question: >-
+      An engineer is travelling internationally for three days to calibrate an instrument that is
+      in continuous field use. What per-diem applies, and how often should that instrument be
+      calibrated?
+    unanswerable: false
+    expected_sources: [travel-policy-v3, site-kelpwright-www]
+    difficulty: medium
+    reference: >-
+      The international per-diem is 88 EUR per day, effective 2026-04-01, at half rate on the days
+      of departure and return. Instruments in continuous field use should be calibrated every
+      6 months, against a general recommended interval of 12 months.
+    expected_answer: >-
+      The international rate is 88 EUR per day (half rate on travel days), and an instrument in
+      continuous field use should be calibrated every 6 months rather than the general 12-month
+      interval.
+    required_facts: ["88", "6 months"]
+    forbidden_claims: ["80", "62", "12 months for continuous field use"]
+    locators: ["travel policy §4 Subsistence", "site support/calibration.html"]
+    tags: [multi-source, docx, html, two-formats]
+    grading_notes: >-
+      Two sources, two formats, two independent facts. 80 EUR is the superseded rate from Appendix
+      A and 62 EUR is the domestic rate; either indicates the wrong chunk won. Answering only one
+      half of the question is a source-recall failure, not a generation failure — check whether the
+      second fixture appeared in the retrieved evidence before blaming the prompt.
+
+  - id: s-002
+    question: >-
+      What was our median first-response time in Q2, and which service plan promises a
+      next-business-day response?
+    unanswerable: false
+    expected_sources: [quarterly-review-q2-2026, pricing-catalog-v1]
+    difficulty: hard
+    reference: >-
+      The median first-response time in Q2 2026 was 3.1 hours, down from 4.6 hours in Q1. The
+      SP-PLUS plan commits to a next-business-day response; SP-CRIT commits to 4 hours remote and
+      next business day on site.
+    expected_answer: >-
+      Q2 median first-response time was 3.1 hours (Q1: 4.6 hours). Next-business-day response is
+      the SP-PLUS commitment; SP-CRIT is faster still at 4 hours remote.
+    required_facts: ["3.1", "SP-PLUS"]
+    forbidden_claims: ["SP-STD offers next business day"]
+    locators: ["quarterly deck slide 4 SPEAKER NOTES", "pricing sheet Service plans"]
+    tags: [multi-source, pptx-notes, xlsx, regression-fixture]
+    grading_notes: >-
+      THE SPEAKER-NOTES REGRESSION CASE. 3.1 hours exists only in slide 4's speaker notes — not on
+      the slide, not in the chart labels, nowhere else in the corpus. If this half is missing while
+      the SP-PLUS half is correct, PPTX notes stopped parsing (ContentLayer.NOTES), which is an
+      ingestion finding. Check s-004 in the same run: both failing together confirms it.
+
+  - id: s-003
+    question: >-
+      A customer wants to return a Tideline 1100 they bought last month. How long do they have to
+      raise the RMA, and what does that instrument list for?
+    unanswerable: false
+    expected_sources: [site-kelpwright-www, pricing-catalog-v1]
+    difficulty: medium
+    reference: >-
+      An RMA request must be raised within 14 days of fault discovery, and an RMA number must be
+      issued before the instrument is shipped back. The Tideline 1100 is part KW-1100-B with a list
+      price of 9,200 EUR.
+    expected_answer: >-
+      RMA requests must be raised within 14 days of discovering the fault, and an RMA number is
+      required before shipping. The Tideline 1100 (KW-1100-B) lists at 9,200 EUR.
+    required_facts: ["14 days", "9200"]
+    forbidden_claims: ["30 days", "18400"]
+    locators: ["site support/rma.html", "pricing sheet Instruments, row KW-1100-B"]
+    tags: [multi-source, html, xlsx, entity-resolution]
+    grading_notes: >-
+      Requires resolving the model name "Tideline 1100" to the part code KW-1100-B before the price
+      lookup can succeed — the question never states the code. 30 days is the expense-claim deadline
+      from a different document and is the plausible wrong number here.
+
+  - id: s-004
+    question: >-
+      How does our Q2 service performance compare with the response commitments we actually sell?
+    unanswerable: false
+    expected_sources: [quarterly-review-q2-2026, pricing-catalog-v1]
+    difficulty: hard
+    reference: >-
+      Q2 median first-response time was 3.1 hours, improved from 4.6 hours in Q1, and the SP-PLUS
+      attach rate reached 41% of new instrument sales. The plans sold commit to 5 business days
+      (SP-STD), next business day (SP-PLUS), and 4 hours remote with next-business-day on site
+      (SP-CRIT), so measured median performance is well inside every commitment sold.
+    expected_answer: >-
+      Median first response was 3.1 hours in Q2 (4.6 in Q1), comfortably inside all three
+      commitments — 5 business days for SP-STD, next business day for SP-PLUS, and 4 hours remote
+      for SP-CRIT. SP-PLUS attach reached 41% of new instrument sales.
+    required_facts: ["3.1", "SP-CRIT"]
+    forbidden_claims:
+      - "any claim that commitments were missed"
+      - "any per-plan measured response time"
+    locators: ["quarterly deck slides 4 and 9 SPEAKER NOTES", "pricing sheet Service plans"]
+    tags: [multi-source, pptx-notes, open-ended, human-review]
+    grading_notes: >-
+      The most open-ended case in the set, and the one where a judged metric is least trustworthy —
+      always include it in the human-review sample. The corpus reports a single company-wide median
+      and never breaks response time down per plan, so any per-plan measured figure is invented.
+      Depends on the same speaker notes as s-002; both failing together is a parsing regression, one
+      failing alone is a retrieval or synthesis issue.

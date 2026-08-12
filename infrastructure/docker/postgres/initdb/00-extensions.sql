@@ -1,0 +1,55 @@
+-- infrastructure/docker/postgres/initdb/00-extensions.sql
+--
+-- ===============================================================================================
+-- EXTENSIONS ONLY. NO TABLES, NO INDEXES, NO SEED DATA, EVER.
+-- ===============================================================================================
+-- Laravel owns every migration and every table — including the four derived tables the FastAPI
+-- data plane WRITES (chunks, document_elements, retrieval_traces, evaluation_results). FastAPI
+-- writes rows into a schema it does not define, and it defines no schema of its own.
+--
+-- A CREATE TABLE in this file would be a second migration authority with no version history, no
+-- rollback, and no relationship to `php artisan migrate:status`. Worse, it would run only ONCE:
+-- scripts in /docker-entrypoint-initdb.d execute exactly once, on an EMPTY data directory. Add a
+-- table here and it exists on every fresh developer machine and on no existing deployment — and
+-- the divergence is invisible until a query fails in production against a schema that has been
+-- correct locally for months.
+--
+-- Extensions are the exception because CREATE EXTENSION requires superuser, and the application
+-- role deliberately does not have it. This is the one window where a superuser is available.
+
+-- ===============================================================================================
+-- pgcrypto — gen_random_bytes() for per-credential data keys.
+-- ===============================================================================================
+-- Note what this is NOT for: primary keys. Ids in this schema are ULIDs stored as
+-- char(26) COLLATE "C", generated in the application. gen_random_uuid() as a primary key writes to
+-- a uniformly random leaf page, so the insert working set becomes the ENTIRE index rather than its
+-- rightmost page — past the point where the index stops fitting in shared_buffers every insert is
+-- a random read, and every touched page becomes a full-page image in WAL after the next
+-- checkpoint. On `chunks` and `document_elements` that difference is tens of gigabytes.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- ===============================================================================================
+-- pg_stat_statements — the only way to answer "which query got slow" after the fact.
+-- ===============================================================================================
+-- It normalizes parameters out of the query text, so it does NOT record tenant question text. That
+-- is the reason it is safe to enable here while log_min_duration_statement stays at 500ms and
+-- log_statement stays at 'ddl'.
+-- Requires shared_preload_libraries, which kb.conf deliberately does not set (adding one is a
+-- restart and a new failure mode). Enable both together, in one change, or not at all — the
+-- CREATE EXTENSION below succeeds without the preload and the view then returns nothing, which
+-- looks like "no slow queries" rather than "not collecting".
+-- CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+
+-- ===============================================================================================
+-- DELIBERATELY ABSENT
+-- ===============================================================================================
+-- * pgvector. Qdrant is the vector engine (ADR-005) and Laravel 13's DB::whereVectorSimilarTo()
+--   would be a SECOND retrieval path carrying none of the four mandatory tenant filters (ADR-017).
+--   Installing the extension is how that path becomes available to someone in a hurry.
+-- * uuid-ossp. Superseded by pgcrypto and by PG 18's native uuidv7(); and see the primary-key note
+--   above — the schema does not want a UUID default anywhere except chunks.vector_point_id, whose
+--   value is the DETERMINISTIC uuid5(POINT_NS, "org:version:seq") computed in the application so a
+--   Celery replay produces the same point id instead of a duplicate vector.
+-- * citext. Case-insensitive comparison is a query-shape decision (lower(email) with a functional
+--   index), not a column type, and citext indexes go through a collation library — the same
+--   library-version-dependent ordering that COLLATE "C" exists to avoid.

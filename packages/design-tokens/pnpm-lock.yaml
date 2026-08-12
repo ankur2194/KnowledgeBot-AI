@@ -1,0 +1,13 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: false
+  excludeLinksFromLockfile: false
+
+overrides:
+  markdown-it: 15.0.0
+  dompurify: 3.4.13
+
+importers:
+
+  .: {}

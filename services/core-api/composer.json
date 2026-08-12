@@ -1,0 +1,104 @@
+{
+    "name": "knowledgebot/core-api",
+    "type": "project",
+    "description": "KnowledgeBot AI control plane — identity, tenancy, bots, credentials, quotas, and every public API.",
+    "keywords": ["laravel", "control-plane", "multi-tenant", "rag"],
+    "license": "proprietary",
+    "require": {
+        "php": "^8.4.1",
+        "ext-bcmath": "*",
+        "ext-intl": "*",
+        "ext-json": "*",
+        "ext-pcntl": "*",
+        "ext-pdo": "*",
+        "ext-pdo_pgsql": "*",
+        "ext-posix": "*",
+        "ext-redis": "*",
+        "guzzlehttp/guzzle": "^7.9",
+        "laravel/framework": "^13.24",
+        "laravel/horizon": "^5.48",
+        "laravel/sanctum": "^4.3.3",
+        "laravel/tinker": "^3.0.2",
+        "league/flysystem-aws-s3-v3": "^3.29",
+        "open-telemetry/exporter-otlp": "^1.4",
+        "open-telemetry/opentelemetry-auto-guzzle": "^1.4",
+        "open-telemetry/opentelemetry-auto-laravel": "^1.8",
+        "open-telemetry/opentelemetry-auto-pdo": "^0.5",
+        "open-telemetry/opentelemetry-auto-psr18": "^1.0",
+        "open-telemetry/sdk": "^1.15",
+        "open-telemetry/sem-conv": "^1.38"
+    },
+    "require-dev": {
+        "brianium/paratest": "^7.23.1",
+        "fakerphp/faker": "^1.24",
+        "larastan/larastan": "^3.10",
+        "laravel/pint": "^1.24",
+        "mockery/mockery": "^1.6",
+        "nunomaduro/collision": "^8.9.5",
+        "pestphp/pest": "^5.0.3",
+        "pestphp/pest-plugin-laravel": "^5.0.1"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "app/",
+            "Database\\Factories\\": "database/factories/",
+            "Database\\Seeders\\": "database/seeders/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "post-autoload-dump": [
+            "@php artisan package:discover --ansi"
+        ],
+        "lint": "pint --test",
+        "fix": "pint",
+        "stan": "phpstan analyse --memory-limit=1G",
+        "test": "pest",
+        "test:par": "php artisan test --parallel --processes=4",
+        "test:arch": "pest --testsuite=Arch",
+        "test:security": "pest --testsuite=Security",
+        "test:random": "pest --order-by=random",
+        "dump:form-rules": "@php artisan kb:dump-form-rules",
+        "ci": [
+            "@lint",
+            "@stan",
+            "@test:arch",
+            "@test"
+        ]
+    },
+    "extra": {
+        "laravel": {
+            "dont-discover": []
+        },
+        "kb-notes": {
+            "guzzle": "Required EXPLICITLY, not pulled in transitively: opentelemetry-auto-guzzle hooks GuzzleHttp\\Client::transfer(), and that hook is the only thing that carries traceparent across the Laravel->FastAPI seam. Without it every internal call is an unparented root trace, with no error anywhere.",
+            "paratest": "^7.23.1 — corrected from the earlier ^9.0 placeholder, which assumed paratest's major tracked PHPUnit's. It does not: paratest has no 8.x or 9.x, and 7.23.1 is the release that requires php ~8.4.0 || ~8.5.0 and phpunit/phpunit ^13.2.5. Pest v5.0.3 requires exactly `brianium/paratest ^7.23.1`, so this pin is Pest's own floor restated — `composer test:par` and Pest must never resolve to different paratest majors.",
+            "larastan": "^3.10 — corrected from ^4.0, which does not exist on Packagist. Larastan's major tracks PHPStan's, not Laravel's: 3.x is the PHPStan 2.x line, and v3.10.0 already accepts `illuminate/* ^13`. Bump only when Larastan 4 ships against PHPStan 3, and change phpstan.neon's rule level in the same commit.",
+            "collision": "^8.9.5 — corrected from ^9.0, which does not exist. Collision 8.x is Laravel 13-compatible by declaration: v8.9.5 conflicts with `laravel/framework <11.48.0 || >=14.0.0`, so 13.x is inside its supported window. Pest v5.0.3 requires `nunomaduro/collision ^8.9.5`; this pin matches it so the test runner and artisan's exception renderer stay on one copy.",
+            "platform": "config.platform pins php 8.4.1 and ext-opentelemetry 1.2.1 so the open-telemetry/opentelemetry-auto-* packages resolve on a developer machine or CI image where the PECL extension is not installed. The runtime image must actually carry the extension: `php -m | grep opentelemetry` in CI. The php pin is the LOWEST supported runtime, not the newest available, and it must stay equal to the `require.php` floor — resolve against a higher version than production runs and the lock can contain packages production cannot install.",
+            "php-floor": "8.4.1, not 8.4.0: pestphp/pest v5.0.3 requires symfony/process ^8.1.0, and symfony/process v8.1.0 requires php >=8.4.1. The floor is therefore set by a dev dependency, but `require.php` still carries it — a composer.json that advertises 8.4.0 while the lock needs 8.4.1 fails at install time on a platform check instead of at resolution. laravel/framework v13.24.0 itself only needs php ^8.3; the runtime image (php:8.4-fpm-bookworm) is comfortably above the floor.",
+            "deliberately-absent": "laravel/fortify + laravel/passkeys (no login UI yet — add with the auth surface), laravel/sail (Compose lives in infrastructure/docker and is platform-devops's), spatie/laravel-permission (roles are hand-rolled per laravel-rbac-policies: its team scoping is ambient static state), phpunit/phpunit as a direct dependency (Pest owns that constraint; a direct pin is how the two drift).",
+            "http-client-adapter": "open-telemetry/exporter-otlp needs a PSR-18 client + PSR-17 factories. Guzzle 7 provides PSR-7/17 but discovery may still ask for php-http/guzzle7-adapter. If `composer install` reports an unsatisfied psr/http-client-implementation, add php-http/guzzle7-adapter — it is the expected resolution, not a surprise. OUTCOME at first lock generation: not needed. open-telemetry/sdk 1.15.0's `psr/http-client-implementation ^1.0` and `psr/http-factory-implementation ^1.0` are satisfied virtually by guzzlehttp/guzzle 7.15.3 and guzzlehttp/psr7 2.13.0, which is the second reason guzzle is required explicitly. php-http/discovery 1.20.0 is in the lock as a transitive of the exporter and is allow-listed as a plugin; it is the RUNTIME discovery that could still fail if guzzle were ever dropped."
+        }
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "preferred-install": "dist",
+        "sort-packages": true,
+        "platform": {
+            "php": "8.4.1",
+            "ext-opentelemetry": "1.2.1"
+        },
+        "allow-plugins": {
+            "pestphp/pest-plugin": true,
+            "php-http/discovery": true,
+            "tbachert/spi": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

@@ -5,7 +5,7 @@ description: OTel SDK wiring for KnowledgeBot AI — the pinned PHP, Python and 
 
 # OpenTelemetry Instrumentation — SDK and Collector Wiring
 
-Python **1.44.0** SDK / **0.65b0** instrumentation (2026-07-16) · PHP SDK **1.15.0**, API **1.10.0**, `exporter-otlp` **1.4.0**, `opentelemetry-auto-laravel` **1.8.0**, `opentelemetry-auto-guzzle` **1.4.0**, `opentelemetry-auto-pdo` **0.5.0**, `open-telemetry/sem-conv` **1.38.0**, PECL `opentelemetry` **1.2.1** · JS `@opentelemetry/api` **1.9.1**, `sdk-trace-web` **2.10.0**, `exporter-trace-otlp-http` **0.221.0**, `auto-instrumentations-web` **0.66.0**, `@vercel/otel` **2.1.3** · Collector `otel/opentelemetry-collector-contrib` **0.158.0**.
+Python **1.44.0** SDK / **0.65b0** instrumentation (2026-07-16) · PHP SDK **1.15.0**, API **1.10.0**, `exporter-otlp` **1.4.0**, `opentelemetry-auto-laravel` **1.8.0**, `opentelemetry-auto-guzzle` **1.4.0**, `opentelemetry-auto-pdo` **0.5.0**, `open-telemetry/sem-conv` **1.38.0**, PECL `opentelemetry` **1.2.1** · JS `@opentelemetry/api` **1.9.1**, `sdk-trace-web` **2.10.0**, `exporter-trace-otlp-http` **0.221.0**, `instrumentation` **0.221.0**, `instrumentation-document-load` **0.66.0**, `instrumentation-fetch` **0.221.0**, `@vercel/otel` **2.1.3** · Collector `otel/opentelemetry-collector-contrib` **0.158.0**.
 **Semconv pinned at 1.43.0** — `https://opentelemetry.io/schemas/1.43.0`.
 **Authoritative spec:** docs/15-observability.md §20, docs/06-architecture.md §11.2, docs/05-tech-stack.md §9.14, docs/18-deployment-backup-cicd.md §24.2
 
@@ -23,7 +23,7 @@ Python **1.44.0** SDK / **0.65b0** instrumentation (2026-07-16) · PHP SDK **1.1
 
 ## How we use it
 
-### Shared environment — identical keys in all four runtimes
+### Shared environment — identical keys in all four runtimes, and one value that is not
 
 | Variable | Value | Why |
 |---|---|---|
@@ -34,9 +34,33 @@ Python **1.44.0** SDK / **0.65b0** instrumentation (2026-07-16) · PHP SDK **1.1
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | `3000` | 10 s default; on PHP-FPM that is 10 s of user-visible latency when the Collector is down. |
 | `OTEL_PROPAGATORS` | `tracecontext,baggage` | Doctrine. One service on B3 splits every trace silently. |
 | `OTEL_TRACES_SAMPLER` | `parentbased_always_on` | Head 100%; tail sampling in the Collector. |
-| `OTEL_METRICS_EXEMPLAR_FILTER` | `trace_based` | Puts a trace id on histogram buckets, so a latency spike is one click from the trace. |
-| `OTEL_LOGS_EXPORTER` | `none` | Logs go to stdout as JSON and are collected by the Collector's `filelog` receiver — the app never blocks on the log pipeline. |
+| `OTEL_METRICS_EXEMPLAR_FILTER` | `trace_based` (Python, browser) · **`with_sampled_trace` (PHP)** | Puts a trace id on histogram buckets, so a latency spike is one click from the trace. **The one key in this table that is not identical across runtimes** — see below. |
+| `OTEL_LOGS_EXPORTER` | `none` | Logs go to stdout as JSON and are collected by the Collector's `file_log` receiver — the app never blocks on the log pipeline. |
 | `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` | **unset** | Tenant data. Asserted at boot. |
+
+#### The exemplar filter is the one value that differs, and getting it wrong is silent
+
+The pinned PHP SDK (`open-telemetry/sdk` 1.15.0) predates the spec's rename. `KnownValues.php:171`
+accepts exactly `with_sampled_trace | all | none`, and `MeterProviderFactory.php:64-77` falls through
+to `default:` — a `logWarning` and **`NoneExemplarFilter`** — for anything else. So `trace_based` on
+PHP does not warn-and-work, it **turns exemplars off for the whole control plane**, while Grafana's
+`prometheus.yml` goes on configuring `exemplarTraceIdDestinations` and the panel renders the same
+graph without the diamonds. Reproduced by calling the private factory through reflection inside
+`knowledgebot/core-api:dev`:
+
+```
+trace_based          -> …[warning] Unknown exemplar filter: trace_based …MeterProviderFactory.php(74)
+                        OpenTelemetry\SDK\Metrics\Exemplar\ExemplarFilter\NoneExemplarFilter
+with_sampled_trace   -> OpenTelemetry\SDK\Metrics\Exemplar\ExemplarFilter\WithSampledTraceExemplarFilter
+```
+
+**The generalisable shape, which is why this is in a skill and not just a comment:** a telemetry SDK
+that *recognises* a variable and *rejects* its value degrades to the safe default, and the safe
+default for an exemplar filter is *none* — so a typo in an observability setting removes the surface
+you would have used to notice it. Both spellings, in one command:
+`grep -rn OTEL_METRICS_EXEMPLAR_FILTER infrastructure/docker/env services/*/.env*` — every `core-api`
+line must read `with_sampled_trace`, every `ai-service` line `trace_based`. **Recheck on any SDK
+bump in either runtime:** the accepted value set is an SDK property, not a specification one.
 
 ### The Python bootstrap — FastAPI and Celery share one module
 
@@ -122,15 +146,30 @@ hook that catches the first navigation. Server side uses `@vercel/otel`'s `regis
 `instrumentation.ts`; the Next server does little beyond RSC and proxying, so a hand-rolled Node SDK
 buys nothing.
 
-- `DocumentLoadInstrumentation` and `FetchInstrumentation` only. **No `user-interaction`**: it spans
-  every click with DOM targets, which triples trace volume and answers no on-call question.
+- `DocumentLoadInstrumentation` and `FetchInstrumentation` only, depended on as the **two individual
+  packages** — never `@opentelemetry/auto-instrumentations-web`. That meta-package depends on
+  `instrumentation-user-interaction` and re-declares its **`zone.js`** peer at its own top level, so
+  the peer is unsatisfiable by simply not importing the piece that needs it: with
+  `auto-install-peers=false` the install warns forever, and "fixing" it means adding an Angular
+  runtime shim that monkey-patches every async primitive into a React 19 concurrent-rendering app.
+  **No `user-interaction`**: it spans every click with DOM targets, which triples trace volume and
+  answers no on-call question. **No `xml-http-request`**: `apps/web` uses `fetch` only, and the
+  browser's built-in SSE client is banned outright.
 - **No browser metrics at all.** Per-visitor label cardinality has no bounded value set.
 - `propagateTraceHeaderCorsUrls` is our API origin and nothing else — an unscoped regex adds a CORS
-  preflight to every third-party request and leaks internal trace ids off-site.
+  preflight to every third-party request and leaks internal trace ids off-site. It must be an
+  **anchored RegExp**, never the origin string: `urlMatches` in `@opentelemetry/core` compares a
+  string pattern to the full request URL with `===`, so an origin string matches nothing and the
+  browser→Laravel leg of the trace silently stops propagating.
 - The exporter posts to a **same-origin** Next route handler that proxies to the Collector. The
   Collector is never published, and CSP stays `connect-src 'self'` (`kb-security-baseline`).
 - Never captured: message text, header values, `document.cookie`, query strings, form fields. Set
-  `ignoreNetworkEvents: true` and add no custom attribute carrying user input.
+  `ignoreNetworkEvents: true`, set `measureRequestSize: false` (it reads the request body, which on a
+  chat send *is* the user's message), and add no custom attribute carrying user input. **Both
+  instrumentations set `url.full` verbatim** — `location.href` for document load, the request URL for
+  fetch — so the query string arrives by default; strip it in a span processor's `onEnd` rather than
+  in `applyCustomAttributesOnSpan`, which is handed a URL-less `FetchError` on the failure path and
+  never runs at all for CORS-preflight child spans.
 - **The embedded widget gets no OTel.** It runs on a hostile third-party page; a cross-origin
   exporter is a data-exfiltration surface, and doctrine already forbids returning trace context to
   clients. Correlate with `X-KB-Request-Id` (`iframe-postmessage-bridge`).
@@ -143,9 +182,20 @@ to, it is the buffer that stops a Tempo restart from turning into dropped spans 
 and it is where the redaction backstop and the uncatalogued-metric filter live. One container,
 ~100 MB, versus losing every error trace.
 
-Pipeline order: `otlp` (+ `filelog` for stdout JSON) → `memory_limiter` → `transform` (drop banned
+Pipeline order: `otlp` (+ `file_log` for stdout JSON) → `memory_limiter` → `transform` (drop banned
 attributes; a backstop, never the defence) → `filter/metrics` (allow `kb_*` plus the enumerated infra
-families) → `tail_sampling` → `batch` → `otlphttp/tempo`, `prometheusremotewrite`, `otlphttp/loki`.
+families) → `tail_sampling` → `batch` → `otlp_http/tempo`, the `prometheus` exporter, `otlp_http/loki`.
+
+**Two spelling traps in that sentence, both of which used to be wrong here.** `filelog` and `otlphttp`
+are **deprecated aliases** in 0.158.0: they still resolve, so the only symptom is
+`warn builders/builders.go:40 "filelog" alias is deprecated` once per named instance, and a component
+that will stop resolving on some later release reads as working today. Canonical names come from
+`otelcol-contrib components` inside the pinned image, not from documentation. And metrics leave over
+the **`prometheus` exporter, which Prometheus scrapes** — never `prometheusremotewrite` and never
+Prometheus's OTLP receiver, because the CI metric-catalog diff has to scrape **one** endpoint that has
+seen every process's data: under PHP-FPM and Celery prefork each request lands in a different process,
+so a per-service `/metrics` returns one worker's fragment and the gate passes while checking almost
+nothing.
 `tail_sampling` runs **before** `batch`, with a `status_code` ERROR policy, a `latency` policy and a
 low `probabilistic` policy as three **top-level** entries — OR'd. `num_traces` must exceed
 `traces/sec × decision_wait`. At one replica the `load_balancing` exporter is unnecessary; the moment

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  // TWO bases, in this order. `expo/tsconfig.base` supplies the React Native compiler shape (jsx,
+  // module/target for Hermes, the RN type roots). `../../tsconfig.base.json` supplies the repo's
+  // strictness contract (strict, noUncheckedIndexedAccess, verbatimModuleSyntax, isolatedModules)
+  // and is listed LAST so the repo's rules win any overlap — a workspace that quietly relaxes
+  // `strict` is the one difference nobody notices until a null reaches a screen.
+  "extends": ["expo/tsconfig.base", "../../tsconfig.base.json"],
+  "compilerOptions": {
+    "strict": true,
+    "jsx": "react-jsx",
+    "moduleResolution": "bundler",
+
+    // DOM is present here even though this is not a browser, and the repo base deliberately omits
+    // it. Reason: the streaming path is typed against WinterCG shapes — ReadableStream,
+    // ReadableStreamDefaultReader, TextDecoder, AbortSignal — whose declarations live in lib.dom.
+    // packages/contracts stays DOM-free (its parser is string-in/object-out) precisely so it keeps
+    // compiling for BOTH; that constraint belongs to the shared package, not to the app that
+    // consumes it.
+    "lib": ["DOM", "DOM.Iterable", "ES2023"],
+
+    // Node types for the config files and the SSE fixture server (node:http). No "jest" entry:
+    // tests import from '@jest/globals' explicitly, which keeps an ambient global from making a
+    // mistyped matcher name compile.
+    "types": ["node"],
+
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+
+    // ADR-028: this package typechecks against the BUILT output of @kb/contracts (tsup, dual
+    // ESM+CJS with .d.ts), never against its sources. That is why `@kb/contracts/src/*` is a
+    // banned import in eslint.config.mjs and why `pnpm contracts:build` must run before
+    // `pnpm --filter @kb/mobile typecheck` — dist/ is gitignored, so a cold clone fails on
+    // missing types rather than on anything about this app.
+    "noEmit": true
+  },
+  "include": ["**/*.ts", "**/*.tsx", ".expo/types/**/*.ts", "expo-env.d.ts"],
+  "exclude": ["node_modules", ".expo", "ios", "android", "dist"]
+}

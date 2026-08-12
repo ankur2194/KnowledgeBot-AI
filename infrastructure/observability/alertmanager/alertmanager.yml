@@ -1,0 +1,108 @@
+# Alertmanager 0.33.1 — routing only. A silence is ephemeral state; a route is code.
+#
+# ALERTMANAGER DOES NOT INTERPOLATE ENVIRONMENT VARIABLES. A `${SLACK_URL}` written anywhere in
+# this file is delivered to the notifier as the literal seven characters, the POST goes to a
+# nonexistent host, and the only symptom is a line in Alertmanager's own log that nobody is
+# watching — because the thing that would have told you is the notification that failed. Every
+# credential here is a `*_file:` key pointing at a Docker secret mounted under /run/secrets/.
+#
+# THE SEVERITY VOCABULARY IS EXACTLY TWO VALUES, `page` and `ticket`, and both are routed below.
+# The default receiver is the pager, deliberately: a rule that ships with a typo'd severity wakes
+# someone instead of vanishing. `kb-unrouted` is the catch-all that names that case so it can be
+# fixed; a CI routing gate resolves every `severity` value in prometheus/rules/ with
+# `amtool config routes test` and fails if any of them lands there.
+
+global:
+  resolve_timeout: 5m
+  # Used by the `chat` receiver's slack_configs below. The file holds one line: the incoming
+  # webhook URL. If it is absent Alertmanager still starts and fails at notify time, which is the
+  # correct failure order — a missing chat webhook must not take the pager down with it.
+  slack_api_url_file: /run/secrets/alertmanager_webhook_url
+
+templates:
+  - /etc/alertmanager/templates/*.tmpl
+
+route:
+  # ONLY labels every alert carries. Grouping by a label some alerts lack sends each of those as
+  # its own notification, which is how one incident becomes eleven pages. `service` is absent on
+  # KbDeadMansSwitch (vector(1) has no labels) and groups under the empty value, which is fine
+  # for a single always-on alert and is why its route below matches on alertname instead.
+  group_by: [alertname, service]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: pager # deliberately loud, never a black-hole default
+
+  routes:
+    # ---------------------------------------------------------------------------------------
+    # FIRST, and matched on alertname rather than severity: the heartbeat.
+    # ---------------------------------------------------------------------------------------
+    # KbDeadMansSwitch fires permanently and its notification IS the heartbeat — the signal is
+    # its absence at the external monitor. It must never reach a human, must never be grouped
+    # with anything, and must repeat far faster than any real alert.
+    - matchers: ['alertname = "KbDeadMansSwitch"']
+      receiver: deadman
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 1m
+
+    - matchers: ['severity = "ticket"']
+      receiver: chat
+      repeat_interval: 12h
+
+    - matchers: ['severity = "page"']
+      receiver: pager
+      repeat_interval: 4h # KbProviderRateLimitSustained re-pages until the cap lifts
+
+    # ---------------------------------------------------------------------------------------
+    # LAST, and matches everything left: no matchers at all.
+    # ---------------------------------------------------------------------------------------
+    # Anything reaching this route carries a severity that is neither `page` nor `ticket` — a
+    # typo, or a rule written against a vocabulary someone invented. It is delivered to the
+    # pager's webhook with a title that says so, because the alternative (silently dropping it)
+    # is the failure this route exists to make impossible. This is the receiver the CI routing
+    # gate compares against: `amtool config routes test severity=<x>` must resolve every severity
+    # used in prometheus/rules/ to `pager` or `chat`, never to `kb-unrouted`.
+    - receiver: kb-unrouted
+      repeat_interval: 4h
+
+receivers:
+  - name: pager
+    webhook_configs:
+      - url_file: /run/secrets/alertmanager_webhook_url
+        send_resolved: true
+        max_alerts: 0
+
+  - name: chat
+    slack_configs:
+      - channel: "#kb-alerts"
+        send_resolved: true
+        title: '{{ template "kb.title" . }}'
+        text: '{{ template "kb.text" . }}'
+
+  # An always-firing alert pointed at an external heartbeat endpoint (Dead Man's Snitch,
+  # healthchecks.io, an uptime monitor's push URL). It must be OUTSIDE this stack: layer 1 dies
+  # with Prometheus, and an internal dead-man's switch tells you nothing when the host is gone.
+  #
+  # TODO(platform-devops-engineer): this needs a second secret. In infrastructure/docker/
+  # compose.yaml add `alertmanager_deadman_url: {file: ./secrets/alertmanager_deadman_url}` to
+  # the top-level `secrets:` map and add `alertmanager_deadman_url` to the alertmanager service's
+  # `secrets:` list. Until then Alertmanager starts normally and logs a notify failure once a
+  # minute — deliberately not pointed at the pager webhook in the meantime, because a heartbeat
+  # arriving at the pager every 60 seconds is how a rotation learns to mute the pager.
+  - name: deadman
+    webhook_configs:
+      - url_file: /run/secrets/alertmanager_deadman_url
+        send_resolved: false
+        max_alerts: 1
+
+  - name: kb-unrouted
+    webhook_configs:
+      - url_file: /run/secrets/alertmanager_webhook_url
+        send_resolved: true
+        max_alerts: 0
+
+# No `inhibit_rules`. Inhibition is tempting here — KbCircuitBreakerOpen on `ai_api` implies most
+# of KbChatErrorRateHigh — but an inhibition that fires on a label combination nobody re-checks
+# silently swallows the alert you needed, and it is unprovable without both alerts firing at once
+# in a test stack. Add one only with a promtool-backed scenario and an ADR.

@@ -1,0 +1,13 @@
+# pnpm workspace roots. Five globs, and exactly TWO of them are packages:
+# packages/contracts and packages/design-tokens. Inventing a third is a finding,
+# not a refactor (CLAUDE.md, docs/19 §27).
+#
+# apps/widget and apps/mobile are owned by widget-sdk-engineer and mobile-engineer and
+# may not exist yet; pnpm skips a glob that matches nothing, so listing them up front
+# costs nothing and stops the next person "fixing" the workspace by adding apps/*.
+packages:
+  - "apps/web"
+  - "apps/widget"
+  - "apps/mobile"
+  - "packages/contracts"
+  - "packages/design-tokens"

@@ -1,0 +1,67 @@
+# apps/widget/.dockerignore
+#
+# Authoritative for the PRIMARY build context (apps/widget). The repo root arrives as the named
+# context `workspace`, from which the Dockerfile copies an explicit list of manifests plus
+# packages/ and apps/widget.
+
+# ================================================================================================
+# SECRETS
+# ================================================================================================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ================================================================================================
+# BUILD OUTPUT AND DEPENDENCIES
+# ================================================================================================
+# A host dist/ copied in would ship a bundle built with a different __KB_API_ORIGIN__ — those are
+# Vite `define` TEXT SUBSTITUTIONS baked at build time, so the loader would point at the wrong API
+# origin on every customer page that embeds it, and every session mint would fail CORS.
+# It would also bypass the two build-stage assertions (no surviving `__KB_` substring, and
+# size-limit), which are the only things standing between a refactor and a blown brotli budget on
+# code that runs on someone else's site.
+dist/
+node_modules/
+*.tsbuildinfo
+
+# ================================================================================================
+# TESTS
+# ================================================================================================
+__tests__/
+*.spec.ts
+*.spec.tsx
+*.test.ts
+*.test.tsx
+vitest.config.*
+playwright.config.*
+playwright/
+playwright-report/
+blob-report/
+test-results/
+coverage/
+
+# ================================================================================================
+# VCS, CI, EDITOR
+# ================================================================================================
+.git
+.gitignore
+.github/
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# ================================================================================================
+# DOCS
+# ================================================================================================
+README.md
+docs/
+Dockerfile
+.dockerignore
+
+# NOT ignored, deliberately:
+#   .size-limit.json  — the brotli budgets. `pnpm --filter widget size` runs INSIDE the build
+#                       stage and its exit code is the stage's; without this file the command
+#                       succeeds while measuring nothing.

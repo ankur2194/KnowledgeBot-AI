@@ -1,0 +1,30 @@
+{
+  "expo": {
+    "name": "KnowledgeBot",
+    "slug": "knowledgebot",
+    "scheme": "knowledgebot",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "icon": "./assets/icon.png",
+    "primaryColor": "#0F172A",
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "bundleIdentifier": "ai.knowledgebot.app",
+      "supportsTablet": true,
+      "buildNumber": "1"
+    },
+    "android": {
+      "package": "ai.knowledgebot.app",
+      "versionCode": 1,
+      "edgeToEdgeEnabled": true,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0F172A"
+      }
+    },
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

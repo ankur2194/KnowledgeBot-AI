@@ -1,0 +1,1218 @@
+# Build, test and scan — everything that needs a dependency tree, a container, or a built image.
+#
+# SPLIT WITH `gates.yml`, AND WHY IT IS NOT ARBITRARY.
+# ------------------------------------------------------------------------------------------------
+# `gates.yml` is the install-free tier: pure text and file passes, no lockfile, no service
+# container, no credential, sub-second per job. This file is everything else — the PHP + Python +
+# Node job graph, the containerized test dependencies, the four image builds, and the scanners.
+# Do not move a gate from there into here. A gate that runs after `pnpm install` inherits that
+# install's failure modes, and then it cannot report on the PR that broke the lockfile, which is
+# precisely the PR you most want it to report on.
+#
+# NO SECRET IS REFERENCED ANYWHERE IN THIS FILE, AND THAT IS THE FORK-PR CONTRACT.
+# ------------------------------------------------------------------------------------------------
+# GitHub hands a `pull_request` run from a fork ZERO repository secrets and a read-only
+# GITHUB_TOKEN. `${{ secrets.X }}` then interpolates to the EMPTY STRING, so a credentialed step
+# does not fail with "no secret" — it fails with a malformed-credential error from whatever tool
+# received the empty value, and the author has no way to read that as "this check cannot run for
+# you". A self-hostable product gets fork PRs. So: every job below runs green with no credential
+# at all, `docker/build-push-action` is `push: false` with no registry login, and the credentialed
+# work (registry push, OIDC exchange, SBOM attestation, the Trivy DB mirror pull) lives in
+# `release.yml`, guarded by `if: github.event.pull_request.head.repo.fork != true` so it reports as
+# SKIPPED rather than FAILED. `pull_request_target` is never used here: it runs privileged against
+# the base ref with secrets in scope, which is the one thing a fork PR must never obtain.
+#
+# ================================================================================================
+# DELIBERATELY NOT HERE — gates that are OWED and cannot pass today
+# ================================================================================================
+# A required check that cannot pass blocks every PR and is switched off within a week, so each of
+# these stays out until the artifact it reads exists. Every one of them is specified in
+# `github-actions-pipeline` or `security-scanning-toolchain`; NONE of them is enforced. Do not cite
+# one as a control, and do not "add the missing job" without first fixing the reason:
+#
+#   * `qdrant-rebuild-proof` (ADR-010, merge-queue tier) — it runs
+#     `services/ai-service/tests/integration/test_adr010_rebuild.py`, and that file does not exist.
+#     THE DIRECTORY NOW DOES, AND IT HAS GROWN SINCE THIS LINE WAS WRITTEN:
+#     `services/ai-service/tests/integration/` carries a README.md and FOUR spec files —
+#     `test_collection_bootstrap.py`, `test_coordination_store.py`, `test_db_pool.py` and
+#     `test_sparse_statistics_purge.py` — and the whole `-m integration` selection is what the
+#     `ai-service` job's second pytest step runs. So "add the directory" is no longer part of
+#     the work — the rebuild test and its service containers are. There is also no
+#     `app.maintenance.rebuild_index` for it to invoke. Owner: retrieval-engineer /
+#     ingestion-engineer.
+#   * `/metrics` catalog diff — needs a RUNNING OpenTelemetry Collector scraped after a smoke suite
+#     has driven every instrumented path (a per-service `/metrics` returns one PHP-FPM or Celery
+#     prefork worker's fragment, so it must be the Collector's `prometheus` exporter). There is no
+#     smoke suite and no instrument registration yet. Owner: observability-engineer.
+#   * the RLS tripwire's SECOND HALF — `database/ci/enable-rls.sql` DOES run below, and it arms
+#     itself as migrations land. What is owed is running the suite as the NON-OWNER role it
+#     creates: `kb_ci_app` has neither CREATEDB nor CREATE on schema public (verified: `create
+#     table` returns "permission denied for schema public"), and both `RefreshDatabase`'s
+#     `migrate:fresh` and `--parallel`'s per-worker `kb_test_N` databases need exactly those. The
+#     grants belong in `enable-rls.sql`, which is services/core-api's file. Until then the tripwire
+#     is armed and unobserved, which is stated in the step rather than implied by its absence.
+#   * `license_gate.py` — this used to say the manifest "carries three `revision =
+#     "TODO-RESOLVE-SHA"` entries". IT NOW CARRIES ZERO: all three were resolved on 2026-08-07 by
+#     two independent mechanisms (the host REST APIs and `git ls-remote`). The count is
+#     deliberately not restated here — it was four before ADR-030, three after, zero now, and a
+#     justification that has to be re-counted rots by design. Check it in one command instead:
+#         grep -c TODO-RESOLVE-SHA services/ai-service/models.manifest.toml
+#
+#     The gate stays out for two reasons that are NOT a count:
+#       - it needs SBOM inputs the release job produces, and exits 2 without them;
+#       - resolving the shas turned three FALSE reds into one TRUE red. Both docling rows claimed
+#         `license = "MIT"` and neither is: Heron's card is Apache-2.0 and docling-models at
+#         v2.3.0 is CDLA-Permissive-2.0 — MIT is docling's SOURCE licence, which is exactly the
+#         code-versus-weights confusion this gate's model arm exists to catch. CDLA-Permissive-2.0
+#         is pending a licensing ruling for `scripts/security/policy/licences.toml`'s allow list;
+#         until that lands the gate correctly BLOCKS.
+#   * `vuln-ignores.toml` `test_id` existence — its one entry names
+#     `services/ai-service/tests/security/test_docling_no_remote_render.py`, which does not exist.
+#     The suppression is therefore paperwork with no control behind it (that is the file's own
+#     wording), and a check asserting the control exists would be red.
+#   * `trivy image` CVE scanning — `security-scanning-toolchain` requires the vulnerability DB to
+#     come from OUR mirror, because the public one is an anonymously-pulled OCI artifact that is
+#     rate-limited per IP and fails unrelated PRs with `TOOMANYREQUESTS`. The reflexive fix,
+#     `--skip-db-update`, is worse than the failure: the scan then passes against a stale DB and
+#     reports a false green. No mirror exists. Image scanning lands with the mirror, not before.
+#   * `pip-audit` — it resolves the requirements file through pip, and `torch==2.13.0+cpu` is a
+#     LOCAL-VERSION wheel that exists only on download.pytorch.org. Reproduced both ways: with no
+#     extra index it dies with "No matching distribution found for torch==2.13.0+cpu"; with
+#     `PIP_EXTRA_INDEX_URL` set it dies with "torch: Dependency not found on PyPI and could not be
+#     audited". Python advisories are covered below by `osv-scanner` reading `uv.lock` directly,
+#     which needs no resolution step at all. Revisit if pip-audit learns local versions.
+#   * `apps/web` Playwright E2E and `apps/web` component specs — STILL OWED, AND THEY ARE THE ONLY
+#     TWO THAT ARE. `apps/web/tests/e2e/` now exists but holds nothing except `.gitkeep`, and
+#     `apps/web/tests/components/` is likewise empty while `vitest.config.ts` declares a
+#     `components` project pointing at it. Wiring either today buys a job that passes by finding
+#     nothing, which is worse than an absent job because it reports as coverage. Both land with
+#     their first spec, not before. Count them before you believe this line:
+#         ls apps/web/tests/e2e apps/web/tests/components
+#   * `apps/widget` Playwright E2E — NO LONGER OWED. This entry used to lump the widget in with
+#     `apps/web` above and the lump was false: the widget's suite is present, green and the only
+#     real-socket cross-origin coverage in the repository (three origins, two node:http servers,
+#     chunked SSE over a real read loop, RST-mid-answer, the idle watchdog, the single 401 re-mint,
+#     sanitisation). It is wired into the `node` job below. Measured on this tree with `CI=1`:
+#     22 specs in 5 files, 22.4 s wall after the harness build.
+#   * `apps/mobile` lint, typecheck and Jest — NO LONGER OWED. All three were red (3 ESLint errors,
+#     TS2307 on an undeclared `@jest/globals`, and jest-expo failing at preset load); all three are
+#     fixed and all three are wired into the `node` job below, re-measured here on Node 22.23.2:
+#     lint 7 warnings/0 errors (it said 6; `eslint-plugin-security` findings are not a fixed
+#     population either), tsc clean, 7 Jest suites. THE TEST COUNT IS DELIBERATELY NOT
+#     RESTATED — the number that stood here was `3 suites / 31 tests`, which is the WIDGET's
+#     vitest count copied into the mobile row, and it survived every later re-measurement of
+#     everything around it because a count in a comment is a value nothing verifies. Measure it:
+#         ( cd apps/mobile && pnpm test )      # suites = ls apps/mobile/tests/*.test.ts*
+#     Two things about them are still true and are stated beside the steps rather than here:
+#     `pnpm test` had never once STARTED before, so its first CI run is unproven; and none of the
+#     three proves anything on Hermes or on a device.
+#   * ANY DEVICE OR SIMULATOR COVERAGE FOR `apps/mobile` — owed, and not by a workflow edit. There
+#     is no Expo toolchain on the authoring machine and no EAS credentials in this repository, so
+#     airplane mode, backgrounding mid-stream, 401 mid-session and reinstall-over-Keychain are
+#     unverified on hardware. That is a `mobile-engineer` + EAS question, not a CI one; naming it
+#     here stops the green Jest job being read as the thing it is not.
+#   * an eval-corpus INTEGRITY gate — NO LONGER OWED. All ten fixtures are authored with real
+#     digests (`corpus-2026.08.1`), and "Golden corpus integrity" is wired in the `ai-service` job
+#     below. Read that step's comment before citing it: it proves the bytes match the manifest and
+#     nothing else.
+#   * an eval-corpus REGRESSION gate — still owed, and a different thing entirely. Scoring is
+#     blocked on unimplemented call sites in the answer path and the judge, and the tolerances in
+#     `samples/expected/baseline.json` are `null` deliberately. Do NOT wire a scoring gate against
+#     a null tolerance: it compares nothing and passes, which is the worst of the two failure modes
+#     because it reads as coverage.
+#     THE FOUR FILE:LINE COORDINATES THAT USED TO BE LISTED HERE ARE GONE, AND NOT BECAUSE THE
+#     BLOCKER LIFTED. They were `chat_pipeline.answer`, `app/rag/rerank.py:365` and
+#     `app/ingestion/embedding/embedder.py:343`/`:285`; today there is no `app/rag/chat_pipeline.py`
+#     at all and both of the other two files carry ZERO `NotImplementedError`. A line number in a
+#     comment is stale the next time anyone formats the file, and a reader who checks one and finds
+#     it empty concludes the gate is unblocked. Measure the real set instead:
+#         grep -rn NotImplementedError services/ai-service/app/rag services/ai-service/app/evaluation
+#     `samples/expected/baseline.json`'s own `_status` string names the same blockers in prose and
+#     is the authority; it is next to the tolerances it explains, which a workflow comment is not.
+#   * `osv-scanner` AS A PULL-REQUEST GATE — it is wired, but on the SCHEDULE tier only
+#     (`dependency-scan-full`), because it is red on today's tree — urllib3 1.26.20 (five), postcss
+#     8.4.31 (four), sharp 0.34.5, uuid 7.0.3, image-size 1.2.1, langchain 1.3.2, plus
+#     diskcache/ragas/vcrpy. It has no `--baseline-commit`, so a PR-tier whole-tree scan fails
+#     every PR for something nobody in the team did. Promote it to the PR tier in the commit that
+#     lands the fixable bumps.
+#     THE TOTALS ARE NOT WRITTEN DOWN HERE ANY MORE, AND THIS IS THE ONE ENTRY WHERE THAT IS NOT A
+#     STYLE PREFERENCE. This line read `8 packages, 15 known vulnerabilities (9 High, 6 Medium)`;
+#     the same scanner, same six lockfiles, same tree now reports `9 packages, 17 (11 High, 6
+#     Medium)`, because the input is an advisory feed the world publishes into overnight — which is
+#     the whole reason this job is on `schedule`. A total here is guaranteed stale and cannot be
+#     made otherwise. Read today's from the nightly run, or reproduce it locally with the same
+#     image and the same six `--lockfile=` arguments the `dependency-scan-full` step passes:
+#         docker run --rm -v "$PWD:/src" -w /src ghcr.io/google/osv-scanner:v2.4.0 --lockfile=...
+#   * `sast` (Opengrep) — WRITTEN AND THEN REMOVED, because the image could not be verified:
+#     `ghcr.io/opengrep/opengrep:v1.26.0` and `:latest` both answer `denied` to an anonymous pull,
+#     and `opengrep/opengrep` on Docker Hub does not exist. Shipping a required check whose runner
+#     cannot be fetched is the same defect as shipping one that cannot pass. The rules themselves
+#     are guarded meanwhile: `gates.yml` asserts a floor of 31 vendored rules across 5 files, so the
+#     ruleset cannot silently empty out while the scanner is unwired. Restore the job once the image
+#     coordinate is confirmed; do NOT substitute Semgrep's registry rulesets, which are Semgrep
+#     Rules License v1.0 (internal use, no distribution) and we publish this monorepo.
+#   * Ragas, Pest mutation, provider live smoke, the full-corpus rebuild and the TruffleHog verified
+#     -credential sweep — all scheduled tiers, and none of them belongs on a PR's required-check
+#     list. Only the dependency sweep is wired on `schedule` today.
+name: ci
+
+on:
+  pull_request:
+  merge_group: { types: [checks_requested] }
+  push: { branches: [main] }
+  # THE NIGHTLY TIER, and the only job that reads it is `dependency-scan-full`. The world publishes
+  # advisories overnight against code nobody touched; that is a red nightly run somebody triages,
+  # never a red PR somebody learns to bypass. Every other job in this file runs on the schedule too,
+  # which costs a few minutes and is the cheapest way to notice a gate that only fails on a cold
+  # cache. 03:17 rather than 03:00: GitHub's scheduler queues heavily on the hour and a job on the
+  # hour can be delayed or dropped entirely.
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+# NOT path-filtered. `github-actions-pipeline` describes per-workspace `paths:` filters, and they
+# are the right optimisation once the suites are long — but a `paths:`-filtered REQUIRED check
+# never reports at all on a PR that misses its filter, and the merge queue then waits forever for a
+# status that will never arrive. Add filters together with the branch-protection change that makes
+# them safe, not before.
+concurrency:
+  # cancel-in-progress must NOT apply to merge_group: a cancelled merge-queue check evicts the PR
+  # from the queue and the author has to re-add it by hand.
+  group: ci-${{ github.event.merge_group.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read # jobs needing more raise it locally, never here
+
+# ================================================================================================
+# TWO SETS OF LITERALS BELOW ARE COPIES, NOT CHOICES. READ THIS BEFORE EDITING EITHER.
+# ================================================================================================
+# There is deliberately no workflow-level `env:` block holding them, because a variable here would
+# hide the drift the two checks below are built to catch — one of them greps THIS FILE's text.
+#
+#   1. THE DATA-SERVICE IMAGE TAGS — `postgres:18-alpine`, `valkey/valkey:9.1.1`,
+#      `qdrant/qdrant:v1.18.3`. Every one is copied from the compose `test` profile in
+#      infrastructure/docker/compose.yaml, which is `docker-compose-stack`'s file to write and this
+#      one's to follow. `gates.yml`'s `compose-ci-tag-drift` job parses both files and fails on any
+#      divergence — and it finds the CI side by grepping `image:` keys out of .github/workflows, so
+#      an `${{ env.X }}` indirection would make it compare against nothing. Why it matters: a CI
+#      service one minor behind production tests a different product. On valkey/valkey:8 there is
+#      no DELIFEQ and no database-level ACL, so the test proving a cache credential cannot reach
+#      the queue DB passes because there is no mechanism left to fail it — and goes red the day
+#      production runs 9.1.1.
+#
+#   2. THE FOUR CANONICAL TEST-DB VALUES — service alias `postgres-test`, database/user/password
+#      all `kb_test`. They must equal `services/core-api/phpunit.xml` and the compose `test`
+#      profile byte for byte. Those three disagreed in three different ways until 2026-08-07
+#      (`knowledgebot_test`/`knowledgebot`/`test` in compose, `kb_test` against a host named
+#      `postgres` in phpunit.xml, `kb_test`/`postgres`/`ci` in the skill reference), which is why
+#      `make test-up && vendor/bin/pest` had never once connected — and nothing reported it,
+#      because a wrong connection string surfaces as "connection refused" and reads as an
+#      infrastructure flake. The `-test` suffix on the alias is load-bearing: a test database
+#      reachable as bare `postgres` is one stale shell away from RefreshDatabase running
+#      `migrate:fresh` against real tenant data.
+
+jobs:
+  # ==============================================================================================
+  # core-api — the Laravel control plane
+  # ==============================================================================================
+  core-api:
+    # `runs-on` is pinned: `ubuntu-latest` rolls over a 1-2 month window and swaps the preinstalled
+    # PHP/Node/Python out from under a job that passed yesterday.
+    runs-on: ubuntu-24.04
+    defaults: { run: { working-directory: services/core-api } }
+    services:
+      # THE SERVICE KEYS ARE THE COMPOSE SERVICE NAMES, not `postgres`/`valkey`. These jobs run ON
+      # the runner rather than inside a container, so the service label is not a resolvable
+      # hostname and every step below connects to 127.0.0.1 through the published port — but
+      # keeping the names identical to compose is what lets a human diff the two files.
+      postgres-test:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: kb_test
+          POSTGRES_USER: kb_test
+          POSTGRES_PASSWORD: kb_test
+        ports: ["5432:5432"] # required: the service label is not resolvable from the runner
+        # `-U kb_test -d kb_test`, not `-U postgres`: pg_isready does not authenticate, so it
+        # answers "accepting connections" for a role that does not exist and the probe goes green
+        # before initdb has finished creating the real database.
+        options: >-
+          --health-cmd "pg_isready -U kb_test -d kb_test"
+          --health-interval 5s --health-retries 20
+      valkey-test:
+        image: valkey/valkey:9.1.1
+        ports: ["6379:6379"]
+        options: --health-cmd "valkey-cli ping" --health-interval 5s --health-retries 20
+      qdrant-test:
+        image: qdrant/qdrant:v1.18.3
+        ports: ["6333:6333"]
+        # DELIBERATELY NO --health-cmd. The Qdrant image ships no shell and no curl, so any
+        # in-container probe fails forever, the job burns its entire retry budget waiting, and then
+        # reports an unrelated startup error. Wait from the runner instead — the step below.
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          # `opentelemetry` is not optional here even though the suite disables the SDK:
+          # composer.json's `config.platform` pins `ext-opentelemetry: 1.2.1` so the
+          # open-telemetry/opentelemetry-auto-* packages resolve, and without the real extension
+          # every artisan and phpstan invocation prints four "The opentelemetry extension must be
+          # loaded" warnings. Warnings that always appear are warnings nobody reads.
+          extensions: pdo_pgsql, redis, bcmath, intl, pcntl, opentelemetry
+          # xdebug roughly doubles the Pest suite; only the nightly mutation job sets pcov.
+          coverage: none
+
+      - uses: actions/cache@v6
+        with:
+          # THE COMPOSER DOWNLOAD CACHE, NEVER vendor/. A restored vendor/ tree outlives the
+          # composer.lock change that should have invalidated it, and CI then tests the old
+          # dependency while the diff says otherwise. Same rule for node_modules/ and .venv/ below.
+          path: ~/.cache/composer/files
+          key: composer-${{ hashFiles('services/core-api/composer.lock') }}
+
+      # `--no-interaction --prefer-dist --no-progress`, and the lockfile is authoritative:
+      # `composer install` errors when composer.lock is stale against composer.json rather than
+      # silently re-resolving. Dev requirements ARE installed here (Pest, PHPStan, Pint); the
+      # shipped image installs with --no-dev.
+      - run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Wait for Qdrant from the runner
+        working-directory: .
+        run: timeout 60 bash -c 'until curl -sf localhost:6333/readyz; do sleep 1; done'
+
+      - name: Pint (formatting)
+        run: vendor/bin/pint --test
+
+      - name: PHPStan
+        run: vendor/bin/phpstan analyse --memory-limit=1G --no-progress
+
+      - name: OpenAPI document is current
+        # packages/contracts/openapi/core-api.openapi.json is GENERATED and COMMITTED, and
+        # packages/contracts/src/resources/ is generated from IT. A Resource edited without
+        # re-running the dump leaves admin-web-engineer generating yesterday's types with nothing
+        # saying so. Same failure mode, same `--check` answer as the form-rules step at the end of
+        # this job — and `--check` for the same reason stated there: `dump && git diff
+        # --exit-code` cannot see an untracked file, so it would pass having compared nothing.
+        #
+        # POSITION IS THE WHOLE DESIGN OF THIS STEP, and it is not a style choice.
+        #
+        # ⚠ THE PREMISE OF THIS PARAGRAPH CHANGED ON 2026-08-11 AND THE CONCLUSION DID NOT.
+        # It used to say that tests/Contract/OpenApiDocumentTest.php's "keeps the committed document
+        # current" already runs this exact assertion inside the Pest step below. THAT TEST NO LONGER
+        # EXISTS — it was the duplicate the OWED note further down asked for, and it was deleted;
+        # OpenApiDocumentTest.php:683-691 is the receipt, a comment where the test used to be.
+        # `grep -rn "keeps the committed document current" .` returns two hits and both are prose
+        # ABOUT the deletion. So this step is no longer "the only REACHABLE copy" of that assertion,
+        # it is the ONLY COPY, full stop, and moving it below Pest would delete the check outright
+        # rather than merely make it unreachable.
+        #
+        # The ordering argument is unchanged and is why the suite copy was the one deleted rather
+        # than this one: a `--check` after `php artisan test --parallel` could never once report,
+        # because the suite goes red first and aborts the job — unreachable on precisely the run it
+        # exists for. Placed HERE it buys three things an in-suite assertion cannot:
+        #
+        #   * IT NEEDS NOTHING. No PostgreSQL, no Valkey, no Qdrant, no migration, no APP_KEY —
+        #     the document is reflected out of the router, the #[ResponseShape] attributes and
+        #     ErrorTaxonomy. Behind `php artisan test --parallel` it inherits three service
+        #     containers, `migrate --force`, the RLS script and RefreshDatabase, which is this
+        #     file's own gates.yml rule ("a gate that runs after an install inherits that
+        #     install's failure modes") applied one layer down.
+        #   * IT READS THE CHECKOUT. An in-suite assertion reads a file the SAME PARALLEL SUITE
+        #     could rewrite: one `Artisan::call('kb:dump-openapi')` without `--path` in any of the
+        #     four processes makes the assertion self-fulfilling, and racily so. No test does that
+        #     today (every call sites a temp `--path`; verified 2026-08-11) — but nothing stops
+        #     one, and this step runs before any test process exists.
+        #   * "OpenAPI is stale" becomes a step name in the job list rather than one failed
+        #     expectation inside a 4-process suite summary.
+        #
+        # THE `OWED` NOTE THAT STOOD HERE IS DISCHARGED. It asked for OpenApiDocumentTest.php's
+        # duplicate to be deleted, and it has been. What survives in that file, and MUST:
+        # `it('is byte-identical across two runs and --check is a real gate')` at :669 — it proves
+        # the MECHANISM against a temp `--path` (two dumps agree; a hand-edited file makes `--check`
+        # exit 1), which no CI step covers and which is the half tests/Feature/DumpFormRulesCommand-
+        # Test.php keeps for the form rules. SUITE PROVES THE GENERATOR; THIS STEP PROVES THE
+        # ARTIFACT. That split is the reason neither is a duplicate of the other, and it is why the
+        # form-rules `--check` now sits directly below rather than after Pest.
+        #
+        # DETERMINISM, checked rather than assumed, because a diff gate that flaps trains people to
+        # re-run CI instead of reading it. Two dumps of an unchanged tree are byte-identical
+        # (sha256 cce65926…, both runs and the committed file) — the command ksorts paths,
+        # operations, schemas, responses and parameters, pins JSON_PRETTY_PRINT|UNESCAPED_SLASHES|
+        # UNESCAPED_UNICODE, and carries no timestamp, no ULID and no host path. Its `info.version`
+        # is a hand-bumped constant, not a generated one.
+        #
+        # ONE ENVIRONMENT COUPLING, stated because it is the only way this step can go red on a
+        # correct tree: `components.securitySchemes.sanctumSession.name` is `config('session.cookie')`,
+        # read from live config rather than transcribed. `SESSION_COOKIE` is therefore load-bearing
+        # here. It resolves to the `kb_session` default in all three environments that matter and
+        # they agree: no `.env` at all (this job — nothing copies `.env.example`), a `.env` copied
+        # from `.env.example` (which sets `SESSION_COOKIE=kb_session`), and `APP_ENV=testing` under
+        # phpunit.xml (which does not set it). Verified by injecting `SESSION_COOKIE=some_other_
+        # cookie` against the committed document: exit 1, "The OpenAPI document is out of date."
+        # So do NOT add a `SESSION_COOKIE` to this job's env, and do not set one in phpunit.xml
+        # without regenerating — the two would then disagree about one published byte.
+        run: php artisan kb:dump-openapi --check
+
+      - name: Form-rules manifest is current
+        # MOVED ABOVE Pest on 2026-08-11 (task #124, N1). It sat after `php artisan test --parallel`
+        # while its twin above sat before it — 7C's ordering argument applied to one of a pair and
+        # not the other, which is a decision nobody made rather than one somebody made.
+        #
+        # The same three reasons hold, and each was MEASURED rather than reasoned from the OpenAPI
+        # case, in the pinned image with no services running at all:
+        #     docker run --rm knowledgebot/core-api:dev php artisan kb:dump-form-rules --check  -> 0
+        #     (same, with one byte added to a rules/*.json)                                     -> 1
+        #   * IT NEEDS NOTHING. No PostgreSQL, no Valkey, no Qdrant, no migration. The manifest is
+        #     reflection over FormRequest::rules(); the command touches no model and no connection.
+        #     Behind Pest it inherited three service containers, `migrate --force`, the RLS script
+        #     and RefreshDatabase — every one of them a way for this check to fail for a reason
+        #     that has nothing to do with form rules.
+        #   * IT READS THE CHECKOUT, before any of the four test processes exists to rewrite
+        #     packages/contracts/rules/.
+        #   * "Form rules are stale" becomes a step name.
+        #
+        # AND THE NODE-JOB COVER IS THINNER THAN IT LOOKS, which is what settled it. `packages/
+        # contracts/test/form-drift.test.ts` reads the COMMITTED manifest and probes it against the
+        # Zod schemas — so it proves manifest ↔ Zod, and is completely blind to Laravel ↔ manifest.
+        # Edit a `rules()` method and forget the dump and that suite stays green, because both of
+        # its sides are the stale artifact. This step is the ONLY thing in the repository that
+        # compares the manifest against the PHP it is generated from; behind a red suite it never
+        # ran at all.
+        #
+        # `--check` rather than `dump && git diff --exit-code`. The diff form has a hole that is
+        # invisible today: `git diff` cannot see an UNTRACKED file, so on a tree where
+        # packages/contracts/rules/ has never been committed the dump writes new files and the diff
+        # passes having compared nothing. `--check` writes nothing and exits non-zero if any file
+        # WOULD change, which is the assertion actually wanted. The command sorts keys and pins its
+        # JSON flags, so it is idempotent (verified: two runs on a clean tree, no diff).
+        run: php artisan kb:dump-form-rules --check
+
+      - name: Migrate, then arm the RLS tripwire
+        env:
+          DB_CONNECTION: pgsql
+          DB_HOST: 127.0.0.1
+          DB_PORT: "5432"
+          DB_DATABASE: kb_test
+          DB_USERNAME: kb_test
+          DB_PASSWORD: kb_test
+        run: |
+          php artisan migrate --force
+
+          # RLS IS A CI-ONLY DETECTOR AND NEVER THE AUTHORIZATION MECHANISM. postgresql-patterns
+          # declines it in production: the tenant GUC does not survive PgBouncer transaction
+          # pooling, `current_setting()` outside a transaction is NULL so the policy filters
+          # everything, and the instinctive fix is a COALESCE that fails OPEN. Isolation is
+          # enforced in code at seven layers. What this buys in CI is one thing those seven cannot
+          # buy themselves: an unscoped query returns FEWER rows, so the isolation test fails on
+          # the query that forgot its organization predicate.
+          #
+          # The script is schema-agnostic — it names no table and arms every BASE TABLE carrying
+          # `organization_id` or `org_id` — so with zero migrations it arms zero tables and exits
+          # 0, and it grows with the schema without anyone remembering to edit it.
+          psql "postgres://kb_test:kb_test@127.0.0.1:5432/kb_test" \
+            -v ON_ERROR_STOP=1 -f database/ci/enable-rls.sql
+
+          # HALF THE TRIPWIRE IS OWED, AND SAYING SO IN THE LOG IS THE POINT.
+          # The other half is running the suite as the NON-OWNER role this script creates. A table
+          # OWNER bypasses its own policies silently, which is why the script also sets FORCE ROW
+          # LEVEL SECURITY — but `kb_ci_app` currently holds neither CREATEDB nor CREATE on schema
+          # public, and `RefreshDatabase`'s `migrate:fresh` plus `--parallel`'s per-worker
+          # `kb_test_N` databases both need exactly those. So the suite below runs as the owner and
+          # the policies are armed but unobserved. Adding those grants to enable-rls.sql (which is
+          # services/core-api's file, not this workflow's) is what closes it.
+          echo "::notice::RLS armed; suite still runs as the OWNER role — the non-owner half of the tripwire is owed (see enable-rls.sql)"
+
+      - name: Pest
+        env:
+          # phpunit.xml's <env> entries do NOT override a variable already present in the
+          # environment (PHPUnit only sets them when unset, absent force="true"), so these win.
+          # They must: phpunit.xml names the COMPOSE aliases `postgres-test` and `valkey-test`,
+          # which are correct inside the Compose network and unresolvable on a runner.
+          DB_CONNECTION: pgsql # never sqlite — jsonb, partial unique indexes and CHECK constraints
+          DB_HOST: 127.0.0.1 # must actually fire, and sqlite accepts what PostgreSQL rejects
+          DB_PORT: "5432"
+          DB_DATABASE: kb_test
+          DB_USERNAME: kb_test
+          DB_PASSWORD: kb_test
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: "6379"
+          QDRANT_URL: http://127.0.0.1:6333
+        # `php artisan test --parallel` and not `vendor/bin/pest`: Laravel tokenizes the DATABASE
+        # per process and nothing else, so the Qdrant collection, the Valkey logical DB and the
+        # cache prefix are token-scoped by hand in AppServiceProvider. The Arch and Security suites
+        # run unconditionally as part of this — never behind test-impact analysis, which follows
+        # PHP call graphs and cannot see across the process boundary into FastAPI and Qdrant.
+        run: php artisan test --parallel --processes=4
+
+  # ==============================================================================================
+  # ai-service — the FastAPI data plane
+  # ==============================================================================================
+  ai-service:
+    runs-on: ubuntu-24.04
+    defaults: { run: { working-directory: services/ai-service } }
+    # NO SERVICE CONTAINERS, AND THE TWO pytest STEPS BELOW ARE WHY THAT SENTENCE IS STILL TRUE.
+    #
+    # `pyproject.toml` sets `testpaths = ["tests"]`, so a bare `pytest` collects `tests/integration/`
+    # too. This job used to run exactly that — one `pytest` step with no marker expression — under a
+    # comment claiming it needed no PostgreSQL, Qdrant or Valkey. Both halves were wrong at once:
+    #
+    #   * "The 210 tests in this suite" was stale by a factor of six. Measured on 2026-08-11 against
+    #     this tree: 1324 collected, of which 1255 pass with no external service (plus 1 skipped and
+    #     1 xfailed) and 67 carry `@pytest.mark.integration`. Do not re-hardcode a number here — the
+    #     split is the marker, and the marker is what the two steps below assert.
+    #   * The integration 67 did not fail for want of `services:` — they were quietly satisfied by
+    #     `tests/conftest.py`'s testcontainers fallback against the RUNNER's Docker daemon. So the
+    #     job was pulling three images per run while its own comment said it touched nothing, and a
+    #     failure to pull would have surfaced as an unrelated-looking unit-test error.
+    #
+    # SPLIT RATHER THAN DESELECTED. Dropping `-m integration` would have made the comment true by
+    # deleting 67 tests from CI, since no other job runs them — a gate turned into no gate. Instead
+    # the fast arm runs first and fails fast, and the container-dependent arm is a step with its own
+    # name, so "CI is red because Docker Hub was down" is legible in the step list rather than
+    # buried. When the ADR-010 rebuild-proof job lands with real `services:` containers, the second
+    # step moves there and `KB_TEST_PG_DSN`/`KB_TEST_QDRANT_URL`/`KB_TEST_VALKEY_URL` become the way
+    # to point it at them — but note finding #81 first: `check_environment` currently REJECTS all
+    # three names, so setting them today makes every test importing `app.worker` error at collection.
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v9
+        with:
+          # The same uv the Dockerfile's UV_IMAGE pins, so a resolution that succeeds here cannot
+          # fail in the image build.
+          version: "0.9.7"
+          enable-cache: true
+          # Keys the cache on the lockfile, and caches uv's DOWNLOAD store — never .venv/, for the
+          # same reason vendor/ is never cached above.
+          cache-dependency-glob: services/ai-service/uv.lock
+
+      # `--frozen`: fail if uv.lock does not match pyproject.toml rather than silently re-resolving.
+      # The dev group carries pytest, ruff and mypy and is installed here only; no image ships it.
+      - run: uv sync --frozen
+
+      - name: Ruff
+        run: uv run --frozen ruff check .
+
+      - name: Ruff format
+        run: uv run --frozen ruff format --check .
+
+      - name: mypy
+        run: uv run --frozen mypy
+
+      # Needs no PostgreSQL, Qdrant, Valkey or SeaweedFS — verified by running it against nothing.
+      - name: pytest (no external services)
+        run: uv run --frozen pytest -q --no-header -m "not integration"
+
+      # Real servers, started by testcontainers against the runner's own Docker daemon. Its own
+      # step so a pull failure is not reported as a unit-test failure.
+      - name: pytest (integration — testcontainers)
+        run: uv run --frozen pytest -q --no-header -m integration
+
+      # ============================================================================================
+      # WHAT THIS GATE PROVES, AND — MORE IMPORTANTLY — WHAT IT DOES NOT
+      # ============================================================================================
+      # It proves ONE thing: the bytes on disk under `samples/` are the bytes
+      # `samples/corpus/manifest.toml` names. Every fixture digest is recomputed and compared.
+      #
+      # IT IS NOT A RETRIEVAL REGRESSION GATE, and the name invites exactly that misreading. It
+      # says nothing about recall, faithfulness, refusal rate, citation validity, or whether a
+      # change made answers worse. A green run here is compatible with a bot that has stopped
+      # answering correctly. Specifically NOT covered:
+      #   * retrieval scoring — still blocked on unimplemented call sites in the answer path and
+      #     the judge. The four file:line coordinates that stood here (`chat_pipeline.answer`,
+      #     `rerank.py:365`, `embedder.py:343`, `:285`) no longer resolve to anything and were
+      #     removed rather than re-numbered; see the header block for why and for the one-line
+      #     grep that measures the real set. The tolerances in `samples/expected/baseline.json`
+      #     are `null` DELIBERATELY, and a scoring gate must NOT be wired against them — a null
+      #     tolerance compares nothing and passes.
+      #   * the golden CASES under `samples/golden/**`. `dataset.toml` carries its own two
+      #     self-check commands for those; they are not this step.
+      #   * judge availability, provider credentials, quota. None is touched here.
+      # Ragas remains scheduled-only and is never a PR required check (`github-actions-pipeline`).
+      #
+      # WHY IT LIVES IN THIS JOB RATHER THAN ITS OWN. `app/evaluation/corpus.py` imports only
+      # hashlib, tomllib, dataclasses and pathlib — verified by rag-eval-engineer under `python -I`
+      # with zero site-packages, and again in a venv built WITHOUT `--extra evaluation` where
+      # ragas/langchain are absent. So it needs no extra, is not confined to the
+      # `runtime-evaluation` image, and runs anywhere with a checkout and Python >= 3.11.
+      # `verify_corpus()` itself is 4.2-17.0 ms; 0.04-0.15 s including interpreter start. A job for
+      # that is a minute of runner scheduling to save nothing.
+      #
+      # CONFIRMED HERE UNDER THE PINNED uv 0.9.7 (the measurements above came from 0.9.30), both
+      # directions:
+      #   pass — "corpus verified: corpus-2026.08.1, 10 fixtures, 21 files, 877761 bytes,
+      #           manifest <sha256>"
+      #   fail — one HTML comment appended to one page of the crawl fixture in a scratch copy:
+      #           CorpusUnverified, 1 problem, `site-kelpwright-www [mismatch]`, EXIT 1.
+      # It reports every problem rather than the first, so one run gives the whole corpus state.
+      #
+      # THE MANIFEST DIGEST IS DELIBERATELY NOT QUOTED HERE. It covers manifest.toml's own bytes,
+      # so it moves on a PROSE edit to that file — a `notes` block correction already moved it once
+      # while all ten fixture digests, `samples/VERSION` and the fixture bytes stayed identical. A
+      # literal in a comment is a value nothing verifies and nothing updates, so it would read as a
+      # pinned expectation while quietly describing a manifest that no longer exists. Nothing in
+      # this repository asserts it either: the step PRINTS `v.manifest_sha256` rather than comparing
+      # it, `samples/expected/baseline.json` carries `corpus_manifest_sha256: null`, and
+      # `test_corpus_integrity.py` recomputes it from the file inside a `tmp_path` fixture. If you
+      # want today's value, run the step.
+      - name: Golden corpus integrity
+        run: >
+          uv run --frozen python -c
+          "from app.evaluation.corpus import verify_corpus;
+          v = verify_corpus();
+          print(f'corpus verified: {v.corpus_version}, {len(v.fixture_digests)} fixtures, {v.files_hashed} files, {v.bytes_hashed} bytes, manifest {v.manifest_sha256}')"
+
+      - name: requirements.lock is a regenerated export of uv.lock, not a hand-edited twin
+        run: |
+          # ADR-022: pyproject.toml + uv.lock are AUTHORITATIVE. `requirements.lock` exists for
+          # exactly two consumers that read requirements format — the dependency scanners and the
+          # lockfile-arm SBOM — and it is a generated export, never maintained by hand. The failure
+          # this guards is the one that cannot be seen in a diff: the image builds from uv.lock
+          # while the scanner reads requirements.lock, so the audited tree is not the shipped tree
+          # and neither file looks wrong on its own.
+          #
+          # ON `--generate-hashes`: the ADR and the skill both name that flag, and uv 0.9 DOES NOT
+          # HAVE IT — `uv export --generate-hashes` fails with "unexpected argument". Hashes are
+          # emitted BY DEFAULT for the requirements.txt format and are suppressed with
+          # `--no-hashes`. So the requirement is satisfied by NOT passing the negative flag, which
+          # is a thing worth writing down, because the obvious "fix" for the argument error is to
+          # drop the hashes. Non-vacuity below asserts the hashes are actually there.
+          #
+          # THE COMMAND LINE MUST MATCH THE ONE IN THE FILE'S HEADER, character for character.
+          # `uv export` writes its own invocation into the first two lines of the output, so any
+          # difference in flags or their order produces a one-line diff that reads as a dependency
+          # change and is not one.
+          #
+          # `--all-extras`: broader than any single image. `evaluation` ships in
+          # ai-worker-evaluation and `ocr-tesseract` ships nowhere, but a scanner input that is a
+          # SUPERSET of every artifact fails safe, and an under-scoped one fails silent.
+          #
+          # ACCUMULATE, never a bare `[` — three checks.
+          set -u; fail=0
+          flag() { echo "::error::$1"; fail=1; }
+
+          [ -f requirements.lock ] \
+            || flag "services/ai-service/requirements.lock is missing; ADR-022 requires it committed, and without it every assertion below compares nothing"
+
+          uv export --frozen --no-dev --all-extras --no-emit-project \
+            --format requirements.txt -o requirements.lock
+
+          git diff --exit-code -- requirements.lock \
+            || flag "requirements.lock is stale against uv.lock; regenerate it with the exact command in its own header comment and commit the result"
+
+          # Non-vacuity: an export that silently lost its hashes is an export the scanners cannot
+          # verify, and it diffs clean against itself forever afterwards.
+          h=$(grep -c '^[[:space:]]*--hash=sha256:' requirements.lock || true)
+          echo "requirements.lock carries $h hash lines"
+          [ "$h" -gt 500 ] \
+            || flag "requirements.lock carries only $h --hash lines; the export lost its hashes (uv 0.9 emits them by default — check for a stray --no-hashes)"
+
+          exit $fail
+
+  # ==============================================================================================
+  # node — the two workspace packages and all three JavaScript apps
+  # ==============================================================================================
+  # TWO TEST RUNNERS, ON PURPOSE: Vitest 4 for packages/contracts, apps/web and apps/widget; Jest +
+  # React Native Testing Library for apps/mobile. They are separate steps, never `pnpm -r test`.
+  node:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      # pnpm/action-setup MUST COME BEFORE setup-node. `setup-node` with `cache: pnpm` shells out
+      # to the package manager to locate its store, so with the order reversed the run dies with
+      # "Unable to locate executable file: pnpm" — which reads like a missing binary rather than a
+      # step-ordering mistake.
+      - uses: pnpm/action-setup@v6
+        with: { version: "10.15.1" } # equals `packageManager` in the root package.json
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          # SIX LOCKFILE PATHS, ONE PER IMPORTER. `.npmrc` sets shared-workspace-lockfile=false, so
+          # pnpm writes a lockfile per importer UNCONDITIONALLY — including the root, whose file is
+          # a 169-byte stub describing a manifest with zero dependencies. That stub is expected;
+          # `gates.yml` asserts the root IMPORTER resolves nothing rather than asserting the file
+          # is absent, because pnpm offers no way to suppress it.
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            apps/web/pnpm-lock.yaml
+            apps/widget/pnpm-lock.yaml
+            apps/mobile/pnpm-lock.yaml
+            packages/contracts/pnpm-lock.yaml
+            packages/design-tokens/pnpm-lock.yaml
+
+      # ONE ROOT INSTALL COVERS ALL SIX IMPORTERS, and this was worth measuring rather than
+      # assuming. `shared-workspace-lockfile=false` changes where the RESOLUTION is written — one
+      # lockfile per importer — but it does not narrow what an install links: `pnpm install` from
+      # the root reports "Scope: all 6 workspace projects" and reads each importer's own lockfile.
+      # A loop of five per-directory installs (the obvious reading of the flag) does the same work
+      # five times and, on a slow filesystem, races itself into ERR_PNPM_ENOTEMPTY.
+      #
+      # `--frozen-lockfile` so a resolver that quietly picks a different version fails here instead
+      # of shipping.
+      - name: Install the workspace
+        run: pnpm install --frozen-lockfile
+
+      # BUILD ORDER IS A DEPENDENCY, NOT A PREFERENCE. packages/contracts carries REAL RUNTIME CODE
+      # — the SSE frame parser, the client event union's guards, KbError — not only types, and
+      # apps/{web,widget,mobile} import the BUILT output.
+      - name: Build the two workspace packages
+        run: |
+          set -eu
+          ( cd packages/design-tokens && pnpm build )
+          ( cd packages/contracts && pnpm build )
+
+      # ESLint AS ITS OWN STEP, NEVER FOLDED INTO `next build`. Next 16 removed `next lint` and the
+      # `eslint` key, and `next build` no longer lints at all — a job whose "lint" is the build
+      # passes while checking nothing. The `--print-config` probe is the second half: a flat config
+      # that fails to resolve makes `eslint .` match no files and exit 0, which is the same green.
+      # NO `--max-warnings=0`, AND THAT IS A DECISION RATHER THAN AN OMISSION. Each workspace's own
+      # `lint` script is `eslint .`, so ESLint ERRORS fail this step — they did, until 2026-08-07,
+      # on three real ones in apps/mobile. The six remaining findings there are all
+      # `eslint-plugin-security` WARNINGS on an Expo config plugin that legitimately writes files at
+      # prebuild time and on a boolean comparison flagged as a timing attack.
+      # `security-scanning-toolchain` files eslint-plugin-security under TypeScript SAST, whose gate
+      # is "changed lines block" — DIFF-SCOPED. `--max-warnings=0` is the opposite: a whole-tree
+      # gate that would be red on day one for six pre-existing findings, and "a SAST gate on the
+      # whole tree makes every PR red on day one and is disabled within a week". The diff-scoped job
+      # that should judge these is the Opengrep one, which is owed (see the header).
+      - name: ESLint, and prove the config actually resolves
+        run: |
+          set -eu
+          ( cd apps/web && pnpm exec eslint --print-config src/app/page.tsx > /dev/null && pnpm lint )
+          ( cd apps/widget && pnpm lint )
+          ( cd apps/mobile && pnpm lint )
+          ( cd packages/contracts && pnpm lint )
+
+      - name: Typecheck
+        run: |
+          set -eu
+          ( cd packages/contracts && pnpm typecheck )
+          ( cd apps/web && pnpm typecheck )
+          ( cd apps/widget && pnpm typecheck )
+          # apps/mobile typechecks against the BUILT packages/contracts output produced above, not
+          # its source: it consumes the same schemas under Jest that contracts exercises under
+          # Vitest, and the two runtimes must agree about the same declarations. It also declares
+          # `@jest/globals` — an import with no declared dependency is a TS2307 here, which is what
+          # this step caught before 2026-08-07.
+          ( cd apps/mobile && pnpm typecheck )
+
+      # NEVER `pnpm -r test`. Two JavaScript test runners on purpose: apps/mobile is Jest + React
+      # Native Testing Library, everything else is Vitest 4. A recursive run picks one and reports
+      # the other as "no tests".
+      - name: Vitest — contracts, web, widget
+        run: |
+          set -eu
+          ( cd packages/contracts && pnpm test )
+          ( cd apps/web && pnpm test )
+          ( cd apps/widget && pnpm test )
+
+      # ============================================================================================
+      # WHAT THE MOBILE SUITE PROVES, AND WHERE IT STOPS. READ BEFORE TREATING IT AS DEVICE COVERAGE.
+      # ============================================================================================
+      # It proves the SSE frame parser, the retry predicate and the auth lifecycle UNDER NODE. It
+      # proves NOTHING on Hermes and nothing on a device: no simulator and no hardware was ever
+      # run — there is no Expo toolchain on the machine these were authored on. So airplane mode,
+      # backgrounding mid-stream, a 401 arriving mid-session, and reinstall-over-Keychain are all
+      # UNVERIFIED on real hardware, and a green run here must not be read as evidence about any of
+      # them.
+      #
+      # The streaming suite in particular runs against a `node:http` transport standing in for
+      # `expo/fetch`, because `globalThis.fetch` under jest-expo is a Babel-transpiled stub that
+      # returns `status: undefined` and cannot be captured around. That substitution is the reason
+      # the suite can run at all, and it is also the reason "streaming works on iOS" is not a claim
+      # this job supports. Hermes' XHR-backed fetch exposes no ReadableStream and fails SILENTLY
+      # (`expo-react-native`), which is exactly the class of bug a Node-hosted transport cannot see.
+      #
+      # THIS JOB HAS NEVER RUN IN CI. `pnpm test` was failing to START until 2026-08-07, on four
+      # separate pre-existing blockers (an undeclared non-optional peer under
+      # `auto-install-peers=false`, a babel-plugin-jest-hoist rejection, an env var absent in a Jest
+      # process, and a test-ordering bug). Treat its first CI run as unproven rather than routine.
+      #
+      # Its own step, and never `pnpm -r test`: apps/mobile is Jest + React Native Testing Library
+      # while everything above is Vitest 4, and a recursive run picks one and reports the other as
+      # "no tests" — which is indistinguishable from a passing run.
+      #
+      # THIS COMMENT USED TO READ "3 suites, 31 tests, 3.5 s" AND ALL THREE NUMBERS WERE THE
+      # WIDGET'S vitest run, pasted into the mobile row. `apps/mobile/tests/` holds SEVEN spec
+      # files. The test count is deliberately not restated: it moved while this line was being
+      # corrected, which is the whole argument against writing it down. `ls apps/mobile/tests/`
+      # gives the suites and the step's own output gives the tests.
+      - name: Jest — mobile
+        run: ( cd apps/mobile && pnpm test )
+
+      # `size-limit` RUNS IN THE SAME STEP AS THE BUILD AND ITS EXIT CODE IS THE JOB'S. It reads
+      # dist/, so a separate job would need the artifact round-tripped; and run behind `|| true`, on
+      # a `continue-on-error` leg, or in a non-required job it is the same as deleting it — the
+      # widget merges 40 kB over budget with a red table in the log. Its numbers are BROTLI by
+      # default, so they will not match `du` and a PR comment quoting bytes must say so.
+      #
+      # apps/widget/vite.config.ts THROWS on an unset origin rather than defaulting: `?? ''` would
+      # bake `https://undefined` onto a customer's page and every session mint would fail CORS with
+      # no error on our side.
+      #
+      # THE TWO ORIGINS MUST NOT SHARE A REGISTRABLE DOMAIN, and the config asserts it. The admin
+      # session cookie is scoped to the main domain, so an API on the widget's eTLD+1 puts a widget
+      # iframe on a hostile customer page SAME-SITE with a real admin credential, and CHIPS cannot
+      # help because the cookie is not the widget's. `widget.ci.invalid` + `api.ci.invalid` would
+      # collapse to the same `ci.invalid` and fail the build — which is the assertion working, so
+      # these two placeholders differ at the second label. `.invalid` is the reserved TLD (RFC
+      # 2606): it cannot resolve, so a bundle built here can never talk to anything real.
+      - name: Widget build + size-limit
+        env:
+          KB_WIDGET_ORIGIN: https://widget.kbwidget-ci.invalid
+          KB_API_ORIGIN: https://api.kb-ci.invalid
+          KB_VERSION: ci
+        run: ( cd apps/widget && pnpm build && pnpm size )
+
+      # ============================================================================================
+      # apps/widget PLAYWRIGHT — THE ONLY REAL-SOCKET, CROSS-ORIGIN COVERAGE IN THE REPOSITORY.
+      # ============================================================================================
+      # 22 specs in 5 files, and every one of them drives the shipped loader against the shipped
+      # frame bundle across THREE ORIGINS served by two node:http harnesses — a hostile customer
+      # page on :4174, the widget origin on :4173, the session mint on :4175. What only this suite
+      # can see, because everything else in this repo stops at a mocked transport:
+      #   * the SSE read loop over chunk boundaries chosen by a real socket rather than by a fixture
+      #     array — including a heartbeat and an internal event that must never surface;
+      #   * `stream_lost` on an RST mid-answer AND on a clean EOF with no terminal event, which a
+      #     transport shim normalises into the same thing;
+      #   * the idle watchdog actually firing on silence;
+      #   * a 401 asking the loader to re-mint EXACTLY ONCE and replaying the send with the new
+      #     bearer and the SAME `client_message_id` (a duplicate answer is the failure here);
+      #   * postMessage origin checks that a same-origin test passes with every check DELETED;
+      #   * sanitisation of hostile model output on its way into the DOM.
+      #
+      # AFTER `pnpm size`, NOT BEFORE, AND THAT ORDER IS LOAD-BEARING. Playwright's `webServer`
+      # rebuilds both artifacts with the loopback `KB_*_ORIGIN` values and a THIRD stream-probe
+      # bundle into `dist/probe/`, overwriting the dist/ the budget was measured against. Run this
+      # first and `pnpm size` measures a harness build.
+      #
+      # apps/web's Playwright project is NOT wired here and must not be: `apps/web/tests/e2e/`
+      # holds only `.gitkeep`, so it would report "no tests found" as a green check. See the
+      # header block.
+      #
+      # `--with-deps` INSTALLS THE SHARED LIBRARIES AS WELL AS THE BROWSER, and only chromium is
+      # fetched — `playwright.config.ts` declares one project, `Desktop Chrome`. Without the deps
+      # the launch fails with a dynamic-linker error naming a .so, which reads as a broken image
+      # rather than a missing apt package.
+      #
+      # `CI` IS ALREADY SET BY GITHUB, and the config keys three behaviours off it: `forbidOnly`
+      # (a stray `test.only` fails the run instead of silently skipping 21 specs), `retries: 1`,
+      # and the blob+list reporter pair. Do not set `CI=1` by hand here and do not unset it.
+      #
+      # Measured on this tree with `CI=1`: 22 passed, 22.4 s after the harness build. The build is
+      # the bulk of the wall clock, not the specs.
+      - name: Playwright — widget (three origins, real sockets)
+        run: |
+          set -eu
+          cd apps/widget
+          pnpm exec playwright install --with-deps chromium
+          pnpm e2e
+
+      # The ONE permitted NEXT_PUBLIC_* value. apps/web/src/lib/env.ts holds the allow-list and
+      # next.config.ts calls assertPublicEnv(), so ANY other NEXT_PUBLIC_* present in the build
+      # environment fails `next build` by design — the prefix carries no secret classification and
+      # is the one mechanism by which a server-side value silently reaches every client bundle.
+      - name: Next.js production build
+        env:
+          NEXT_PUBLIC_API_ORIGIN: https://api.kb-ci.invalid
+        run: ( cd apps/web && pnpm build )
+
+  # ==============================================================================================
+  # images — the four Dockerfiles, five targets
+  # ==============================================================================================
+  # UNTIL THIS JOB EXISTED, NO WORKFLOW BUILT ANY IMAGE, so every build-time assertion in all four
+  # Dockerfiles ran only on a developer machine and had never been enforced. Those assertions are
+  # not decoration; each guards a regression that leaves every manifest looking correct:
+  #
+  #   services/ai-service `runtime`  — `import ragas` must FAIL (ragas is an LLM-judged evaluation
+  #       harness making real provider calls on a tenant credential; importable from the chat path
+  #       it is one careless import away from billing a quality score nobody asked for), and
+  #       `kb-assert-no-local-inference` must pass: zero `nvidia-*`/`triton` distributions, torch a
+  #       `+cpu` build, and neither FlagEmbedding nor sentence_transformers importable. That check
+  #       reads INSTALLED DISTRIBUTIONS rather than the filesystem, because its predecessor globbed
+  #       `find -maxdepth 2 -name 'nvidia*'` while the nvidia wheels install at depth THREE — so it
+  #       matched nothing and passed on every image, CPU and CUDA alike.
+  #   services/ai-service `runtime-evaluation` — `import ragas` must SUCCEED, which catches a
+  #       renamed extra that would otherwise produce a worker that starts, consumes jobs, and fails
+  #       every one at import time until someone reads a scheduled run.
+  #   apps/web — `next build` fails on any unexpected NEXT_PUBLIC_*; `output: 'standalone'` must be
+  #       set or the runtime stage has no server.js and the container crash-loops.
+  #   apps/widget — the `__KB_*` build-time constants are a TEXT SUBSTITUTION, not a binding, so the
+  #       build greps dist/ for a surviving `__KB_`; and `pnpm size` runs inside the build stage.
+  #
+  # PUSH IS FALSE AND THERE IS NO REGISTRY LOGIN, so this job is green on a fork PR. Publishing,
+  # provenance attestation and the image-SBOM arm of the licence gate belong to `release.yml`.
+  images:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+
+      # THE BUILD CONTEXTS ARE NOT THE SERVICE DIRECTORIES ALONE, and getting this wrong fails at a
+      # COPY line with "invalid from flag" rather than anything that names the real problem.
+      # ADR-023 puts each Dockerfile beside the service it builds, so each one reaches outside its
+      # own context through a NAMED context:
+      #   services/core-api  -> `infra`     = infrastructure/docker  (php.ini, the two fpm pools,
+      #                                       the two nginx configs)
+      #   apps/web, apps/widget -> `workspace` = the repo root (pnpm-workspace.yaml, .npmrc,
+      #                                       tsconfig.base.json, packages/*)
+      # A Dockerfile cannot COPY outside its context, so `COPY ../../infrastructure/...` is a build
+      # ERROR and not a path that resolves — which is deliberate: building without the named
+      # context fails loudly at that line.
+      - name: core-api (one image, six services)
+        uses: docker/build-push-action@v7
+        with:
+          context: services/core-api
+          file: services/core-api/Dockerfile
+          target: runtime
+          build-contexts: infra=infrastructure/docker
+          push: false
+          # `load: true` + `tags:` ARE FINDING B1'S FIX, AND THEY ARE THE ONLY WAY TO FIX IT HERE.
+          # This build used to be `load: false` with no `tags:`, which means buildx wrote the layers
+          # into the cache and NOTHING into the runner's Docker daemon — the image existed as a
+          # build result and not as an image anything could run. `load: true` exports it and
+          # `docker load`s it under the tag below; `tags:` is not optional once `load` is true,
+          # since an untagged load leaves `<none>:<none>` and `docker image inspect` still fails.
+          #
+          # THE TAG IS A COPY, NOT A CHOICE: `knowledgebot/core-api:${VERSION:-dev}` in
+          # infrastructure/docker/compose.yaml (six services), which is what
+          # `test_signing_cross_language.py`'s `KB_TEST_CORE_API_IMAGE` defaults to. It is NOT
+          # covered by `gates.yml`'s `compose-ci-tag-drift`, which filters to the three data-service
+          # families — so if compose ever renames the image, this line has to be renamed by hand.
+          #
+          # WHAT IT COSTS. `load: true` forces the docker exporter, so buildx serialises the whole
+          # ~666 MB image to a tarball and the daemon unpacks it — tens of seconds even on a full
+          # cache hit, and it defeats the pure-cache fast path where a fully-cached build finishes
+          # without materialising anything. It is charged ONCE, on the smallest of the six images,
+          # and it buys the only test in the repository that can see the two runtimes disagree.
+          # Do NOT copy it onto the ai-service targets: those are 3-9 GB.
+          load: true
+          tags: knowledgebot/core-api:dev
+          cache-from: type=gha,scope=core-api
+          cache-to: type=gha,mode=max,scope=core-api
+
+      # ============================================================================================
+      # THE CROSS-LANGUAGE SIGNING CONTRACT — FINDING B1. IT RUNS HERE AND NOWHERE ELSE.
+      # ============================================================================================
+      # `services/ai-service/tests/contract/test_signing_cross_language.py` runs the REAL
+      # `App\Services\Internal\InternalRequestSigner` inside `knowledgebot/core-api:dev` and compares
+      # the canonical string it returns, BYTE FOR BYTE, with `app/core/signing.py`'s over a matrix of
+      # header sets. It is the only artifact here that can observe two runtimes agreeing on a
+      # *description* of the format and disagreeing on its *bytes* — a 401 that looks correct in
+      # both logs. `InternalRequestSignerTest.php` and `tests/unit/test_canonical_string.py` each
+      # stay inside one runtime and are green through exactly that failure.
+      #
+      # IT WAS INERT ON EVERY PULL REQUEST UNTIL THIS STEP EXISTED. The file skips at MODULE level
+      # when `docker image inspect` cannot find the image, so the `ai-service` job — which has no
+      # core-api image and never did — reported `1 skipped`: all 16 byte-comparison cases plus the
+      # strict-xfail guard collapsed into one line nobody reads. Measured both ways on 2026-08-11:
+      # image absent -> `1 skipped`; image present -> `16 passed` (+ the xfail, see below).
+      #
+      # WHY THIS JOB AND NOT `ai-service`. GitHub Actions jobs do not share a Docker daemon, so
+      # `needs: images` would not have helped even before this — the image has to be built and
+      # loaded in the SAME job that runs the test, and this is the job that already builds it.
+      # The alternative, rebuilding core-api inside `ai-service`, duplicates a whole image build to
+      # avoid three wheels; the ephemeral environment below is the cheaper half of that trade.
+      #
+      # `KB_TEST_REQUIRE_PHP=1` IS THE POINT OF THE STEP. Without it a broken image, a renamed tag
+      # or a dropped `load: true` turns this step green again by skipping, which is precisely the
+      # failure being fixed. With it, "the PHP side is unavailable" is a FAILED assertion.
+      #
+      # THREE PINS RATHER THAN `uv sync --frozen`. The full sync installs torch and the Docling
+      # stack and takes minutes; this file's whole import surface is pytest, pytest-asyncio (for
+      # `asyncio_mode = "auto"` under `--strict-config`) and httpx (imported at module scope by
+      # `tests/contract/conftest.py`). The three versions are copied from
+      # `services/ai-service/pyproject.toml` — `grep -nE '(pytest|pytest-asyncio|httpx)==' ` there
+      # to check them. A skew fails LOUD in both directions: a version that no longer resolves
+      # fails the step, and a missing import is a collection error, never a silent pass.
+      - uses: astral-sh/setup-uv@v9
+        with:
+          version: "0.9.7" # equals the `ai-service` job and the Dockerfile's UV_IMAGE
+          # No cache: three wheels. Sharing the `ai-service` job's key would restore its whole
+          # download store — the full Docling/torch resolution — to install pytest.
+          enable-cache: false
+
+      - name: Cross-language signing contract (the real PHP signer, in the image built above)
+        working-directory: services/ai-service
+        env:
+          KB_TEST_REQUIRE_PHP: "1"
+        run: >
+          uv run --no-project --python 3.13
+          --with pytest==9.1.1
+          --with pytest-asyncio==1.4.0
+          --with httpx==0.28.1
+          python -m pytest -q --no-header -rs tests/contract/test_signing_cross_language.py
+
+      - name: ai-service runtime (ai-api, ingestion, embedding, beat)
+        uses: docker/build-push-action@v7
+        with:
+          context: services/ai-service
+          file: services/ai-service/Dockerfile
+          target: runtime
+          push: false
+          cache-from: type=gha,scope=ai-runtime
+          cache-to: type=gha,mode=max,scope=ai-runtime
+
+      - name: ai-service runtime-crawl (Chromium, the SSRF pivot's image)
+        uses: docker/build-push-action@v7
+        with:
+          context: services/ai-service
+          file: services/ai-service/Dockerfile
+          target: runtime-crawl
+          push: false
+          cache-from: type=gha,scope=ai-crawl
+          cache-to: type=gha,mode=max,scope=ai-crawl
+
+      - name: ai-service runtime-evaluation (the only image where `import ragas` may succeed)
+        uses: docker/build-push-action@v7
+        with:
+          context: services/ai-service
+          file: services/ai-service/Dockerfile
+          target: runtime-evaluation
+          push: false
+          cache-from: type=gha,scope=ai-eval
+          cache-to: type=gha,mode=max,scope=ai-eval
+
+      - name: web
+        uses: docker/build-push-action@v7
+        with:
+          context: apps/web
+          file: apps/web/Dockerfile
+          target: runtime
+          build-contexts: workspace=.
+          build-args: NEXT_PUBLIC_API_ORIGIN=https://api.kb-ci.invalid
+          push: false
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+      - name: widget
+        uses: docker/build-push-action@v7
+        with:
+          context: apps/widget
+          file: apps/widget/Dockerfile
+          target: runtime
+          build-contexts: workspace=.
+          # The two origins must differ at the registrable domain — see the node job's widget step
+          # for why the config asserts it and why `widget.ci.invalid` + `api.ci.invalid` would fail.
+          build-args: |
+            KB_WIDGET_ORIGIN=https://widget.kbwidget-ci.invalid
+            KB_API_ORIGIN=https://api.kb-ci.invalid
+            KB_VERSION=ci
+          push: false
+          cache-from: type=gha,scope=widget
+          cache-to: type=gha,mode=max,scope=widget
+
+      - name: Hadolint (issue only, never blocking)
+        # `security-scanning-toolchain` puts Dockerfile linting in the "issue" column deliberately:
+        # its findings are style and cache-ordering advice, and a build-blocking style linter on
+        # four heavily-commented Dockerfiles trains people to bypass the whole scanner tier.
+        # `continue-on-error` is forbidden on a GATE; this is not a gate, and saying so is the
+        # difference. Hadolint is GPL-3.0 and runs as a separate CI process, which is why the
+        # licence gate — which reads ARTIFACT SBOMs — does not consider it a defect.
+        continue-on-error: true
+        run: |
+          # `docker run … || true` USED TO BE THE WHOLE BODY, AND IT MADE FOUR OUTCOMES LOOK ALIKE:
+          # a clean Dockerfile, a Dockerfile with findings, an image that would not pull, and a
+          # docker that is not there. All four printed nothing this step distinguished and exited
+          # 0. That is the same shape as the `! yq` vacuity in gates.yml, one suppression weaker.
+          #
+          # This stays NON-BLOCKING (continue-on-error, and no `exit 1` below) because
+          # `security-scanning-toolchain` puts Dockerfile lint in the "issue" column. Non-blocking
+          # is a decision about consequences; it is not a licence to be unable to tell whether the
+          # tool ran. So the exit status is read and said out loud.
+          # THE LEADING `v` ON THE TAG IS NOT A TYPO — DO NOT TIDY IT AWAY. hadolint publishes
+          # `v2.14.0`, not `2.14.0`, unlike every other pinned image in these two workflows.
+          # This line read `hadolint/hadolint:2.14.0` and the pull failed with exit 125 for all
+          # four Dockerfiles, on the runner as well as locally:
+          #     $ docker manifest inspect hadolint/hadolint:2.14.0   -> no such manifest
+          #     $ docker manifest inspect hadolint/hadolint:v2.14.0  -> schemaVersion 2
+          # Because this step is deliberately `continue-on-error`, it never blocked and never
+          # would have: Dockerfile linting had run NOWHERE, and nothing said so. The `case` block
+          # below is what finally surfaced it, which is the argument for keeping it.
+          # THE DOCKERFILE IS PASSED BY PATH, NOT PIPED ON STDIN, AND THAT IS DELIBERATE.
+          # This read `hadolint - < "$df"`. A heredoc-piped Dockerfile has no name, so hadolint
+          # reported every finding against `-` — four files' findings in one undifferentiated
+          # list — and, worse, had no file location to resolve configuration against. The day
+          # somebody adds a `.hadolint.yaml` to silence a rule for one image, the pipe form
+          # ignores it silently and the rule stays loud: a suppression that reads as applied and
+          # is not. Nothing is broken today, because no such file exists yet — which is exactly
+          # when this is cheap to fix. `-v $PWD:/repo:ro` is read-only: a linter never writes.
+          for df in services/core-api/Dockerfile services/ai-service/Dockerfile \
+                    apps/web/Dockerfile apps/widget/Dockerfile; do
+            rc=0
+            out=$(docker run --rm -v "$PWD:/repo:ro" -w /repo \
+                    hadolint/hadolint:v2.14.0 hadolint "$df" 2>&1) || rc=$?
+            [ -z "$out" ] || printf '%s\n' "$out"
+            case "$rc" in
+              0) echo "hadolint $df: clean" ;;
+              1) echo "hadolint $df: findings above — issue only, not blocking" ;;
+              *) echo "::warning::hadolint could not run on $df (exit $rc); this step's silence is not a clean bill" ;;
+            esac
+          done
+
+  # ==============================================================================================
+  # dependency-scan — the PR tier: what THIS diff can be held responsible for
+  # ==============================================================================================
+  # OSV-Scanner is deliberately NOT here, and it is not an oversight. It is in `dependency-scan-full`
+  # below, on the schedule tier, because it is RED ON TODAY'S TREE: `osv-scanner:v2.4.0` over all
+  # six lockfiles reports High and Medium findings in urllib3, postcss, sharp, uuid, image-size,
+  # langchain, diskcache, ragas and vcrpy, most with a fix available. Wiring it as a PR gate now
+  # makes every PR in the repository red for something nobody in the team did, and a gate like that
+  # is switched off inside a week. `security-scanning-toolchain`'s own split says the PR gate fails
+  # only on findings the DIFF INTRODUCED, and osv-scanner has no `--baseline-commit`; the honest
+  # home for a whole-tree scan is therefore the nightly. Move it back the moment the bumps land.
+  # The totals that used to be quoted here moved between two measurements a few days apart against
+  # an unchanged tree — see the header block's `osv-scanner` entry for why no number belongs here.
+  dependency-scan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      # NON-VACUITY, and it is the reason this step exists at all in a job whose only real scanner
+      # is `composer audit`. `--lockfile=<path>` on a path that does not exist is not reliably a
+      # non-zero exit, so a scan that read five files instead of six is indistinguishable in the log
+      # from one that read six and found nothing. This asserts the inputs the nightly job below
+      # consumes, on every PR, where a rename or a deletion is actually visible in the diff.
+      #
+      # packages/design-tokens and the root are deliberately absent: both are dependency-free, so
+      # their lockfiles are the same 169-byte stub and there is nothing to scan.
+      - name: Every lockfile the scanners read actually exists
+        run: |
+          set -u; fail=0
+          for f in services/core-api/composer.lock \
+                   services/ai-service/uv.lock \
+                   services/ai-service/requirements.lock \
+                   apps/web/pnpm-lock.yaml apps/widget/pnpm-lock.yaml \
+                   apps/mobile/pnpm-lock.yaml packages/contracts/pnpm-lock.yaml; do
+            if [ -s "$f" ]; then
+              echo "ok   $f ($(wc -c < "$f") bytes)"
+            else
+              echo "::error::$f is missing or empty; every dependency scan that names it covers less than it appears to"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - uses: shivammathur/setup-php@v2
+        with: { php-version: "8.4", coverage: none }
+
+      # `--abandoned=report`, deliberately. Abandonment is ASYNCHRONOUS NEWS ABOUT SOMEONE ELSE'S
+      # REPOSITORY: with the default this goes red on a PR that changed nothing relevant, because a
+      # maintainer archived a transitive package overnight. Main is never red for something nobody
+      # on the team did. Real advisories still affect the exit code.
+      # `--locked` reads composer.lock without installing anything.
+      # VERIFIED GREEN on today's lock: "No security vulnerability advisories found."
+      - name: composer audit
+        working-directory: services/core-api
+        run: composer audit --locked --abandoned=report
+
+  # ==============================================================================================
+  # dependency-scan-full — the nightly whole-tree scan, NOT a pull-request check
+  # ==============================================================================================
+  # `if:` restricts it to `schedule` and `workflow_dispatch`, so it never attaches a status to a PR
+  # and can never block a merge. That is the point: the world publishes advisories overnight against
+  # code nobody touched, and the right response is a red nightly run somebody triages, not a red PR
+  # somebody bypasses.
+  #
+  # OSV-Scanner is the unifier across ecosystems. `npm audit` knows only the GitHub Advisory DB and
+  # reports per-workspace noise; OSV aggregates GHSA, PySec and the distro feeds behind one exit
+  # code. It also reads `uv.lock` DIRECTLY, which is what lets Python be covered at all —
+  # `pip-audit` cannot resolve `torch==2.13.0+cpu` (see the header). The `requirements.lock`
+  # regenerate-and-diff in the `ai-service` job is a DIFFERENT check: it proves the export is fresh,
+  # not that it is free of advisories.
+  dependency-scan-full:
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v7
+      - name: OSV-Scanner over every lockfile
+        uses: google/osv-scanner-action/osv-scanner-action@v2.4.0
+        with:
+          scan-args: |-
+            --lockfile=services/core-api/composer.lock
+            --lockfile=services/ai-service/uv.lock
+            --lockfile=apps/web/pnpm-lock.yaml
+            --lockfile=apps/widget/pnpm-lock.yaml
+            --lockfile=apps/mobile/pnpm-lock.yaml
+            --lockfile=packages/contracts/pnpm-lock.yaml
+
+  # ==============================================================================================
+  # secret-scan — the one finding that always blocks, with no waiver
+  # ==============================================================================================
+  secret-scan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # `fetch-depth: 0` IS THE WHOLE JOB. actions/checkout clones at depth 1 by default, so
+          # `gitleaks git` walks exactly ONE COMMIT and reports zero findings on every PR forever,
+          # while the key sits three commits back. kb-security-baseline forbids a provider
+          # credential reaching a log, a response or an audit row; git is all three at once and it
+          # is public.
+          fetch-depth: 0
+
+      - name: Gitleaks — full history and the worktree
+        run: |
+          # TWO SUBCOMMANDS, BOTH NEEDED, AND NEITHER IS THE OLD NAME. `detect` and `protect` were
+          # deprecated in 8.19.0 in favour of `git` and `dir`; the old names still run, with
+          # different defaults, so a stale invocation keeps working while checking something else.
+          #   `git --log-opts=--all`  every ref, not just the checked-out branch's first parent
+          #   `dir`                   the worktree, which catches a secret staged but never committed
+          #
+          # NO --exit-code OVERRIDE AND NO ALLOW-LIST FLAG. A secret is the one finding with no
+          # waiver: a force-push does not reach forks, clones, CI caches or GitHub's cached
+          # unreachable objects, so rotation at the provider is the only remediation and the git
+          # surgery is cleanup.
+          set -eu
+          docker run --rm -v "$PWD:/repo:ro" -w /repo zricethezav/gitleaks:v8.30.1 \
+            git --log-opts="--all" --redact --verbose
+          docker run --rm -v "$PWD:/repo:ro" -w /repo zricethezav/gitleaks:v8.30.1 \
+            dir . --redact --verbose
+
+      - name: The two live-credential files gitleaks cannot see
+        # ==========================================================================================
+        # THE STEP ABOVE IS GREEN BECAUSE THE BYTES ARE ABSENT, NOT BECAUSE THEY ARE SAFE (#110).
+        # ==========================================================================================
+        # `infrastructure/docker/valkey/users.acl` and
+        # `infrastructure/docker/seaweedfs/identities.json` hold live generated credentials on every
+        # developer machine and every deployment. #66 gitignored both, which closed the "one
+        # `git add -A` commits them" hole and opened a quieter one: NEITHER GITLEAKS SUBCOMMAND CAN
+        # REACH THEM HERE.
+        #
+        #   * `gitleaks git --log-opts=--all` walks COMMITS. These files have none — `git ls-files
+        #     infrastructure/` is 0 — so it scans nothing of them, correctly.
+        #   * `gitleaks dir .` walks the WORKTREE and does NOT honour .gitignore, which is why it
+        #     looks like the covering scan. It is not: `actions/checkout` never materialises an
+        #     ignored, untracked file, so on this runner the paths do not exist. A scanner reports
+        #     no findings in a file that is not there, and the job goes green.
+        #
+        # So the choice was: bring the bytes onto the runner (run bootstrap.sh and scan what it
+        # writes), or scan the properties that need no bytes and SAY which one is missing. The
+        # second, because the first proves the wrong thing — CI's freshly generated credentials are
+        # not the ones on anybody's disk, and a green run against them would read as coverage of a
+        # tree it never saw.
+        #
+        # `KB_SCAN_MODE=structural` runs the arms that are decidable from git alone, all of which
+        # answer for a PATH rather than a file: every credential path is gitignored, every one is
+        # untracked (a .gitignore rule does not apply to an already-tracked path, so the two fail
+        # independently), the `secrets/` directory rule exists, and the `.example` templates carry a
+        # placeholder in the credential FIELD rather than a real key. The value-leak arm — does any
+        # live secret appear in a committable file — is SKIPPED and printed as skipped; it runs
+        # where the bytes are, in scripts/ops/preflight.sh and on a developer machine.
+        #
+        # The script exits 2, never 0, if it cannot run honestly: no /usr/bin/grep, no python3, not
+        # a git worktree, an unknown mode, or a `git check-ignore` that fails to discriminate.
+        #
+        # Proven by mutation on a simulated checkout (tracked + untracked-not-ignored only, no
+        # credential files): deleting the identities.json ignore rule, deleting the `secrets/*` rule,
+        # and filling the template's secretKey each fail this step, and the unmutated tree passes.
+        # The same M1 against the previous version of check 1 — which `continue`d past an absent
+        # path — PASSED. That was the same blindness one layer down.
+        env:
+          KB_SCAN_MODE: structural
+        run: bash scripts/security/credential-file-scan.sh

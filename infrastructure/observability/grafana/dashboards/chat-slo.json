@@ -1,0 +1,135 @@
+{
+  "uid": "kb-chat-slo",
+  "title": "Chat SLO",
+  "tags": ["kb", "slo"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "timezone": "utc",
+  "refresh": "1m",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Chat requests/sec by operation",
+      "description": "Recorded series kb:chat_requests:rate5m. Includes cancelled requests: a cancellation is traffic, it is just not a failure. This is also the traffic-floor term in KbChatErrorRateHigh.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (service, operation) (kb:chat_requests:rate5m)"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Chat error + timeout ratio",
+      "description": "Recorded series kb:chat_error_ratio:5m — the ONE definition of an error rate. It counts outcome=error AND outcome=timeout and excludes outcome=cancelled. Never re-derive this matcher in a panel: a panel written against outcome=error alone reads 0.4% during an outage in which a third of requests time out. Absent rather than zero before the first failure.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "kb:chat_error_ratio:5m"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "First visible token, p95 by model (seconds)",
+      "description": "THE SLO NUMBER: measured from Laravel's receipt of the client request to the first token event flushed to the client, so it contains the retrieval leg. docs/17 §23 targets 4 s, which is why 4 is a bucket edge. Do not substitute kb_provider_first_token_seconds — that starts at the provider call and hides the 1.5 s retrieval budget entirely.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le, model) (rate(kb_chat_first_token_seconds_bucket[5m])))"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Chat duration, p95 by outcome (seconds)",
+      "description": "Split by outcome so a fast failure cannot flatter the percentile. `le` is kept alongside the grouping label in every quantile here: aggregating it away first leaves no buckets to interpolate and histogram_quantile returns nonsense.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(kb_chat_duration_seconds_bucket[5m])))"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Open SSE streams",
+      "description": "Capacity headroom. A monotonic climb that never returns to baseline is a leaked finalizer — a streaming span or generator that was not closed in a finally — not organic growth.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (service) (kb_chat_active_streams)"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Cancellation rate",
+      "description": "Tracked separately from the error rate on purpose: a user hanging up is not our failure, and folding it in makes alarms fire during a normal demo. A cancelled stream still finalizes usage, because the provider billed the tokens it had already generated.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (operation) (rate(kb_chat_requests_total{outcome=\"cancelled\"}[5m]))"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Model fallbacks",
+      "description": "A silent fallback looks like the primary model produced the answer, and the eval suite then scores the wrong model. error_class carries the trigger.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (from_model, to_model, error_class) (rate(kb_chat_fallbacks_total[5m]))"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Answers by finish_reason",
+      "description": "Insufficient-evidence and truncation rates. Values are the SSE terminal finish_reason enum. The insufficient-evidence rate is a PRODUCT number and is deliberately not alerted on — a refusal on thin evidence is the system working.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (finish_reason) (rate(kb_chat_answers_total[5m]))"
+        }
+      ]
+    }
+  ]
+}

@@ -122,12 +122,14 @@ Permitted labels, and nothing else: `service` (4) · `env` (3) · `operation` (`
 `disposition` (a per-family result set that is deliberately *not* the shared four) · `error_class`
 (18 + `none`, from `kb-error-taxonomy`) · `provider` (5 adapters) · `model` / `from_model` /
 `to_model` · `token_type` (`input` `output`) · `finish_reason` (the SSE terminal enum,
-`kb-internal-api-contracts`) · `stage` (17 ingestion + 7 retrieval, code-defined) · `reason` (two
-disjoint closed enums — retrieval 3, crawl 8) · `kind` (`dense` `sparse`) · `engine` (the code-defined
+`kb-internal-api-contracts`) · `stage` (17 ingestion + 7 retrieval, code-defined) · `reason` (three
+disjoint closed enums — empty-retrieval 4, rerank-skip 5, crawl 8) · `scale` (`RerankScale`, 4, and
+`kb_retrieval_evidence_score` only) · `kind` (`dense` `sparse`) · `engine` (the code-defined
 OCR set, `ocr-pipeline`) · `file_type` (supported formats, else `other`) · `queue` (the 9 named
 queues, never a connection name) · `collection` (one per embedding model) · `task` (the ~6
 code-defined scheduled-task names) · `status_class` (`2xx` `3xx` `4xx` `5xx` `network`) ·
-`dependency` (the fixed 8) · `required` (`true`/`false`) · `version`, `git_sha`, `contract_version`
+`dependency` (the fixed **6** — `embedding` and `reranker` left with ADR-030, see the catalog) ·
+`required` (`true`/`false`) · `version`, `git_sha`, `contract_version`
 (**`kb_build_info` only** — the `_info` pattern, one series per running build).
 
 **`model` comes from the pinned model catalog; an unrecognised string maps to `other`** — a tenant can
@@ -162,8 +164,9 @@ other three contracts, which share one rule (telemetry is lossy, audit is not): 
 forbidden fields on every JSON log line (`org_id` belongs in a log and never in a label; prompts,
 chunks and credentials belong in neither), the store/completeness/write-coupling table that keeps
 `audit_logs` out of Loki and telemetry out of PostgreSQL, and the liveness-vs-readiness matrix (zero
-dependency I/O on `/health/live`, a 5 s cached check on `/health/ready`, optional-dependency breakers
-degraded but ready).
+dependency I/O on `/health/live`, a 5 s cached check on `/health/ready` that is one real round trip
+per required dependency and never a presence check, optional-dependency breakers degraded but ready,
+and the rule deciding which column a dependency lands in — who the failure belongs to).
 
 ## Gotchas
 
@@ -196,5 +199,5 @@ degraded but ready).
 - [ ] Every streaming and job span ends in a `finally`; aborting a stream mid-flight still exports the span with `kb.finish_reason="cancelled"`. Celery and Laravel queued jobs start a new root with a span link, never a child of the submitter.
 - [ ] Sampling is head-100% with tail sampling in the Collector (`load_balancing` exporter in front); a test asserts a 5xx trace survives while a routine 200 is dropped. `opentelemetry-auto-guzzle` is installed and Celery runs with `use_span_links=True`.
 - [ ] A log fixture containing a known API key, password, prompt and retrieved chunk asserts none reach any sink; `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` is unset in every environment.
-- [ ] `/health/live` makes zero network calls (asserted with all dependencies blackholed); `/health/ready` fails for required dependencies only, and an open reranker breaker leaves it ready.
+- [ ] `/health/live` makes zero network calls (asserted with all dependencies blackholed); `/health/ready` fails for required dependencies only, and **probes no provider at all** — since ADR-030 embedding and reranking are provider API calls, so a test asserts readiness stays 200 while every provider is unreachable, and that neither is a `dependency` label value. Each required dependency is probed with a **real round trip** and named by its own key in the 503 body — a test blackholes each one in turn (PostgreSQL included; it was the one missing until 2026-08-11) and asserts the body names it. The required set is whatever `grep -n 'checks: dict\[str, bool\]' services/ai-service/app/api/health.py` prints, not a list transcribed into a skill.
 - [ ] Audit entries are written inside the operation's transaction to `audit_logs`, never to the log pipeline; a test asserts an audit write failure aborts the operation.

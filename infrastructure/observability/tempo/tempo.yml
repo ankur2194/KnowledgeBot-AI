@@ -1,0 +1,60 @@
+# Tempo 3.0.2 — monolithic, 7-day block retention, no Kafka.
+#
+# `target: all` is not a convenience, it is the reason this stack fits on one host. In monolithic
+# mode the distributor pushes in-process to the live-store and the metrics-generator; MICROSERVICES
+# mode requires Kafka, and the scalable-single-binary target that used to sit between them was
+# deleted in 3.0. One box, one process, no broker.
+#
+# TEMPO 3.0 REJECTS UNKNOWN CONFIG FIELDS AND REFUSES TO START. 3.0 deleted the `ingester`,
+# `ingester_client`, `compactor` and `metrics_generator_client` blocks outright and moved block
+# retention to `backend_scheduler.provider.compaction.block_retention`. A config copied from a 2.x
+# tutorial does not "mostly work" — it fails at boot with an unknown-field error. This file is
+# deliberately small for that reason: every key below is one we need, and a key we did not need is
+# a startup failure waiting for the next person who pastes one in.
+#
+# THERE IS NO DOWNGRADE PATH FROM 3.0 TO 2.x. Snapshot the `tempo` volume before any 3.x upgrade.
+
+target: all
+
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9095
+  log_level: info
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        # The ONLY writer is the Collector, on the internal `observability` network. Nothing else
+        # can reach this port: browsers post to the Collector's ingress (ADR-025), never here.
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/blocks
+    wal:
+      path: /var/tempo/wal
+
+backend_scheduler:
+  provider:
+    compaction:
+      # 7 days. Default is 336h. Traces are the most expensive of the four stores per byte and
+      # the least often read past a week — head-100% sampling with tail sampling in the Collector
+      # is what keeps the volume survivable at all.
+      #
+      # THE 30d/7d ASYMMETRY WITH LOKI IS DELIBERATE AND HAS A VISIBLE CONSEQUENCE: a `trace_id`
+      # link in a log line older than 7 days returns "trace not found". That is structural, not a
+      # bug, and it is the first thing to check when a correlation link looks broken while both
+      # stores are healthy. (The second thing is the time shift on the datasource — see
+      # grafana/provisioning/datasources/tempo.yml.)
+      block_retention: 168h
+
+# No `metrics_generator` block. Span metrics and service graphs would need a remote-write target
+# and would produce metric names that are not in the closed catalog — the CI catalog gate fails on
+# the first `traces_spanmetrics_*` series to reach Prometheus. If a service graph is ever wanted,
+# it is a catalog PR first and a config change second.

@@ -1,0 +1,47 @@
+# Tempo datasource, and the trace→log half of the correlation chain.
+apiVersion: 1
+
+datasources:
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+
+        # Scope the log query to the trace that is open. Without it the button lands on every log
+        # line the service emitted in that window, which during an incident is thousands.
+        filterByTraceID: true
+        filterBySpanID: false
+
+        # THE ONE SETTING THAT MAKES OR BREAKS THIS LINK. Without a shift, Grafana bounds the log
+        # query to exactly the span's start and end — and the log line that describes the span is
+        # written milliseconds after it ends, or milliseconds before it starts, and falls outside
+        # by a hair. The link then returns nothing while both stores are perfectly healthy, which
+        # reads as "correlation is broken" and sends someone to debug the wrong system. An hour
+        # either side costs nothing: `filterByTraceID` has already narrowed the result to one
+        # trace, so the window only decides which chunks are read.
+        spanStartTimeShift: "-1h"
+        spanEndTimeShift: "1h"
+
+        # Map the span's resource attribute onto the Loki stream label of the same meaning. The
+        # names differ on purpose: OTel resource attributes are dotted (`service.name`), Loki
+        # labels are the four-value allow-list (`service`).
+        tags:
+          - key: "service.name"
+            value: "service"
+
+      nodeGraph:
+        enabled: true
+
+# No `serviceMap`. It reads span metrics produced by Tempo's metrics-generator, which is switched
+# off in tempo.yml because its `traces_spanmetrics_*` series are not in the closed metric catalog
+# and would fail the CI catalog gate on their first scrape. Enabling one means enabling both, plus
+# a catalog PR.
+#
+# A link that returns "trace not found", and ONLY for older logs, is not a misconfiguration: Loki
+# keeps 30 days and Tempo keeps 7, so the link is structurally dead past day 7. That asymmetry is
+# deliberate (traces are the most expensive store per byte and the least read past a week).

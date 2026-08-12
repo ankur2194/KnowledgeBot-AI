@@ -1,0 +1,22 @@
+[
+  {
+    "name": "loader BROTLI (host page pays this on every navigation)",
+    "path": "dist/loader/kb-widget.js",
+    "limit": "5 kB"
+  },
+  {
+    "name": "app shell BROTLI (includes @kb/contracts, budgeted <=1 kB of it)",
+    "path": "dist/app/assets/index-*.js",
+    "limit": "30 kB"
+  },
+  {
+    "name": "renderer BROTLI (lazy chunk: markdown-it + dompurify)",
+    "path": "dist/app/assets/renderer-*.js",
+    "limit": "60 kB"
+  },
+  {
+    "name": "app total BROTLI (backstop for a transitive dependency)",
+    "path": "dist/app/assets/*.{js,css}",
+    "limit": "100 kB"
+  }
+]

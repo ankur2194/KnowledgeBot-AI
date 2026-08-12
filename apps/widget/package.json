@@ -1,0 +1,43 @@
+{
+  "name": "@kb/widget",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The embedded widget (ADR-007): a tiny host-page loader that runs on a HOSTILE customer origin, plus a Preact chat app that runs in an iframe on <widget-domain>. Two artifacts, two Vite builds, one package. Every version is pinned EXACT (.npmrc save-exact=true) because a caret in a 5 kB budget is a build gate that moves on its own.",
+  "scripts": {
+    "dev": "vite --mode app",
+    "build": "pnpm run build:loader && pnpm run build:app",
+    "build:loader": "vite build --mode loader",
+    "build:app": "vite build --mode app",
+    "preview": "vite preview --mode app",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "e2e": "playwright test",
+    "size": "size-limit"
+  },
+  "dependencies": {
+    "@kb/contracts": "workspace:*",
+    "@kb/design-tokens": "workspace:*",
+    "dompurify": "3.4.13",
+    "markdown-it": "15.0.0",
+    "preact": "10.29.8"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@preact/preset-vite": "2.10.6",
+    "@size-limit/file": "13.0.3",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/markdown-it": "14.1.2",
+    "@types/node": "22.15.3",
+    "eslint": "9.36.0",
+    "eslint-plugin-security": "3.0.1",
+    "prettier": "3.6.2",
+    "size-limit": "13.0.3",
+    "tailwindcss": "4.3.3",
+    "typescript": "5.9.2",
+    "typescript-eslint": "8.40.0",
+    "vite": "8.2.0",
+    "vitest": "4.1.10"
+  }
+}

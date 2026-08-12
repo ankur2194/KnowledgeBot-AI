@@ -1,0 +1,45 @@
+{
+  "$schema": "https://raw.githubusercontent.com/expo/eas-cli/main/packages/eas-json/schema/eas.schema.json",
+  "cli": {
+    "version": ">= 16.0.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "channel": "development",
+      "env": {
+        "EXPO_PUBLIC_API_ORIGIN": "http://localhost:8080"
+      },
+      "ios": { "simulator": true },
+      "android": { "buildType": "apk" }
+    },
+    "preview": {
+      "distribution": "internal",
+      "channel": "preview",
+      "env": {
+        "EXPO_PUBLIC_API_ORIGIN": "https://api.staging.knowledgebot.ai"
+      },
+      "android": { "buildType": "apk" }
+    },
+    "production": {
+      "distribution": "store",
+      "channel": "production",
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_API_ORIGIN": "https://api.knowledgebot.ai"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  },
+  "//profiles": {
+    "development": "Dev client only. It is the ONLY profile whose EXPO_PUBLIC_API_ORIGIN is cleartext, and the ONLY one for which plugins/with-api-origin-pinning relaxes ATS and the Android network security config — and it relaxes them for hard-coded loopback hosts, not for whatever origin is configured. There is no runtime server-URL switch in this app.",
+    "preview": "Internal distribution (TestFlight / internal APK). Same native posture as production: HTTPS only, cleartext refused. This is the profile that must reproduce a production streaming session, because a simulator on the development profile can hide an ATS mistake.",
+    "production": "Store distribution. `appVersionSource: remote` plus `autoIncrement` keeps the build number off the working tree, so two people cannot ship the same buildNumber from two branches.",
+    "no-secrets-here": "Every `env` value above is inlined into the JS bundle by babel-preset-expo and is readable by anyone who downloads the app. Nothing that is not already public may appear in these blocks — no provider credential, no internal HMAC key, no FastAPI hostname. Secrets that a BUILD genuinely needs (store credentials) live in EAS secrets, never in this file.",
+    "channels-vs-updates": "The `channel` keys are declared so an OTA channel exists the day code signing does. `updates.enabled` is false in app.config.ts until the certificate is embedded and the private key lives outside this repo; see the comment block there."
+  }
+}

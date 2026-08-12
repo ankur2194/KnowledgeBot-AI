@@ -1,0 +1,154 @@
+# infrastructure/docker/otel/metric-allowlist.yaml
+#
+# A Collector config FRAGMENT, merged with collector.yaml by passing both as --config. It is a
+# separate file for one reason: CI diffs it against the metric catalog
+# (.claude/skills/kb-observability-conventions/references/metric-catalog.md) without having to
+# parse a 200-line pipeline, and adding an instrument becomes a visible one-file change.
+#
+# ================================================================================================
+# THE CATALOG IS CLOSED. This file is its enforcement at the wire.
+# ================================================================================================
+# Metric and span names are PERMANENT — they compile into recording rules, alerts, dashboards and
+# runbooks, so renaming one is a migration with a dual-write window, not an edit. Adding a metric
+# is therefore: (1) a PR to the catalog, (2) then the instrument in code, created at MODULE IMPORT
+# so a freshly booted service exposes it, (3) then a line here. In that order.
+#
+# ------------------------------------------------------------------------------------------------
+# TWO VOCABULARIES, AND WHY THE NAMES BELOW LOOK "WRONG"
+# ------------------------------------------------------------------------------------------------
+# Names here are OTLP INSTRUMENT names: dotted, and with NO unit suffix. Units are declared on the
+# instrument (`unit="s"`), never written into the name. The Prometheus exporter's default
+# translation (UnderscoreEscapingWithSuffixes) is what produces the names every rule and dashboard
+# uses:
+#       kb.chat.requests          (counter)      ->  kb_chat_requests_total
+#       kb.chat.first_token       (unit "s")     ->  kb_chat_first_token_seconds
+#       kb.chat.active_streams    (gauge)        ->  kb_chat_active_streams
+# Writing `kb.chat.first_token_seconds` here is the classic own-goal: the OTLP->Prometheus rule
+# only *SHOULD* skip a suffix the name already ends with, so you get kb_chat_first_token_seconds_
+# seconds and no query in the repo matches.
+#
+# ------------------------------------------------------------------------------------------------
+# WHY AN ALLOW-LIST AND NOT A `kb.*` REGEXP
+# ------------------------------------------------------------------------------------------------
+# A regexp would let any new kb.* instrument through, which defeats the point — the catalog diff
+# would then be the only gate, and it runs after the metric already exists in production data.
+# strict matching means an uncatalogued instrument is dropped at the Collector and shows up as a
+# missing panel rather than as unbounded series growth.
+#
+# It also catches what the SDK emits that nobody in this repo wrote: CeleryInstrumentor registers
+# `flower.task.runtime.seconds` (a name that ends in its unit AND declares unit="seconds"), and the
+# ASGI instrumentation registers `http.server.*`. Suppress those at the SDK with a
+# NoOpMeterProvider as well — two lines of defence, because the CI diff fails on either leaking.
+#
+# ------------------------------------------------------------------------------------------------
+# NOT LISTED, DELIBERATELY: infrastructure metrics.
+# ------------------------------------------------------------------------------------------------
+# CPU/memory/disk (node_exporter, cAdvisor), database connections (postgres_exporter), Valkey
+# memory (redis_exporter), Qdrant collection size (Qdrant's own /metrics), object-storage usage
+# (SeaweedFS), worker concurrency (Celery exporter, Horizon) are scraped by Prometheus DIRECTLY
+# from those exporters. Re-exporting them as kb_* produces two numbers for one fact that disagree
+# during exactly the incident you need them for. There is no kb_cpu_percent, no kb_db_connections,
+# no kb_valkey_memory_bytes, no kb_qdrant_points, no kb_storage_bytes, no kb_workers_active.
+
+processors:
+  filter/metrics:
+    error_mode: ignore
+    metrics:
+      include:
+        match_type: strict
+        metric_names:
+          # ---------- chat (exposed: kb_chat_*) ----------
+          - kb.chat.requests                       # -> kb_chat_requests_total   {operation,outcome,error_class}
+          - kb.chat.first_token                    # -> kb_chat_first_token_seconds {model}
+          - kb.chat.duration                       # -> kb_chat_duration_seconds {outcome}
+          - kb.chat.answers                        # -> kb_chat_answers_total {finish_reason}
+          - kb.chat.active_streams                 # -> kb_chat_active_streams (a monotonic climb is a leaked finalizer)
+          - kb.chat.fallbacks                      # -> kb_chat_fallbacks_total {from_model,to_model,error_class}
+
+          # ---------- retrieval (exposed: kb_retrieval_*) ----------
+          - kb.retrieval.duration                  # -> kb_retrieval_duration_seconds {stage}
+          - kb.retrieval.empty                     # -> kb_retrieval_empty_total {reason}
+          - kb.retrieval.candidates                # -> kb_retrieval_candidates {stage}
+          - kb.retrieval.evidence_selected         # -> kb_retrieval_evidence_selected
+          - kb.retrieval.evidence_score            # -> kb_retrieval_evidence_score
+          - kb.retrieval.rerank_skips              # -> kb_retrieval_rerank_skips_total {reason}
+                                                   #    How often stage 11 did not run, and why. `reason` is
+                                                   #    RerankSkipReason, closed at FIVE: provider_lacks_capability,
+                                                   #    provider_scale_uncalibrated, model_not_configured,
+                                                   #    disabled_by_configuration, insufficient_deadline — all
+                                                   #    decidable BEFORE the call and none of them an error. A
+                                                   #    provider outage is an error with its own error_class and has
+                                                   #    no member here, which is what stops an incident being
+                                                   #    laundered into a skip. The label VALUES are not enforced by
+                                                   #    this file — it matches metric NAMES only — so the closed set
+                                                   #    lives in app/rag/rerank.py and in the metric catalog, and
+                                                   #    this comment is a copy that goes stale silently. Check it
+                                                   #    against `RerankSkipReason`, not the other way round.
+                                                   #    This family is deliberately paired with NO alert: under
+                                                   #    ADR-030 reranking is capability-gated, so the gap is a
+                                                   #    permanent expected fact for some tenants, and alerting on a
+                                                   #    condition that is always true is how a rotation learns to
+                                                   #    ignore alerts. It is a counter and a panel instead.
+
+          # ---------- providers (exposed: kb_provider_*) ----------
+          - kb.provider.requests                   # -> kb_provider_requests_total {provider,model,outcome,error_class}
+          - kb.provider.duration                   # -> kb_provider_duration_seconds {provider,model}
+          - kb.provider.first_token                # -> kb_provider_first_token_seconds — ATTRIBUTION ONLY, never the SLO
+          - kb.provider.tokens                     # -> kb_provider_tokens_total {provider,model,token_type}
+          - kb.provider.cost_usd                   # -> kb_provider_cost_usd_total — an ESTIMATE; the usage table is billing truth
+
+          # ---------- ingestion & embedding (exposed: kb_ingestion_*, kb_embedding_*, kb_vector_*) ----------
+          - kb.queue.depth                         # -> kb_queue_depth {queue}. Queue NAMES, never connection names:
+                                                   #    valkey/valkey-long each carry two queues, and labelling by
+                                                   #    connection hides a wedged `exports` behind a healthy `maintenance`.
+          - kb.ingestion.jobs                      # -> kb_ingestion_jobs_total {file_type,outcome,error_class}
+          - kb.ingestion.stage_duration            # -> kb_ingestion_stage_duration_seconds {stage,file_type}
+          - kb.ingestion.retries                   # -> kb_ingestion_retries_total {stage,error_class}
+          - kb.ingestion.pages                     # -> kb_ingestion_pages_total {file_type}
+          - kb.ingestion.ocr_pages                 # -> kb_ingestion_ocr_pages_total {engine,DISPOSITION}
+          - kb.embedding.chunks                    # -> kb_embedding_chunks_total {model,kind}
+          - kb.embedding.batch_duration            # -> kb_embedding_batch_duration_seconds {model,kind}
+          - kb.vector.upsert_duration              # -> kb_vector_upsert_duration_seconds {collection}
+          - kb.vector.upsert_points                # -> kb_vector_upsert_points_total {collection,outcome}
+          - kb.version.publications                # -> kb_version_publications_total {outcome}
+
+          # ---------- crawl (exposed: kb_crawl_*) ----------
+          - kb.crawl.pages                         # -> kb_crawl_pages_total {DISPOSITION}
+          - kb.crawl.runs                          # -> kb_crawl_runs_total {outcome}
+          - kb.crawl.duration                      # -> kb_crawl_duration_seconds
+          - kb.crawl.fetch_duration                # -> kb_crawl_fetch_duration_seconds
+          - kb.crawl.responses                     # -> kb_crawl_responses_total {status_class} — never host, never URL
+          - kb.crawl.robots_blocked                # -> kb_crawl_robots_blocked_total {reason} (8 values; a missing enum
+                                                   #    value sends those rejections to no counter at all, so the SSRF
+                                                   #    guard looks quieter than it is)
+          - kb.crawl.sources_overdue               # -> kb_crawl_sources_overdue
+
+          # ---------- cross-cutting (exposed: kb_build_info, kb_dependency_up, ...) ----------
+          - kb.build_info                          # -> kb_build_info {version,git_sha,contract_version}; value always 1
+          - kb.dependency.up                       # -> kb_dependency_up {dependency,required}
+          - kb.circuit_breaker.state               # -> kb_circuit_breaker_state {dependency}: 0 closed, 1 half-open, 2 open
+          - kb.internal.requests                   # -> kb_internal_requests_total {operation,outcome,error_class,status_class}
+          - kb.internal.scheduler_tick_timestamp   # -> kb_internal_scheduler_tick_timestamp_seconds {task}
+                                                   #    Exported by the ALWAYS-SCRAPED API from a PostgreSQL row seeded in
+                                                   #    the migration — never by the scheduler, which has no scrape target.
+                                                   #    A series that never existed cannot be threshold-alerted.
+          - kb.internal.scheduler_tasks            # -> kb_internal_scheduler_tasks_total {task,outcome}
+                                                   #    The ONE family where outcome may be `skipped`.
+
+# ================================================================================================
+# LABEL RULES THIS FILE CANNOT ENFORCE — asserted at the instrument wrapper instead
+# ================================================================================================
+# `org_id`, `bot_id`, `user_id`, `conversation_id`, `message_id`, `source_id`, `job_id`,
+# `chunk_id`, `url`, and any user question, query or filename are BANNED as labels. Series count is
+# the PRODUCT of every label's cardinality, and a histogram multiplies that again by buckets+2 —
+# 800 orgs on an 11-bucket histogram is ~10k series from one metric. Prometheus has no per-tenant
+# series cap: the only guardrail is sample_limit, which is a CLIFF, not a throttle. Exceed it and
+# the ENTIRE SCRAPE fails, so one bad deploy deletes the job's metrics rather than degrading them,
+# and it does not recover on revert because the series sit in the head block for the retention
+# window. Per-tenant numbers come from PostgreSQL aggregates, never from PromQL.
+#
+# Note also the `outcome` vs `disposition` split marked above. `kb_crawl_pages_total` and
+# `kb_ingestion_ocr_pages_total` use `disposition` because their result sets are not the shared
+# four (success/error/timeout/cancelled). Renaming either to `outcome` drops the whole family out
+# of `outcome=~"error|timeout"`, and the error rate then reads healthy through a crawl outage in
+# which a third of pages fail — valid PromQL, existing series, a smaller sum, nothing logged.

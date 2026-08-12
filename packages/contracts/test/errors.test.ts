@@ -1,0 +1,284 @@
+import { describe, expect, it } from 'vitest';
+
+import { ERROR_CLASSES, STREAM_LOST, isErrorClass } from '../src/error-classes.js';
+import { KbError, parseRetryAfter, toKbError } from '../src/errors.js';
+
+/**
+ * A stand-in for the three members `toKbError` reads. Not a `Response`: the whole reason the
+ * parameter is structural is that `apps/mobile` hands it an `expo/fetch` response, which is a
+ * different type from the DOM `Response` `apps/web` hands it.
+ */
+const responseLike = (
+  status: number,
+  headers: Record<string, string>,
+  body: () => Promise<unknown>,
+) => ({
+  status,
+  headers: { get: (name: string) => headers[name.toLowerCase()] ?? null },
+  json: body,
+});
+
+describe('the 18 classes', () => {
+  it('is exactly 18 and does not contain the client-local sentinel', () => {
+    expect(ERROR_CLASSES).toHaveLength(18);
+    expect(new Set(ERROR_CLASSES).size).toBe(18);
+    expect(isErrorClass(STREAM_LOST)).toBe(false);
+  });
+});
+
+describe('KbError', () => {
+  it('carries the envelope field names verbatim, snake_case', () => {
+    const error = new KbError('rate_limit', true, 30, '01JABCDEF', 'upstream said no');
+    expect(error.error_class).toBe('rate_limit');
+    expect(error.retry_after).toBe(30);
+    expect(error.request_id).toBe('01JABCDEF');
+    // The camelCase spellings are the bug that turns every retryable class permanent.
+    expect((error as unknown as Record<string, unknown>)['errorClass']).toBeUndefined();
+    expect((error as unknown as Record<string, unknown>)['retryAfter']).toBeUndefined();
+  });
+
+  /**
+   * ADR-029 / finding O1. `origin` is not a wire field and there is nothing on `KbError` to branch
+   * on — which is exactly why this is asserted here. The two `internal_dependency` sub-cases are
+   * indistinguishable by class name; `retryable` is the only thing that separates them, so any
+   * consumer deriving retryability from `error_class` alone is wrong for this row.
+   */
+  it('carries both internal_dependency sub-cases under one class name', () => {
+    const downstream = new KbError('internal_dependency', true); // 503
+    const ourDefect = new KbError('internal_dependency', false); // 500
+    expect(downstream.error_class).toBe(ourDefect.error_class);
+    expect(downstream.retryable).toBe(true);
+    expect(ourDefect.retryable).toBe(false);
+    // No `origin` anywhere on the instance: it selects a status and a flag, and both already exist.
+    expect((ourDefect as unknown as Record<string, unknown>)['origin']).toBeUndefined();
+  });
+
+  it('is an Error and survives instanceof — the retry predicate depends on it', () => {
+    const error = new KbError(null, false);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toBeInstanceOf(KbError);
+    expect(error.message).toBe('unknown');
+  });
+});
+
+describe('parseRetryAfter', () => {
+  it('reads delta-seconds', () => {
+    expect(parseRetryAfter('30')).toBe(30);
+    expect(parseRetryAfter(' 30 ')).toBe(30);
+  });
+
+  it('reads an HTTP-date', () => {
+    const seconds = parseRetryAfter(new Date(Date.now() + 30_000).toUTCString());
+    expect(seconds).toBeGreaterThan(27);
+    expect(seconds).toBeLessThanOrEqual(30);
+  });
+
+  it('clamps a past date to zero rather than returning a negative delay', () => {
+    expect(parseRetryAfter(new Date(Date.now() - 60_000).toUTCString())).toBe(0);
+  });
+
+  it('returns null for absent or unparseable headers', () => {
+    expect(parseRetryAfter(null)).toBeNull();
+    expect(parseRetryAfter('')).toBeNull();
+    expect(parseRetryAfter('soon')).toBeNull();
+    expect(parseRetryAfter('1e3')).toBeNull();
+  });
+});
+
+/**
+ * `toKbError` lives here rather than in either app because the mapping is now needed identically by
+ * `apps/web` and `apps/mobile`. Every assertion below is about a field that has NO visible symptom
+ * when it is wrong: a dropped `retry_after` retries inside the window it was told to wait, a
+ * re-derived `retryable` retries a defect forever, and an invented class name on a malformed
+ * response pages somebody.
+ */
+describe('toKbError', () => {
+  const envelope = {
+    error_class: 'rate_limit',
+    message: 'bucket kb:rl:org_01J:bot_01K exhausted on node api-7.internal',
+    retryable: true,
+    request_id: '01JREQ',
+  };
+
+  it('carries the envelope through and takes retry_after off the HEADER, not the JSON', async () => {
+    const error = await toKbError(
+      responseLike(429, { 'retry-after': '30' }, () => Promise.resolve(envelope)),
+    );
+
+    expect(error).toBeInstanceOf(KbError);
+    expect(error.error_class).toBe('rate_limit');
+    expect(error.retryable).toBe(true);
+    expect(error.request_id).toBe('01JREQ');
+    // 30 SECONDS. The envelope has no such key, so a mapper that only reads the body silently
+    // produces null and the caller retries immediately, inside the window it was told to wait.
+    expect(error.retry_after).toBe(30);
+    // Operator-facing: it carries an internal hostname. Kept on the instance to be logged, never
+    // rendered — the UI shows a class-mapped sentence plus the request_id.
+    expect(error.message).toContain('api-7.internal');
+  });
+
+  it('is a straight carry of `retryable`, never a re-derivation from the class name', async () => {
+    // The `self` sub-case: an unmapped exception in our own code, 500, NOT retryable, under the
+    // same class name as the 503 brownout. The axis is deliberately not on the wire (ADR-029), so
+    // the flag is the only thing that can say it.
+    const error = await toKbError(
+      responseLike(500, {}, () =>
+        Promise.resolve({
+          error_class: 'internal_dependency',
+          message: 'TypeError',
+          retryable: false,
+        }),
+      ),
+    );
+
+    expect(error.error_class).toBe('internal_dependency');
+    expect(error.retryable).toBe(false);
+  });
+
+  it('yields error_class null when no envelope parsed — never an invented class', async () => {
+    const notJson = await toKbError(
+      responseLike(502, {}, () => Promise.reject(new SyntaxError('Unexpected token <'))),
+    );
+    expect(notJson.error_class).toBeNull();
+    expect(notJson.retryable).toBe(false);
+    expect(notJson.message).toBe('HTTP 502');
+
+    // A body that IS JSON but is not our envelope is the same verdict. `internal_dependency` would
+    // be the tempting guess for a 502 and it is the worst one available: retryable AND it pages.
+    const wrongShape = await toKbError(
+      responseLike(502, {}, () => Promise.resolve({ error: 'Bad Gateway' })),
+    );
+    expect(wrongShape.error_class).toBeNull();
+    expect(wrongShape.retryable).toBe(false);
+  });
+
+  it('keeps retry_after from an unparseable body — the header is valid either way', async () => {
+    const error = await toKbError(
+      responseLike(503, { 'retry-after': '120' }, () => Promise.reject(new Error('empty body'))),
+    );
+    expect(error.error_class).toBeNull();
+    expect(error.retry_after).toBe(120);
+  });
+
+  it('defaults request_id to null when neither the envelope nor a header carries one', async () => {
+    const error = await toKbError(
+      responseLike(403, {}, () =>
+        Promise.resolve({ error_class: 'authorization', message: 'denied', retryable: false }),
+      ),
+    );
+    expect(error.request_id).toBeNull();
+    expect(error.retry_after).toBeNull();
+  });
+});
+
+/**
+ * `X-KB-Request-Id` (finding #69b). `request_id` is the ONE identifier a user is ever shown and the
+ * one string a support engineer can grep across both planes — and before this it was read only off
+ * the parsed envelope, so it was null on exactly the failures people have to debug: a proxy's 502
+ * page, a truncated body, an authentication envelope stamped before the id was bound.
+ *
+ * Every assertion below is about a value with NO visible symptom when it is wrong. A dropped
+ * request_id does not throw; `endUserCopy` simply drops the "(ref …)" suffix, and the user reports
+ * "Something went wrong" with nothing attached.
+ */
+describe('toKbError and the X-KB-Request-Id header', () => {
+  it('reads it off the header when NO envelope parsed — the whole point of that branch', async () => {
+    // The proxy page: an HTML 502 that never had an envelope. Laravel/Traefik still stamped the
+    // header, so there is a reference to hand support even though the body is unparseable.
+    const error = await toKbError(
+      responseLike(502, { 'x-kb-request-id': '01JPROXY' }, () =>
+        Promise.reject(new SyntaxError('Unexpected token <')),
+      ),
+    );
+
+    expect(error.error_class).toBeNull();
+    expect(error.retryable).toBe(false);
+    expect(error.request_id).toBe('01JPROXY');
+  });
+
+  it('reads it off the header for a body that is JSON but is not our envelope', async () => {
+    const error = await toKbError(
+      responseLike(503, { 'x-kb-request-id': '01JGATEWAY' }, () =>
+        Promise.resolve({ error: 'Service Unavailable' }),
+      ),
+    );
+    expect(error.error_class).toBeNull();
+    expect(error.request_id).toBe('01JGATEWAY');
+  });
+
+  it('prefers the ENVELOPE when the two disagree', async () => {
+    // They agree by construction — one middleware mints both — so a disagreement means a hop in
+    // between re-stamped the header. The envelope's value was written by the code that classified
+    // the failure and logged it under that id, so that is the one support can search for.
+    const error = await toKbError(
+      responseLike(429, { 'x-kb-request-id': '01JRELAY' }, () =>
+        Promise.resolve({
+          error_class: 'rate_limit',
+          message: 'bucket exhausted',
+          retryable: true,
+          request_id: '01JORIGIN',
+        }),
+      ),
+    );
+    expect(error.request_id).toBe('01JORIGIN');
+  });
+
+  it('falls back to the header when the envelope carries request_id: NULL', async () => {
+    // Not hypothetical (5B-S2): FastAPI's `verify_hmac` runs before `request_context` stamps the
+    // id, so every authentication-failure envelope from that plane carries an explicit null today.
+    // `??` treats that as an absence rather than a decision, which is the only reading that leaves
+    // a reference on the error people are most likely to be looking at.
+    const error = await toKbError(
+      responseLike(401, { 'x-kb-request-id': '01JHEADER' }, () =>
+        Promise.resolve({
+          error_class: 'authentication',
+          message: 'signature mismatch',
+          retryable: false,
+          request_id: null,
+        }),
+      ),
+    );
+    expect(error.error_class).toBe('authentication');
+    expect(error.request_id).toBe('01JHEADER');
+  });
+
+  it('falls back to the header when the envelope omits the key entirely', async () => {
+    const error = await toKbError(
+      responseLike(403, { 'x-kb-request-id': '01JHEADER' }, () =>
+        Promise.resolve({ error_class: 'authorization', message: 'denied', retryable: false }),
+      ),
+    );
+    expect(error.request_id).toBe('01JHEADER');
+  });
+
+  it('is case-insensitive on the header name, as HTTP is', async () => {
+    // `Headers.get` lowercases; a hand-rolled record (apps/mobile's expo/fetch response, the
+    // fixture above) may not. Reading the lowercase spelling is what makes both work.
+    const error = await toKbError(
+      responseLike(500, { 'X-KB-Request-Id': '01JMIXED' } as Record<string, string>, () =>
+        Promise.reject(new Error('empty body')),
+      ),
+    );
+    // The fixture's `get` lowercases the lookup key, so a mixed-case RECORD key does NOT match —
+    // which is the honest simulation of a client that does not normalize. Asserted so the next
+    // reader does not mistake this for the DOM `Headers` behaviour.
+    expect(error.request_id).toBeNull();
+  });
+
+  it('treats a present-but-blank header as an absence, not as an id', async () => {
+    // `''` is truthy enough for `??` to keep it, and the user would be shown "(ref )".
+    const error = await toKbError(
+      responseLike(500, { 'x-kb-request-id': '   ' }, () => Promise.reject(new Error('no body'))),
+    );
+    expect(error.request_id).toBeNull();
+  });
+
+  it('trims surrounding whitespace, exactly as parseRetryAfter does', async () => {
+    const error = await toKbError(
+      responseLike(500, { 'x-kb-request-id': ' 01JPADDED ' }, () =>
+        Promise.reject(new Error('no body')),
+      ),
+    );
+    expect(error.request_id).toBe('01JPADDED');
+  });
+});

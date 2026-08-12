@@ -1,0 +1,9 @@
+Vitest Browser Mode (chromium) specs: rendering, accessible names and roles, focus and keyboard
+paths (§8.18), the markdown -> DOMPurify sanitizer output, and streaming RENDER behaviour against
+tests/fixtures/sse-server.ts.
+
+May never assert a tenancy claim: a mocked transport cannot leak. Isolation is Playwright's, and
+citing a component test as isolation coverage is how a suite becomes decoration.
+
+Async Server Components stay out of Vitest entirely — Next's own guide says they are unsupported.
+That costs nothing here, because server components render only org-neutral chrome.

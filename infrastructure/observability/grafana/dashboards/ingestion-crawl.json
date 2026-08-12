@@ -1,0 +1,270 @@
+{
+  "uid": "kb-ingestion-crawl",
+  "title": "Ingestion & Crawl",
+  "tags": ["kb"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "timezone": "utc",
+  "refresh": "1m",
+  "time": { "from": "now-12h", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Queue depth by queue",
+      "description": "Every queue in BOTH runtimes: Celery's ingest, embed, crawl, evaluate, maintenance and Laravel's ai-dispatch, notify, maintenance, exports. The label is the queue NAME, never a connection name — `valkey` and `valkey-long` are Laravel connections carrying two queues each, and labelling by connection merges two backlogs so a wedged `exports` hides behind a healthy `maintenance`. `maintenance` exists in both runtimes and is disambiguated by `service`.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (service, queue) (kb_queue_depth)"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Ingestion jobs by file_type and outcome",
+      "description": "file_type is a fixed enum from the supported-format list with everything else folded to `other` — a tenant-supplied extension is not a label value.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (file_type, outcome) (rate(kb_ingestion_jobs_total[5m]))"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Ingestion stage duration, p95 by stage and file_type (seconds)",
+      "description": "Which of the 17 stages is slow, for which format. The stage list is the safe retry boundaries plus their substages: acquire, validate, hash, store, parse, ocr, normalize, clean, enrich, chunk, embed, sparse, upsert, verify, activate, retire, invalidate.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le, stage, file_type) (rate(kb_ingestion_stage_duration_seconds_bucket[5m])))"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Ingestion retries by stage and error_class",
+      "description": "Retries climbing against a flat success rate is the fingerprint of a PERMANENT error misfiled as temporary — it retries to the attempt cap, lands in failed_jobs, and an operator retries it again.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (stage, error_class) (rate(kb_ingestion_retries_total[5m]))"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Pages ingested per minute by file_type",
+      "description": "Pages per minute is a rate() expression, deliberately: the counter stores events so the window can be changed and the series summed. A stored per-minute rate can be neither re-windowed nor added.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (file_type) (rate(kb_ingestion_pages_total[5m])) * 60"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "OCR pages by engine and disposition",
+      "description": "disposition, NOT outcome: an OCR page is success, partial or error, and a partially-OCR'd page is a real third result rather than a failure. A family whose results are not the shared four names its label disposition so it cannot silently fall outside the error-rate matcher.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (engine, disposition) (rate(kb_ingestion_ocr_pages_total[5m]))"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Embedded chunks per second by model and kind",
+      "description": "kind is dense or sparse — one document produces both, from one model.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (model, kind) (rate(kb_embedding_chunks_total[5m]))"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Embedding batch duration, p95 (seconds)",
+      "description": "One metric for two budgets: the 5 s query-embedding budget on the chat path and the ingestion batch cost. They are the same operation at different batch sizes, which is why they share an instrument.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le, model, kind) (rate(kb_embedding_batch_duration_seconds_bucket[5m])))"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Vector upsert duration, p95 by collection (seconds)",
+      "description": "collection is bounded — one per embedding model, shared across tenants. Tenant separation inside a collection is the four mandatory payload filters, not a collection per org.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le, collection) (rate(kb_vector_upsert_duration_seconds_bucket[5m])))"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Vector points written vs failed",
+      "description": "Pairs with the verification count: Qdrant is a derived index, so a failed upsert is recoverable from stored normalized chunks and is not data loss.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (collection, outcome) (rate(kb_vector_upsert_points_total[5m]))"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Source version publications",
+      "description": "Active-version pointer switches versus verification failures. A version becomes searchable only after it is fully indexed and verified; the previous version serves until then, so a failure here is invisible to users and must not be invisible here.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (outcome) (rate(kb_version_publications_total[5m]))"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Crawl runs by outcome",
+      "description": "Run-level success. Per-PAGE results live on kb_crawl_pages_total with a disposition label, deliberately kept apart from this.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (outcome) (rate(kb_crawl_runs_total[5m]))"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Crawl pages by disposition",
+      "description": "disposition, NOT outcome — six per-page results: discovered, changed, unchanged, skipped, missing, failed. Two of those are failures that are not in the shared four, so an `outcome` label here would place every crawl failure outside the error-rate matcher and the error rate would read healthy while pages fail.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (disposition) (rate(kb_crawl_pages_total[5m]))"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Crawl responses by status_class",
+      "description": "status_class is 2xx, 3xx, 4xx, 5xx or network. Never the host and never the URL: a crawl target set is tenant-controlled and therefore unbounded, and a URL label is the fastest way to take the metrics backend down.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (status_class) (rate(kb_crawl_responses_total[5m]))"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Crawl rejections by reason (robots and SSRF guard)",
+      "description": "The guard rejects for all eight reasons — robots, scheme, credentials, dns, private_ip, redirect, content_type, size — and an enum missing one sends those rejections to no counter at all, so the SSRF guard looks quieter than it is.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 56 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (reason) (rate(kb_crawl_robots_blocked_total[5m]))"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Per-URL fetch duration, p95 (seconds)",
+      "description": "Against the 20 s per-URL timeout. A p95 pressed against 20 s means the crawl is spending its run budget on timeouts rather than pages.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 56 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(kb_crawl_fetch_duration_seconds_bucket[5m])))"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Crawl run duration, p95 (seconds)",
+      "description": "Whole-run duration, on the job-duration bucket set (1 s to 900 s). Read alongside the crawl queue depth on this dashboard: long runs plus a growing queue is a concurrency problem, long runs alone is a target problem.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 64 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(kb_crawl_duration_seconds_bucket[5m])))"
+        }
+      ]
+    }
+  ]
+}

@@ -39,7 +39,7 @@ Valkey is a fork of Redis 7.2 under the Linux Foundation (BSD-3), and half the e
 
 ### The grammar
 
-`{family}:{org_id}:{scope…}:{discriminator}` — family first so a family is greppable, ACL-matchable (`~ans:*`) and countable; org second, always. It matches `idem:`/`lock:` as already fixed by `kb-error-taxonomy`, and it realizes `kb-tenancy-isolation`'s `kb:{org_id}:{bot_id}:…` sketch with a concrete family token in place of the literal `kb:`. Never build a segment from a user-chosen string (a bot slug, a source name); use ULIDs and hex digests only. An org-wide purge iterates the thirteen known families by prefix — deterministic, and unlike a `SCAN MATCH kb:{org}:*` sweep it cannot miss a key written mid-iteration.
+`{family}:{org_id}:{scope…}:{discriminator}` — family first so a family is greppable, ACL-matchable (`~ans:*`) and countable; org second, always. It matches `idem:`/`lock:` as already fixed by `kb-error-taxonomy`, and it realizes `kb-tenancy-isolation`'s `kb:{org_id}:{bot_id}:…` sketch with a concrete family token in place of the literal `kb:`. Never build a segment from a user-chosen string (a bot slug, a source name); use ULIDs and hex digests only. An org-wide purge iterates every **org-scoped** family in the catalog table by prefix — the Celery, Laravel-queue and Horizon families carry no org segment and are not part of it — which is deterministic, and unlike a `SCAN MATCH kb:{org}:*` sweep it cannot miss a key written mid-iteration.
 
 > `laravel-sanctum-auth` currently mints widget sessions at `kb:{org_id}:sdk:sess:{sha256}` — org-first. That is the one shipped key that does not match this grammar; it should become `sess:{org_id}:{bot_id}:{sha256}`. Flagged, not silently rewritten.
 
@@ -65,10 +65,62 @@ Value shapes, sizing arithmetic and the rate-limiter Lua are in **[references/ke
 | Laravel default cache store | `{APP}_cache_*` — `Cache::lock()`, `WithoutOverlapping`, `RateLimiter`, scheduler mutexes (`framework/schedule-*`) | per entry | **core db 0** | core-api | framework |
 | Horizon | `horizon:*` | mixed | core db 3 | core-api | metrics retention |
 | Celery broker | `{ingest\|embed\|crawl\|evaluate\|maintenance}`, `unacked`, `unacked_index`, `_kombu.binding.*`, `*.pidbox` | none | core db 1 | ai-service | queue depth × payload; unacked ≈ in-flight × visibility timeout |
+| Celery priority sub-queues | `{queue}\x06\x16{3\|6\|9}` — one list per non-zero priority step | none | core db 1 | ai-service | as the base queue |
+| Celery QoS restore mutex | `unacked_mutex` | `PX 300000` while held | core db 1 | ai-service | exactly one, fleet-wide |
+| Celery remote-control replies | `{uuid}.reply.celery.pidbox` and `{uuid}.reply.celery.pidbox\x06\x16{3\|6\|9}` | none — `DEL`ed by the caller | core db 1 | ai-service | one per in-flight `inspect`/`control` call |
+| Celery fanout **channels** (not keys) | `/{db}.celery.pidbox`, `/{db}.celeryev/worker.*` | n/a — pub/sub | core, **not** DB-scoped | ai-service | n/a |
 
 `rl` scopes are `bot`, `origin`, `session`, `ip` — all four checked together in one call, per `kb-security-baseline` §18.5; the limits and the `by()` composition are `laravel-sanctum-auth`'s, the physical key, TTL and eviction posture are this file's. `nonce` is the one family with no org segment, and the reason is ordering: **the replay check runs as part of signature verification, before any organization has been resolved.** Keying it on `X-KB-Org-Id` would make replay protection depend on a value that verification has not yet established, which inverts the trust order. It keys on the signing `key_id` and the `X-KB-Request-Id` ULID instead — globally unique, so an org segment would add no isolation. (This file originally justified the exception by `X-KB-Org-Id` being outside the HMAC canonical string. That was a correct reading of the contract and a real vulnerability: the tenant scope of every data-plane call was forgeable. `kb-internal-api-contracts` now signs the full `X-KB-*` header set, so the header is trustworthy — but it is trustworthy only *after* verification, which is why the key stays as it is.)
 
 **Laravel's default cache store is on `valkey-core`, not on the cache instance.** `Cache::lock()`, `WithoutOverlapping`, `RateLimiter`, and both scheduler mutexes live in the *default* store, and every one of them fails **open** when its key disappears (`laravel-queues-valkey`, `laravel-scheduler`). The evicting instance is reachable from Laravel only as an explicitly named store — `Cache::store('ephemeral')` — used for `cfg:` and `quota:` and nothing else.
+
+### The four Celery families this table used to omit
+
+They are listed above; this is why each is a family in its own right rather than a footnote to the
+broker row. All four were established by running `celery -A app.worker worker` and `beat` on the
+pinned **celery 5.6.3 / kombu 5.6.2 / redis-py 6.4.0** against a throwaway Valkey 9.1.1 with
+`MONITOR` attached, using `app/worker/config.py` unmodified — not read off a list. The stack's own
+`valkey/users.acl` already grants all four; **the ACL was ahead of this document**, which is the
+shape of the defect: the deployment depended on families the catalog did not name, so a reviewer
+checking the ACL against the catalog would have deleted a working grant.
+
+- **`{queue}\x06\x16{3|6|9}` — the priority sub-queues.** kombu's redis transport splits every queue
+  across `priority_steps = [0, 3, 6, 9]`, separator `\x06\x16`; priority 0 is the bare name and the
+  other three get the suffix. **Every `BRPOP` polls all four names on every poll cycle** even though
+  nothing in `services/ai-service` sets a priority today, so the three suffixed keys are always in
+  the consumer's key set and never in its data. Two consequences: an ACL granting only `~ingest`
+  gives the worker `NOPERM` on its own `BRPOP` and it consumes nothing (hence `~ingest??[369]` —
+  `??` is the two-byte separator); and `LLEN ingest` is not the queue depth the moment anyone does
+  pass `priority=`, because kombu sums all four.
+- **`unacked_mutex` — the QoS restore lock.** `SET unacked_mutex {token} PX 300000 NX`, released by a
+  compare-and-delete Lua. `maybe_restore_messages` runs every 10 s per worker and acts on every 10th
+  call, so this key blinks into existence roughly every 100 s per consumer and is otherwise absent —
+  which is why a `SCAN` at an arbitrary moment does not find it and a catalog built from a `SCAN`
+  misses it. It is the only thing serialising the visibility-timeout sweep across workers: lose it
+  and two workers restore the same expired delivery, which is a duplicate ingestion job, not a
+  latency blip. **Absence-sensitive, therefore `noeviction`, without exception.**
+- **`{uuid}.reply.celery.pidbox` (+ its three priority variants) — remote-control replies.** The
+  *request* half of `celery inspect`/`celery control` is a fanout and never touches a key; the
+  *reply* half is a direct exchange, so each call materialises a list keyed on the caller's uuid,
+  `BRPOP`s it and `DEL`s it. `compose.yaml` documents `celery inspect ping -d celery@$HOSTNAME` as a
+  liveness probe, so a probe on a short interval is a steady stream of short-lived keys. Note the
+  glob: `~*.pidbox` does **not** match `…pidbox\x06\x163`, which is why the ACL carries
+  `~*.pidbox??[369]` as a separate pattern.
+- **`/{db}.celery.pidbox` and `/{db}.celeryev/worker.*` — fanout channels, not keys.** Worker events
+  and the remote-control broadcast are pub/sub, so nothing appears in `SCAN` and nothing is bounded
+  by `maxmemory`. They are in this catalog for one reason: **pub/sub ignores `SELECT`.** Measured — a
+  subscriber on db 0 receives a message published from db 1 — which is why kombu prefixes the channel
+  with the database number and why the logical-DB split is *not* a boundary here. `resetchannels`
+  makes channels deny-by-default, so the grants are explicit (`&/1.celery.pidbox`,
+  `&/1.celeryev/worker.*`) and hardcode the broker's DB index: **change the broker DB and these two
+  grants must change with it**, or gossip and remote control fail while the worker looks healthy.
+
+Two nearby facts worth recording because they look like families and are not. There is **no
+`celery-task-meta-*`**: `app/worker/config.py` sets `result_backend = None` and
+`task_ignore_result = True`, so no result, group, or chord key exists anywhere — a result backend
+would be a second, unsynchronised source of truth for job status. And `users.acl` grants
+`~celeryev.*` as a **key** pattern; measured against `celery events --dump`, no such key is ever
+created — the event stream is entirely pub/sub. The grant is a harmless over-grant, not a family.
 
 **Deliberately not in Valkey:** job status and delivery counters (`background_jobs`), usage and quota truth (`usage_events`), audit, conversation content, retrieval traces, and any config snapshot on the FastAPI side — FastAPI receives the snapshot in the request body and caches nothing across requests (`kb-internal-api-contracts`). Valkey memory and hit-rate observability comes from `redis_exporter`; do not mint `kb_*` metrics for it (`kb-observability-conventions`).
 
@@ -163,6 +215,10 @@ async def invalidate_source(org_id: str, source_id: str) -> int:
 - **An erasure request is signed off and the tenant's cached answers are still recoverable from a backup.** Expiry is lazy plus a sampling cycle that tolerates ~10% expired keys resident, so "the TTL passed" says nothing about the bytes; an RDB written *before* expiry stores the value with its TTL, and the AOF keeps the write until a rewrite drops it. (A save does skip already-expired keys — that is not the hole.) The only provable posture is the one above: no RDB, no AOF, no backup job on `valkey-cache`, and tenant text nowhere else in the keyspace.
 - **A cache-invalidation listener silently does nothing, or fires minutes late.** It was built on `notify-keyspace-events` `expired`. That event fires when the server *deletes* the key — lazily or on the active cycle — not at logical expiry, and pub/sub is fire-and-forget with no replay for a subscriber that was disconnected. Invalidation is an explicit call in the deletion path, never a notification.
 - **Two environments share a logical DB and steal each other's jobs, or a `FLUSHDB` during an incident wipes the wrong workload.** A DB index is not a namespace guarantee: kombu applies no prefix at all, and Laravel's client-level prefix has historically not reached queue key names (laravel/framework#27896). <!-- UNVERIFIED: not re-checked against Laravel 13 --> One DB per workload per environment, enforced with a 9.1 database-level ACL user rather than a config convention.
+- **A new ACL user is deployed, every worker reports `ready`, and not one message is ever consumed.** The key patterns named the five queues and not their priority variants. `BRPOP` takes four keys per queue, an ACL check covers *every* key of a command, and the resulting `NOPERM` surfaces in the worker log rather than as a crash — so the container is healthy, the queue grows, and no job fails. Grant `~{queue}??[369]` alongside `~{queue}`, and `~*.pidbox??[369]` alongside `~*.pidbox`.
+- **A queue-depth alert reads normal while jobs pile up, or a `LLEN` and Flower disagree.** `LLEN ingest` counts priority 0 only; kombu sums all four priority keys. Nothing in this repo publishes with a priority today, so the two agree — the day one call site passes `priority=`, only the second number is the queue.
+- **After a worker is SIGKILLed, one expired delivery is restored twice and a source is ingested twice.** `unacked_mutex` was evicted or lost, so two workers' restore sweeps overlapped. It is a lock on the `noeviction` instance for the same reason every other lock is: absence reads as *free*.
+- **Remote control and worker events stop working after the broker is moved to a different logical DB, and the workers still look healthy.** The fanout channel names embed the DB index (`/{db}.celeryev/…`) because pub/sub ignores `SELECT`, and `resetchannels` makes the `&` grants exact. Move the DB, move the grants.
 - **A hot bot's cache hit rate reads 0% after an unrelated source upload.** Expected: the evidence fingerprint covers the bot's whole resolved scope, so adding a source rekeys every entry. If this becomes a cost problem, the fix is a shorter TTL, never a narrower fingerprint.
 
 ## Official docs
@@ -190,6 +246,6 @@ async def invalidate_source(org_id: str, source_id: str) -> int:
 - [ ] Locks use `SET NX PX` and release with `DELIFEQ`; no `DEL` on a lock key anywhere. Every correctness-critical lock has a fencing token compared in the guarded `UPDATE`, with a test that a stale token's write is rejected.
 - [ ] Rate limiting is one `EVALSHA` covering bot, origin, session and IP; a boundary test proves no 2× burst; IPv6 subjects are keyed on the /64.
 - [ ] Laravel's **default** cache store resolves to `valkey-core`; `valkey-cache` is reachable only as `Cache::store('ephemeral')`. A test asserts `Cache::lock()` and the scheduler mutex land on the `noeviction` instance.
-- [ ] Each service connects with its own ACL user, scoped to its logical DB and its key patterns; a test asserts `ai-api` cannot read `queues:*`.
+- [ ] Each service connects with its own ACL user, scoped to its logical DB and its key patterns; a test asserts `ai-api` cannot read `queues:*`. The ai-service user additionally covers the priority variants (`~{queue}??[369]`, `~*.pidbox??[369]`), `~unacked_mutex`, and the two fanout channels — a test that only enqueues and dequeues at priority 0 cannot fail on any of them, so assert the grants against the catalog rather than inferring them from a green worker.
 - [ ] No production code calls `KEYS`, and no invalidation, verification, or deletion path depends on `SCAN` or on keyspace notifications.
 - [ ] An alert fires on `redis_memory_used_bytes / maxmemory` for `valkey-core` well before the ceiling; nothing in the repo re-exports Valkey metrics as `kb_*`.

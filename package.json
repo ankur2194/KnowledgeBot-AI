@@ -1,0 +1,41 @@
+{
+  "name": "knowledgebot-ai",
+  "version": "0.0.0",
+  "private": true,
+  "description": "KnowledgeBot AI monorepo root. Declares ZERO dependencies and ZERO devDependencies on purpose: .npmrc sets shared-workspace-lockfile=false, so a single root dependency would write a FIFTH pnpm-lock.yaml and break the four-lockfile contract that security-scanning-toolchain scans and github-actions-pipeline caches on. Every root config here is therefore zero-install. engines.node is DERIVED, not chosen: .npmrc sets engine-strict=true, so the floor must satisfy every engines.node declared anywhere in the installed tree or `pnpm install` dies with ERR_PNPM_UNSUPPORTED_ENGINE on a version this file says is supported. 22.20.0 is the lowest Node 22.x satisfying all 872 of them; the two that bind are size-limit@13.0.3 (^22.18.0, a required devDependency of apps/widget) and rollup's linux-x64-only optional @napi-rs/lzma-linux-x64-gnu@1.5.1 (^22.20). Re-derive this number on any dependency bump; never round it down to match .nvmrc.",
+  "packageManager": "pnpm@10.15.1",
+  "engines": {
+    "node": ">=22.20.0 <23",
+    "pnpm": ">=10.0.0 <11"
+  },
+  "scripts": {
+    "tokens:build": "pnpm --filter @kb/design-tokens build",
+    "contracts:build": "pnpm --filter @kb/contracts build",
+    "contracts:typecheck": "pnpm --filter @kb/contracts typecheck",
+    "contracts:test": "pnpm --filter @kb/contracts test",
+    "contracts:lint": "pnpm --filter @kb/contracts lint",
+    "web:dev": "pnpm --filter @kb/web dev",
+    "web:build": "pnpm --filter @kb/web build",
+    "web:start": "pnpm --filter @kb/web start",
+    "web:lint": "pnpm --filter @kb/web lint",
+    "web:typecheck": "pnpm --filter @kb/web typecheck",
+    "web:test": "pnpm --filter @kb/web test",
+    "web:e2e": "pnpm --filter @kb/web e2e",
+    "format": "pnpm --filter @kb/web exec prettier --config ../../.prettierrc.json --ignore-path ../../.gitignore --ignore-path ../../.prettierignore --write ../..",
+    "format:check": "pnpm --filter @kb/web exec prettier --config ../../.prettierrc.json --ignore-path ../../.gitignore --ignore-path ../../.prettierignore --check ../.."
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@tailwindcss/oxide",
+      "esbuild",
+      "sharp",
+      "unrs-resolver",
+      "playwright-core",
+      "@playwright/test"
+    ],
+    "overrides": {
+      "markdown-it": "15.0.0",
+      "dompurify": "3.4.13"
+    }
+  }
+}

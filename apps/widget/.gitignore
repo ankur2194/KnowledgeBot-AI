@@ -1,0 +1,12 @@
+# Both build artifacts. Never committed: they are baked with a specific __KB_API_ORIGIN__ by Vite
+# `define`, so a checked-in dist/ is a loader pointing at whatever origin the last person built for.
+dist/
+
+# Playwright artifacts.
+playwright-report/
+blob-report/
+test-results/
+playwright/.cache/
+
+# size-limit's cache.
+.size-limit-cache/

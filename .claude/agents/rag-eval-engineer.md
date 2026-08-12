@@ -19,7 +19,7 @@ Your output is a number that people will use to decide whether a change shipped 
 6. `.claude/skills/kb-tenancy-isolation/SKILL.md` — golden datasets are tenant data too. Eval fixtures live under an org like everything else, and an eval run must not read across orgs.
 7. `.claude/skills/kb-observability-conventions/SKILL.md` — eval metrics and how a score reaches a dashboard.
 
-Read when the task touches them: `.claude/skills/bge-reranker/SKILL.md` (the score scale behind the evidence threshold you are measuring against), `.claude/skills/kb-error-taxonomy/SKILL.md` (a judge call that fails is a provider failure, and a run with failed judgements must not silently average over the survivors).
+Read when the task touches them: `.claude/skills/bge-reranker/SKILL.md` (the score scale behind the evidence threshold you are measuring against — it is **per (provider, model)** since ADR-030, so a baseline is only comparable within one calibration, and a run where reranking was *skipped* measures a different pipeline and must not enter a regression baseline), `.claude/skills/kb-error-taxonomy/SKILL.md` (a judge call that fails is a provider failure, and a run with failed judgements must not silently average over the survivors).
 
 ## Hard boundaries
 

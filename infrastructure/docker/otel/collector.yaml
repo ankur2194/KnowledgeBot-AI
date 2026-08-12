@@ -1,0 +1,333 @@
+# infrastructure/docker/otel/collector.yaml — otel/opentelemetry-collector-contrib 0.158.0
+#
+# Loaded together with metric-allowlist.yaml (two --config flags, merged by confmap). The metric
+# allow-list lives in that file so CI can diff it against the catalog without parsing this one.
+#
+# ================================================================================================
+# WHY THIS CONTAINER SHIPS IN EVERY DEPLOYMENT (ADR-024), INCLUDING SINGLE-HOST SELF-HOSTED
+# ================================================================================================
+# It is not optional plumbing:
+#   * Tail sampling cannot exist without it. Head sampling is 100% everywhere and the decision is
+#     made HERE — a head sampler drops the one request someone is investigating, irreversibly,
+#     because non-recording spans never reach a processor and no tail sampler can recover them.
+#   * It is the only endpoint a browser may post to (ADR-025), on the app's own origin so CSP
+#     stays connect-src 'self'.
+#   * It is the buffer that stops a Tempo restart from becoming dropped spans inside a PHP request.
+#     PHP has no background threads, so its exporter flushes inline on the request's own clock.
+#   * The redaction backstop and the uncatalogued-metric filter live here.
+# One container, ~100 MB, versus losing every error trace.
+#
+# NOTHING `depends_on` this service. Telemetry fails soft (§19.6): a depends_on into a component
+# that can legitimately be down is how a telemetry outage becomes a product outage.
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+        # NO `cors:` BLOCK, and that is a consequence of ADR-025 rather than an omission.
+        # No browser ever talks to this endpoint directly: the browser posts SAME-ORIGIN to
+        # /telemetry/v1/traces on app./chat.<domain>, and a Next route handler forwards it here
+        # over the `edge` network. Server-to-server calls send no Origin header, so there is
+        # nothing to allow. Adding a CORS block would only make sense alongside a public router,
+        # and there is deliberately no public router — an OTLP receiver reachable from the
+        # internet is an unauthenticated ingest endpoint in front of the component every other
+        # service's telemetry depends on.
+      grpc:
+        endpoint: 0.0.0.0:4317
+        # Present for completeness; every service in this stack uses http/protobuf. gRPC is avoided
+        # deliberately: it needs ext-grpc in PHP, and grpc's background threads plus Celery's
+        # prefork fork() deadlock on the first export from a child.
+
+  # `file_log`, NOT `filelog`. The old spelling still resolves in 0.158.0 but it is a deprecated
+  # alias and the collector says so on every boot:
+  #   warn builders/builders.go:40  "filelog" alias is deprecated; use "file_log" instead
+  # A deprecated alias is a component that will stop resolving in some later release, and the
+  # failure mode is the whole logs pipeline refusing to start — measured on 0.158.0, `file_log`
+  # boots with no warning and an otherwise identical config.
+  file_log:
+    include: [/var/lib/docker/containers/*/*-json.log]
+    include_file_path: false
+    start_at: end          # `beginning` replays the whole log history on every Collector restart
+    operators:
+      - type: json_parser
+        id: docker
+        timestamp: {parse_from: attributes.time, layout: "%Y-%m-%dT%H:%M:%S.%LZ"}
+      - type: json_parser
+        id: app
+        parse_from: attributes.log
+        # An application line that is not JSON (a stack trace, a third-party library's println)
+        # must not stall the pipeline. Route it to the noop and keep the raw body.
+        if: 'attributes.log matches "^\\s*\\{"'
+      # `severity` FIRST, because that is the field name the log contract actually specifies
+      # (kb-observability-conventions/references/logs-health-audit.md: "Required on every line:
+      # timestamp, severity, service, env, trace_id, span_id, request_id, operation"). It is what
+      # the two APPLICATION runtimes emit — Laravel through app/Logging/KbJsonFormatter.php and
+      # Python through app/observability/logging.py.
+      #
+      # Getting this wrong is silent in the worst way: an unparsed severity leaves the record at
+      # SEVERITY_NUMBER_UNSPECIFIED, Loki's `level` stream label — one of the four permitted
+      # labels — is then absent or wrong, and every "errors in the last hour" query and every
+      # level-faceted panel reads zero while the lines themselves sit in the store.
+      - type: severity_parser
+        parse_from: attributes.severity
+        if: 'attributes.severity != nil'
+      # THE `level` ARM IS NOT A LEGACY COMPATIBILITY ARM AND IT IS NOT DEAD. It was once written
+      # up as one — as cover for stock Monolog — and that reading was measured and refuted on
+      # 2026-08-11. The receiver's `include:` glob is EVERY container on the host, not just the
+      # ones we write, and this stack ships two INFRASTRUCTURE components that log JSON with a
+      # string `level` and no `severity` at all:
+      #
+      #   traefik:v3.7            {"level":"warn", "time":…, "message":…}
+      #   the Collector ITSELF    {"level":"info", "ts":…,   "msg":…}   (service.telemetry.logs
+      #                                                                  below sets encoding: json)
+      #
+      # Measured by replaying real captured lines from both through this operator chain on
+      # 0.158.0: with this operator Traefik parses to Warn(13) and the Collector's own log to
+      # Info(9); with it deleted BOTH drop to SEVERITY_NUMBER_UNSPECIFIED — i.e. deleting it
+      # blinds every level-faceted query against the edge proxy and against the telemetry
+      # pipeline's own health, which are two of the places you look first during an incident.
+      # Delete it only when something else attaches a level to those two, and re-measure first.
+      - type: severity_parser
+        parse_from: attributes.level
+        # The type guard IS still load-bearing, for a measured reason that is not the one this
+        # comment used to give. Stock Monolog's `JsonFormatter` emits `level` as Monolog's INTEGER
+        # (200 for INFO, 400 for ERROR) — the shape every Laravel line had before
+        # app/Logging/KbJsonFormatter.php, and the shape any third-party PHP container still has.
+        # On 0.158.0 that does NOT error the operator: it sets SeverityText to the literal "400"
+        # and leaves SeverityNumber at Unspecified(0), so Loki gets a `level` stream label whose
+        # values are Monolog integers and no query matches. Skipping the line is the better of the
+        # two: `severity` is what the contract asks for, and `level_name` is the string a future
+        # mapping would read.
+        if: 'attributes.level != nil and type(attributes.level) == "string"'
+
+processors:
+  # MUST BE FIRST in every pipeline. It refuses data when the process is near its limit instead of
+  # being OOM-killed — a killed Collector is a dead OTLP endpoint, and every service's exporter
+  # then blocks on it for its full timeout.
+  #
+  # PERCENTAGES, NOT `limit_mib`/`spike_limit_mib`, AND THAT IS THE ENFORCEMENT MECHANISM.
+  # The limiter must stay below the container's cgroup memory limit — a limiter set above it gets
+  # you the OOM kill it was supposed to prevent. That used to be stated as an ABSOLUTE (384/96)
+  # beside a comment naming "512M in compose.yaml", which meant the invariant was a number
+  # duplicated across three files (compose.yaml, compose.prod.yaml, and this line) with nothing
+  # comparing them: raising the container limit and forgetting this file left the Collector
+  # shedding at 384 MiB of a 1 GB container, and LOWERING the container limit without this file
+  # was the OOM kill itself. `limit_percentage` reads the cgroup at startup, so the two cannot
+  # disagree — the agreement is computed rather than asserted.
+  #
+  # It is also SELF-REPORTING, which is what makes it a check and not a hope. Measured on
+  # 0.158.0, one line per boot:
+  #   --memory=512m  Using percentage memory limiter {"total_memory_mib":512,...} -> limit_mib 384
+  #   --memory=256m  Using percentage memory limiter {"total_memory_mib":256,...} -> limit_mib 192
+  # 75% of 512 MiB is 384 MiB, i.e. the number this file used to hard-code — the swap changes
+  # nothing at the shipped container limit and tracks it everywhere else.
+  #
+  # KNOWN FALLBACK, stated because it is silent: with NO cgroup limit at all (a bare `docker run`
+  # with no --memory) the percentage is taken against HOST RAM — measured here as
+  # total_memory_mib 7912 -> limit_mib 5934. Both compose.yaml and compose.prod.yaml set
+  # `deploy.resources.limits.memory: 512M`, so every shipped path has a limit; if that boot line
+  # ever reports a total that is not the container limit, the deployment lost its limit.
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 20
+
+  # The BACKSTOP, never the defence. The defence is the field allow-list at each logger and the
+  # attribute allow-list at each instrument; this exists because the case you did not imagine is
+  # the one that ships.
+  transform:
+    error_mode: ignore
+    trace_statements:
+      - context: span
+        statements:
+          # GenAI content capture is opt-in and OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT
+          # is unset in every environment, and each service refuses to start if it is set. If any
+          # of these ever appears anyway, it is the user's question or the retrieved tenant chunks,
+          # in a store with no per-tenant access control and fixed retention.
+          - delete_key(attributes, "gen_ai.input.messages")
+          - delete_key(attributes, "gen_ai.output.messages")
+          - delete_key(attributes, "gen_ai.system_instructions")
+          - delete_key(attributes, "gen_ai.retrieval.query.text")
+          - delete_key(attributes, "gen_ai.retrieval.documents")
+          # Credential and signing material. `provider_credential` is a top-level field on the
+          # internal request body and is on the never-forward list; this catches an adapter that
+          # put it on a span while debugging and forgot.
+          - delete_key(attributes, "provider_credential")
+          - delete_key(attributes, "http.request.header.authorization")
+          - delete_key(attributes, "http.request.header.x-kb-signature")
+          # url.query carries the query string, which is how a customer's question reaches a trace
+          # by a route nobody was watching.
+          - delete_key(attributes, "url.query")
+    log_statements:
+      - context: log
+        statements:
+          - delete_key(attributes, "authorization")
+          - delete_key(attributes, "x-kb-signature")
+          - delete_key(attributes, "provider_credential")
+          - delete_key(attributes, "prompt")
+          - delete_key(attributes, "packed_context")
+
+  # The metric label projection. Exactly two resource attributes become labels, by name.
+  #
+  # This exists because `resource_to_telemetry_conversion` below is deliberately `false`, and
+  # with it false NOTHING is promoted: every kb_* series would arrive carrying only `job` and
+  # `instance`. That does not fail — it is worse than failing. `sum by (service, env, ...)` in
+  # every recording rule and alert still evaluates, merging the entire fleet under two empty
+  # label values; the dashboards draw one line; and Alertmanager's `group_by: [alertname,
+  # service]` collapses every page into a single notification.
+  #
+  # Do NOT "fix" that by setting the conversion to true. It promotes EVERY resource attribute,
+  # which includes `service.version` — a git sha — putting a new label value on every family on
+  # every deploy, and the churn falls on Prometheus as unbounded series cardinality.
+  transform/metric_labels:
+    error_mode: ignore
+    metric_statements:
+      - context: datapoint
+        statements:
+          - set(attributes["service"], resource.attributes["service.name"])
+          - set(attributes["env"], resource.attributes["deployment.environment.name"])
+
+  # filter/metrics is DEFINED IN metric-allowlist.yaml. Declared here only so the pipeline
+  # reference below resolves in isolation; confmap merges the two documents.
+  # It exists because auto-instrumentation emits its own metrics that are not in the closed
+  # catalog: CeleryInstrumentor registers flower.task.runtime.seconds, the ASGI instrumentation
+  # registers http.server.*. Suppress them at the SDK with a NoOpMeterProvider AND drop them here;
+  # two lines of defence, because the CI catalog diff fails on either one leaking.
+  filter/metrics: {}
+
+  # tail_sampling runs BEFORE batch. After it, the decision is made on whatever fragment the batch
+  # happened to contain.
+  tail_sampling:
+    decision_wait: 30s
+    # num_traces MUST exceed traces/sec x decision_wait. Watch
+    # otelcol_processor_tail_sampling_sampling_trace_dropped_too_early — it going non-zero is the
+    # signal that this number is too small, and the symptom otherwise is "some traces are missing"
+    # with no pattern.
+    #
+    # LITERALS, NOT `${env:...}`, AND THAT IS DELIBERATE. Both were once declared as environment
+    # knobs (KB_TAIL_DECISION_WAIT / KB_TAIL_NUM_TRACES) that this file never read, and the
+    # obvious repair — wiring them — was measured and rejected. `${env:X}` on an UNSET variable
+    # expands to nothing and the field silently falls back to the component default: on 0.158.0 a
+    # container started with KB_TAIL_NUM_TRACES absent boots clean, "Everything is ready", and
+    # sizes the buffer to a number nobody chose. (A malformed value does fail loudly —
+    # `'num_traces' expected type 'uint64', got unconvertible type 'string'`, exit 1 — so the
+    # failure mode is exactly the dangerous half: absent is silent, wrong is loud.) The sizing
+    # rule is arithmetic over three values — this one, decision_wait above, and the policy list
+    # below — so splitting it across two files makes the invariant uncheckable from either.
+    num_traces: 50000
+    expected_new_traces_per_sec: 100
+    policies:
+      # THREE TOP-LEVEL ENTRIES. Top-level policies are OR'd. Wrapping them in an `and` policy
+      # gives you 5% of your errors — the exact bug you were investigating when you added
+      # sampling.
+      - name: errors
+        type: status_code
+        status_code: {status_codes: [ERROR]}
+      - name: slow
+        type: latency
+        latency: {threshold_ms: 4000}   # §23's first-visible-token budget; anything past it is worth keeping
+      - name: baseline
+        type: probabilistic
+        probabilistic: {sampling_percentage: 5}
+
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+
+exporters:
+  # `otlp_http`, NOT `otlphttp` — same deprecated-alias story as `file_log` above, found by booting
+  # this exact file on 0.158.0 rather than by reading it:
+  #   warn builders/builders.go:40  "otlphttp" alias is deprecated; use "otlp_http" instead
+  # once per named instance, so the old spelling cost TWO boot warnings, not one. The instance
+  # suffix after the slash is ours and is unaffected; only the type name before it is the alias.
+  otlp_http/tempo:
+    endpoint: ${env:KB_TEMPO_ENDPOINT}
+    retry_on_failure: {enabled: true, initial_interval: 1s, max_interval: 30s}
+    sending_queue: {enabled: true, queue_size: 5000}
+
+  otlp_http/loki:
+    endpoint: ${env:KB_LOKI_ENDPOINT}
+    retry_on_failure: {enabled: true, initial_interval: 1s, max_interval: 30s}
+    sending_queue: {enabled: true, queue_size: 5000}
+
+  # ==============================================================================================
+  # THE ONE METRIC PATH: Prometheus SCRAPES this exporter.
+  # ==============================================================================================
+  # Not prometheusremotewrite, and not Prometheus's OTLP receiver:
+  #   * --web.enable-otlp-receiver is OFF by default, so an OTLP push silently goes nowhere;
+  #   * the CI metric-catalog diff has to scrape ONE endpoint that has seen every process's data.
+  #     Transport is OTLP push everywhere, and under PHP-FPM and Celery prefork each request lands
+  #     in a different process with its own memory — so a per-service /metrics returns one worker's
+  #     fragment and the gate passes while checking almost nothing.
+  #   * remote-write would also need Prometheus to accept out-of-order samples the moment there is
+  #     a second Collector replica.
+  prometheus:
+    endpoint: ${env:KB_PROM_EXPORTER_ADDR}
+    # `service` and `env` are the base labels every family carries, so they must survive the
+    # resource->label projection. NOTHING ELSE is promoted: a resource attribute promoted to a
+    # label is how org_id gets onto a metric by accident.
+    resource_to_telemetry_conversion: {enabled: false}
+    enable_open_metrics: true
+    # Series must survive a scrape gap for `rate()` to work across a Collector restart.
+    metric_expiration: 5m
+    # NOTE the exposed names: the default OTLP->Prometheus translation
+    # (UnderscoreEscapingWithSuffixes) is what turns `kb.chat.requests` (unit "1", counter) into
+    # `kb_chat_requests_total`. Keep it. Switching to NoTranslation gives dotted UTF-8 names that
+    # no rule, panel, or alert in the repo matches — with no error anywhere.
+
+  debug:
+    verbosity: ${env:KB_OTEL_DEBUG_VERBOSITY}
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+    # Exposed for humans and for `docker compose exec`, NOT wired to a Compose healthcheck: the
+    # contrib image is distroless and has no client to call it with, and nothing depends on this
+    # service anyway.
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs: {level: info, encoding: json}
+    metrics:
+      # The Collector's OWN metrics (otelcol_*) on a separate port from the application metrics,
+      # so a filter change cannot accidentally hide the pipeline's own health.
+      readers:
+        - pull:
+            exporter:
+              prometheus: {host: 0.0.0.0, port: 8888}
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, transform, tail_sampling, batch]
+      exporters: [otlp_http/tempo, debug]
+
+    metrics:
+      receivers: [otlp]
+      # transform/metric_labels runs BEFORE filter/metrics so the allow-list matches on the
+      # same series shape Prometheus will scrape, not on a pre-projection one.
+      processors: [memory_limiter, transform/metric_labels, filter/metrics, batch]
+      exporters: [prometheus]
+
+    logs:
+      receivers: [otlp, file_log]
+      processors: [memory_limiter, transform, batch]
+      exporters: [otlp_http/loki]
+
+# ================================================================================================
+# SCALING NOTE — read before adding a replica
+# ================================================================================================
+# At ONE replica the load_balancing exporter is unnecessary. The moment there are TWO it is
+# MANDATORY: every span of a trace must reach the same instance, or tail sampling decides on
+# fragments and the errors policy sees a trace with no error span in it. The exporter was renamed
+# from `loadbalancing` to `load_balancing`; key it on trace id and put it in front of a second
+# Collector tier. Adding a replica without it is the silent version of "our error traces vanished".
+#
+# There is NO REPLICA COUNT TO SET, here or in an env file. env/observability.env used to declare
+# `KB_OTEL_REPLICAS=1` with this same warning attached; nothing read it, and nothing could —
+# neither compose.yaml nor compose.prod.yaml gives otel-collector a `deploy.replicas`, and the
+# second replica it purported to configure is unsafe until the exporter above exists. A knob that
+# reads as a supported dial for an unsupported topology is worse than its absence, so it is gone
+# and the warning lives here, next to the thing that would have to change first.

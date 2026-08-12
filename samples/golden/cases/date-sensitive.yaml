@@ -1,0 +1,102 @@
+# §21.2 — Date-sensitive questions.
+#
+# The corpus contains current values and superseded values, both indexed, both retrievable by the
+# same query. The failure this category catches is invisible to every groundedness metric: an
+# answer built from the superseded appendix is faithful, cited, and wrong. Only the deterministic
+# required/forbidden check sees it.
+#
+# Note the two directions. d-001 must prefer the current rate; d-002 must prefer the superseded
+# one. A bot that always picks the newest text passes one and fails the other, which is exactly
+# the discrimination we want.
+
+dataset: kb-platform-golden
+corpus_version: corpus-2026.08.1
+category: date-sensitive
+
+cases:
+  - id: d-001
+    question: "What is the domestic per-diem rate?"
+    unanswerable: false
+    expected_sources: [travel-policy-v3]
+    difficulty: medium
+    reference: >-
+      The domestic per-diem is 62 EUR per day, effective 2026-04-01, at half rate on the days of
+      departure and return. The previous rate of 55 EUR per day applies to travel completed before
+      2026-04-01.
+    expected_answer: >-
+      62 EUR per day for domestic travel, effective 1 April 2026, at half rate on departure and
+      return days. (Trips completed before that date use the earlier 55 EUR rate.)
+    required_facts: ["62"]
+    forbidden_claims: ["55 EUR as the current rate"]
+    locators: ["travel policy §4 Subsistence", "Appendix A — Superseded rates"]
+    tags: [supersession, current-value]
+    grading_notes: >-
+      GROUNDED-BUT-WRONG DETECTOR. Both rates are in the document and both are legitimately
+      retrievable. Answering 55 is faithful to the retrieved evidence and completely wrong;
+      faithfulness and citation correctness both score it well. Mentioning the old rate as
+      historical context is correct; presenting it as current is a failure.
+
+  - id: d-002
+    question: "I travelled domestically and the trip ended on 20 March 2026. What per-diem do I claim?"
+    unanswerable: false
+    expected_sources: [travel-policy-v3]
+    difficulty: hard
+    reference: >-
+      The trip ended before 2026-04-01, so the superseded rates apply: 55 EUR per day for domestic
+      travel, per Appendix A of the Travel and Expenses Policy.
+    expected_answer: >-
+      Your trip ended before the 1 April 2026 change, so the earlier rate applies: 55 EUR per day
+      domestic (Appendix A). The current 62 EUR rate applies only to travel completed on or after
+      that date.
+    required_facts: ["55"]
+    forbidden_claims: ["62 EUR for a trip completed before 2026-04-01"]
+    locators: ["travel policy Appendix A — Superseded rates"]
+    tags: [supersession, historical-value, recency-bias]
+    grading_notes: >-
+      The mirror of d-001, and the reason d-001 alone is not enough. A pipeline biased toward the
+      newest text — or a prompt instructing it to "prefer the most recent" — passes d-001 and fails
+      here. Both must pass in the same run. Appendix A states its date range in its own body text,
+      so the qualifier survives a chunk split at the heading; if the answer gives 55 without the
+      date qualifier, check whether that sentence made it into the chunk.
+
+  - id: d-003
+    question: "When is the travel policy next due for review?"
+    unanswerable: false
+    expected_sources: [travel-policy-v3]
+    difficulty: easy
+    reference: >-
+      The Travel and Expenses Policy is reviewed every 24 months; the next scheduled review is
+      2028-04-01.
+    expected_answer: "2028-04-01. The policy is on a 24-month review cycle."
+    required_facts: ["2028"]
+    forbidden_claims: ["2026-04-01 as the review date", "2025-01-15 as the review date"]
+    locators: ["travel policy page 1 header block"]
+    tags: [date-extraction, multiple-dates]
+    grading_notes: >-
+      The header block carries three dates in four lines — effective 2026-04-01, supersedes
+      2025-01-15, next review 2028-04-01 — and each answers a different question. Returning the
+      effective date is the failure mode; the model is not wrong about what the document says, it
+      is wrong about which date was asked for.
+
+  - id: d-004
+    question: "An instrument was commissioned in February 2026. What warranty applies to it?"
+    unanswerable: false
+    expected_sources: [warranty-terms-2026, warranty-datasheet-2025]
+    difficulty: hard
+    reference: >-
+      The 2026 warranty terms, effective 2026-01-01, give 36 months from the date of commissioning
+      for Tideline benchtop instruments, so an instrument commissioned in February 2026 falls under
+      them. The 2025 datasheet still states 24 months from date of shipment.
+    expected_answer: >-
+      The 2026 terms apply — 36 months from the date of commissioning, since the instrument was
+      commissioned after 1 January 2026. Note that the March 2025 datasheet still states 24 months
+      from shipment; that is the older statement and the two sources disagree.
+    required_facts: ["36 months", "commissioning"]
+    forbidden_claims: ["24 months as the applicable warranty for this instrument"]
+    locators: ["warranty terms 2026 §1", "warranty datasheet 2025 page 1"]
+    tags: [supersession, conflict-adjacent, dated-resolution]
+    grading_notes: >-
+      Sits deliberately between the date-sensitive and conflicting categories. Unlike the c-* cases,
+      this one IS resolvable — the commissioning date determines which rule applies — so a refusal
+      here is a false refusal. Acknowledging the older datasheet is expected; leading with 24 months
+      is wrong. Compare with c-004, which is the same document pair and genuinely unresolvable.

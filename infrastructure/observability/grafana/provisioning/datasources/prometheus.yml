@@ -1,0 +1,46 @@
+# Prometheus datasource. Provisioned, read-only, and referenced by every dashboard panel through
+# the literal uid `prometheus` — a mistyped uid in a dashboard renders a panel that looks
+# configured and returns nothing, with no error in any log.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    # The UI's edit form is disabled rather than divergent. Everything in this directory is
+    # mounted :ro anyway, so an edit made through the API would be lost on restart — which is the
+    # worse failure, because it works until it doesn't.
+    editable: false
+    jsonData:
+      # POST so a long dashboard query is not truncated by a URL length limit.
+      httpMethod: POST
+      # Matches global.scrape_interval in prometheus.yml. Grafana uses it as the floor for the
+      # auto `$__interval`; setting it lower produces panels that query at a resolution the data
+      # does not have and draw sawtooth artefacts everyone reads as real.
+      timeInterval: 15s
+      prometheusType: Prometheus
+      prometheusVersion: 3.13.2
+      # Grafana Alerting is not used: rules live in prometheus/rules/ and evaluate whether or not
+      # Grafana is running. This keeps the "New alert rule" affordance off this datasource so
+      # nobody creates a second, invisible evaluation engine during an incident.
+      manageAlerts: false
+      # Exemplars: histogram buckets carry a trace id, so a latency spike is one click from the
+      # trace that caused it.
+      #
+      # THIS BLOCK IS A CLAIM ABOUT THE SDKs, AND THE SPELLING OF THE SETTING IT DEPENDS ON IS
+      # NOT THE SAME IN BOTH. Python takes the spec value `trace_based`; the pinned PHP SDK
+      # (open-telemetry/sdk 1.15.0) predates the rename and accepts only
+      # `with_sampled_trace | all | none`, falling through to NoneExemplarFilter — with a warning
+      # nobody reads — for anything else. The spec spelling therefore turns exemplars OFF for the
+      # entire control plane while this file goes on asserting they are on, and the panel does not
+      # error: it draws the same graph without the diamonds, which is indistinguishable from a
+      # quiet period. Both spellings, in one command:
+      #   grep -rn OTEL_METRICS_EXEMPLAR_FILTER infrastructure/docker/env services/*/.env*
+      # core-api must read `with_sampled_trace`, ai-service `trace_based`. Recheck on any OTel SDK
+      # bump in either runtime — the accepted value set is an SDK property, not a spec one.
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo

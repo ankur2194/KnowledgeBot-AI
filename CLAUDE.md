@@ -2,11 +2,27 @@
 
 Self-hostable multi-model RAG chatbot platform. Documents, images, spreadsheets, presentations, and crawled websites become source-grounded AI conversations with citations.
 
-**Status:** planning complete, implementation not started. The repository currently holds the specification, the docs split, and the skill/agent library — no application code yet.
+**Status:** past skeleton, unevenly. All six original Non-goals — business logic, migrations, controllers, retrieval stages, provider adapters, CI workflows — have been crossed, mostly forced by [ADR-030](docs/19-repo-structure-adrs.md) and its consequences ADR-031…035. **The code stays; the line was redrawn on 2026-08-10:** _build what is self-contained; do not build the five provider wire adapters, the chat router, or the `rt/v1` / `sdk/v1` control plane._ Every lockfile is present and none is gitignored — one `pnpm-lock.yaml` per workspace importer (`find . -name pnpm-lock.yaml -not -path '*/node_modules/*'` → 6, and an importer with no dependencies produces an **empty** lockfile rather than none), plus `composer.lock`, `uv.lock`, and `requirements.lock` — the last a generated export of `uv.lock`, not a second source of truth (ADR-022). **They are not yet _committed_, and nor is anything else:** `git ls-files | wc -l` returns 128 and every one of them is under `.claude/`, `docs/`, `CLAUDE.md`, `KnowledgeBot-AI.md` or `.gitignore`. The whole working tree is untracked pending #66, which is why `gates.yml`'s `repo-artifact-consistency` cannot go green yet (`git ls-files packages/` → 0). `.github/workflows/` holds **two** files: `gates.yml` (six install-free jobs) and `ci.yml` (seven jobs — it installs, runs Pest/pytest/Vitest, and builds six images).
+
+**Which parts are real is a grep, not a list — so run the grep.** The measuring command is
+
+```bash
+for d in services/ai-service/app/*/; do \
+  printf '%-14s %s\n' "$(basename "$d")" "$(grep -rc 'raise NotImplementedError' "$d" | awk -F: '{n+=$2} END{print n+0}')"; done
+```
+
+Note `raise`: a bare `grep -c NotImplementedError` also counts prose in comments, which is why the number in this paragraph used to disagree with the code. The **rule** is what to trust: `providers/`, `crawl/` and `deletion/` are the deliberate stubs; `evaluation/`'s orchestration is a stub while its arithmetic is not; `core/`, `db/`, `contracts/`, `observability/`, `worker/`, `maintenance/` are written, typed and covered; `ingestion/`, `retrieval/`, `rag/` and `api/` are mixed **file by file**, so grep the file, not the directory. **This paragraph no longer publishes the per-subtree figures, and that is [ADR-036](docs/19-repo-structure-adrs.md) being applied to the sentence that is its own worked example.** It has carried two different lists and both went false — the second in three places one day after it was published (`deletion` 30→26, `ingestion` 17→5, `rag` 1→0), and possibly before, since Batch 12 wrote those bodies days earlier and no prose followed. A third list would go false the same way, so run the command. The one figure worth stating as a rule: the raises in `evaluation/` are **not** a regression — they are `judge.py`'s deliberate permanent raise guarding Ragas' sync path plus `tasks.py`'s `start_run`/`score_case`, both named out of scope, so `evaluation/` reading non-zero is the expected state, not a to-do. Full record in [`docs/22` § *The rulings of 2026-08-12*, G1](docs/22-spec-findings-and-decisions.md). `services/core-api` is the mirror image: six migrations, six route files, three controllers, config and tests, but almost no controller bodies.
+
+**The write allow-list is a rule, not a number.** `ALLOWED_TABLES` in `services/ai-service/app/db/writes.py` is the list; **read the tuple, and do not restate its length here or anywhere else** ([ADR-033](docs/19-repo-structure-adrs.md), generalized to every document by [ADR-036](docs/19-repo-structure-adrs.md) on 2026-08-12). Admission is three properties: the row is derived and rebuildable, no public API path reads or writes it, Laravel owns the migration. `gates.yml`'s old `[ "$t" = "4" ]` cardinality assertion **no longer exists** — task 2E replaced it with the `KB_TABLE_REVIEW_PIN` membership check (`gates.yml:423`), which is compared set-wise against the imported tuple and is **green**.
+
+**`enforcement-greps` is green, and #79 is _pinned known-red_ rather than red.** The violation is real and was not fixed: the data plane writes `chunks` and `document_elements` (`app/deletion/relational.py:200,204,210,217`) while no Laravel migration creates either, against ADR-033 property 3. Ankur ruled on 2026-08-12 that it is pinned, because both repairs are worse than the finding — writing the migrations drags in the out-of-scope `source_versions → source_items → knowledge_sources` cascade, and narrowing the purge plan shrinks deletion coverage before the tables it purges exist. `KB_MIGRATION_PIN_79` (`gates.yml:473-603`) is **self-expiring by three independent paths**: a pinned name that gains a migration fails the build, one that stops being written fails the build, and one that leaves `ALLOWED_TABLES` entirely is caught by a closing set comparison that deliberately does not delegate to check `(b1)`. **So whoever lands those migrations gets a red build until they delete the name from the pin in the same PR** — that failure is a success and the flag text says so. Re-measured 2026-08-12 by executing all seven of that job's `run:` bodies on this host: **all seven exit 0.** _Two sentences this paragraph used to carry are now false and are retired: "#79 is the only failing arm" and "it fails inside the job's first step, which then exits before exporting the two variables the later steps read." Steps 2–7 had never been reachable before; they have now been executed once, locally — see `docs/23`, which keeps the caveat that no workflow has ever run on a GitHub runner._ The skill files that used to claim the allow-list is "exactly four" have been corrected by their owner; `grep -rn 'exactly four' .claude/skills/` is the check, and it is the claim — run it rather than trusting this sentence. And `app/retrieval/sparse.py:tokenize` is still `NotImplementedError` (`sparse.py:246`) — held by ruling and re-dated 2026-08-12 (`docs/22` § G6) — so the sparse arm has arithmetic and no producer.
 
 ## Read this first
 
 - **[docs/00-index.md](docs/00-index.md)** — the specification split into 21 sections, plus a table of the invariants most likely to be violated and where each is defined.
+- **[docs/22-spec-findings-and-decisions.md](docs/22-spec-findings-and-decisions.md) § _Open after scaffolding_** — 27 findings the skeleton and the first toolchain run surfaced, plus four CI gates that cannot pass on correct code. O1 was the blocking one and ADR-029 closed it. **§ _Open after ADR-030_** adds C1–C3: reranking is no longer universally available, hybrid search has lost its sparse producer, and embedding-model identity is now a vendor alias that can move under us. **§ _The decisions ADR-030's consequences forced_** closes most of that as **ADR-031…035** and states per finding what is still open — the rerank bot-policy gate, the BM25 tokenizer, and the alias-drift runbook. The tokenizer is not closed but is **held by dated ruling** (2026-08-12, `docs/22` § G6); the other two are simply open. Note that the data plane cites _"finding C1"_ for the **embedding**-credential question, which `docs/22` records under the rerank-titled C1; the pointer at the head of that finding is there so a code comment leads somewhere true. **§ _Found while completing the stubs_** adds **F1–F13**: the `ai-service` image was nondeterministic rather than broken and `uv` silently ignores the override that fixes it; instrumenting FastAPI from the lifespan yields zero spans with no exception; `repo-artifact-consistency` cannot go green before the first commit; two `apps/web` test commands run nothing; a seventeenth false enforcement claim — `apps/mobile/jest.config.js:35` says CI greps for the `expo/fetch` import and no such grep exists — and two more of that shape (**F7**: the vendored semgrep ruleset under `scripts/security/rules/` is counted by `gates.yml:1705` and executed by nothing, and `sanctum:prune-expired` is scheduled against a table **0** migrations create). **F8–F10 are the infrastructure batches**, and the two worth reading are the ones that went the other way: **F9 withdraws** a finding — the collector's `attributes.level` arm matches, because `include:` is every container on the host and traefik and the collector's own log carry a string `level` — and **F10 corrects a figure this effort's own planning repeated three times**, from 95 s of OTLP backoff to a measured 0.54–1.11 s across 8 runs. **F11–F12 are the two contract gaps ADR-030's degraded path opened**, and F12 was Ankur's: the internal body carries **one** `provider_credential` while one chat turn can need **three**. The same pointer rule applies to it as to C1 — `app/providers/embedding_selection.py` cites _"finding S12"_, and S12's row carries the pointer. **§ _The rulings of 2026-08-12_ closes F12 and eight more as G1–G9, and adds G10–G15 for what recording them turned up.** Read G9 first: `COVERAGE_WARN` was **not** moved, because 74 real page-parses show the clean and degraded populations *overlap* and a 5° crooked scan that lost not one character reads 0.3909 — so it is a catastrophe floor, not a quality gate — and the same measurement found a third defect that was worse, every born-digital page reporting `ocr_coverage_unmeasurable`. Four of the nine rulings went a different way from the brief that asked for them, and in three of those the investigation refuted the premise; that is written down deliberately, because a ruling recorded only as its outcome invites the same question next quarter. **G10 and G11 were closed on 2026-08-12** — `overlap_of` left `PAYLOAD_PROJECTION`, and the three Pest dataset rows now carry unshaped values so nothing but the exclusion protects them. **G16–G19** are that pass's own findings: a site table that went stale in a day and whose stale rows invite a re-break; the `blur >= 3.0` silent degradation, now warned on by `ocr_text_unplaced` with **no tunable**, so `ocr_cfg_version` did not move and no re-OCR was triggered; the `logit` metric gap ruled as *record nothing, read it from the evaluation suite*; and a hadolint invocation that could never have honoured a `.hadolint.yaml`.
+- **[ADR-037](docs/19-repo-structure-adrs.md)** — the two fail-open reputations were backwards, and both were measured. `seaweedfs:4.40` **exits 255** without its identities file; `valkey:9.1.1` **starts wide open** without its ACL file, and an unauthenticated `SET pwned 1` returns `OK`. The old `… ping | grep -q PONG` healthcheck returned **exit 0 against the wide-open server** — the failed AUTH goes to stderr while the `nopass` default user answers PING on stdout. **The site list that used to live in this sentence is retired, and its retirement is the point.** `docs/22` § ADR-037 named seven files still stating the old direction; re-measured 2026-08-12, **six were already fixed** — including `scripts/ops/preflight.sh`, whose 655-line self-contradiction that table called its most useful single fact and which has since been resolved. The last wrong one, `README.md`, is fixed. Only the live `infrastructure/docker/seaweedfs/identities.json` still reads backwards, and it is gitignored, holds generated credentials and re-renders from an already-correct template — **do not hand-edit it.** The table now leads with a measuring grep rather than line numbers ([ADR-036](docs/19-repo-structure-adrs.md); the episode is `docs/22` § G16). Run the grep, not this sentence and not the rows.
+- **[docs/23-unverified-claims.md](docs/23-unverified-claims.md) § _Raised by the stub-completion effort_** — the four things this host structurally cannot verify. Neither workflow has ever run on a GitHub runner, and **no mobile behaviour has been verified on a device**: `apps/mobile`'s suite runs on Node, where `fetch` streams, so it proves the parser and can never prove streaming works on Hermes. **§ _Raised by the 2026-08-12 rulings_** adds one real degradation that reaches the index as silence — at `blur >= 3.0` the layout model calls the whole page a picture, OCR reads it perfectly (cell recall 1.000), the text never becomes an element (element recall 0.000), and **nothing warns**. It is outside `ocr/` and unowned.
 - **`.claude/skills/kb-architecture-map/SKILL.md`** — who owns what, and the boundaries between services.
 - `KnowledgeBot-AI.md` — the original 3,816-line spec. Prefer the `docs/` split; read this only when you need the whole document.
 
@@ -14,39 +30,50 @@ Self-hostable multi-model RAG chatbot platform. Documents, images, spreadsheets,
 
 Laravel is the **control plane**: identity, tenancy, bots, provider configuration, encrypted credentials, source metadata, conversations, quotas, and every public API. FastAPI is the **AI data plane**: provider calls, retrieval, reranking, prompting, parsing, OCR, crawling, embedding, indexing, evaluation, and deletion. PostgreSQL is the source of truth; Qdrant is a derived, rebuildable retrieval index; Valkey handles queues, locks, and rate limits; SeaweedFS stores objects. Browser, widget, and mobile clients talk **only** to Laravel — never to FastAPI.
 
+**No machine-learning model runs here for embedding or reranking** ([ADR-030](docs/19-repo-structure-adrs.md)). Both go out through the _existing_ provider adapter layer — same per-org encrypted credentials, same quota accounting, same error taxonomy — as `embed(texts, *, model)` and `rerank(query, passages, *, model)`. There is no GPU deployment, no `compose.gpu.yaml`, and no embedding weights in `models.manifest.toml`. The line falls **below document processing**: Docling's layout and TableFormer models and RapidOCR's ONNX weights are still local, still pinned, still offline. The rule is _no local model inference for embedding or reranking_, not _no local computation_ — **and BM25 is now the worked example rather than the hypothetical one**: [ADR-032](docs/19-repo-structure-adrs.md) restores the sparse arm with locally computed BM25 in `app/retrieval/sparse.py`, with every corpus-dependent quantity on the **query** vector so Qdrant stays rebuildable and no tenant's statistics weight another's ranking. And `torch` is still in `services/ai-service/pyproject.toml` because it is **Docling's**; read the comment at `pyproject.toml:151-200` before removing it, or you will ship a service that cannot read a PDF.
+
+Three follow-on rules from ADR-030 that are easy to violate by accident: **which connection embeds is decided by one function** (`app/providers/embedding_selection.py`), and two eligible connections that disagree on `(provider, model)` are a refusal, not a tiebreak, because that pair _is_ the vector space ([ADR-031](docs/19-repo-structure-adrs.md)). **The sparse analyzer is part of the collection name**, so changing the tokenizer or a BM25 constant re-embeds the dense vectors too, at a provider's per-token price ([ADR-034](docs/19-repo-structure-adrs.md)). And **embedding-model identity is measured, not declared** — a fixed five-string canary detects a vendor re-pointing an alias, and its digest must never enter the collection name ([ADR-035](docs/19-repo-structure-adrs.md)).
+
+## Git
+
+**Never stage and never commit.** No `git add`, no `git commit`, no `git push` — not for a
+"checkpoint", not at the end of a task, not when a change looks finished. Leave every change
+in the working tree; Ankur reviews and commits it himself. This applies to every agent in
+`.claude/agents/` as well as to the main session.
+
 ## Working here
 
 Delegate implementation to the agent that owns the area rather than editing across boundaries. Each agent in `.claude/agents/` opens with the exact skill files it must read; those skills carry the conventions, the gotchas, and a `## Definition of done`.
 
-| Area | Agent |
-|---|---|
-| Laravel control plane | `control-plane-engineer` |
-| LLM provider adapters | `provider-adapter-engineer` |
-| Parsing, OCR, chunking | `ingestion-engineer` |
-| Crawling and recrawl | `crawler-engineer` |
-| Retrieval and reranking | `retrieval-engineer` |
-| Knowledge deletion | `deletion-engineer` |
-| Next.js admin + hosted chat | `admin-web-engineer` |
-| Embedded widget SDK | `widget-sdk-engineer` |
-| React Native app | `mobile-engineer` |
-| Docker, Traefik, data services | `platform-devops-engineer` |
-| Tracing, metrics, logs | `observability-engineer` |
-| RAG evaluation | `rag-eval-engineer` |
-| Tests across all runtimes | `test-engineer` |
-| Security review *(read-only)* | `security-auditor` |
-| Contract review *(read-only)* | `contract-steward` |
-| Docs and ADRs | `docs-adr-writer` |
+| Area                           | Agent                       |
+| ------------------------------ | --------------------------- |
+| Laravel control plane          | `control-plane-engineer`    |
+| LLM provider adapters          | `provider-adapter-engineer` |
+| Parsing, OCR, chunking         | `ingestion-engineer`        |
+| Crawling and recrawl           | `crawler-engineer`          |
+| Retrieval and reranking        | `retrieval-engineer`        |
+| Knowledge deletion             | `deletion-engineer`         |
+| Next.js admin + hosted chat    | `admin-web-engineer`        |
+| Embedded widget SDK            | `widget-sdk-engineer`       |
+| React Native app               | `mobile-engineer`           |
+| Docker, Traefik, data services | `platform-devops-engineer`  |
+| Tracing, metrics, logs         | `observability-engineer`    |
+| RAG evaluation                 | `rag-eval-engineer`         |
+| Tests across all runtimes      | `test-engineer`             |
+| Security review _(read-only)_  | `security-auditor`          |
+| Contract review _(read-only)_  | `contract-steward`          |
+| Docs and ADRs                  | `docs-adr-writer`           |
 
 ### Shared directories
 
-`apps/` and `services/` are owned by the table above. The three top-level directories that are *shared* need their own row, because a directory owned by everyone is owned by nobody — and every artifact below is mandatory somewhere.
+`apps/` and `services/` are owned by the table above. The three top-level directories that are _shared_ need their own row, because a directory owned by everyone is owned by nobody — and every artifact below is mandatory somewhere.
 
-| Directory | Contents | Writes | Everyone else |
-|---|---|---|---|
-| `packages/contracts/` | the SSE frame parser, shared TypeScript types, the generated OpenAPI document | `admin-web-engineer` | import it; **never fork it.** A second copy of the frame parser is the drift `contract-steward` exists to catch |
-| `packages/design-tokens/` | design tokens consumed by web and widget | `admin-web-engineer` | import only |
-| `samples/` | the golden eval corpus and fixture documents | `rag-eval-engineer` | read only |
-| `scripts/` | repo-level developer and operational scripts | `platform-devops-engineer` | read only |
+| Directory                 | Contents                                                                      | Writes                     | Everyone else                                                                                                   |
+| ------------------------- | ----------------------------------------------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `packages/contracts/`     | the SSE frame parser, shared TypeScript types, the generated OpenAPI document | `admin-web-engineer`       | import it; **never fork it.** A second copy of the frame parser is the drift `contract-steward` exists to catch |
+| `packages/design-tokens/` | design tokens consumed by web and widget                                      | `admin-web-engineer`       | import only                                                                                                     |
+| `samples/`                | the golden eval corpus and fixture documents                                  | `rag-eval-engineer`        | read only                                                                                                       |
+| `scripts/`                | repo-level developer and operational scripts                                  | `platform-devops-engineer` | read only                                                                                                       |
 
 There are exactly two workspace packages. Inventing a third is a finding, not a refactor.
 

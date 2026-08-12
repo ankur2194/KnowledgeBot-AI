@@ -1,0 +1,211 @@
+# Alerting rules.
+#
+# ===============================================================================================
+# TODO(ADR): complete against kb-error-taxonomy's Page column.
+#
+# THIS FILE IS INCOMPLETE AND THE INCOMPLETENESS IS DELIBERATE AND LOUD. A silently incomplete
+# alert file is exactly the failure that let `provider_rate_limit` sit in doctrine as "alert on
+# sustained" with no rule anywhere — the class was documented, nobody was paged, and the gap was
+# invisible because a missing alert produces no signal of any kind.
+#
+# Every kb-error-taxonomy row whose Page column is not `no` must resolve to a named rule here.
+# Covered below: provider_rate_limit (KbProviderRateLimitSustained), provider_temporary via the
+# breaker (KbCircuitBreakerOpen). NOT YET COVERED, each needing a decision recorded as an ADR
+# before it is written:
+#
+#   error_class                  Page column                        what is missing
+#   ---------------------------  ---------------------------------  ----------------------------
+#   provider_billing             page immediately, on ANY sample    a one-sample alert has no
+#                                                                   traffic floor and no `for:`;
+#                                                                   decide the dedupe window
+#   provider_permanent_request   page — it is our bug               needs a rate + floor, or it
+#                                                                   pages on one bad tenant model id
+#   retrieval                    page — chat is down                overlaps KbChatErrorRateHigh;
+#                                                                   decide whether both page
+#   internal_dependency          page                               same overlap question
+#   provider_auth                alert; page if >1 org in 15 min    UNEXPRESSIBLE in PromQL —
+#                                                                   org_id is not a label. Split
+#                                                                   into a rate alert + SQL in the
+#                                                                   runbook, as
+#                                                                   KbProviderRateLimitSustained does
+#   rate_limit (ours)            alert on sustained                 ticket-severity rate rule
+#   vector_indexing, storage     alert                              ticket-severity rate rules
+#
+# A CI gate diffs that class list against the alert names in this file. Until the rules above
+# exist the gate is expected to fail, and it should — the failure IS the marker.
+# ===============================================================================================
+#
+# EVERY alert below carries all three of `severity`, `summary` and `runbook`. `severity` has
+# exactly two values, `page` and `ticket`, both routed in alertmanager.yml; the CI metadata gate
+# asserts the three annotations are present because an alert that fires with no runbook is an
+# on-call engineer reading PromQL at 03:00 to work out what it means.
+#
+# Alerts whose condition names a TENANT are unexpressible: `org_id` is not and never will be a
+# metric label, and adding one is the Prometheus OOM described in kb-observability-conventions.
+# The resolution is always the same shape — PromQL detects the condition, the runbook annotation
+# carries the SQL that identifies who.
+#
+# DELIBERATELY NOT ALERTED, recorded here so it is not "fixed" later:
+#
+#   reranking unavailable for an organization  — kb_retrieval_rerank_skips_total
+#     {reason=~"provider_lacks_capability|provider_scale_uncalibrated"} is PERMANENT and EXPECTED.
+#     Two of the five vendors rerank — NIM and OpenRouter — and only NIM's scores may ever be cut
+#     against (ADR-030; app/providers/nim.py:127), so a bot on OpenAI and a bot on OpenRouter both
+#     serve the RRF-fused order for their whole life, for two DIFFERENT reasons with two different
+#     remedies. Alerting on a condition that is expected to be true is how an on-call rotation
+#     learns to ignore alerts, and the alert could not name the bot anyway. It is a Retrieval
+#     dashboard panel, and the answer to "which bots" is SQL.
+#     A reranker OUTAGE is a different thing entirely and is already covered: it propagates as a
+#     provider error_class through kb_provider_requests_total and KbChatErrorRateHigh, because
+#     RerankSkipReason contains no member meaning the call failed.
+
+groups:
+  # =============================================================================================
+  # CHAT
+  # =============================================================================================
+  - name: kb_chat_alerts
+    interval: 30s
+    rules:
+      - alert: KbChatErrorRateHigh
+        # References the recorded ratio and never re-derives the matcher. The second term is the
+        # traffic floor: at 03:00 one failure out of one request is a 100% error ratio.
+        expr: kb:chat_error_ratio:5m > 0.05 and kb:chat_requests:rate5m > 0.1
+        for: 10m
+        keep_firing_for: 5m # stops a flapping provider paging four times in an hour
+        labels: { severity: page }
+        annotations:
+          summary: "Chat error+timeout ratio {{ $value | humanizePercentage }} on {{ $labels.service }}"
+          runbook: 'Split by error_class, using the same matcher kb-recording.yml defines and never a hand-written one: sum by (error_class) (rate(kb_chat_requests_total{outcome=~"error|timeout"}[5m])). A single dominant class points at one dependency; a spread points at the seam. Provider classes: check KbCircuitBreakerOpen and the Providers dashboard. retrieval/internal_dependency: check kb_dependency_up and Qdrant.'
+
+  # =============================================================================================
+  # SCHEDULER — three independent layers, because each one is blind to the others' failure
+  # =============================================================================================
+  - name: kb_scheduler_alerts
+    interval: 30s
+    rules:
+      # Layer 1. The gauge is exported by core-api from a PostgreSQL row SEEDED IN THE MIGRATION
+      # (laravel-scheduler) — a scheduler that never started after a deploy must read as an
+      # ancient timestamp, not a missing series. You cannot threshold-alert a series that never
+      # existed, and the scheduler container has no scrape target of its own.
+      - alert: KbSchedulerStalled
+        expr: time() - kb_internal_scheduler_tick_timestamp_seconds > 900
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "Scheduled task {{ $labels.task }} has not ticked in 15m"
+          runbook: "Is the laravel-scheduler container running, and is its cron entry firing `schedule:run` every minute? The gauge is read from PostgreSQL by core-api, so a stale value means the scheduler is not writing it — not that the metrics pipeline is broken. If the row is missing entirely the migration seed never ran."
+
+      # Layer 1b. `skipped` is outside the error rate (a skip is the lock working) but needs its
+      # own alert, because its failure mode is SILENCE: withoutOverlapping() registers a skip
+      # filter, so a lock stranded by SIGKILL — default TTL 24h — leaves the tick timestamp
+      # advancing while no work happens. KbSchedulerStalled stays green throughout.
+      - alert: KbSchedulerSkipStuck
+        expr: increase(kb_internal_scheduler_tasks_total{outcome="skipped"}[30m]) >= 5
+        for: 0m
+        labels: { severity: ticket }
+        annotations:
+          summary: "{{ $labels.task }} skipped every tick for 30m — stranded mutex, not contention"
+          runbook: "php artisan schedule:clear-cache; see laravel-scheduler Gotchas"
+
+      # Layer 3. Computed from PostgreSQL by the API on scrape, deliberately NOT by the
+      # scheduler: it is the only signal that catches a scheduler ticking perfectly while the
+      # work does not happen — a stranded lock, a wedged queue, a dispatcher that claims and
+      # throws. Layer 2 is the external dead-man's switch below.
+      - alert: KbCrawlSourcesOverdue
+        expr: kb_crawl_sources_overdue > 50
+        for: 30m
+        labels: { severity: ticket }
+        annotations:
+          summary: "{{ $value }} sources are more than an hour past their recrawl due time"
+          runbook: "The scheduler may be ticking while nothing is dispatched. Check the crawl queue depth (kb_queue_depth{queue=\"crawl\"}) and KbSchedulerSkipStuck first. Which sources: SELECT id, organization_id, next_crawl_at FROM source_items WHERE next_crawl_at < now() - interval '1 hour' ORDER BY next_crawl_at LIMIT 50."
+
+  # =============================================================================================
+  # PROVIDERS
+  # =============================================================================================
+  - name: kb_provider_alerts
+    interval: 30s
+    rules:
+      # kb-error-taxonomy marks provider_rate_limit "alert on sustained" and it is the incident we
+      # actually get. 15m outlives every automatic remedy: a single 429 is retried at most once
+      # and then falls back if configured, so anything still true here has already exhausted
+      # retry AND fallback and is reaching users as failed turns.
+      - alert: KbProviderRateLimitSustained
+        expr: kb:provider_rate_limit_ratio:5m > 0.10
+          and sum by (service, env, provider) (rate(kb_provider_requests_total[5m])) > 0.1
+        for: 15m
+        keep_firing_for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: "{{ $labels.provider }} 429ing {{ $value | humanizePercentage }} of calls for 15m"
+          runbook:
+            "One tenant or the fleet? PromQL cannot answer — org_id is not a label. Run
+            SELECT organization_id, count(*) FROM usage_events WHERE error_class='provider_rate_limit'
+            AND created_at > now() - interval '30 minutes' GROUP BY 1 ORDER BY 2 DESC. One org
+            dominating: throttle or raise that connection's quota. Spread across orgs: our provider
+            account is capped — open a limit increase and confirm §8.7 fallback is configured on the
+            affected bots, because without it every retry ladder ends in a 429 reaching a user."
+
+  # =============================================================================================
+  # PLATFORM — one line each, over a catalogued metric
+  # =============================================================================================
+  - name: kb_platform_alerts
+    interval: 30s
+    rules:
+      # 2 == open. kb-error-taxonomy: a breaker open for more than 5 minutes means the dependency
+      # did not recover across at least ten half-open probe cycles. Pages because for a required
+      # dependency it means chat is down, and for a provider it means answers are failing.
+      # `dependency` is the fixed 8 plus nothing — a per-org provider credential is NOT a
+      # dependency value; per-credential breaker state is PostgreSQL data on the admin dashboard.
+      - alert: KbCircuitBreakerOpen
+        expr: kb_circuit_breaker_state == 2
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "Circuit breaker for {{ $labels.dependency }} is open on {{ $labels.service }}"
+          runbook: "The breaker admits at most 3 concurrent probes and closes only after 3 consecutive successes. If the dependency is healthy and the breaker is still open, the probe is wrong — a /health ping on a different code path returns 200 while inference is dead. Confirm with kb_dependency_up{dependency=\"...\"} and a real request, not a probe."
+
+      # Optional dependencies degrade rather than fail readiness, so nothing else notices they are
+      # gone. Ticket, not page — and `for: 15m` so a rolling deployment does not open one every
+      # release.
+      #
+      # `dependency` IS THE FIXED SIX, and this rule's subject shrank with it. It used to name the
+      # reranker first, on both counts wrongly:
+      #
+      #   * NO PRODUCER. `kb_dependency_up{dependency="reranker"}` had no emitter and could not
+      #     acquire one. Reranking is a provider API call since ADR-030, and readiness must never
+      #     probe an external provider (services/ai-service/app/api/health.py) — provider
+      #     reachability is per-bot and per-credential, so one tenant's revoked key would pull
+      #     every replica out of the edge at once. An alert matching a series nothing emits is
+      #     silent forever and reads as coverage.
+      #   * INVERTED SEMANTICS. A reranker that is DOWN is an error carrying its own error_class,
+      #     not a degradation: `RerankSkipReason` is closed and failure-free precisely so an
+      #     outage cannot be laundered into a skip. What legitimately degrades to fusion-only is
+      #     `provider_lacks_capability` (the vendor publishes no ranking route) or
+      #     `provider_scale_uncalibrated` (it publishes one whose scores this platform cannot
+      #     threshold) — both permanent per-org configuration facts, and an alert is the wrong
+      #     instrument for a condition that is expected to be true. It is a counter,
+      #     kb_retrieval_rerank_skips_total{reason}, on the Retrieval dashboard; the per-tenant
+      #     question is SQL, as it always is here.
+      #
+      # On ai-api the one optional dependency left is object_storage. core-api may add its own.
+      - alert: KbOptionalDependencyDown
+        expr: kb_dependency_up{required="false"} == 0
+        for: 15m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Optional dependency {{ $labels.dependency }} is down on {{ $labels.service }} — degraded, not failing"
+          runbook: "Readiness deliberately ignores optional dependencies, so this never takes a container out of rotation and nothing else will tell you. object_storage: ingestion cannot store originals and uploads fail, while chat and retrieval are unaffected — check SeaweedFS and the ingest queue depth (kb_queue_depth{queue=\"ingest\"}) for the backlog that is building behind it. If the dependency named here is NOT one of the fixed six (postgres, valkey, qdrant, object_storage, ai_api, core_api), a service is emitting an uncatalogued label value and that is the bug to fix first."
+
+      # Layer 2 of the scheduler's three layers, and the only one that survives Prometheus dying.
+      # This alert ALWAYS fires; its notification is a heartbeat to an external monitor, and the
+      # signal is its ABSENCE. Alertmanager routes it on alertname to the `deadman` receiver
+      # before the severity routes, at a 1m repeat interval. It still carries a severity, so that
+      # if the deadman route is ever removed this lands in the ticket queue rather than in the
+      # kb-unrouted catch-all.
+      - alert: KbDeadMansSwitch
+        expr: vector(1)
+        for: 0m
+        labels: { severity: ticket, deadman: "true" }
+        annotations:
+          summary: "Alerting pipeline heartbeat — this alert is always firing, by design"
+          runbook: "Do not silence and do not resolve. If the external monitor stops receiving this, Prometheus, Alertmanager, or the network between them is down and NO other alert in this file can reach anyone. Start there, not at the application."

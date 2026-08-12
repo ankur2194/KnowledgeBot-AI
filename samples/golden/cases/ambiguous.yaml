@@ -1,0 +1,112 @@
+# §21.2 — Ambiguous questions.
+#
+# Every case here sets `clarification_ok: true`. Two responses are correct: ask which
+# interpretation is meant, or answer all of them with citations. Exactly one response is wrong:
+# silently pick one and present it as the answer.
+#
+# Scoring consequence, stated in schema.md and repeated here because it is easy to get wrong:
+# false_refusal = refused and not unanswerable would score a good clarifying question as a false
+# refusal, pushing the gate toward a bot that guesses. Cases marked clarification_ok that produce
+# a clarifying question are EXCLUDED from the false-refusal denominator, counted in a separately
+# reported clarification_rate, and still fully scored on retrieval — asking for clarification does
+# not excuse failing to retrieve the alternatives.
+
+dataset: kb-platform-golden
+corpus_version: corpus-2026.08.1
+category: ambiguous
+
+cases:
+  - id: a-001
+    question: "How much is the 2200?"
+    unanswerable: false
+    clarification_ok: true
+    expected_sources: [pricing-catalog-v1]
+    difficulty: medium
+    reference: >-
+      Two products match "2200": KW-2200-B, the Tideline 2200 benchtop analyser at 18,400 EUR, and
+      KW-2200-F, the Tideline 2200F field analyser at 21,750 EUR.
+    expected_answer: >-
+      There are two: the benchtop KW-2200-B at 18,400 EUR and the field model KW-2200-F at
+      21,750 EUR. Which did you mean?
+    required_facts: []
+    forbidden_claims: ["a single price presented without naming which variant it belongs to"]
+    locators: ["pricing sheet Instruments, rows KW-2200-B and KW-2200-F"]
+    tags: [ambiguous, two-referents, exact-code]
+    grading_notes: >-
+      Correct: name both variants with both prices, or ask which one. Wrong: a bare "18,400 EUR".
+      The forbidden claim is deliberately about presentation rather than value — an unqualified
+      price is wrong for half the people who ask, and the retrieval trace will look perfect.
+      required_facts is empty because a clarifying question legitimately contains no figures; the
+      retrieval check still requires both rows in the evidence.
+
+  - id: a-002
+    question: "How much leave am I entitled to?"
+    unanswerable: false
+    clarification_ok: true
+    expected_sources: [handbook-en-v1]
+    difficulty: medium
+    reference: >-
+      The handbook covers two kinds of leave: annual leave of 26 days per year, rising by one day
+      per five completed years of service to a maximum of 30, and sickness absence, which may be
+      self-certified for up to 3 consecutive days with a medical certificate required from day 4.
+    expected_answer: >-
+      Are you asking about annual leave or sickness absence? Annual leave is 26 days a year (plus a
+      day per five years of service, capped at 30). Sickness absence can be self-certified for up
+      to 3 consecutive days.
+    required_facts: []
+    forbidden_claims: ["any statement that the handbook covers parental leave"]
+    locators: ["handbook §3 Leave", "§3.1 Sickness"]
+    tags: [ambiguous, two-topics, absent-third-topic]
+    grading_notes: >-
+      "Leave" spans two sections. Either covering both or asking which is meant is correct. The
+      forbidden claim is the interesting one — an ambiguous question invites the model to enumerate
+      leave types it knows about generally, and parental leave is the one the handbook deliberately
+      omits (see u-001). An enumeration that includes it has left the sources.
+
+  - id: a-003
+    question: "What is the response time?"
+    unanswerable: false
+    clarification_ok: true
+    expected_sources: [pricing-catalog-v1, quarterly-review-q2-2026]
+    difficulty: hard
+    reference: >-
+      "Response time" has two readings in the corpus: the contractual commitments per service plan
+      — 5 business days for SP-STD, next business day for SP-PLUS, 4 hours remote for SP-CRIT — and
+      the measured Q2 median first-response time of 3.1 hours.
+    expected_answer: >-
+      Do you mean what we commit to, or what we measured? The plans commit to 5 business days
+      (SP-STD), next business day (SP-PLUS), and 4 hours remote (SP-CRIT). Measured median first
+      response in Q2 was 3.1 hours.
+    required_facts: []
+    forbidden_claims: ["3.1 hours presented as a contractual commitment"]
+    locators: ["pricing sheet Service plans", "quarterly deck slide 4 SPEAKER NOTES"]
+    tags: [ambiguous, commitment-vs-measurement, pptx-notes]
+    grading_notes: >-
+      The most consequential ambiguity in the corpus: conflating a measured internal average with a
+      contractual commitment is the kind of answer that gets quoted back by a customer. Both
+      readings must be retrievable — source recall requires both fixtures — but the answer must keep
+      them apart. Depends on speaker notes, so cross-check s-002 before diagnosing.
+
+  - id: a-004
+    question: "Do I need approval first?"
+    unanswerable: false
+    clarification_ok: true
+    expected_sources: [handbook-en-v1, travel-policy-v3]
+    difficulty: hard
+    reference: >-
+      Approval requirements appear in two places: remote working requires manager approval and is
+      unavailable during the first three months of employment, and any single trip with an estimated
+      cost above 1,200 EUR requires advance written approval.
+    expected_answer: >-
+      Approval for what? Remote working needs manager approval and is not available in your first
+      three months. Travel needs advance written approval when a single trip is estimated above
+      1,200 EUR.
+    required_facts: []
+    forbidden_claims: ["any approval threshold or rule not stated in the corpus"]
+    locators: ["handbook §2.1 Remote work", "travel policy §2 Approval"]
+    tags: [ambiguous, no-topic-at-all, two-documents]
+    grading_notes: >-
+      The hardest ambiguity because the question names no topic whatsoever — a bare pronoun-free
+      "it". This is the case most likely to produce a fabricated general policy ("all purchases over
+      X require approval"), which is why the forbidden claim is a catch-all. A clarifying question
+      is arguably the BEST answer here, and it must not be penalised.

@@ -1,0 +1,98 @@
+# scripts/security/policy/vuln-ignores.toml
+#
+# Accepted-with-mitigation vulnerabilities. Read by the dependency and image scanners (pip-audit,
+# composer audit, osv-scanner, trivy, grype) so that one dated, owned, reviewable file is the only
+# place a finding can be suppressed.
+#
+# ================================================================================================
+# WHY THIS FILE EXISTS INSTEAD OF A CLI FLAG
+# ================================================================================================
+# `pip-audit --ignore-vuln GHSA-xxxx` and `trivy --ignore-unfixed` in a workflow YAML have no
+# owner, no expiry, and no stated compensating control. Six months later nobody can say who decided
+# it or whether the reason still holds — and the scanner is quietly checking less than everyone
+# believes. A flag also survives the mitigation being reverted, which is the failure this schema is
+# shaped around.
+#
+# ================================================================================================
+# THE SCANNER IS NOT THE MITIGATION
+# ================================================================================================
+# An entry here records that we ACCEPTED A RISK. A TEST enforces the thing that makes it
+# acceptable. That is why `test_id` is mandatory and why CI fails when the named test does not
+# exist: a suppression keys on the PACKAGE, so it stays green after a well-meaning refactor
+# re-enables the very configuration the suppression assumed was off.
+#
+# ================================================================================================
+# SCHEMA — every field is required. A missing one is a FATAL policy error, not a skipped entry.
+# ================================================================================================
+#   id                  advisory identifier (CVE-…, GHSA-…, PYSEC-…, OSV-…)
+#   package             purl of the affected component
+#   affected_versions   the range we actually ship
+#   owner               an agent or a person who re-decides at expiry — never "the team"
+#   reason              why there is nothing to bump; a fixed version existing makes this invalid
+#   compensating_control  the configuration or code that makes exploitation impossible here
+#   test_id             the test that ENFORCES that control. Must exist, or CI fails.
+#   expires             ISO date. On lapse the nightly job fails and someone re-decides.
+#   scanners            which tools this entry suppresses in; never a blanket suppression
+#
+# Nothing here is retroactive and nothing here is permanent. A finding WITH a fix available is
+# never suppressed — it is bumped.
+
+schema_version = 1
+
+# ================================================================================================
+# The worked case.
+# ================================================================================================
+[[ignore]]
+id                = "CVE-2026-44016"
+package           = "pkg:pypi/docling"
+affected_versions = ">=2.94.0,<=2.118.0"
+owner             = "ingestion-engineer"
+reason            = """
+Docling's HTML pipeline can render a page through Playwright to resolve client-side content. The
+flaw is scope-changed with high confidentiality and integrity impact — a hostile HTML document
+drives a real browser inside the ingestion worker.
+
+THERE IS NO PATCHED RELEASE. Upstream has shipped nothing that fixes it, so `pip-audit --fix` does
+nothing and the job still fails; there is no version to bump to. The decision is therefore
+accept-with-mitigation or drop the dependency, and Docling is the parser for every PDF, DOCX,
+XLSX and PPTX in the product.
+
+The exposure is entirely a function of one option. We never enable remote rendering: every
+DocumentConverter in this codebase is constructed with `enable_remote_services=False`, so the
+Playwright backend is never constructed and the vulnerable path is unreachable. Uploaded and
+crawled content is hostile data permanently, and the HTML pipeline runs on exactly that.
+"""
+compensating_control = """
+`enable_remote_services=False` on every DocumentConverter construction in
+services/ai-service/app/ingestion/parsing/, plus the parser container's own envelope: no route to
+the `data` network from the crawl path, a hard Celery `time_limit` (not only `soft_time_limit`),
+and a container memory cap.
+
+The control is the ASSERTION, not this entry. This entry is paperwork.
+"""
+test_id  = "services/ai-service/tests/security/test_docling_no_remote_render.py::test_html_pipeline_never_constructs_playwright_backend"
+expires  = "2026-11-05"
+scanners = ["pip-audit", "trivy", "grype", "osv-scanner"]
+
+# ================================================================================================
+# HOW TO ADD ONE — the questions in order
+# ================================================================================================
+# 1. Is there a fixed version? If yes, this file is the wrong answer. Bump it.
+# 2. Is the vulnerable code path reachable in OUR configuration? If you cannot say precisely why
+#    not, you do not have a compensating control, you have a hope.
+# 3. Write the TEST that enforces the control FIRST. If the control cannot be tested, it will be
+#    reverted, and the suppression will outlive it silently.
+# 4. Pick an expiry you are willing to be interrupted by. 90 days is the default; a longer window
+#    needs a reason of its own.
+# 5. Name an owner who will still be responsible at that date.
+#
+# [[ignore]]
+# id                   = "GHSA-xxxx-xxxx-xxxx"
+# package              = "pkg:npm/some-package"
+# affected_versions    = ">=1.0.0,<2.0.0"
+# owner                = "admin-web-engineer"
+# reason               = "..."
+# compensating_control = "..."
+# test_id              = "apps/web/src/.../thing.test.ts::asserts the control"
+# expires              = "2026-11-01"
+# scanners             = ["osv-scanner", "trivy"]

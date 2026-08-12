@@ -114,8 +114,8 @@ def publish_version(v: SourceVersion, chunks: list[Chunk]) -> None:
         # -> Failed. The prior version was never touched and still serves.
 
     # 3. REPORT READINESS. The data plane's last act. ADR-012: FastAPI writes only
-    #    chunks, document_elements, retrieval_traces, evaluation_results — never
-    #    source_versions, never source_items, and it never performs an activation.
+    #    the tables in ALLOWED_TABLES (app/db/writes.py) — never source_versions,
+    #    never source_items, and it never performs an activation.
     report_ingestion_status(v.id, state="indexed_verified", chunk_count=indexed)
 ```
 

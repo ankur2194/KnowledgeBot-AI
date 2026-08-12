@@ -1,0 +1,111 @@
+# /.dockerignore — the repo root.
+#
+# ================================================================================================
+# THIS FILE IS NOT DEAD WEIGHT: IT IS THE ONLY .dockerignore THAT APPLIES TO apps/web AND
+# apps/widget, AND WITHOUT IT THOSE TWO BUILDS HAD NO EXCLUSION AT ALL.
+# ================================================================================================
+# No image in this repo uses the repo root as its PRIMARY build context. That is deliberate — see
+# the header of apps/web/Dockerfile. But both web images take the repo root as a NAMED build
+# context (`workspace`, declared in compose.yaml), and every one of their COPY lines reads
+# `--from=workspace`. Their own apps/{web,widget}/.dockerignore files each describe themselves as
+# "authoritative for the PRIMARY build context" — which is true, and also means they were
+# filtering a context that neither Dockerfile ever copies a single byte from.
+#
+# BuildKit applies a local named context's OWN root .dockerignore to that context (verified
+# empirically, not assumed: a file matched here does not appear in the destination). So this file
+# is the exclusion list for `workspace`, and until it existed the entire repository — .git,
+# infrastructure/docker/secrets/, every developer .env, every Playwright storage-state file — was
+# uploaded to the daemon on every `docker compose build web`.
+#
+# A layer is permanent. Deleting a file in a later RUN does not remove it from the earlier layer;
+# `docker history` and `docker save` both still show it, and anyone who can pull the image can
+# read it.
+#
+# WHAT IS DELIBERATELY *NOT* EXCLUDED: test sources (`tests/`, `*.spec.ts`, `*.test.ts`,
+# playwright.config.ts). apps/web/tsconfig.json includes `**/*.ts`, so `next build` type-checks
+# them; excluding them here would make the image build a WEAKER check than CI's
+# `pnpm --filter web typecheck` and let a type error reach main through the image. Test
+# ARTIFACTS — which hold real cookies and tokens — are excluded below.
+
+# ================================================================================================
+# SECRETS. Nothing below this heading may ever enter a build context.
+# ================================================================================================
+.env
+.env.*
+!.env.example
+!*.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+id_rsa*
+
+# The Compose secret files themselves: KEK, both internal HMAC signing keys, the database and
+# Valkey passwords, the S3 secret. They reach a container through `secrets:` at RUN time and must
+# never reach one at BUILD time.
+infrastructure/docker/secrets/
+
+# Playwright storage state is a real authenticated session for the test users.
+**/playwright/.auth/
+**/.auth/
+
+# ================================================================================================
+# VERSION CONTROL AND AGENT STATE
+# ================================================================================================
+# .git carries every deleted file and every rewritten commit — including anything a secret scan
+# has already caught and someone "removed" in a later commit.
+.git/
+.gitignore
+.gitattributes
+.claude/
+.github/
+
+# ================================================================================================
+# DEPENDENCIES AND BUILD OUTPUT — rebuilt inside the image, from the lockfiles
+# ================================================================================================
+# A host node_modules copied in would shadow the frozen install with whatever the developer's
+# machine resolved, silently, and the image would contain packages in no SBOM and no lockfile.
+**/node_modules/
+.pnpm-store/
+**/.next/
+**/out/
+**/dist/
+**/.turbo/
+**/*.tsbuildinfo
+**/vendor/
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+
+# ================================================================================================
+# TEST AND COVERAGE ARTIFACTS (not test sources — see the header)
+# ================================================================================================
+**/playwright-report/
+**/blob-report/
+**/test-results/
+**/coverage/
+**/.nyc_output/
+
+# ================================================================================================
+# MODEL WEIGHTS AND LARGE FIXTURES — never in a layer
+# ================================================================================================
+# Gigabytes each, in no SBOM, invisible to pip-audit, and carrying their own licences. They arrive
+# on a mounted volume pinned by commit SHA in models.manifest.toml.
+**/models/
+*.safetensors
+*.gguf
+*.onnx
+
+# ================================================================================================
+# DOCS AND EDITOR NOISE — no image reads these
+# ================================================================================================
+docs/
+KnowledgeBot-AI.md
+*.log
+.DS_Store
+.idea/
+.vscode/

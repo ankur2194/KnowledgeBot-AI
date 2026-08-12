@@ -1,0 +1,89 @@
+# services/core-api/.dockerignore
+#
+# A .dockerignore is a SECURITY control before it is a build-speed control. Everything not excluded
+# here is uploaded to the daemon and lands in a layer — and a layer is readable by anyone who can
+# pull the image, including every self-hoster we hand it to. `docker history` and `docker save`
+# both expose it; deleting a file in a later RUN does not remove it from the earlier layer.
+
+# ================================================================================================
+# SECRETS AND ENVIRONMENT — the reason this file exists
+# ================================================================================================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+auth.json
+storage/oauth-*.key
+
+# ================================================================================================
+# DEPENDENCIES — rebuilt in the vendor stage from the committed lockfile
+# ================================================================================================
+# Copying a host vendor/ in would silently override the frozen install and ship whatever the
+# developer's machine resolved, which is exactly what --no-dev and a committed composer.lock exist
+# to prevent.
+vendor/
+node_modules/
+
+# ================================================================================================
+# RUNTIME STATE — must never be baked into an image
+# ================================================================================================
+# storage/framework/* holds one machine's compiled views, sessions and cache. In production these
+# are tmpfs (the container is read_only), so an image carrying a developer's session files is both
+# stale and a data leak.
+storage/framework/cache/*
+storage/framework/sessions/*
+storage/framework/views/*
+storage/logs/*
+bootstrap/cache/*
+!storage/framework/cache/.gitignore
+!storage/framework/sessions/.gitignore
+!storage/framework/views/.gitignore
+!bootstrap/cache/.gitignore
+database/*.sqlite
+public/storage
+
+# ================================================================================================
+# TESTS AND DEV TOOLING — not shipped
+# ================================================================================================
+# Not only size: test fixtures contain seeded credentials and sample tenant data, and a test suite
+# in a shipped artifact widens the CVE surface with findings a self-hoster cannot act on.
+tests/
+.phpunit.result.cache
+.phpunit.cache/
+phpunit.xml
+phpunit.xml.dist
+pest.xml
+.pest/
+coverage/
+infection.json*
+psalm.xml*
+phpstan.neon*
+.php-cs-fixer.cache
+storage/phpstan/
+
+# ================================================================================================
+# VCS, CI, EDITOR
+# ================================================================================================
+# .git is the big one: it is full history, so a credential removed three commits ago is still in
+# the image even after the working tree is clean.
+.git
+.gitignore
+.gitattributes
+.github/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# ================================================================================================
+# DOCS AND LOCAL COMPOSE
+# ================================================================================================
+README.md
+CHANGELOG.md
+docs/
+docker-compose*.yml
+compose*.yaml
+Dockerfile
+.dockerignore

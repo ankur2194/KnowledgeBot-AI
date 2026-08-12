@@ -1,0 +1,65 @@
+# apps/web/.dockerignore
+#
+# Authoritative for the PRIMARY build context (apps/web). The repo root arrives as the named
+# context `workspace`, from which the Dockerfile copies only the manifests it names plus packages/
+# and apps/web — an explicit list rather than a wildcard, which is the real control there.
+
+# ================================================================================================
+# SECRETS
+# ================================================================================================
+# .env.local and .env.production are Next's own conventions and are the files most likely to hold
+# a real value on a developer's machine.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ================================================================================================
+# BUILD OUTPUT AND DEPENDENCIES — rebuilt inside the image
+# ================================================================================================
+# A host .next/ copied in would ship a bundle built against a different NEXT_PUBLIC_API_ORIGIN.
+# Those values are INLINED at build time, so the image would call the wrong API host and the
+# symptom would be CORS failures rather than a configuration error.
+.next/
+out/
+node_modules/
+*.tsbuildinfo
+
+# ================================================================================================
+# TESTS
+# ================================================================================================
+# Playwright artifacts in particular: traces and videos of authenticated sessions, and
+# playwright/.auth/ holds real storage state (cookies and tokens) for the test users.
+playwright/
+playwright-report/
+blob-report/
+test-results/
+e2e/
+__tests__/
+*.spec.ts
+*.spec.tsx
+*.test.ts
+*.test.tsx
+vitest.config.*
+playwright.config.*
+coverage/
+
+# ================================================================================================
+# VCS, CI, EDITOR
+# ================================================================================================
+.git
+.gitignore
+.github/
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# ================================================================================================
+# DOCS
+# ================================================================================================
+README.md
+docs/
+Dockerfile
+.dockerignore

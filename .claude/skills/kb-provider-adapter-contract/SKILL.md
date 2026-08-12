@@ -10,7 +10,7 @@ FastAPI AI service — Python, Pydantic v2 typed contracts, official provider SD
 
 ## Non-negotiables
 
-- **No provider credential leaves the adapter.** Under ADR-011 the adapter reads `provider_credential` off the already-validated internal request — it resolves nothing from storage, and the value lives beside the config snapshot rather than inside it. It uses that secret for one call, and never puts it in a log line, a span attribute, a `Diagnostics` payload, or an exception message. Encryption and storage belong to `kb-security-baseline`; this skill only guarantees the value stops here.
+- **No provider credential leaves the adapter.** Under ADR-011 the adapter reads its key from the `provider_credentials` map on the already-validated internal request — it resolves nothing from storage, and the map lives beside the config snapshot rather than inside it. **Look the entry up by `connection_id` at the call site that is about to make the request, and unwrap it there** (finding F12, ruled 2026-08-12 as `docs/22` § G7). Never unwrap the map into a container: one comprehension over `.items()` produces a plain `dict[str, str]` with no masking left in it, and a single `str()` of that object in an exception message prints all three keys. It uses that secret for one call, and never puts it in a log line, a span attribute, a `Diagnostics` payload, or an exception message. Encryption and storage belong to `kb-security-baseline`; this skill only guarantees the value stops here.
 - **Capabilities come from `provider_models.capability_flags`, never from the model id string.** Parsing `"gpt-5"` or `"deepseek-reasoner"` to infer support is how capability drift ships to production — and both of those ids are already dead (`deepseek-reasoner` was retired 2026-07-24), which is the point: id strings decay, the capability row does not. `docs/11-data-model.md` §16.2 is the source of truth; the DB row is the input to `validate()`.
 - **An unsupported option is rejected or warned — never silently dropped** (§8.6). Silent drops mean a bot configured for structured output quietly returns prose and nobody notices for a month.
 - **`stop_reason` never lies about truncation.** A length cap maps to `MAX_OUTPUT`, never `COMPLETE`. Truncated answers presented as complete are the worst failure this layer can cause: the user sees a confident half-sentence and no error anywhere.
@@ -40,6 +40,13 @@ class Capability(StrEnum):
     PROMPT_CACHING     = "prompt_caching"
     STREAM_USAGE       = "stream_usage"            # usage arrives on the stream
     EARLY_INPUT_USAGE  = "early_input_usage"       # input tokens known before the stream ends
+    # Non-chat surfaces (ADR-030). Rows are TASK-EXCLUSIVE: a row claiming a chat flag
+    # alongside one of these describes a product that does not exist, and
+    # capabilities.assert_row_coherent refuses it at save time.
+    EMBEDDING          = "embedding"
+    EMBEDDING_INPUT_TYPE = "embedding_input_type"  # NVIDIA's required passage/query switch
+    EMBEDDING_DIMENSIONS = "embedding_dimensions"  # Matryoshka width — part of the EmbeddingSpace
+    RERANK             = "rerank"
 
 class ModelCapabilities(BaseModel):
     """Mirrors provider_models.capability_flags (docs/11 §16.2)."""
@@ -144,9 +151,59 @@ class ProviderAdapter(Protocol):
     name: str
     def validate(self, req: ChatRequest, caps: ModelCapabilities) -> list[CapabilityWarning]: ...
     def stream(self, req: ChatRequest, caps: ModelCapabilities) -> AsyncIterator[Delta | ChatResult]: ...
+
+# Three Protocols, not one widened Protocol. Bolting embed/rerank onto ProviderAdapter would
+# force AnthropicAdapter.embed to exist and raise: it type-checks, satisfies every Protocol
+# check, and fails at request time on the ingestion path — the one place a failure costs a
+# re-parse. So THE STATIC GATE IS THE ABSENCE OF THE METHOD (a vendor that cannot embed does
+# not define `embed`), and the runtime gate is capabilities.can_embed / can_rerank. The two
+# are asserted against each other by test_provider_capability_matrix.py.
+class EmbeddingAdapter(Protocol):
+    async def embed(self, req: EmbeddingRequest, caps, credential) -> EmbeddingResult: ...
+class RerankAdapter(Protocol):
+    async def rerank(self, req: RerankRequest, caps, credential) -> RerankResult: ...
+    # RerankRequest carries org_id / trace_id / provider_connection_id and has NO top_n:
+    # scores come back input-aligned, and the pipeline cuts. RerankResult carries `scale` —
+    # the vendor's own claim about what its numbers mean — which is what makes stage 12's
+    # scale assertion a real comparison rather than a value against a copy of itself.
 ```
 
 `validate()` runs **before** the first byte goes out. With `on_unsupported="reject"` it raises a validation error naming the option and the model; with `"warn"` it strips the option and appends a `CapabilityWarning` that rides into `Diagnostics` and the conversation diagnostics panel. Both paths are visible; neither is silent. The stream terminates with a `ChatResult` on every path — success, error, cancellation — so usage finalization has one call site.
+
+### Non-chat capabilities — who can embed, who can rerank
+
+Every vendor chats. Embedding and reranking are **per-vendor** since ADR-030, and the answer is
+data rather than prose: `app/providers/capabilities.py` holds the matrix (`PROVIDER_TASKS`, one
+cell per `(vendor, ProviderSurface)`, each carrying the vendor document it was read from and the
+date), and `tests/unit/test_provider_capability_matrix.py` pins it against the adapters — it fails
+if an adapter defines a method the matrix denies, or omits one the matrix asserts. **Never write a
+vendor name into prose as the answer; run the lookup.**
+
+```bash
+cd services/ai-service && .venv/bin/python -c "from app.providers.capabilities import providers_offering, RERANK_SCALE; from app.providers.errors import ProviderSurface; print('embed  ', sorted(providers_offering(ProviderSurface.EMBEDDING))); print('rerank ', sorted(providers_offering(ProviderSurface.RERANK))); print('cutable', sorted(RERANK_SCALE))"
+# 2026-08-12: embed ['nvidia_nim','openai','openrouter'] | rerank ['nvidia_nim','openrouter'] | cutable ['nvidia_nim']
+```
+
+Three things that lookup encodes and a single boolean cannot:
+
+- **`can_embed` is two axes ANDed** — the vendor publishes `/embeddings`, *and* the
+  `provider_models` row claims `Capability.EMBEDDING`. A wrong answer here is not a degradation:
+  an org whose only connection cannot embed **cannot ingest at all** (finding C1), and the failure
+  otherwise lands after the parse and the OCR are paid for. That is a connection-save validity
+  question, and `assert_row_coherent` raises `VALIDATION` at save time rather than on a request.
+- **`can_rerank` is three axes ANDed**, and the third is about *us*: the provider's score scale
+  must be one this pipeline can threshold (`RERANK_SCALE`). A vendor can publish a ranking route
+  we cannot consume — that is OpenRouter today (finding #47), a gateway fronting several upstream
+  cross-encoders on one credential with no documented normalization, so its scale is
+  `UNCALIBRATED` and `RerankCalibration` refuses to be constructed on it. There is **no
+  ordering-only path** through the pipeline, so an uncharacterized scale is the absence of the
+  capability rather than a reduced one.
+- **Three states, not two.** `UNVERIFIED` (nobody has checked) gates identically to `UNSUPPORTED`
+  (the vendor positively denies it) at runtime and needs the opposite follow-up. A `SUPPORTED` or
+  `UNSUPPORTED` cell cannot be written without naming its source; the model validator enforces it.
+
+Scale and threshold doctrine — including why `0.30` is a valid float on every scale and means
+opposite things — is `bge-reranker`'s; embedding-space identity is `bge-m3-embeddings`'.
 
 ### Fallback eligibility
 
@@ -196,3 +253,5 @@ Owned elsewhere: per-provider API surfaces → `openai-api`, `anthropic-api`, `d
 - [ ] Per adapter, two synthetic fixtures built from the vendor's own error code: a capacity/overload error yields `provider_temporary` and falls back; an unknown-model error yields `provider_permanent_request` and does not. Five adapters, one contract.
 - [ ] `Diagnostics` snapshot contains no prompt text, no message content, and no credential; asserted by a test that greps the serialized payload for the fixture's system prompt.
 - [ ] New capability shipped as all three of: `Capability` member, `validate()` mapping, `provider_models.capability_flags` backfill.
+- [ ] A vendor that cannot embed or rerank **does not define the method**, and a test asserts the matrix and the adapters against each other in both directions — an adapter defining a method the matrix denies, or omitting one it asserts, is red. No skill, doc or comment names a vendor as "the only" embedder or reranker; the answer is looked up in `capabilities.py`.
+- [ ] `assert_row_coherent` refuses, at connection-save time: a row claiming a surface the vendor is not `SUPPORTED` on, a rerank row on a provider absent from `RERANK_SCALE`, a row claiming both embedding and rerank, and a non-chat row carrying chat flags.

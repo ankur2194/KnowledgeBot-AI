@@ -1,0 +1,300 @@
+# Production overlay. ALWAYS passed explicitly:
+#
+#     docker compose -f compose.yaml -f compose.prod.yaml up -d
+#
+# Passing -f is what disables the auto-load of compose.override.yaml. Omit it and production comes
+# up with dev bind mounts, a published PostgreSQL port and staging certificates, and nothing warns.
+#
+# Four hardening axes, all from §24.7: digest pins, read-only root filesystems with explicit
+# tmpfs scratch, dropped capabilities + no-new-privileges, and non-root users.
+#
+# ------------------------------------------------------------------------------------------------
+# ON `deploy.restart_policy`
+# ------------------------------------------------------------------------------------------------
+# `docker compose up` honours deploy.resources.{limits,reservations} and IGNORES
+# deploy.{placement,mode,update_config,rollback_config,replicas} — and restart_policy is in the
+# ignored set outside Swarm. It is written below because §24.7 asks for it and because a future
+# Swarm/Kubernetes port reads it, but THE KEY THAT ACTUALLY RESTARTS A CONTAINER HERE IS
+# `restart: unless-stopped`, inherited from compose.yaml. Do not delete `restart:` believing
+# restart_policy replaces it.
+#
+# And note what `restart:` does NOT do: it reacts to process EXIT, never to health. A container
+# that Traefik has excluded for failing its readiness probe is not restarted by Docker — it is
+# simply out of the load balancer with nothing to recover it. That is why readiness probes here
+# carry enough `retries` to outlive a normal dependency blip.
+#
+# ------------------------------------------------------------------------------------------------
+# ON DIGESTS
+# ------------------------------------------------------------------------------------------------
+# Every image is `tag@sha256:...`. The tag stays for readability; the digest is what pulls.
+# An unpinned tag makes the SBOM a description of a build that no longer exists and makes "we fixed
+# that CVE" unfalsifiable. It matters most for SeaweedFS: it has no semver, no LTS, ships roughly
+# every 5.5 days, and #9700 is a confirmed DATA-LOSS regression *inside* its own 4.x line.
+# Digests live in .env (see .env.example); they are values, not secrets.
+
+services:
+
+  traefik:
+    image: traefik:v3.7@${TRAEFIK_DIGEST}
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    # The one capability kept anywhere in this file. Binding :80 and :443 needs it, and dropping it
+    # in favour of high ports plus host NAT moves the problem rather than removing it.
+    cap_add: [NET_BIND_SERVICE]
+    # NO `command:` KEY HERE EITHER — and this overlay is where the bug the base file documents
+    # was still live. It carried
+    #     command: [--certificatesresolvers.le.acme.email=${ACME_EMAIL}]
+    # which is the SAME dead flag the base file records having removed. Measured against
+    # traefik:v3.7.10 on 2026-08-07: with traefik.yaml mounted, a file that defines no
+    # certificatesResolvers plus these exact flags starts NO acme provider at all (no
+    # `Starting provider *acme.Provider`, no `acme-http@internal` router); the identical flags with
+    # the file removed do create the resolver. So PRODUCTION's ACME account has been registering
+    # with no contact address for the whole life of this overlay, exactly as the base file says.
+    # The email lives in traefik/traefik.yaml as a committed placeholder that bootstrap/deploy
+    # rewrites in place. ${ACME_EMAIL} in .env reaches Traefik through that rewrite, not through
+    # a flag — if the rewrite has not run, the placeholder is what registers.
+    #
+    # The caserver note that used to sit here was misleading for the same reason: the production
+    # directory is selected by the `le` resolver in traefik.yaml and by CERT_RESOLVER=le on the
+    # router LABELS, not by the absence of a flag. The operational half of it is still true and is
+    # kept: if you ever iterated against staging, DELETE the acme volume as well — the staging
+    # account persists in acme.json and every certificate stays untrusted with no error anywhere.
+    deploy:
+      restart_policy: {condition: any, delay: 5s}
+      resources: {limits: {memory: 512M}}
+
+  web:
+    image: ${REGISTRY}/web:${VERSION}@${WEB_DIGEST}
+    read_only: true
+    tmpfs: ["/tmp", "/app/.next/cache"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    user: "10001:10001"
+    deploy:
+      restart_policy: {condition: any, delay: 5s}
+      resources: {limits: {memory: 1G}}
+
+  sdk:
+    image: ${REGISTRY}/widget:${VERSION}@${WIDGET_DIGEST}
+    read_only: true
+    tmpfs: ["/tmp", "/var/cache/nginx", "/var/run"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    user: "10001:10001"
+    deploy:
+      restart_policy: {condition: any, delay: 5s}
+      resources: {limits: {memory: 256M}}
+
+  # ----------------------------------------------------------------------------------------------
+  # Laravel: one image, six services. `x-core-api-prod` is a YAML anchor, not a Compose feature —
+  # merge keys are resolved by the YAML parser before Compose ever sees the document.
+  # ----------------------------------------------------------------------------------------------
+  laravel-api: &core-api-prod
+    image: ${REGISTRY}/core-api:${VERSION}@${CORE_API_DIGEST}
+    read_only: true
+    # Laravel writes framework caches, sessions and logs; nginx and php-fpm write pid/socket files.
+    # tmpfs, not a volume: none of it survives a restart by design, and a writable layer here is
+    # how a compromised worker persists.
+    tmpfs:
+      - /tmp
+      - /var/run
+      - /var/cache/nginx
+      - /app/storage/framework/cache
+      - /app/storage/framework/sessions
+      - /app/storage/framework/views
+      - /app/storage/logs
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    user: "10001:10001"
+    environment:
+      APP_ENV: production
+      APP_DEBUG: "false"
+    deploy:
+      restart_policy: {condition: any, delay: 5s}
+      resources: {limits: {memory: 1G}}
+
+  laravel-api-stream:
+    <<: *core-api-prod
+    deploy:
+      restart_policy: {condition: any, delay: 5s}
+      # Sized for CONCURRENT STREAMS, not requests per second: one streamed answer pins one FPM
+      # child for its entire life.
+      resources: {limits: {memory: 2G}}
+
+  laravel-worker:
+    <<: *core-api-prod
+    deploy:
+      restart_policy: {condition: any, delay: 5s}
+      resources: {limits: {memory: 1G}}
+
+  laravel-worker-long:
+    <<: *core-api-prod
+    deploy:
+      restart_policy: {condition: any, delay: 5s}
+      resources: {limits: {memory: 2G}}   # export/rollup jobs stream CSV/ZIP through PHP
+
+  laravel-scheduler:
+    <<: *core-api-prod
+    deploy:
+      restart_policy: {condition: any, delay: 5s}
+      resources: {limits: {memory: 512M}}
+
+  laravel-migrate:
+    <<: *core-api-prod
+    restart: "no"                          # re-assert: the anchor above does not carry it
+    deploy:
+      restart_policy: {condition: none}    # a migration that restarts on failure is a deadlock loop
+      resources: {limits: {memory: 1G}}
+
+  # ----------------------------------------------------------------------------------------------
+  # FastAPI data plane
+  # ----------------------------------------------------------------------------------------------
+  ai-api:
+    image: ${REGISTRY}/ai-service:${VERSION}@${AI_SERVICE_DIGEST}
+    read_only: true
+    tmpfs: ["/tmp", "/home/app/.cache"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    user: "10001:10001"
+    volumes:
+      - models:/models:ro    # :ro in production. Weights are baked or pre-populated, never written
+                             # at runtime — a writable model directory is an unsigned code path.
+    deploy:
+      restart_policy: {condition: any, delay: 10s}
+      # NO `resources:` KEY, DELIBERATELY. `deploy` merges recursively, so this block adds a
+      # restart policy and inherits compose.yaml's limit — which is 2G, with the derivation
+      # written out there: ADR-030 left ai-api with no resident model, so what remains is an
+      # I/O-bound ASGI process (httpx, a psycopg pool, a Qdrant client), and ai-api is not a
+      # Celery worker so no worker_max_memory_per_child sits under the number.
+      #
+      # This used to restate `{limits: {memory: 8G}}` — the pre-ADR-030 figure ("embedder ~2.3 GB
+      # + reranker ~2.3 GB + heap"), quietly reinstated in production after the base file had
+      # already cut it, exactly as the dev overlay was quietly reinstating a 600s start_period.
+      # A number worth writing twice is a number that will disagree with itself; the base file is
+      # the one place ai-api's limit is decided.
+
+  ai-worker-ingestion: &ai-worker-prod
+    image: ${REGISTRY}/ai-service:${VERSION}@${AI_SERVICE_DIGEST}
+    read_only: true
+    tmpfs: ["/tmp", "/home/app/.cache"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    user: "10001:10001"
+    volumes: ["models:/models:ro"]
+    deploy:
+      restart_policy: {condition: any, delay: 10s}
+      resources: {limits: {memory: 8G}}
+
+  ai-worker-embedding:
+    <<: *ai-worker-prod
+    deploy:
+      restart_policy: {condition: any, delay: 10s}
+      resources: {limits: {memory: 8G}}
+
+  ai-worker-crawl:
+    image: ${REGISTRY}/ai-service-crawl:${VERSION}@${AI_SERVICE_CRAWL_DIGEST}
+    # NOT read_only. Chromium needs a writable profile, cache and shared-memory directory, and a
+    # read-only rootfs makes it fail at page load rather than at start — which reads as a crawl
+    # bug for a week. It is instead the most tightly *networked* service in the file: no `data`
+    # membership, one secret, and an application-level egress allow-list denying private ranges.
+    tmpfs:
+      - /tmp
+      - /dev/shm:size=1g     # Chromium's default 64 MB /dev/shm crashes tabs on large pages
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    user: "10001:10001"
+    deploy:
+      restart_policy: {condition: any, delay: 10s}
+      resources: {limits: {memory: 4G}}
+
+  ai-worker-evaluation:
+    image: ${REGISTRY}/ai-service-eval:${VERSION}@${AI_SERVICE_EVAL_DIGEST}
+    read_only: true
+    tmpfs: ["/tmp", "/home/app/.cache"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    user: "10001:10001"
+    # THIS LIST IS NOT THE WHOLE LIST, AND IT LOOKS LIKE IT IS. Compose merges `volumes:` across
+    # files by TARGET PATH, so the `../../samples:/samples:ro` bind declared on this service in
+    # compose.yaml survives into the production render — VERIFIED, not assumed:
+    # `docker compose -f compose.yaml -f compose.prod.yaml config` emits both entries.
+    # It matters because `kb.evaluate.start_run` calls `verify_corpus()` as its first statement and
+    # refuses the run without the corpus, and a "tidy" edit that re-states this as the complete set
+    # (or a merge-semantics change) removes the mount with no error anywhere until an eval run
+    # starts. `models:/models:ro` is restated here only to add `:ro`, which the base file does not
+    # set. Read the long block beside the bind in compose.yaml before changing either.
+    volumes: ["models:/models:ro"]
+    deploy:
+      restart_policy: {condition: any, delay: 10s}
+      resources: {limits: {memory: 4G}}
+
+  ai-beat:
+    <<: *ai-worker-prod
+    read_only: false          # beat writes its shelve schedule file to the beat-schedule volume
+    volumes: ["beat-schedule:/var/lib/celerybeat"]
+    deploy:
+      restart_policy: {condition: any, delay: 10s}
+      resources: {limits: {memory: 512M}}
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.158.0@${OTELCOL_DIGEST}
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    user: "10001:10001"
+    deploy:
+      restart_policy: {condition: any, delay: 5s}
+      resources: {limits: {memory: 512M}}
+
+  # ----------------------------------------------------------------------------------------------
+  # Data tier. NO `ports:` — production publishes no database port at all. Inspect through
+  # `docker compose exec` or an SSH tunnel.
+  # ----------------------------------------------------------------------------------------------
+  postgres:
+    image: postgres:18-alpine@${POSTGRES_DIGEST}
+    # NOT read_only: the server writes WAL, temp files and a socket outside the data volume, and
+    # the initdb entrypoint writes a pid file. Constrain it with capabilities instead.
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]   # the entrypoint's user drop needs these
+    deploy:
+      restart_policy: {condition: any, delay: 10s}
+      resources: {limits: {memory: 4G}}
+
+  qdrant:
+    image: qdrant/qdrant:v1.18.3@${QDRANT_DIGEST}
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    deploy:
+      restart_policy: {condition: any, delay: 10s}
+      resources: {limits: {memory: 4G}}
+
+  valkey-core:
+    image: valkey/valkey:9.1.1@${VALKEY_DIGEST}
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    deploy:
+      restart_policy: {condition: any, delay: 5s}
+      resources: {limits: {memory: 1536M}}
+
+  valkey-cache:
+    image: valkey/valkey:9.1.1@${VALKEY_DIGEST}
+    read_only: true      # it has no volume and writes no RDB and no AOF, so nothing needs to be
+                         # writable. This is the erasure control asserted a second way.
+    tmpfs: ["/data"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    deploy:
+      restart_policy: {condition: any, delay: 5s}
+      resources: {limits: {memory: 2560M}}
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.40@${SEAWEEDFS_DIGEST}
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    deploy:
+      restart_policy: {condition: any, delay: 10s}
+      resources: {limits: {memory: 2G}}

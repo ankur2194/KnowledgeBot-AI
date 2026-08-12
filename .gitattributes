@@ -1,0 +1,140 @@
+# .gitattributes
+#
+# ================================================================================================
+# `* text=auto eol=lf` IS LOAD-BEARING HERE. IT IS NOT A STYLE PREFERENCE.
+# ================================================================================================
+# This repository is developed on WSL2 and Windows and runs entirely in Linux containers. Git's
+# default on Windows (core.autocrlf=true) checks files out with CRLF endings — and every file that
+# gets bind-mounted or COPY'd into a container then carries a stray \r that nothing strips.
+#
+# The failures are silent in exactly the places that matter, and each one names the wrong problem:
+#
+#   *.sh   `bad interpreter: /usr/bin/env bash^M: no such file or directory` — an error naming a
+#          file that plainly exists, on a line that looks correct in every editor.
+#
+#   php.ini  QUIETEST OF ALL. `output_buffering = 0\r` is not a valid integer, so PHP discards it
+#          and falls back to the default of 4096. There is no warning. Every SSE answer is then
+#          withheld until 4 KB accumulates, so a short answer arrives in one blob at the end and a
+#          long one arrives in jerks — a bug that reproduces only in production, only through the
+#          full edge, and looks like a slow model.
+#
+#   *.conf  nginx and php-fpm: `fastcgi_buffering off;\r` is a syntax error nginx reports with a
+#          line number and no visible cause, and the container restart-loops.
+#
+#   valkey.conf  `maxmemory-policy noeviction\r` — Valkey refuses to start, which is the good
+#          outcome. `save ""\r` on the cache instance is the bad one.
+#
+#   Dockerfile  a CRLF continuation line silently truncates the RUN that follows it.
+#
+# `eol=lf` forces LF in the WORKING TREE, not merely in the repository. That is the difference
+# between this file working and not: `text=auto` alone normalizes on commit and would still check
+# out CRLF on Windows.
+#
+# .editorconfig is the other half — it governs what an editor writes; this governs what git checks
+# out. Both are needed.
+
+* text=auto eol=lf
+
+# ================================================================================================
+# Explicit text, so a file with unusual bytes is never misdetected as binary
+# ================================================================================================
+*.php     text eol=lf
+*.py      text eol=lf
+*.ts      text eol=lf
+*.tsx     text eol=lf
+*.js      text eol=lf
+*.jsx     text eol=lf
+*.json    text eol=lf
+*.yaml    text eol=lf
+*.yml     text eol=lf
+*.toml    text eol=lf
+*.md      text eol=lf
+*.sql     text eol=lf
+*.sh      text eol=lf
+*.conf    text eol=lf
+*.ini     text eol=lf
+*.acl     text eol=lf
+*.env     text eol=lf
+*.env.example text eol=lf
+Dockerfile        text eol=lf
+Dockerfile.*      text eol=lf
+.dockerignore     text eol=lf
+Makefile          text eol=lf
+
+# Windows-only files that must KEEP CRLF. Rare here, listed so nobody has to wonder.
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+*.ps1     text eol=crlf
+
+# ================================================================================================
+# BINARY — never diffed, never normalized
+# ================================================================================================
+# samples/ is the golden evaluation corpus. Its fixtures are asserted BYTE FOR BYTE: content
+# hashes, recrawl change detection, and extraction output all depend on the exact bytes. Any
+# normalization here does not produce a formatting diff, it produces an evaluation regression that
+# looks like a model or parser change.
+samples/**/*.pdf   binary
+samples/**/*.docx  binary
+samples/**/*.xlsx  binary
+samples/**/*.pptx  binary
+samples/**/*.png   binary
+samples/**/*.jpg   binary
+samples/**/*.jpeg  binary
+samples/**/*.tiff  binary
+samples/**/*.webp  binary
+samples/**/*.zip   binary
+
+# The crawl fixture tree under samples/corpus/documents/site/www/ is HTML/XML/TXT and stays text —
+# but its line endings must not move either, because the crawl fixture asserts on the served bytes
+# and on nginx's ETag, which is derived from mtime AND CONTENT LENGTH. A CRLF checkout changes the
+# length of every file and every recrawl reports "changed".
+samples/corpus/documents/site/www/** text eol=lf
+
+# Everything else binary
+*.pdf     binary
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.webp    binary
+*.woff    binary
+*.woff2   binary
+*.ttf     binary
+*.otf     binary
+*.eot     binary
+*.zip     binary
+*.gz      binary
+*.tar     binary
+*.br      binary
+*.safetensors binary
+*.onnx    binary
+*.bin     binary
+*.pt      binary
+*.pth     binary
+
+# ================================================================================================
+# GENERATED — collapsed in review, excluded from language statistics
+# ================================================================================================
+# linguist-generated hides these from a PR diff by default and drops them from the repository's
+# language breakdown. It does NOT make them un-reviewable: a lockfile change is still reviewed, by
+# reading the manifest diff beside it, which is the reviewable artifact. What this prevents is a
+# 40 000-line pnpm-lock.yaml burying the four lines that matter in the same PR.
+composer.lock    linguist-generated=true -diff
+pnpm-lock.yaml   linguist-generated=true -diff
+uv.lock          linguist-generated=true -diff
+package-lock.json linguist-generated=true -diff
+
+packages/contracts/generated/**  linguist-generated=true
+# NOTE: packages/design-tokens/generated/ is deliberately NOT marked generated and is NOT
+# gitignored — the tokens are consumed by both apps and a visual change there must be visible in
+# review.
+
+# ================================================================================================
+# EXPORT — kept out of `git archive` / release tarballs
+# ================================================================================================
+.github/         export-ignore
+.claude/         export-ignore
+docs/            export-ignore
+samples/         export-ignore
+scripts/security/rules/ export-ignore

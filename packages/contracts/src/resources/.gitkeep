@@ -1,0 +1,5 @@
+API Resource types (BotResource, SourceResource, ConversationResource, …) land here, GENERATED
+from the OpenAPI document in ../../openapi/ once control-plane-engineer publishes it.
+
+Hand-writing them here is the failure vitest-playwright names: a fixture typed by hand encodes what
+the author believed the wire says, so a server-side rename ships instead of failing a typecheck.

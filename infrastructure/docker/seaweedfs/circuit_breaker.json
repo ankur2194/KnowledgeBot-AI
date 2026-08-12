@@ -1,0 +1,85 @@
+{
+  "__README": [
+    "==========================================================================================",
+    "SeaweedFS S3 circuit breaker -- per-bucket concurrency and rate caps, returning 429 SlowDown.",
+    "==========================================================================================",
+    "It exists because ai-worker-ingestion runs -c 4 and ai-worker-embedding runs -c 2, each child",
+    "streaming 64 MiB multipart parts, while Laravel is concurrently streaming uploads and",
+    "downloads through PHP-FPM. Without a cap, an ingestion burst saturates the volume server and",
+    "the symptom lands on the *interactive* path: a customer's download stalls because a background",
+    "job is reindexing. A 429 that a client backs off on is strictly better than a timeout.",
+    "",
+    "------------------------------------------------------------------------------------------",
+    "<!-- UNVERIFIED --> HOW THIS FILE ACTUALLY REACHES THE GATEWAY",
+    "------------------------------------------------------------------------------------------",
+    "The path /etc/s3/circuit_breaker.json is a path INSIDE THE FILER'S NAMESPACE, not a path on",
+    "the container filesystem -- SeaweedFS reads its S3 circuit-breaker configuration from the",
+    "filer, unlike -s3.config which is a real file argument. Mounting this file into the container",
+    "therefore makes it AVAILABLE but does not ACTIVATE it. It has to be uploaded once, per",
+    "cluster, e.g.:",
+    "",
+    "    docker compose exec seaweedfs \\",
+    "      weed shell -c \"fs.cd /etc/s3\" -c \"fs.upload /etc/s3/circuit_breaker.json\"",
+    "",
+    "Confirm the exact command and the enabled/disabled semantics against the SeaweedFS wiki for",
+    "the pinned 4.40 tag before relying on it. Until that upload has run, THE BREAKER IS NOT",
+    "ACTIVE -- and unlike the identities file, that is a performance exposure rather than a",
+    "security one, so it fails loud (slow) rather than open (unauthenticated).",
+    "",
+    "This file is committed and version-controlled deliberately: it is one of exactly three",
+    "SeaweedFS-specific things worth paying for, because all three live entirely in",
+    "infrastructure/ (the others are filer.backup/filer.sync and erasure coding for cold volumes).",
+    "Migrating to a managed object store deletes these files and changes nothing above the storage",
+    "module. That is the whole point of restricting application code to the portable S3 subset."
+  ],
+
+  "global": {
+    "enabled": true,
+    "actions": {
+      "Write:MaxConcurrent": 64,
+      "Read:MaxConcurrent": 128,
+      "List:MaxConcurrent": 32
+    }
+  },
+
+  "buckets": {
+    "kb": {
+      "enabled": true,
+      "actions": {
+        "__comment": [
+          "Writes are the ingestion path (originals + derived artifacts). 32 concurrent leaves",
+          "headroom under the global cap for the interactive read path.",
+          "MaxBandwidth is in bytes/sec."
+        ],
+        "Write:MaxConcurrent": 32,
+        "Write:MaxBandwidth": 209715200,
+        "Read:MaxConcurrent": 96,
+        "Read:MaxBandwidth": 314572800,
+        "List:MaxConcurrent": 16,
+        "__comment_list": [
+          "List is capped tightest of all. The deletion verification pass and the abandoned-",
+          "multipart sweep both paginate large prefixes, and an unbounded List concurrency is how",
+          "a purge job starves the read path it shares a volume server with."
+        ]
+      }
+    }
+  },
+
+  "__not_configured_here": [
+    "LIFECYCLE RULES. SeaweedFS lifecycle needs the admin server plus a lifecycle worker running;",
+    "without them a bucket with rules but no worker silently retains data past its declared",
+    "expiration, with no error -- and even when it works, the default detection interval is 1440",
+    "minutes. Retention here is a PostgreSQL-driven Celery sweep, never a bucket rule.",
+    "",
+    "OBJECT LOCK / LEGAL HOLD. Object Lock requires versioning AND can only be enabled at bucket",
+    "creation; there is no retrofit, only a bucket migration. If governance-mode locks for held",
+    "originals are ever built, they need a SEPARATE, PRE-CREATED versioned lock-enabled bucket",
+    "that held originals are CopyObject'd into. Provision it before it is needed, or the first",
+    "legal hold is a bucket migration under time pressure.",
+    "",
+    "SSE-C. filer.backup and filer.sync have no access to customer keys, so SSE-C objects would be",
+    "ABSENT from the DR copy. If at-rest encryption is required, use filer-level -encryptVolumeData",
+    "(per-chunk AES-256-GCM, keys in filer metadata) -- an ops-layer choice no application code",
+    "observes."
+  ]
+}

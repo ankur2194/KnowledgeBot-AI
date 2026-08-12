@@ -1,0 +1,120 @@
+{
+  "uid": "kb-retrieval",
+  "title": "Retrieval",
+  "tags": ["kb"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "timezone": "utc",
+  "refresh": "1m",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Retrieval stage duration, p95 by stage (seconds)",
+      "description": "The 1.5 s end-to-end retrieval budget, split across its seven stages: embed, dense, sparse, fuse, dedupe, rerank, pack. The budget is for the sum of these, not for any one of them; 8 s is the hard stop in kb-error-taxonomy, not the goal.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le, stage) (rate(kb_retrieval_duration_seconds_bucket[5m])))"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Candidate funnel, median candidates entering each stage",
+      "description": "Where the funnel collapses. A stage whose median input drops to near zero while the stage before it is healthy is the stage that is over-filtering — usually dedupe or the threshold, and usually after a chunking change rather than a retrieval one.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.5, sum by (le, stage) (rate(kb_retrieval_candidates_bucket[5m])))"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Empty retrieval by reason",
+      "description": "Empty retrieval produces a refusal, not an invention, so this is the leading indicator for the refusal rate. reason is a closed four-value enum: no_match, below_threshold, filtered, no_branch_agreement. A rise in `filtered` specifically is a tenancy or source-status question, not a relevance one. `no_branch_agreement` is reachable only on the degraded path — a run that skipped stage 11 has no score and therefore no threshold, so it selects on branch agreement instead; read it next to the rerank-skip panel below, because a rise in both is one organization's provider configuration rather than a retrieval regression.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (reason) (rate(kb_retrieval_empty_total[5m]))"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Evidence selected after thresholding, median",
+      "description": "How many chunks survived the evidence threshold and are available for citation. Citations are assigned from this set before generation, so a collapse here is a citation failure before it is an answer-quality one.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(kb_retrieval_evidence_selected_bucket[5m])))"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Mean evidence score, by scale",
+      "description": "_sum / _count, which is what a mean is for a histogram. The mean is the least informative view of a reranker score distribution — a bimodal split of excellent and useless evidence averages to the same number as uniformly mediocre evidence. Read it next to the p10 panel, never alone. SPLIT BY `scale` AND NEVER SUMMED ACROSS IT: since ADR-030 the scale belongs to the (provider, model) pair and can differ per organization, so a bounded 0–1 relevance score and an unbounded logit both feed this family. A mean over the mixture is arithmetic on two incomparable distributions and produces a number that moves when the tenant mix moves.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (scale) (rate(kb_retrieval_evidence_score_sum[5m])) / sum by (scale) (rate(kb_retrieval_evidence_score_count[5m]))"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Evidence score, p10 by scale",
+      "description": "The weakest tenth of accepted evidence. This is the number that moves when a reranker model changes, and it moves before the answer-quality complaints arrive. `scale` is grouped alongside `le` rather than aggregated away: the bucket set is a union spanning a bounded 0–1 range and the positive half of a logit one, so a quantile over the mixture interpolates across edges that mean different things on the two scales — plausible output, no error, wrong number. TWO SERIES HERE ARE BUGS RATHER THAN READINGS. `scale=\"uncalibrated\"` cannot be carried by any calibration, so such a score should have failed stage 12 as an error. `scale=\"logit\"` should not be here at all yet: the OTel SDK silently discards negative histogram samples, so a logit series is the positive half of its distribution presented as the whole, and its p10 is biased upward by exactly the weakest evidence. If one appears, the call site is recording logits into a histogram that cannot hold them — see BUCKETS_RERANK_SCORE in app/observability/instruments.py.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.1, sum by (le, scale) (rate(kb_retrieval_evidence_score_bucket[5m])))"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Reranking skipped, by reason",
+      "description": "Stage 11 is capability-gated since ADR-030: two of the five vendors rerank — NIM and OpenRouter — and only NIM's scores may ever be cut against, so a bot whose organization is on OpenAI (no ranking route) or on OpenRouter (a route whose score scale this platform cannot threshold) serves the RRF-fused order for its whole life and ranks measurably worse. That is correct behaviour, and this panel is the only place it is visible — without it the gap reads as a defect in the retrieval stack and gets debugged as one for weeks. There is deliberately NO ALERT on it: a permanent, expected, per-organization configuration fact is the wrong thing to page or ticket on, and PromQL cannot name the tenant. Which bots: SELECT b.id, b.organization_id FROM bots b JOIN provider_connections pc ON pc.id = b.provider_connection_id WHERE pc.provider NOT IN ('nvidia_nim') — NIM is the only rerank-ELIGIBLE provider, which is a claim about this platform and not about what the vendors publish. The five reasons are closed and none of them is an error — a reranker OUTAGE never lands here, it propagates as a provider error_class, which is what stops an incident being laundered into a skip. Watch `insufficient_deadline` in particular: it is the one that moves with load rather than configuration, and it rising means the retrieval leg is being squeezed upstream while answers quietly get worse.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (reason) (rate(kb_retrieval_rerank_skips_total[5m]))"
+        }
+      ]
+    }
+  ]
+}

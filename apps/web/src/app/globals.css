@@ -1,0 +1,70 @@
+/* This file IS the Tailwind configuration. There is no tailwind.config.js — v4 deleted the
+ * JavaScript config, and `@config "../tailwind.config.js"` is a v3 bridge that silently disables
+ * corePlugins/safelist/separator while splitting the source of truth across two files. */
+
+@import 'tailwindcss';
+@import 'tw-animate-css';
+/* shadcn's runtime: the data-open/data-closed variants, keyframes and scroll-fade its components
+ * assume exist. Without it the components render, and nothing animates or closes. */
+@import 'shadcn/tailwind.css';
+/* The :root and .dark custom-property defaults, shared byte-for-byte with apps/widget so a
+ * customer's brand is identical between hosted chat and the embed. */
+@import '@kb/design-tokens/tokens.css';
+
+/* v4 has no `darkMode: 'class'`. shadcn's docs ship `(&:is(.dark *))`, which matches DESCENDANTS
+ * of .dark but not the .dark element itself — so a `dark:` utility on <html> silently does
+ * nothing. `:where(.dark, .dark *)` matches both and keeps specificity at zero. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* `inline` is LOAD-BEARING. Without it, `var(--primary)` is resolved where this block is defined
+ * (:root) and baked into --color-primary, so a subtree override — the bot theme preview panel, the
+ * per-bot scope in bot-theme-scope.tsx — is either ignored or leaks upward into the whole console.
+ * With it, the utility itself emits `background-color: var(--primary)` and resolves at the element.
+ * Both spellings compile and nothing warns. */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --radius-xs: calc(var(--radius) - 6px);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* No @source directives, deliberately. v4's automatic content detection ignores node_modules and
+ * pnpm workspace links resolve through it, so a workspace package containing class names would
+ * need one — but neither of ours does: packages/design-tokens ships CSS and JSON, and
+ * packages/contracts ships parsers and schemas. A @source pointing at markup-free code is not an
+ * error in v4; it scans nothing while producing the identical missing-CSS symptom you added it to
+ * fix. */
+
+@layer base {
+  /* v4's default border colour is currentColor, not gray-200. Without this reset every border in
+   * the app takes the colour of its text, and it reads as a design bug rather than a config
+   * change. */
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}

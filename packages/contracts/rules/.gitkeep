@@ -1,0 +1,22 @@
+`php artisan kb:dump-form-rules` writes one JSON file per FormRequest here, dumped from each
+request's own rules() — from executing code, never from the OpenAPI document, which would be a
+third copy nobody enforces (rhf-zod-forms).
+
+POPULATED. The first real dump landed with the embedding-designation endpoints:
+DesignateEmbeddingConnectionRequest.json and StoreProviderConnectionRequest.json. Output is
+byte-stable — keys ksort-ed, JSON flags pinned, rule ORDER inside a field left alone because
+`bail|required|string` is semantic — and was verified by two independent runs producing identical
+sha256 sums.
+
+DO NOT HAND-EDIT A FILE IN HERE. ci.yml runs `php artisan kb:dump-form-rules --check`, which
+rewrites nothing and exits non-zero if any file WOULD change (`--check` rather than
+`dump && git diff --exit-code`, because git diff cannot see an untracked file and would have
+compared nothing on the tree these files first landed in).
+
+test/form-drift.test.ts consumes every file here: each manifest must be named in either MIRRORS
+(the Zod schema in src/forms/ that mirrors it) or NO_CLIENT_FORM (an allow-list entry with a
+reason), so a FormRequest nobody mirrored fails the suite by name rather than 422-ing in production
+on a rule the form was never told about.
+
+The .gitkeep stays. The command prunes orphaned *.json only, so this file survives a dump that
+finds no FormRequests, and the directory keeps its documentation.

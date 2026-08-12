@@ -1,0 +1,67 @@
+{
+  "name": "@kb/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The one SSE frame parser, the one KbError, the client event union, and the shared form schemas. NOT types-only: apps/web, apps/widget and apps/mobile all parse the same frames, so a per-app copy is the drift contract-steward exists to catch. The root entry carries ZERO runtime dependencies and is budgeted at <=1 kB brotli inside apps/widget's 30 kB app shell; the Zod schemas live behind the ./forms subpath so the widget never pulls them in (ADR-028).",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./forms": {
+      "import": {
+        "types": "./dist/forms/index.d.ts",
+        "default": "./dist/forms/index.js"
+      },
+      "require": {
+        "types": "./dist/forms/index.d.cts",
+        "default": "./dist/forms/index.cjs"
+      }
+    },
+    "./rules/*.json": "./rules/*.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "rules",
+    "openapi"
+  ],
+  "engines": {
+    "node": ">=22.20.0"
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint ."
+  },
+  "peerDependencies": {
+    "zod": "4.4.3"
+  },
+  "peerDependenciesMeta": {
+    "zod": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "22.15.3",
+    "eslint": "9.36.0",
+    "eslint-plugin-security": "3.0.1",
+    "tsup": "8.5.0",
+    "typescript": "5.9.2",
+    "typescript-eslint": "8.40.0",
+    "vitest": "4.1.10",
+    "zod": "4.4.3"
+  }
+}

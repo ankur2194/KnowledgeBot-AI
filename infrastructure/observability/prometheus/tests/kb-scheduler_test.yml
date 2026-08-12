@@ -1,0 +1,180 @@
+# promtool unit tests for the scheduler alerts in rules/kb-alerts.yml.
+#
+#   cd infrastructure/observability/prometheus/tests
+#   promtool test rules kb-scheduler_test.yml
+#
+# The scheduler gets its own file because it is the one subsystem with THREE independent alerting
+# layers, each blind to the others' failure mode, and the interesting assertions are the ones
+# that prove a layer stays green while another layer catches the fault.
+#
+# TIME IN THESE TESTS STARTS AT THE UNIX EPOCH. promtool runs a test from t=0 = 1970-01-01, so
+# `time()` at eval_time 25m is literally 1500. KbSchedulerStalled is `time() - <gauge> > 900`, so
+# the gauge values below are seconds-since-test-start, not timestamps from any real clock. This
+# is the single most confusing thing about testing that rule and the reason it is spelled out
+# here rather than discovered.
+
+evaluation_interval: 30s
+
+rule_files:
+  - ../rules/kb-recording.yml
+  - ../rules/kb-alerts.yml
+
+tests:
+  # ===========================================================================================
+  # KbSchedulerStalled — the tick advances, then stops.
+  # ===========================================================================================
+  # The scheduler ticks every minute for ten minutes and then dies. The gauge freezes at 600. The
+  # rule tolerates 15 minutes of silence, so the expression turns true just after t=25m and the
+  # page lands five minutes later. Fifteen minutes is deliberately generous: the shortest
+  # scheduled task interval is one minute, and paging at two missed ticks would page on every
+  # deployment.
+  - name: KbSchedulerStalled pages fifteen minutes after the last tick
+    interval: 1m
+    input_series:
+      - series: 'kb_internal_scheduler_tick_timestamp_seconds{service="core-api",env="prod",task="recrawl-dispatch"}'
+        values: "0+60x10 600+0x30"
+
+    promql_expr_test:
+      # Freshness in seconds, asserted exactly: integers, so no band is needed. At t=20m the
+      # scheduler has been dead for ten minutes and the rule is still — correctly — silent.
+      - expr: time() - kb_internal_scheduler_tick_timestamp_seconds
+        eval_time: 20m
+        exp_samples:
+          - labels: '{service="core-api", env="prod", task="recrawl-dispatch"}'
+            value: 600
+
+      - expr: ALERTS{alertname="KbSchedulerStalled", alertstate="firing"}
+        eval_time: 32m
+        exp_samples:
+          - labels: 'ALERTS{alertname="KbSchedulerStalled", alertstate="firing", service="core-api", env="prod", task="recrawl-dispatch", severity="page"}'
+            value: 1
+
+    alert_rule_test:
+      - alertname: KbSchedulerStalled
+        eval_time: 20m
+        exp_alerts: []
+      - alertname: KbSchedulerStalled
+        eval_time: 25m
+        exp_alerts: []
+      - alertname: KbSchedulerStalled
+        eval_time: 29m
+        exp_alerts: []
+
+  # ===========================================================================================
+  # A scheduler that never started after a deployment reads as an ancient timestamp.
+  # ===========================================================================================
+  # This is why laravel-scheduler seeds the row IN THE MIGRATION. The gauge exists from the first
+  # scrape holding a stale value, so the rule can threshold it. The test below is that fixture:
+  # a gauge pinned at 0 while time advances.
+  - name: KbSchedulerStalled fires on a seeded row that never advanced
+    interval: 1m
+    input_series:
+      - series: 'kb_internal_scheduler_tick_timestamp_seconds{service="core-api",env="prod",task="recrawl-dispatch"}'
+        values: "0+0x40"
+
+    alert_rule_test:
+      - alertname: KbSchedulerStalled
+        eval_time: 14m
+        exp_alerts: []
+
+    promql_expr_test:
+      - expr: ALERTS{alertname="KbSchedulerStalled", alertstate="firing"}
+        eval_time: 22m
+        exp_samples:
+          - labels: 'ALERTS{alertname="KbSchedulerStalled", alertstate="firing", service="core-api", env="prod", task="recrawl-dispatch", severity="page"}'
+            value: 1
+
+  # ===========================================================================================
+  # And the reason the row must be seeded at all: a series that never existed cannot be alerted.
+  # ===========================================================================================
+  # No tick gauge in the fixture. `time() - <absent>` is absent, the comparison has nothing to
+  # compare, the rule is silent forever, and a scheduler that has never run once since the
+  # deployment is indistinguishable from a healthy one. This test passes today and is meant to:
+  # it documents the hole that the migration seed fills. It is NOT a substitute for the seed.
+  - name: KbSchedulerStalled cannot see a scheduler that never wrote its row
+    interval: 1m
+    input_series:
+      - series: 'kb_internal_scheduler_tasks_total{service="core-api",env="prod",task="recrawl-dispatch",outcome="success"}'
+        values: "0+1x40"
+
+    alert_rule_test:
+      - alertname: KbSchedulerStalled
+        eval_time: 40m
+        exp_alerts: []
+
+  # ===========================================================================================
+  # THE ONE THAT MATTERS: a stranded mutex, with the freshness gauge perfectly healthy.
+  # ===========================================================================================
+  # withoutOverlapping() registers a SKIP FILTER, so a lock stranded by SIGKILL — default TTL 24
+  # hours — leaves the scheduler ticking on time and reporting `skipped` every minute while no
+  # work happens at all. KbSchedulerStalled stays green through the entire incident, which is
+  # exactly why KbSchedulerSkipStuck exists. Both facts are asserted here, at the same instants.
+  #
+  # This is also the file's one annotation-rendering assertion: the summary interpolates
+  # `{{ $labels.task }}`, and the transcription below is short enough to keep honest.
+  - name: KbSchedulerSkipStuck fires while KbSchedulerStalled stays green
+    interval: 1m
+    input_series:
+      # Ticking perfectly: the gauge tracks test time, so freshness is never more than one
+      # evaluation interval.
+      - series: 'kb_internal_scheduler_tick_timestamp_seconds{service="core-api",env="prod",task="recrawl-dispatch"}'
+        values: "0+60x40"
+      # And every one of those ticks skips.
+      - series: 'kb_internal_scheduler_tasks_total{service="core-api",env="prod",task="recrawl-dispatch",outcome="skipped"}'
+        values: "0+1x40"
+
+    alert_rule_test:
+      # Below the five-skip threshold: brief contention between two overlapping sweeps is normal
+      # and must not open a ticket.
+      - alertname: KbSchedulerSkipStuck
+        eval_time: 2m
+        exp_alerts: []
+
+      # Five skips in the window, `for: 0m`, so it opens as soon as the pattern is unambiguous.
+      - alertname: KbSchedulerSkipStuck
+        eval_time: 8m
+        exp_alerts:
+          - exp_labels:
+              alertname: KbSchedulerSkipStuck
+              severity: ticket
+              service: core-api
+              env: prod
+              task: recrawl-dispatch
+              # `increase()` keeps every label of the input series, so the matcher's own
+              # `outcome="skipped"` travels into the alert and on to Alertmanager. Worth knowing
+              # before writing an inhibition rule against it.
+              outcome: skipped
+            exp_annotations:
+              summary: "recrawl-dispatch skipped every tick for 30m — stranded mutex, not contention"
+              runbook: "php artisan schedule:clear-cache; see laravel-scheduler Gotchas"
+
+      # The whole point: the freshness layer sees nothing wrong, at the same moment, forever.
+      - alertname: KbSchedulerStalled
+        eval_time: 8m
+        exp_alerts: []
+      - alertname: KbSchedulerStalled
+        eval_time: 40m
+        exp_alerts: []
+
+  # ===========================================================================================
+  # Occasional skips are the lock working and must never open a ticket.
+  # ===========================================================================================
+  # Three skips, then a long healthy run. `increase(...[30m]) >= 5` never reaches the threshold,
+  # and once the burst leaves the 30-minute window the expression is a flat zero. A rule written
+  # as `> 0` would open a ticket every time two sweeps legitimately overlapped.
+  - name: KbSchedulerSkipStuck ignores occasional contention
+    interval: 1m
+    input_series:
+      - series: 'kb_internal_scheduler_tasks_total{service="core-api",env="prod",task="recrawl-dispatch",outcome="skipped"}'
+        values: "0+1x2 3+0x40"
+
+    alert_rule_test:
+      - alertname: KbSchedulerSkipStuck
+        eval_time: 4m
+        exp_alerts: []
+      - alertname: KbSchedulerSkipStuck
+        eval_time: 10m
+        exp_alerts: []
+      - alertname: KbSchedulerSkipStuck
+        eval_time: 35m
+        exp_alerts: []

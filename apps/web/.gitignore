@@ -1,0 +1,8 @@
+# Playwright's storageState: real session cookies for a real Laravel, written by the setup project.
+playwright/.auth/
+
+# Next's generated ambient types.
+next-env.d.ts
+
+# Vitest browser-mode artifacts.
+__screenshots__/

@@ -1,0 +1,213 @@
+# §21.2 — Unanswerable questions. MANDATORY, and the most important file in this directory.
+#
+# WHY THIS FILE IS LARGE
+#
+# Without unanswerable cases, an evidence threshold of 0 and one of 10 are indistinguishable.
+# Both score well on everything else in this suite: a threshold of 0 packs noise and answers
+# everything, and every answer it produces is still "grounded" in whatever it packed, so
+# faithfulness looks fine, citations validate, hit rate is unchanged, and latency improves. A
+# threshold of 10 refuses everything, which Ragas rewards — refusals extract no statements,
+# Faithfulness returns NaN, the legacy aggregator drops those rows, and the mean goes UP. The
+# only instrument in the whole suite that can tell those two pipelines apart is a question whose
+# correct answer is "the sources do not say".
+#
+# §21.5 blocks a release on "unanswerable-question hallucination increases". That number does not
+# exist unless this file creates it.
+#
+# WHY THESE EIGHT, AND NOT EIGHT OF THE SAME
+#
+# An unanswerable set made of out-of-domain questions ("what is the capital of France") measures
+# almost nothing — retrieval returns garbage, the threshold refuses, everyone passes. The hard
+# cases are the ones where retrieval succeeds and returns highly relevant evidence that
+# nonetheless does not contain the answer. Each case below names its `unanswerable_kind`, and the
+# per-kind breakdown is reported, because a threshold change that trades one kind for another is
+# a different decision from one that improves across the board.
+#
+# CORRECT BEHAVIOUR FOR EVERY CASE HERE: refuse, state that the sources do not contain the
+# answer, cite nothing as if it answered the question, and do not fall through to model
+# knowledge. Strict RAG is the default mode. An answer here is a `false_answer` and scores -1
+# on the CRAG rule; a refusal scores 0.
+#
+# THE CORPUS MUST STAY SILENT. Every fixture README carries a "must NOT contain" section written
+# to keep these eight unanswerable. Adding a helpful sentence to a fixture does not improve the
+# corpus; it deletes a test.
+
+dataset: kb-platform-golden
+corpus_version: corpus-2026.08.1
+category: unanswerable
+
+cases:
+  - id: u-001
+    question: "How many days of paid parental leave does Kelpwright offer?"
+    unanswerable: true
+    unanswerable_kind: absent_fact
+    expected_sources: []
+    difficulty: medium
+    expected_answer: >-
+      The handbook does not state a parental leave entitlement. It covers annual leave and sickness
+      absence only.
+    forbidden_claims:
+      - "any number of parental leave days"
+      - "any statutory entitlement quoted as company policy"
+    locators: ["handbook §3 Leave — covers leave thoroughly and omits this specifically"]
+    tags: [absent-fact, high-relevance-retrieval, hr]
+    grading_notes: >-
+      The topic is well covered and the specific fact is absent, so retrieval WILL return the leave
+      section with a high reranker score. This is the common real-world shape of a hallucination:
+      relevant evidence, missing fact, and a model that fills the gap from priors — often with a
+      statutory figure from some jurisdiction, stated as company policy. Naming what the handbook
+      does cover is good behaviour and does not make the refusal partial.
+
+  - id: u-002
+    question: "Who audits Kelpwright's financial statements?"
+    unanswerable: true
+    unanswerable_kind: out_of_domain
+    expected_sources: []
+    difficulty: easy
+    expected_answer: "The sources do not mention Kelpwright's auditors."
+    forbidden_claims: ["any named audit firm"]
+    locators: []
+    tags: [out-of-domain, control-case]
+    grading_notes: >-
+      The control case, and the only easy one here. Nothing in the corpus is close to this
+      question, so retrieval returns weak evidence and the threshold should refuse without effort.
+      If THIS one produces an answer, the evidence threshold is not functioning at all and every
+      other result in the run is suspect — check it first when reading a failed run.
+
+  - id: u-003
+    question: "Why was the Tideline 4500 recalled in 2025?"
+    unanswerable: true
+    unanswerable_kind: false_premise
+    expected_sources: []
+    difficulty: hard
+    expected_answer: >-
+      The sources do not mention a Tideline 4500 or any product recall. The instruments described
+      are the Tideline 1100, 2200, 2200F, 3400, and the Sampler 450.
+    forbidden_claims:
+      - "any recall reason"
+      - "any confirmation that a recall occurred"
+      - "any confirmation that a Tideline 4500 exists"
+    locators: []
+    tags: [false-premise, presupposition, product]
+    grading_notes: >-
+      A FALSE PREMISE, not merely a missing fact: the question presupposes both a product and an
+      event, neither of which exists. Retrieval will surface the product pages because the naming
+      pattern matches. The best answer refuses AND corrects the premise; an answer that refuses
+      while implicitly accepting the premise ("I don't have details of that recall") is a partial
+      failure worth flagging in human review — it has confirmed something untrue.
+
+  - id: u-004
+    question: "What is the list price of part KW-2200-C?"
+    unanswerable: true
+    unanswerable_kind: nonexistent_entity
+    expected_sources: []
+    difficulty: hard
+    expected_answer: >-
+      There is no part KW-2200-C in the price list. The 2200 family lists KW-2200-B (benchtop,
+      18,400 EUR) and KW-2200-F (field, 21,750 EUR).
+    forbidden_claims:
+      - "any price attributed to KW-2200-C"
+      - "any statement that KW-2200-C exists"
+    locators: ["pricing sheet Instruments — rows -B and -F exist, -C does not"]
+    tags: [nonexistent-entity, lexical-trap, exact-code]
+    grading_notes: >-
+      THE LEXICAL TRAP. The query is one character from two real rows, so sparse retrieval scores
+      the KW-2200-* rows very highly and the reranker will keep them — this case is engineered so
+      that stage 12 sees strong evidence which nonetheless does not contain the answer. A pipeline
+      that thresholds on the fused RRF score rather than the reranker score cannot fail this case
+      correctly, because RRF discards magnitude. Naming the real neighbouring codes is helpful and
+      correct; attaching either price to KW-2200-C is a hallucination even though the number is
+      real.
+
+  - id: u-005
+    question: "What are Kelpwright's FY2027 revenue targets?"
+    unanswerable: true
+    unanswerable_kind: not_yet_published
+    expected_sources: []
+    difficulty: hard
+    expected_answer: >-
+      FY2027 targets have not been published. The Q2 2026 business review states they will not be
+      published until the board meeting in November 2026.
+    forbidden_claims:
+      - "any revenue target figure"
+      - "any growth percentage presented as a target"
+    locators: ["quarterly deck slide 11 SPEAKER NOTES — states the targets are unpublished"]
+    tags: [not-yet-published, evidence-says-no, pptx-notes, highest-value]
+    grading_notes: >-
+      THE HARDEST AND MOST VALUABLE CASE IN THE FILE. Slide 11 is the single most semantically
+      relevant chunk in the corpus for this question, it will be retrieved with a high score, and
+      its text explicitly says the number does not exist yet. A pipeline that invents a target here
+      has hallucinated WHILE HOLDING EVIDENCE THAT SAYS OTHERWISE — a strictly harder failure than
+      inventing an answer from nothing, and one that no evidence threshold can catch, because the
+      evidence is genuinely strong. This case tests generation and prompting, not retrieval.
+      Unlike the rest of this file, citing the source is CORRECT here: the evidence answers the
+      meta-question. An answer of "not published until the November 2026 board meeting", with the
+      deck cited, is the ideal response and must be scored as a correct refusal, not as an answer.
+      Depends on speaker notes; if s-002 and s-004 also failed, the notes stopped parsing and this
+      case degraded to an ordinary absent-fact question.
+
+  - id: u-006
+    question: "What discount do authorised partners receive on list prices?"
+    unanswerable: true
+    unanswerable_kind: out_of_crawl_scope
+    expected_sources: []
+    difficulty: hard
+    expected_answer: >-
+      The sources do not contain partner or reseller pricing. Only list prices are available.
+    forbidden_claims:
+      - "22%"
+      - "any partner discount percentage"
+    locators: ["site internal/staging.html — DISALLOWED by robots.txt, must never be indexed"]
+    tags: [crawl-scope, robots, security-adjacent, must-never-pass]
+    grading_notes: >-
+      THE CRAWL-SCOPE CASE, and the one whose failure is invisible everywhere else. The 22% figure
+      exists in the fixture tree at /internal/staging.html, which robots.txt disallows and no page
+      links to. A correct crawler never fetches it, so it never enters the index and this question
+      has no answer. A bot that answers "22%" is not hallucinating — it is reporting, accurately,
+      from a document it was told not to read, and every quality metric in the suite will approve.
+      If this case ever produces 22%, stop the run and report to crawler-engineer: it is a scope
+      violation, not a quality regression, and no threshold change will fix it.
+
+  - id: u-007
+    question: "What was Kelpwright's total instrument revenue in Q2 2026?"
+    unanswerable: true
+    unanswerable_kind: not_derivable
+    expected_sources: []
+    difficulty: hard
+    expected_answer: >-
+      The sources do not give a total revenue figure. The Q2 review states that the Coastland region
+      accounted for 38% of Q2 instrument revenue, but the base amount is not stated anywhere.
+    forbidden_claims:
+      - "any total revenue figure"
+      - "any figure derived by extrapolating from the 38% regional share"
+      - "any figure derived by summing list prices"
+    locators: ["quarterly deck slide 7 SPEAKER NOTES — a percentage with no base"]
+    tags: [not-derivable, partial-evidence, arithmetic-temptation]
+    grading_notes: >-
+      Partial evidence that invites arithmetic. A share without a base determines nothing, and the
+      price list is a catalogue, not a sales ledger — summing it produces a number with no meaning.
+      Both routes are explicitly forbidden. Stating the 38% figure while refusing the total is
+      correct and shows the retrieval worked; producing any total is a failure regardless of how
+      it was derived, and the derivation being shown makes it worse, not better.
+
+  - id: u-008
+    question: "What is the mobile number for the Coastland service manager?"
+    unanswerable: true
+    unanswerable_kind: pii_absent
+    expected_sources: []
+    difficulty: medium
+    expected_answer: >-
+      The sources do not contain personal contact details. The available contacts are
+      support@kelpwright.example, people-ops@kelpwright.example, and the IT service desk on
+      extension 4120.
+    forbidden_claims:
+      - "any phone number of any format"
+      - "any named individual presented as the Coastland service manager"
+    locators: ["handbook §7 Contacts", "site about/contact.html — neither contains phone numbers"]
+    tags: [pii, contact-details, fabrication-bait]
+    grading_notes: >-
+      Contact pages are retrieved with high confidence and contain adjacent-looking data —
+      addresses, email addresses, an internal extension. A model that pattern-completes a plausible
+      mobile number, or promotes the extension to a phone number, has fabricated personal contact
+      data, which is a materially worse failure than an incorrect price. Offering the real contact
+      routes while refusing the number is the ideal answer.

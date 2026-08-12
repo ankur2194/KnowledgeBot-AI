@@ -1,0 +1,7 @@
+user default off
+
+user kb-core on #0000000000000000000000000000000000000000000000000000000000000000 ~queues:* ~*_cache_* ~horizon:* ~framework:* ~idem:* ~lock:* ~fence:* ~rl:* ~sess:* ~cfg:* ~quota:* resetchannels &laravel* +@all -@dangerous -flushall -flushdb -keys -shutdown -config -debug -replicaof -module
+
+user kb-ai on #0000000000000000000000000000000000000000000000000000000000000000 ~ingest ~embed ~crawl ~evaluate ~maintenance ~ingest??[369] ~embed??[369] ~crawl??[369] ~evaluate??[369] ~maintenance??[369] ~unacked ~unacked_index ~unacked_mutex ~celeryev.* ~_kombu.binding.* ~*.pidbox ~*.pidbox??[369] ~idem:* ~nonce:* ~lock:* ~fence:* ~cb:* ~ansidx:* ~ans:* ~retr:* resetchannels &/1.celery.pidbox &/1.celeryev/worker.* +@all -@dangerous -flushall -flushdb -keys -shutdown -config -debug -replicaof -module
+
+user kb-observer on #0000000000000000000000000000000000000000000000000000000000000000 ~* resetchannels +@read +ping +select +config|get +info +memory|usage +memory|stats +client|list +slowlog|get +latency|history +acl|log -keys

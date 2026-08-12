@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+         cacheDirectory=".phpunit.cache"
+         executionOrder="depends,defects"
+         failOnRisky="true"
+         failOnWarning="true"
+         failOnDeprecation="true"
+         beStrictAboutOutputDuringTests="true"
+         displayDetailsOnTestsThatTriggerDeprecations="true"
+         displayDetailsOnTestsThatTriggerErrors="true"
+         displayDetailsOnTestsThatTriggerWarnings="true"
+         displayDetailsOnPhpunitDeprecations="true">
+
+    <!--
+        SIX SUITES, and the split is not cosmetic — each one has a different database strategy and a
+        different set of things it is allowed to fake (see tests/Pest.php):
+
+          Unit         no framework boot at all: no container, no database, no facades. If a unit
+                       test needs one of those, it is a Feature test.
+          Feature      HTTP through the full stack, RefreshDatabase (one BEGIN/ROLLBACK per test).
+          Contract     Laravel<->FastAPI against the OpenAPI document in packages/contracts/.
+                       Http::fake() is BANNED here: a faked SSE body is a string, so the relay
+                       drains it in microseconds and every buffering, ordering, heartbeat and
+                       disconnect bug passes.
+          Security     the §22.5 suite. Always runs; never accelerated by test-impact analysis,
+                       which follows PHP call graphs and cannot see across the process boundary into
+                       FastAPI and Qdrant.
+          Integration  real containers, cross-process. The ONLY suite on DatabaseTruncation, because
+                       it is the only one where another process must be able to SEE the rows.
+          Arch         the doctrine no runtime test can observe. Always runs.
+    -->
+    <testsuites>
+        <testsuite name="Unit">
+            <directory>tests/Unit</directory>
+        </testsuite>
+        <testsuite name="Feature">
+            <directory>tests/Feature</directory>
+        </testsuite>
+        <testsuite name="Contract">
+            <directory>tests/Contract</directory>
+        </testsuite>
+        <testsuite name="Security">
+            <directory>tests/Security</directory>
+        </testsuite>
+        <testsuite name="Integration">
+            <directory>tests/Integration</directory>
+        </testsuite>
+        <testsuite name="Arch">
+            <directory>tests/Arch</directory>
+        </testsuite>
+    </testsuites>
+
+    <source ignoreIndirectDeprecations="true" restrictNotices="true" restrictWarnings="true">
+        <include>
+            <directory>app</directory>
+        </include>
+    </source>
+
+    <php>
+        <env name="APP_ENV" value="testing"/>
+
+        <!--
+            APP_KEY, for the suite only. It is delivered as a FILE in every real environment
+            (APP_KEY_FILE=/run/secrets/app_key), and the arch and unit suites run with no secret
+            mounts at all — so without this line every session-authenticated Feature test dies on
+            MissingAppKeyException before it reaches the assertion it was written for.
+
+            Deliberately NOT the KEK. APP_KEY covers sessions and cookies; KB_KEK wraps provider
+            credentials. Sharing one value here would make the suite unable to detect the day
+            somebody shares them in production, where "log everyone out" and "re-wrap every
+            tenant's provider credential" would become the same operation.
+        -->
+        <env name="APP_KEY" value="base64:Y2Ftby10ZXN0LWFwcC1rZXktMzItYnl0ZXMtbG9uZyE="/>
+        <env name="APP_MAINTENANCE_DRIVER" value="file"/>
+        <env name="APP_DEBUG" value="true"/>
+
+        <!--
+            POSTGRESQL, NEVER SQLITE. The schema depends on jsonb, partial unique indexes (the
+            single-active-version constraint that makes publication atomic), CHECK constraints, and
+            the COMPOSITE foreign keys that guard bot_source_assignments — the one row that can span
+            two organizations. SQLite silently accepts what PostgreSQL rejects, so a green suite on
+            SQLite proves nothing about the constraint that is the entire point.
+
+            Under parallel testing Laravel appends the worker token and creates kb_test_1 … kb_test_N
+            automatically. It does that FOR THE DATABASE ONLY — the Qdrant collection, the Valkey
+            logical databases and the cache prefix are token-scoped by hand in
+            AppServiceProvider::isolateParallelTestWorkers(). (XML comments cannot contain a double
+            hyphen, which is why no CLI flag is written out literally in this file.)
+
+            THE HOST IS `postgres-test`, NOT `postgres`, AND THE SUFFIX IS THE POINT. The test
+            database has to be a DIFFERENT NAME from the one the application runs against, not merely
+            a different database on the same name: `postgres` is the dev and production service, and
+            a suite that resolves it is one stale shell, one wrong Compose project, or one absent
+            DB_DATABASE away from running RefreshDatabase's migrate:fresh against real tenant data.
+            The failure is silent and total, and it is not recoverable from the test run.
+
+            These four values are canonical and shared: infrastructure/docker/compose.yaml's `test`
+            profile and the CI service container use the same host, database, user and password.
+            Changing one of them here without changing them there does not fail loudly — it fails as
+            "connection refused" in whichever environment was not updated, which reads like an
+            infrastructure flake rather than a config edit.
+        -->
+        <env name="DB_CONNECTION" value="pgsql"/>
+        <env name="DB_HOST" value="postgres-test"/>
+        <env name="DB_PORT" value="5432"/>
+        <env name="DB_DATABASE" value="kb_test"/>
+        <env name="DB_USERNAME" value="kb_test"/>
+        <env name="DB_PASSWORD" value="kb_test"/>
+
+        <!--
+            The default cache store stays on the NON-EVICTING Valkey instance even in tests, because
+            WithoutOverlapping, ShouldBeUnique and the scheduler mutexes cannot be pointed anywhere
+            else and every one of them fails OPEN when its key disappears. `array` would make a
+            two-replica onOneServer test pass while proving the opposite of what it claims.
+            Never call Cache::flush() or FLUSHDB in a test: under parallel testing it wipes the siblings.
+
+            REDIS_HOST IS PINNED HERE FOR THE SAME REASON DB_HOST IS, AND THE HAZARD IS WORSE.
+            config/database.php defaults it to `valkey-core`, which is the DEV AND PRODUCTION
+            instance, so before this line an unpinned suite resolved the real one. That store is
+            non-evicting and holds the scheduler mutexes, WithoutOverlapping and ShouldBeUnique
+            locks — so a test run against it does not read stale data, it takes and drops the locks
+            a running scheduler depends on, and every one of those fails OPEN when its key vanishes.
+            `valkey-test` is the service name the Compose `test` profile already uses.
+
+            REDIS_CACHE_HOST IS DELIBERATELY LEFT UNSET, so the `ephemeral` connection still
+            resolves `valkey-cache` and fails with a connection error the first time a test reaches
+            for it. Pointing it at valkey-test as well would put the EVICTING and NON-EVICTING
+            keyspaces on one server at the same logical database, and a lock wrongly written to the
+            evicting store would then pass every test — which is the bug the two-instance split
+            exists to catch. A loud "connection refused" is the correct answer until the test
+            profile grows a second Valkey.
+        -->
+        <env name="CACHE_STORE" value="valkey"/>
+        <env name="REDIS_HOST" value="valkey-test"/>
+        <env name="REDIS_CLIENT" value="phpredis"/>
+        <env name="SESSION_DRIVER" value="array"/>
+
+        <!--
+            `sync` for the default run so a Feature test's dispatch executes inline. Integration/
+            tests that exercise a real worker, a retry_after expiry, or a lock TTL must override
+            this to `valkey` explicitly — asserting on a job payload instead is how a queue test
+            stops testing anything.
+        -->
+        <env name="QUEUE_CONNECTION" value="sync"/>
+
+        <env name="BCRYPT_ROUNDS" value="4"/>
+
+        <!--
+            Telemetry off in the suite: the PHP SDK has no background thread, so the batch processor
+            flushes inline at shutdown and a missing Collector adds its full timeout to every test.
+            OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT is absent here for the same reason
+            it is absent from .env.example: it has no permitted value in any environment, including
+            this one, because it captures user questions, assembled prompts and retrieved tenant
+            chunks into spans.
+
+            Note what does NOT stop it. The fail-closed boot check exists only in the data plane
+            (services/ai-service/app/observability/otel.py raises when the name is present in the
+            environment at all). There is no equivalent in this service, so adding the variable to
+            this block would not fail the suite and nothing would say so — it would just start
+            capturing. Writing that boot check is open work, not done work.
+        -->
+        <env name="OTEL_PHP_AUTOLOAD_ENABLED" value="false"/>
+        <env name="OTEL_SDK_DISABLED" value="true"/>
+
+        <!--
+            THE KEY-ENCRYPTING KEY, FOR TESTS ONLY. Provider credentials are envelope-encrypted
+            (kb-security-baseline §18.2) and CredentialVault fails CLOSED on a missing KEK — which
+            is correct, and which means the fixture connection factory cannot seal anything
+            without one. A literal here rather than a mounted file because the arch/unit suites
+            run with no secret mounts at all, and because a suite that silently skipped encryption
+            would make every redaction assertion vacuous.
+
+            It is deliberately not a real-looking key: secret scanners flag those on every PR
+            forever. It is also not APP_KEY — sharing one key would make "log everyone out" and
+            "re-wrap every tenant's provider credential" the same operation.
+        -->
+        <env name="KB_KEK" value="kb-test-kek-not-a-real-key-0000000000000000"/>
+        <env name="KB_KEK_VERSION" value="1"/>
+
+        <!-- Deterministic fixtures. Real credentials never reach the suite. -->
+        <env name="AI_SERVICE_URL" value="http://ai-api:8000"/>
+        <env name="AI_HMAC_ACTIVE_KEY_ID" value="k1"/>
+        <env name="AI_HMAC_KEY_K1" value="test-hmac-secret-k1"/>
+        <env name="QDRANT_COLLECTION" value="kb_test"/>
+    </php>
+</phpunit>

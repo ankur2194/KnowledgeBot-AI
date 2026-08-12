@@ -1,0 +1,154 @@
+/* apps/widget/src/loader/launcher.css
+ *
+ * Imported with `?inline`, so this arrives in the bundle as a STRING and Vite emits no .css file.
+ * An IIFE on a customer's page has nothing to inject a stylesheet with, and a second request into
+ * a page whose CSP we have not seen is a request that silently fails.
+ *
+ * It is installed through `new CSSStyleSheet()` + `replaceSync()` + `adoptedStyleSheets`, which is
+ * NOT gated by `style-src` — a <style> element and a style="" attribute are both inline CSS and
+ * need 'unsafe-inline'. That is the whole reason the launcher survives a strict host CSP.
+ *
+ * THREE RULES THIS FILE OBEYS, each with a production-only failure mode:
+ *
+ *  1. It starts with `:host { all: initial }`. Shadow DOM blocks SELECTOR MATCHING, not
+ *     INHERITANCE: font-family, font-size, color, line-height, letter-spacing, direction and
+ *     visibility all cross the boundary, and custom properties pierce it by design. Without this
+ *     line the launcher renders in the customer's serif face at triple line-height.
+ *
+ *  2. NO `rem` ANYWHERE. `rem` resolves against the HOST PAGE's root font size, so one customer
+ *     with `html { font-size: 62.5% }` gets a launcher at 62.5% scale. Every length here is px.
+ *
+ *  3. It NEVER imports @kb/design-tokens. The tokens are custom properties on `:root`, they sit
+ *     behind `all: initial` in a closed shadow root, and they are inside a 5 kB budget. The chat
+ *     UI gets them — inside the iframe, on our own document (src/app/styles.css).
+ *
+ * And it must still be LEGIBLE WITH NO STYLESHEET AT ALL: the constructed-stylesheet CSP gap is
+ * acknowledged at spec level but not re-tested against every 2026 browser, so the launcher is a
+ * real <button> with real text content, not an icon-only div.
+ */
+
+:host {
+  all: initial;
+}
+
+.kb-launcher {
+  position: fixed;
+  bottom: 16px;
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 28px;
+  background: #111827;
+  color: #ffffff;
+  /* No `rem`, and no font-family inheritance to fall back on after `all: initial`. */
+  font:
+    500 14px/1 system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgb(0 0 0 / 24%);
+  /* The host page cannot select into a closed shadow root, but it can still stack above us. */
+  z-index: 2147483000;
+  transition: transform 120ms ease-out;
+}
+
+.kb-launcher:hover,
+.kb-launcher:focus-visible {
+  transform: scale(1.05);
+}
+
+.kb-launcher:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+}
+
+/* Text for a screen reader and for the no-stylesheet case; hidden visually once styling applies. */
+.kb-launcher-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.kb-launcher-glyph {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.kb-frame {
+  position: fixed;
+  bottom: 88px;
+  width: 400px;
+  /* max-height, not height: the frame's own content height arrives over the bridge as `resize`
+   * and is clamped host-side. This is the ceiling that clamp is measured against. */
+  height: 620px;
+  max-height: calc(100vh - 120px);
+  max-width: calc(100vw - 32px);
+  border: 0;
+  border-radius: 16px;
+  background: transparent;
+  box-shadow: 0 12px 40px rgb(0 0 0 / 22%);
+  z-index: 2147483000;
+  /* `display: none` rather than opacity: a hidden iframe must not swallow the host page's clicks,
+   * and a frame that is merely transparent still covers a fifth of their viewport. */
+  display: none;
+}
+
+.kb-frame[data-open='true'] {
+  display: block;
+}
+
+/* Position is written by the loader from the `data-kb-position` attribute, on BOTH elements. */
+.kb-launcher[data-position='right'],
+.kb-frame[data-position='right'] {
+  right: 16px;
+}
+
+.kb-launcher[data-position='left'],
+.kb-frame[data-position='left'] {
+  left: 16px;
+}
+
+/* The degraded state: no iframe, one anchor to hosted chat on chat.<domain>. It has to be legible
+ * on a page whose CSP just blocked our frame, which is the page most likely to block other things
+ * too. */
+.kb-degraded {
+  position: fixed;
+  bottom: 16px;
+  box-sizing: border-box;
+  padding: 12px 16px;
+  border-radius: 24px;
+  background: #111827;
+  color: #ffffff;
+  font:
+    500 14px/1.4 system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+  text-decoration: none;
+  box-shadow: 0 4px 14px rgb(0 0 0 / 24%);
+  z-index: 2147483000;
+}
+
+.kb-degraded[data-position='right'] {
+  right: 16px;
+}
+
+.kb-degraded[data-position='left'] {
+  left: 16px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kb-launcher {
+    transition: none;
+  }
+}

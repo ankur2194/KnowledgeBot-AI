@@ -1,0 +1,4 @@
+Shared React hooks. `components.json` points the `hooks` alias here, so this is where the shadcn CLI
+writes any hook a component depends on (use-mobile, and similar).
+
+Anything that fetches belongs in features/<area>/ next to the query keys it owns, not here.

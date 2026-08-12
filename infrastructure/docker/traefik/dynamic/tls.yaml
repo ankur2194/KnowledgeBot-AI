@@ -1,0 +1,57 @@
+# infrastructure/docker/traefik/dynamic/tls.yaml — DYNAMIC configuration (file provider).
+#
+# Split from traefik.yaml on purpose: static configuration requires a restart, dynamic
+# configuration is hot-reloaded. Changing a cipher list should not cut every in-flight stream.
+#
+# Router and middleware definitions live on the Compose service labels (the docker provider), not
+# here — keeping a router next to the container it routes to is what makes "this service has no
+# route" verifiable by reading one file.
+
+tls:
+  options:
+    default:
+      # TLS 1.2 floor. 1.3 alone would be nicer and is not yet safe for a self-hostable product:
+      # the widget is embedded on customer sites we do not control, including corporate proxies
+      # that terminate at 1.2.
+      minVersion: VersionTLS12
+      # Traefik's own default already excludes the weak suites; this list is explicit so that a
+      # Traefik minor cannot quietly move it. TLS 1.3 suites are not configurable in Go and are
+      # therefore absent — that is expected, not an omission.
+      cipherSuites:
+        - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+        - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305
+        - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
+      curvePreferences:
+        - X25519
+        - CurveP256
+        - CurveP384
+      # sniStrict:false deliberately. With it on, a client that sends no SNI gets a handshake
+      # failure rather than the default certificate — which breaks some older embedded browsers on
+      # the widget domain, and the widget's whole job is to work on someone else's page.
+      sniStrict: false
+      alpnProtocols:
+        - h2
+        - http/1.1
+      # NOTE: HTTP/3 is not enabled. In v3 it moved onto the entrypoint
+      # (entryPoints.websecure.http3), not into `experimental`. It is off because QUIC needs a
+      # published UDP/443 and adds a second transport path to prove SSE-safe; the streaming
+      # guarantees in this stack have only been reasoned about over TCP.
+
+# ------------------------------------------------------------------------------------------------
+# WHAT IS DELIBERATELY NOT HERE
+# ------------------------------------------------------------------------------------------------
+# * No `headers` middleware, and specifically no static CSP or frame-ancestors. The widget's
+#   frame-ancestors is derived PER BOT from a live allow-list on every request, so it cannot be a
+#   static header — Laravel emits it, which is why the widget domain has two backends.
+#
+# * No `rateLimit` and no `inFlightReq` on any router. Traefik's rateLimit defaults its
+#   sourceCriterion to the remote address alone, so one abuser behind an office NAT rate-limits
+#   their colleagues while the same abuser on a phone hotspot is unaffected. Rate limiting keys on
+#   organization + bot + session + IP TOGETHER, in Laravel. A second, weaker limiter here would
+#   also fire first and return a 429 with no error_class for the client to branch on.
+#
+# * No certificate `stores` or manually supplied certificates. Everything is ACME HTTP-01 through
+#   the `le` resolver, and acme.json lives on a NAMED VOLUME.

@@ -1,0 +1,155 @@
+# scripts/security/policy/licences.toml
+#
+# Read by scripts/security/license_gate.py, which is the ONLY check permitted to block a build on
+# licence. It reads ARTIFACT SBOMs — per lockfile pre-merge, per image at release — plus
+# services/ai-service/models.manifest.toml.
+#
+# ================================================================================================
+# THE RULE, AND WHY IT IS A LEGAL MATTER RATHER THAN A LINT
+# ================================================================================================
+# We hand images and source to self-hosters we do not vet. A field-of-use restriction or a
+# network-copyleft term inside a shipped artifact is a term THEY inherit without ever agreeing to
+# it. There is no "we'll deal with it later" version of that.
+#
+# Scope is artifacts only. hadolint (GPL-3.0) and TruffleHog (AGPL-3.0) run in CI as separate
+# processes and appear nowhere below — a CI tool is not in a shipped artifact, and that distinction
+# is the whole reason the gate is scoped this way rather than to "everything we execute".
+
+# ================================================================================================
+# ALLOW — permissive and weak-copyleft licences we can ship
+# ================================================================================================
+# Anything NOT on this list fails, including UNKNOWN. Failing closed is deliberate: PyPI and npm
+# metadata omit or mistype the licence often enough that treating UNKNOWN as a pass is the single
+# most likely way copyleft code reaches an image. The failure message names the identifier, so
+# adding a genuinely permissive one is a one-line, reviewed change.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "MPL-2.0",
+  # LGPL is allowed because we consume those as SEPARATE PROCESSES or as UNMODIFIED shared
+  # libraries, which is the condition under which the reciprocal obligation does not reach our
+  # code. MODIFYING one moves it to the deny side — and that is a review, not a policy edit. If a
+  # patched LGPL library ever ships, this comment is the thing that was ignored.
+  "LGPL-2.1",
+  "LGPL-2.1-only",
+  "LGPL-2.1-or-later",
+  "LGPL-3.0",
+  "LGPL-3.0-only",
+  "LGPL-3.0-or-later",
+  "PSF-2.0",
+  "0BSD",
+  "CC0-1.0",
+  "Zlib",
+
+  # ----------------------------------------------------------------------------------------------
+  # PENDING ANKUR'S APPROVAL — A LICENSING DECISION, ADDED SO THE GATE CAN BE EVALUATED.
+  # Revert this entry, not the manifest, if the ruling goes the other way.
+  # ----------------------------------------------------------------------------------------------
+  # A DATA licence, not a code licence, and the first one on this list. It arrived with
+  # `docling-tableformer` (docling-project/docling-models at v2.3.0), whose model card at the
+  # pinned revision is CDLA-Permissive-2.0. That row previously claimed MIT; MIT is docling's
+  # SOURCE licence, and code-versus-weights is exactly the confusion the gate's model arm exists
+  # to catch — Surya is the standing example. Resolving the revision turned three false greens
+  # into one true red, which is the gate working.
+  #
+  # Read against this file's own scope (block what a self-hoster INHERITS without agreeing:
+  # field-of-use restrictions and network copyleft), verified against the licence text at
+  # https://cdla.dev/permissive-2-0/ rather than from a summary:
+  #   §1.1  use, modify and share the Data.
+  #   §3.1  "No Restrictions on Results" — no obligation whatsoever on model OUTPUT. Nothing
+  #         reaches an embedding, an answer, or a tenant's data.
+  #   §2.1  THE ONLY CONDITION: a redistributor must make the text of the agreement available
+  #         with the shared Data.
+  # No copyleft on our code, no field-of-use clause, no revenue cap, no competing-product clause.
+  # It is permissive in the sense this list means.
+  #
+  # §2.1 IS AN OBLIGATION WE MUST ACTUALLY MEET, NOT A FOOTNOTE. These weights ship INSIDE our
+  # image, so every self-hoster is a Data Recipient and we are sharing Data. The agreement text
+  # travels via the third-party notices in /NOTICE (docs/21 §35). An allow-listed licence whose
+  # obligation is unmet is worse than one that blocks the build, so NOTICE and this line land
+  # together — if you remove one, remove the other.
+  "CDLA-Permissive-2.0",
+]
+
+# ================================================================================================
+# DENY — network copyleft, source-available, and field-of-use restrictions
+# ================================================================================================
+# A denied licence is a hard failure with no waiver path short of a dated, owned [[exception]].
+deny = [
+  # Network copyleft: reaches us because we ship a SERVER that self-hosters run for third parties.
+  # The "we don't distribute, we host" argument does not apply to a self-hostable product.
+  "AGPL-3.0",
+  "AGPL-3.0-only",
+  "AGPL-3.0-or-later",
+  "SSPL-1.0",
+
+  # Strong copyleft. Fine for a CI tool run as a separate process (see scope above), fatal linked
+  # into a shipped image.
+  "GPL-2.0",
+  "GPL-2.0-only",
+  "GPL-2.0-or-later",
+  "GPL-3.0",
+  "GPL-3.0-only",
+  "GPL-3.0-or-later",
+
+  # Source-available with a competing-use restriction. Not OSI, and the restriction binds the
+  # self-hoster, not us.
+  "BUSL-1.1",
+  "Elastic-2.0",
+
+  # Non-commercial. We are a commercially usable product, so running or shipping this is exactly
+  # the prohibited use. The standing example is Safety's `safety-db` (CC BY-NC-SA 4.0) — which is
+  # why the Python dependency scanner here is pip-audit (PyPA, Apache-2.0, OSV-backed) and not
+  # Safety.
+  "CC-BY-NC-1.0",
+  "CC-BY-NC-2.0",
+  "CC-BY-NC-2.5",
+  "CC-BY-NC-3.0",
+  "CC-BY-NC-4.0",
+  "CC-BY-NC-SA-4.0",
+  "CC-BY-NC-ND-4.0",
+
+  # Model weights with field-of-use terms. Surya's OCR WEIGHTS are modified AI Pubs OpenRAIL-M
+  # (operator-revenue cap, competing-product clause) while its CODE is Apache-2.0 — so a
+  # code-level licence check reports the safe half of a package the model arm of the gate rejects.
+  #
+  # STILL LIVE AFTER LOCAL INFERENCE WAS REMOVED. Embeddings and reranking became provider API
+  # calls, but document parsing and OCR were kept — so we still ship weights (docling's layout
+  # model and TableFormer, RapidOCR's ONNX) and still inherit their licences. Surya remains the
+  # standing example of why a code-level check is not sufficient. Do not retire these two ids.
+  "LicenseRef-OpenRAIL-M",
+  "LicenseRef-AI-Pubs-OpenRAIL-M",
+
+  # Semgrep's community rules moved to the Semgrep Rules License v1.0: internal use only, and it
+  # "does not allow you to distribute the rules, or to make them available to others as a
+  # service." Vendoring a `p/...` ruleset into a monorepo we publish to self-hosters IS
+  # distribution. We run Opengrep (the LGPL-2.1 fork) against rules we wrote — see
+  # scripts/security/rules/LICENCES.md.
+  "LicenseRef-Semgrep-Rules-1.0",
+]
+
+# ================================================================================================
+# EXCEPTIONS
+# ================================================================================================
+# Every entry requires ALL FOUR of `purl`, `owner`, `reason`, `expires`. The gate treats a missing
+# field as a FATAL policy error rather than as an ignored entry, because an exception without an
+# expiry is a permanent hole nobody revisits, and an exception without an owner is one nobody can
+# be asked about.
+#
+# When `expires` lapses the waiver stops applying and the component fails on its own licence. That
+# failure IS the review prompt. Do not extend a date without redoing the analysis.
+#
+# There are none today. The shape:
+#
+# [[exception]]
+# purl    = "pkg:pypi/some-package@1.2.3"
+# owner   = "platform-devops-engineer"
+# reason  = """
+#   Dual-licensed AGPL-3.0 OR MIT; we take the MIT grant. The gate splits compound expressions and
+#   requires every operand to be permitted, so an explicit human decision is recorded here rather
+#   than being made implicitly by a parser.
+# """
+# expires = "2026-11-01"

@@ -1,0 +1,47 @@
+{{/*
+  Notification rendering for KnowledgeBot alerts.
+
+  Runbook prose lives in the `runbook` ANNOTATION on each rule in prometheus/rules/kb-alerts.yml,
+  not here and not in alertmanager.yml. Three reasons, in order of how much each one hurts when
+  ignored: the runbook belongs next to the expression it explains, so a threshold change and its
+  guidance move together; a route file full of paragraphs stops being reviewable as routing; and
+  the CI metadata gate asserts `severity` + `summary` + `runbook` on every rule, which it can
+  only do if the text is on the rule.
+
+  These templates therefore render whatever the rule provided and never carry knowledge of any
+  specific alert. `{{ template "kb.text" . }}` on a group with no runbook annotation prints the
+  header and nothing else rather than failing to notify.
+
+  Alertmanager parses every file matched by the `templates:` glob at startup. A syntax error here
+  is a startup failure, not a rendering failure, so it takes the whole notification path down —
+  check it with `amtool check-config alertmanager.yml` before shipping.
+*/}}
+
+{{ define "kb.title" -}}
+[{{ .Status | toUpper }}{{ if eq .Status "firing" }} {{ .Alerts.Firing | len }}{{ end }}] {{ .GroupLabels.alertname }}{{ if .GroupLabels.service }} — {{ .GroupLabels.service }}{{ end }}
+{{- end }}
+
+{{ define "kb.text" -}}
+{{ range .Alerts -}}
+{{ .Annotations.summary }}
+
+{{ if .Annotations.runbook -}}
+RUNBOOK
+{{ .Annotations.runbook }}
+{{ end }}
+{{- if .Labels.env }}env={{ .Labels.env }} {{ end -}}
+{{- if .Labels.service }}service={{ .Labels.service }} {{ end -}}
+{{- if .Labels.provider }}provider={{ .Labels.provider }} {{ end -}}
+{{- if .Labels.dependency }}dependency={{ .Labels.dependency }} {{ end -}}
+{{- if .Labels.task }}task={{ .Labels.task }} {{ end -}}
+{{- if .Labels.operation }}operation={{ .Labels.operation }} {{ end }}
+
+{{ end -}}
+{{- end }}
+
+{{/*
+  A per-tenant question is a PostgreSQL query, never a PromQL one. There is no org_id label on
+  any series and there never will be, so no template here can name a tenant — the runbook
+  annotation carries the SQL instead. If a notification ever needs to say WHICH organization,
+  that is a signal the alert is the wrong shape, not that this file needs a new variable.
+*/}}

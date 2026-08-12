@@ -1,0 +1,84 @@
+# services/ai-service/.dockerignore
+#
+# Everything not excluded here is uploaded to the daemon and lands in a layer that anyone who can
+# pull the image can read — including every self-hoster. Deleting a file in a later RUN does not
+# remove it from the earlier layer; `docker history` and `docker save` both still show it.
+
+# ================================================================================================
+# SECRETS AND ENVIRONMENT
+# ================================================================================================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ================================================================================================
+# VIRTUALENVS — rebuilt by `uv sync --frozen` inside the image
+# ================================================================================================
+# Copying a host .venv in would shadow the frozen install with whatever the developer's machine
+# resolved, and would do it silently — the image would then contain packages that appear in no
+# SBOM and no lockfile. The compose dev overlay mounts an ANONYMOUS volume over /app/.venv for the
+# same reason.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.python-version
+
+# ================================================================================================
+# MODEL WEIGHTS — never in a layer
+# ================================================================================================
+# BGE-M3, bge-reranker-v2-m3 and Docling's layout/table models are gigabytes each, appear in no
+# SBOM, are invisible to pip-audit, and carry their own licences (Surya's weights are OpenRAIL-M
+# while its code is Apache-2.0). They arrive on a mounted volume, pinned by COMMIT SHA in
+# models.manifest.toml — never baked in from a developer's cache, where the revision is whatever
+# `main` was that day.
+models/
+*.safetensors
+*.bin
+*.onnx
+*.pt
+*.pth
+.cache/
+huggingface/
+
+# ================================================================================================
+# TESTS AND FIXTURES
+# ================================================================================================
+# Fixtures include the SSRF payload set, prompt-injection corpora and seeded credentials. None of
+# that belongs in a shipped image.
+tests/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+coverage.xml
+.coverage*
+
+# ================================================================================================
+# VCS, CI, EDITOR
+# ================================================================================================
+.git
+.gitignore
+.gitattributes
+.github/
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# ================================================================================================
+# DOCS AND LOCAL COMPOSE
+# ================================================================================================
+README.md
+docs/
+docker-compose*.yml
+compose*.yaml
+Dockerfile
+.dockerignore
+
+# NOT ignored, deliberately:
+#   pyproject.toml, uv.lock   — the dependency graph; --frozen fails without both
+#   models.manifest.toml      — the model licence + revision manifest the licence gate reads

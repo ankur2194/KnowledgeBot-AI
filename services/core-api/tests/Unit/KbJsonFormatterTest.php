@@ -1,0 +1,452 @@
+<?php
+
+declare(strict_types=1);
+
+use App\Logging\KbJsonFormatter;
+use App\Support\Observability\LogContext;
+use Monolog\Level;
+use Monolog\LogRecord;
+
+/*
+|--------------------------------------------------------------------------
+| The log line shape (finding #56)
+|--------------------------------------------------------------------------
+|
+| A Unit test, with no container and no facades, because App\Logging\KbJsonFormatter takes its two
+| process-wide fields as constructor arguments precisely so it can be one. A formatter that had to
+| boot the framework to be exercised is a formatter nobody exercises.
+|
+| THE REDACTION ASSERTIONS ASSERT ABSENCE OF THE SECRET, NEVER PRESENCE OF THE MASK. Those are
+| different claims and only one of them is worth anything: the two bugs found in the Python
+| redactor earlier — `Bearer <token>` where the word `Bearer` was replaced and the token survived,
+| and `KB1 k1:<sig>` where the pattern stopped at the colon — BOTH produced output containing
+| `[REDACTED]`. A test looking for the marker passes on every one of them.
+|
+| WHY EVERY CREDENTIAL FIXTURE BELOW IS A REPEATED MARKER AND NOT A RANDOM-LOOKING STRING (#137)
+| ----------------------------------------------------------------------------------------------
+| `secret-scan` in `.github/workflows/ci.yml` runs gitleaks with NO `--exit-code` override, NO
+| allow-list flag and no `.gitleaksignore` — its own comment is "a secret is the one finding with
+| no waiver" — over BOTH the worktree and every ref. Three fixtures in this file were the only
+| findings in the whole repository that survive `actions/checkout`, so they would have turned the
+| first PR after this tree is committed red, and a waiver file would have hollowed out the gate for
+| the next real fixture. They were lowered instead.
+|
+| gitleaks' `generic-api-key` rule needs THREE things at once on one line: a credential-shaped
+| KEYWORD (`api_key`, `token`, `secret`, `credential`, …), an assignment operator, and a captured
+| value whose Shannon entropy is at least 3.5. Measured with `zricethezav/gitleaks:v8.30.1`, the
+| three that fired, and what each became — DESCRIBED AND NOT REPRODUCED, because writing the old
+| value into this comment fires the rule again from the comment, which is how the first attempt at
+| this note failed:
+|
+|   1. the `api_key` dataset row — `nvapi-` plus 22 pseudo-random characters — entropy 4.593.
+|      Now `nvapi-MUSTNOTAPPEARMUSTNOTAPPEAR`: it keeps the `nvapi-` PREFIX and stays far over
+|      redact()'s 12-character floor, while the repeated marker puts the entropy under the bar.
+|
+|   2. the auth-scheme test's local — a real JWT bound to `$token` — entropy 4.451. Now the same
+|      JWT bound to `$jwt`. A JWT's entropy lives in its base64 header and CANNOT be lowered
+|      without destroying the shape the bug was found in, so this one is disarmed at the
+|      IDENTIFIER instead. That is sound precisely because the identifier is not a byte the
+|      redactor reads: redact() keys on `Authorization` and `Bearer` in the MESSAGE.
+|
+|   3. the exception test's local — `sk-proj-` plus 21 characters bound to `$secret` — entropy
+|      4.142. Now `$argument`, holding unshaped prose. Read that test: its old fixture also
+|      detected nothing, so it changed for two independent reasons.
+|
+| The two knobs are therefore the VALUE'S ENTROPY and the PHP IDENTIFIER, and NEITHER IS A BYTE
+| `KbJsonFormatter::redact()` READS. The redactor keys on a vendor PREFIX (`sk-`, `sk-ant-`,
+| `nvapi-`, `ghp_`, `AKIA`), on a LENGTH FLOOR after it, and on words that appear in the MESSAGE
+| (`Authorization`, `Bearer`, `KB1`, `?`). A repeated marker keeps every one of those.
+|
+| DO NOT "make these look more like real keys", and do not add a `.gitleaksignore`. Both are the
+| same refused trade. If a fixture must be random-looking, prove first that the redactor still
+| fires on it by breaking `redact()` and watching this file go red.
+*/
+
+/**
+ * A record with a fixed, deliberately non-UTC instant, so the UTC conversion is observable.
+ *
+ * @param  array<string, mixed>  $context
+ */
+function kbRecord(
+    Level $level = Level::Info,
+    string $message = 'hello',
+    array $context = [],
+): LogRecord {
+    return new LogRecord(
+        datetime: new \DateTimeImmutable('2026-08-10T14:34:56.789000+02:00'),
+        channel: 'stdout',
+        level: $level,
+        message: $message,
+        context: $context,
+    );
+}
+
+function kbFormatter(): KbJsonFormatter
+{
+    return new KbJsonFormatter(service: 'core-api', env: 'testing');
+}
+
+/**
+ * @param  array<string, mixed>  $context
+ * @return array<string, mixed>
+ */
+function kbFormatted(
+    Level $level = Level::Info,
+    string $message = 'hello',
+    array $context = [],
+): array {
+    $line = kbFormatter()->format(kbRecord($level, $message, $context));
+
+    /** @var array<string, mixed> $decoded */
+    $decoded = json_decode(trim($line), true, 512, JSON_THROW_ON_ERROR);
+
+    return $decoded;
+}
+
+beforeEach(function (): void {
+    // Static context: a test that binds one and does not clear it hands its request id to the
+    // next test in the file, which is the same class of bug the middleware's terminate() prevents.
+    LogContext::forget();
+});
+
+afterEach(function (): void {
+    LogContext::forget();
+});
+
+it('emits one JSON object terminated by exactly one newline', function (): void {
+    $line = kbFormatter()->format(kbRecord());
+
+    expect(substr_count($line, "\n"))->toBe(1)
+        ->and(str_ends_with($line, "\n"))->toBeTrue()
+        ->and(json_decode(trim($line), true))->toBeArray();
+});
+
+it('carries all eight required fields on every line, at every level', function (): void {
+    foreach (Level::cases() as $level) {
+        $payload = kbFormatted($level);
+
+        foreach (KbJsonFormatter::REQUIRED_FIELDS as $field) {
+            expect(array_key_exists($field, $payload))->toBeTrue(
+                "{$field} is missing from a {$level->getName()} line. The eight required fields "
+                .'are the log contract (kb-observability-conventions), not a suggestion.',
+            );
+        }
+    }
+
+    expect(KbJsonFormatter::REQUIRED_FIELDS)->toHaveCount(8);
+});
+
+it('renders severity as a STRING, which is the whole of finding #56', function (): void {
+    foreach (Level::cases() as $level) {
+        expect(kbFormatted($level)['severity'])->toBeString();
+    }
+});
+
+it('renders a severity the Collector severity_parser actually maps', function (): void {
+    /*
+     * MEASURED, NOT ASSUMED. otel/opentelemetry-collector-contrib:0.158.0 was run against the
+     * `file_log` operator block from infrastructure/docker/otel/collector.yaml with one probe line per
+     * candidate string. Its severity_parser accepts, case-insensitively, exactly
+     * trace|debug|info|warn|error|fatal with an optional 2/3/4 suffix, plus the alias `warning`.
+     * Everything else — including Monolog's NOTICE, CRITICAL, ALERT and EMERGENCY — lands on
+     * SeverityNumber Unspecified(0), which is the SAME broken outcome as the integer `level` this
+     * formatter replaced: no `level` stream label in Loki, and every level-faceted panel reads zero.
+     *
+     * This pattern is that measurement written down. Widening it means re-running the probe.
+     */
+    $accepted = '/^(?:trace|debug|info|warn|warning|error|fatal)[234]?$/i';
+
+    foreach (Level::cases() as $level) {
+        $severity = kbFormatted($level)['severity'];
+
+        expect($severity)->toBeString()->toMatch($accepted, sprintf(
+            'severity "%s" (Monolog %s) is outside the set the Collector maps; it would reach Loki '
+            .'with SeverityNumber Unspecified(0) and no level label.',
+            is_string($severity) ? $severity : gettype($severity),
+            $level->getName(),
+        ));
+    }
+});
+
+it('maps every Monolog level through the OpenTelemetry syslog severity table', function (): void {
+    // Monolog's levels ARE the RFC 5424 severities, so this table is the specified mapping rather
+    // than an invented one — and it is the only one preserving ORDER across the four levels the
+    // parser has no plain name for. The numbers are the SeverityNumber each string produced in the
+    // probe above.
+    $expected = [
+        'DEBUG' => 'DEBUG',      // 5
+        'INFO' => 'INFO',        // 9
+        'NOTICE' => 'INFO2',     // 10
+        'WARNING' => 'WARNING',  // 13
+        'ERROR' => 'ERROR',      // 17
+        'CRITICAL' => 'ERROR2',  // 18
+        'ALERT' => 'ERROR3',     // 19
+        'EMERGENCY' => 'FATAL',  // 21
+    ];
+
+    foreach (Level::cases() as $level) {
+        expect(kbFormatted($level)['severity'])->toBe($expected[$level->getName()]);
+    }
+
+    expect(KbJsonFormatter::SEVERITY)->toBe($expected);
+});
+
+it('emits none of the stock JsonFormatter keys that the contract does not name', function (): void {
+    $payload = kbFormatted(Level::Error, 'boom', ['error_class' => 'internal_dependency']);
+
+    // `level` is the one that matters: the Collector's compatibility arm is guarded with
+    // `type(attributes.level) == "string"`, so re-introducing it as Monolog's integer puts the
+    // record straight back into the unparsed branch.
+    foreach (['level', 'level_name', 'context', 'extra', 'datetime', 'channel'] as $key) {
+        expect(array_key_exists($key, $payload))->toBeFalse("stock JsonFormatter key [{$key}] is back");
+    }
+});
+
+it('flattens context instead of nesting it under a context key', function (): void {
+    $payload = kbFormatted(Level::Info, 'ok', ['org_id' => '01J0ORG', 'duration_ms' => 12]);
+
+    expect($payload['org_id'])->toBe('01J0ORG')
+        ->and($payload['duration_ms'])->toBe(12);
+});
+
+it('renders the timestamp as RFC3339 UTC with millisecond precision', function (): void {
+    // The record was built at 14:34:56.789 +02:00.
+    expect(kbFormatted()['timestamp'])->toBe('2026-08-10T12:34:56.789Z');
+});
+
+it('renders trace_id and span_id as null when no span is active, without crashing', function (): void {
+    $payload = kbFormatted();
+
+    expect($payload)->toHaveKeys(['trace_id', 'span_id'])
+        ->and($payload['trace_id'])->toBeNull()
+        ->and($payload['span_id'])->toBeNull();
+
+    // The all-zero sentinel must never be taken at face value: rendered literally it puts a dead
+    // link in Grafana on every line emitted outside a span. This is the PHP half of the rule
+    // `_trace_ids` states in services/ai-service/app/observability/logging.py.
+    expect(json_encode($payload))->not->toContain(str_repeat('0', 32));
+});
+
+it('takes request_id and operation from the request-scoped context', function (): void {
+    LogContext::bind('01JREQUESTID0000000000', static fn (): string => 'admin.provider-connections.store');
+
+    $payload = kbFormatted();
+
+    expect($payload['request_id'])->toBe('01JREQUESTID0000000000')
+        ->and($payload['operation'])->toBe('admin.provider-connections.store');
+});
+
+it('survives an operation resolver that throws', function (): void {
+    LogContext::bind('01JREQUESTID0000000000', static function (): ?string {
+        throw new \RuntimeException('the router blew up');
+    });
+
+    $payload = kbFormatted();
+
+    // The line that has to survive is the one describing the failure.
+    expect($payload['operation'])->toBeNull()
+        ->and($payload['request_id'])->toBe('01JREQUESTID0000000000');
+});
+
+it('never lets a context key overwrite a contract field, and says which one it dropped', function (): void {
+    LogContext::bind('01JREALREQUESTID000000');
+
+    $payload = kbFormatted(Level::Info, 'ok', [
+        'service' => 'ai-api',
+        'severity' => 'DEBUG',
+        'request_id' => 'attacker-chosen',
+        'timestamp' => '1970-01-01T00:00:00.000Z',
+    ]);
+
+    // Silently overwriting `service` from user-supplied context is a log-forging primitive: the
+    // fields an incident is reconstructed from would be settable by anyone who can influence a
+    // context array, and a forged field is worse than an absent one.
+    expect($payload['service'])->toBe('core-api')
+        ->and($payload['severity'])->toBe('INFO')
+        ->and($payload['request_id'])->toBe('01JREALREQUESTID000000')
+        ->and($payload['timestamp'])->toBe('2026-08-10T12:34:56.789Z')
+        ->and($payload['dropped_fields'])->toBe(['request_id', 'service', 'severity', 'timestamp']);
+});
+
+it('drops a context key outside the allow-list, keeping only its name', function (): void {
+    $payload = kbFormatted(Level::Info, 'ok', [
+        'org_id' => '01J0ORG',
+        'user_id' => '01J0USER',
+        'query' => 'what is our refund policy',
+    ]);
+
+    // `org_id` is blessed for logs; `user_id` and `query` are not, and admitting either is an edit
+    // to references/logs-health-audit.md rather than to a code constant.
+    expect($payload['org_id'])->toBe('01J0ORG')
+        ->and($payload['dropped_fields'])->toBe(['query', 'user_id'])
+        ->and(json_encode($payload))->not->toContain('01J0USER')
+        ->and(json_encode($payload))->not->toContain('refund policy');
+});
+
+it('never writes a secret that arrives in the context', function (string $key, string $value, string $secret): void {
+    $line = kbFormatter()->format(kbRecord(Level::Error, 'provider call failed', [$key => $value]));
+
+    // ABSENCE of the secret, not presence of a mask. `[REDACTED]` appeared in the output of both
+    // Python bugs while the credential sat beside it.
+    expect($line)->not->toContain($secret);
+})->with([
+    // Outside the allow-list: the field is dropped whole, value included.
+    //
+    // EVERY VALUE HERE IS DELIBERATELY UNSHAPED, AND THAT IS WHAT MAKES THE ROWS MEASURE THE
+    // EXCLUSION (finding G11, fixed 2026-08-12). The first three used to carry real credential
+    // shapes — `sk-ant-…`, `Bearer eyJ…`, `nvapi-…` — and all three stayed GREEN under the
+    // mutation that opens `partition()` so every context key ships, because `normalize()` hands
+    // the bare VALUE to redact() and the vendor-key and bearer rules caught them on the way out.
+    // They measured the BACKSTOP while reading as if they measured the exclusion, and would have
+    // kept passing if `ALLOWED_EXTRA_FIELDS` were deleted outright.
+    //
+    // The rule for adding a row here: the KEY is the excluded field under test, and the VALUE
+    // must be something redact() cannot recognise — no `sk-`/`nvapi-`/`ghp_`/`AKIA` prefix, no
+    // `bearer `/`basic ` scheme, no `KB1 `, no `http…?query`, and none of CREDENTIAL_KEY_VALUE's
+    // keywords followed by `:` or `=`. Nothing but the exclusion may stand between the value and
+    // the log store, or the row proves the wrong defence. `MUSTNOTAPPEAR` is the needle in every
+    // one, so a failure names itself.
+    //
+    // The backstop is not left unmeasured: the three rows in the second group below are exactly
+    // that test, with the credential shapes, on fields the allow-list PERMITS.
+    ['provider_credential', 'MUSTNOTAPPEAR-pasted-into-the-admin-form', 'MUSTNOTAPPEAR'],
+    ['authorization', 'MUSTNOTAPPEAR-scheme-and-value-together', 'MUSTNOTAPPEAR'],
+    ['api_key', 'MUSTNOTAPPEAR-copied-from-the-vendor-console', 'MUSTNOTAPPEAR'],
+    ['user_id', 'MUSTNOTAPPEAR-01J0USERWHOASKED', 'MUSTNOTAPPEAR'],
+    // INSIDE the allow-list, so the field ships and only redact() stands between the secret and
+    // the log store. This is the case the allow-list cannot help with, and the needle is the
+    // CREDENTIAL rather than the sentence around it.
+    ['reason', 'refused: api_key=sk-proj-AAAABBBBCCCCDDDDEEEE', 'sk-proj-AAAABBBBCCCCDDDDEEEE'],
+    ['reason', 'signature mismatch for KB1 k1:9f8e7d6c5b4a3f2e1d0c', '9f8e7d6c5b4a3f2e1d0c'],
+    ['model', 'gpt-5 via Authorization: Bearer abcdefghijklmnop', 'abcdefghijklmnop'],
+]);
+
+it('redacts the token after an auth scheme, not the word naming the scheme', function (): void {
+    // THE EXACT BUG FOUND IN THE PYTHON REDACTOR. Without the optional scheme group the key/value
+    // rule replaces `Bearer` — the next non-space run after the colon — and leaves the credential
+    // standing, which is worse than not matching at all because the output LOOKS redacted.
+    // `$jwt` AND NOT `$token`, and the third segment is a marker rather than a random run — see the
+    // gitleaks note in the file header. Neither byte is one the redactor reads: CREDENTIAL_KEY_VALUE
+    // keys on the word `Authorization` in the MESSAGE plus the optional `Bearer ` scheme, and BEARER
+    // keys on `bearer\s+[A-Za-z0-9._\-+/=]{8,}`. The base64url header segments are kept because they
+    // are what makes the value a JWT, which is the shape this bug was found in.
+    $jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.MUSTNOTAPPEARSIGNATURE';
+
+    $line = kbFormatter()->format(kbRecord(
+        Level::Error,
+        "upstream rejected Authorization: Bearer {$jwt}",
+    ));
+
+    // Two needles: the whole token, and the SIGNATURE segment alone — a match that stopped at a `.`
+    // would leave the signature standing while the line still read as redacted.
+    expect($line)->not->toContain($jwt)
+        ->and($line)->not->toContain('MUSTNOTAPPEARSIGNATURE');
+});
+
+it('redacts the whole KB1 signature, colon included', function (): void {
+    // THE SECOND BUG. `KB1 <key_id>:<signature>` — without the colon inside the character class
+    // the pattern matches `KB1 k1`, which is below the length floor, and the signature survives.
+    $signature = '4f3c2b1a0e9d8c7b6a5f4e3d2c1b0a99';
+
+    $line = kbFormatter()->format(kbRecord(Level::Error, "bad signature KB1 k1:{$signature}"));
+
+    expect($line)->not->toContain($signature);
+});
+
+it('redacts the query string of an absolute URL', function (): void {
+    $line = kbFormatter()->format(kbRecord(
+        Level::Warning,
+        'fetch failed for https://example.test/search?q=how+do+I+cancel&token=abcd1234',
+    ));
+
+    expect($line)->not->toContain('how+do+I+cancel')
+        ->and($line)->not->toContain('abcd1234')
+        ->and($line)->toContain('https://example.test/search');
+});
+
+it('states what its redaction cannot do', function (): void {
+    // A redactor that gives false confidence is worse than none. The limits are a constant so that
+    // deleting the caveat is a diff rather than a forgotten sentence.
+    expect(KbJsonFormatter::REDACTION_LIMITS)->toContain('does NOT catch tenant content');
+});
+
+it('renders an exception without PHP argument values', function (): void {
+    // getTraceAsString() renders call ARGUMENTS — scalars truncated to 15 characters — so a user
+    // question or a provider key passed to any function on the stack would land in the log store.
+    // Frames are rebuilt from file/line/class/function and `args` is never read.
+    //
+    // THE NEEDLE IS UNSHAPED PROSE, AND IT HAS TO BE — THIS TEST USED TO DETECT NOTHING (#137).
+    // It passed an `sk-proj-` credential 29 characters long and asserted all 29 were absent, which
+    // was undetectable twice over. Appending `getTraceAsString()` to the rendered exception — the
+    // exact regression the paragraph above warns about — left this test GREEN. Measured:
+    //
+    //   getTraceAsString() renders  {closure:…}('sk-proj-THISMUS...')   <- truncated to 15
+    //
+    // so a 29-character needle can never be found however badly the formatter behaves; and even
+    // the surviving 15-character stub is eaten by redact()'s `sk-[A-Za-z0-9_\-]{12,}` rule — by
+    // one character — so the backstop would have covered the regression and this test would still
+    // not have measured the `args` refusal. A user question is the case REDACTION_LIMITS states
+    // redact() CANNOT cover, which makes it the only needle that measures this defence rather than
+    // the one behind it — and the marker sits inside the first 15 characters so truncation cannot
+    // hide it.
+    $argument = 'MUSTNOTAPPEAR: what is our refund policy?';
+
+    $thrower = static function (string $userQuestion): never {
+        throw new \RuntimeException('provider rejected the call');
+    };
+
+    try {
+        $thrower($argument);
+    } catch (\Throwable $e) {
+        $line = kbFormatter()->format(kbRecord(Level::Error, 'call failed', ['exception' => $e]));
+    }
+
+    // The marker FIRST: it is the assertion that can actually fail, because it survives the
+    // 15-character truncation. The whole-string assertion stays for a regression that renders
+    // `args` without truncating, such as an implode() over the frame.
+    expect($line)->not->toContain('MUSTNOTAPPEAR')
+        ->and($line)->not->toContain($argument)
+        ->and($line)->toContain('RuntimeException')
+        ->and($line)->toContain('provider rejected the call');
+});
+
+it('refuses an unknown object by NAME and never calls __toString', function (): void {
+    $leaky = new class
+    {
+        public function __toString(): string
+        {
+            return 'sk-ant-LEAKED-THROUGH-TOSTRING';
+        }
+    };
+
+    // `model` is inside the allow-list, so the value reaches the normalizer — which is the point.
+    // (string) on an arbitrary object is an open channel from any library into the log store.
+    $line = kbFormatter()->format(kbRecord(Level::Info, 'ok', ['model' => $leaky]));
+
+    expect($line)->not->toContain('LEAKED-THROUGH-TOSTRING')
+        ->and($line)->toContain('class@anonymous');
+});
+
+it('never throws or loses a line on an unencodable value', function (): void {
+    $line = kbFormatter()->format(kbRecord(Level::Info, 'ok', [
+        'duration_ms' => NAN,
+        'count' => INF,
+    ]));
+
+    /** @var array<string, mixed> $payload */
+    $payload = json_decode(trim($line), true, 512, JSON_THROW_ON_ERROR);
+
+    foreach (KbJsonFormatter::REQUIRED_FIELDS as $field) {
+        expect(array_key_exists($field, $payload))->toBeTrue($field);
+    }
+});
+
+it('resolves env from OTEL_RESOURCE_ATTRIBUTES first and APP_ENV second', function (): void {
+    // `deployment.environment.name` is what the Collector projects onto the `env` METRIC label, so
+    // reading it first is what keeps the log field and the metric label describing one fleet.
+    expect(KbJsonFormatter::environmentFrom('service.version=abc,deployment.environment.name=staging', 'production'))
+        ->toBe('staging')
+        ->and(KbJsonFormatter::environmentFrom('', 'production'))->toBe('production')
+        ->and(KbJsonFormatter::environmentFrom(null, null))->toBe('local')
+        ->and(KbJsonFormatter::environmentFrom('deployment.environment.name=', 'testing'))->toBe('testing');
+});

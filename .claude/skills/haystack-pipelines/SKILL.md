@@ -32,8 +32,8 @@ Findings verified against **haystack-ai 3.0.0** (2026-07-20, Apache-2.0, Python 
 | Parsing | Docling, plus the OCR engine policy on top of it | `docling-parsing`, `ocr-pipeline` |
 | Chunking | structure-aware boundaries and the full chunk metadata schema | `kb-chunking-rules` |
 | Crawling | Crawl4AI behind our guarded fetch | `crawl4ai-crawler` |
-| Embedding | BGE-M3, dense + sparse from one pass | `bge-m3-embeddings` |
-| Reranking | `bge-reranker-v2-m3` cross-encoder, and the evidence threshold on its scale | `bge-reranker` |
+| Embedding | a provider `embed()` call, dense only (ADR-030) | `bge-m3-embeddings` |
+| Reranking | a provider `rerank()` call — **capability-gated**, and the evidence threshold on that provider's scale | `bge-reranker` |
 | Evaluation | Ragas, on the `evaluate` queue, judging through our provider path | `ragas-evaluation`; docs/16 §21 |
 | Provider calls | the adapter contract — five official SDKs, one internal shape (ADR-001) | `app/providers/`; `kb-provider-adapter-contract` |
 | Document-store abstraction | none. ADR-005 pins one backend; a store abstraction earns its keep only when there are two | `qdrant-hybrid-search` |

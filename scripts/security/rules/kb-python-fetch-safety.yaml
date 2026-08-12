@@ -1,0 +1,132 @@
+# scripts/security/rules/kb-python-fetch-safety.yaml
+# ORIGINAL WORK. Not derived from any registry ruleset — see LICENCES.md.
+# Scope: services/ai-service/ — the crawl fetch path, the parsers, and model loading.
+#
+# ai-worker-crawl runs INSIDE the private network and fetches URLs an attacker chooses. It is the
+# one component that can be aimed at an internal hostname, at Qdrant's unauthenticated port, or at
+# a cloud metadata endpoint — the Capital One shape exactly. Network isolation (it is deliberately
+# off the `data` network) is one half of the boundary; these rules are the other half.
+
+rules:
+  - id: kb-py-redirects-followed-internally
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `follow_redirects=True` (httpx) and `allow_redirects=True` (requests/aiohttp) resolve and
+      fetch the Location header AFTER your validator ran. Your SSRF test suite passes and the
+      crawler still reads 169.254.169.254. Disable redirects, loop over the hops yourself, re-run
+      the FULL check on each hop, and cap at 5.
+    metadata:
+      kb-invariant: "kb-security-baseline — per-hop redirect revalidation"
+    pattern-either:
+      - pattern: httpx.$M(..., follow_redirects=True, ...)
+      - pattern: $CLIENT.$M(..., follow_redirects=True, ...)
+      - pattern: httpx.AsyncClient(..., follow_redirects=True, ...)
+      - pattern: requests.$M(..., allow_redirects=True, ...)
+      - pattern: $SESSION.$M(..., allow_redirects=True, ...)
+
+  - id: kb-py-is-private-is-not-the-ssrf-rule
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `is_private` and `is_global` are NOT complements. ipaddress.ip_address("100.64.1.1") reports
+      is_private=False AND is_global=False, so a CGNAT address passes an is_private check. Use
+      `not ip.is_global` as the SOLE rule, after unwrapping `.ipv4_mapped` — because
+      ::ffff:169.254.169.254 reports is_link_local=False, link-local being an IPv4 property.
+      Related floor: CPython >= 3.12.4, below which `ipaddress` mis-classifies ranges outright
+      (CVE-2024-4032) and silently breaks this check no matter how it is written.
+    metadata:
+      kb-invariant: "kb-security-baseline — destination IP allow-list"
+    pattern-either:
+      - pattern: "if $IP.is_private: ..."
+      - pattern: "if not $IP.is_private: ..."
+      - pattern: $IP.is_private or $IP.is_loopback
+      - pattern: return $IP.is_private
+
+  - id: kb-py-dns-resolved-twice
+    languages: [python]
+    severity: WARNING
+    message: >-
+      Two DNS lookups — one to validate, one to connect — is a TOCTOU the attacker's nameserver
+      answers differently with TTL 0. Resolve ONCE, validate every A and AAAA record, then connect
+      to the validated IP LITERAL with Host and TLS SNI still set to the hostname. Shipped in 2025
+      in both MobSF and Craft CMS.
+    metadata:
+      kb-invariant: "kb-security-baseline — resolved-IP pinning"
+    patterns:
+      - pattern-inside: |
+          def $FN(...):
+            ...
+      - pattern-either:
+          - pattern: |
+              socket.getaddrinfo(...)
+              ...
+              socket.getaddrinfo(...)
+          - pattern: |
+              $R = socket.getaddrinfo($HOST, ...)
+              ...
+              httpx.$M($URL, ...)
+
+  - id: kb-py-docling-remote-services
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `enable_remote_services=True` constructs Docling's Playwright HTML backend — a real browser
+      driven by a hostile document inside the ingestion worker. This is CVE-2026-44016, which has
+      NO PATCHED RELEASE: the suppression in scripts/security/policy/vuln-ignores.toml is paperwork
+      and THIS SETTING BEING OFF is the actual control. The suppression keys on the package, so it
+      stays green after a refactor re-enables the option — which is exactly what this rule exists
+      to catch.
+    metadata:
+      kb-invariant: "security-scanning-toolchain — the scanner is not the mitigation"
+      vuln: "CVE-2026-44016"
+    pattern-either:
+      - pattern: enable_remote_services=True
+      - pattern: $OPTS.enable_remote_services = True
+
+  - id: kb-py-torch-load-unpickles
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `torch.load` on a .bin UNPICKLES, and unpickling is arbitrary code execution — a supply-chain
+      path no dependency scanner watches, because there is no dependency to watch. Require
+      safetensors. Where a pickle is genuinely unavoidable, run picklescan and record the pass in
+      models.manifest.toml, which is what the licence gate's model arm checks.
+    metadata:
+      kb-invariant: "security-scanning-toolchain — model weights are dependencies with no package manager"
+    pattern-either:
+      - pattern: torch.load(...)
+      - pattern: pickle.load(...)
+      - pattern: pickle.loads(...)
+
+  - id: kb-py-unpinned-model-revision
+    languages: [python]
+    severity: ERROR
+    message: >-
+      revision="main" MOVES, so a scan of it proves nothing about what shipped, and Docling's own
+      model specs default to it. Every model revision is pinned by 40-character commit sha in
+      services/ai-service/models.manifest.toml and passed explicitly.
+    metadata:
+      kb-invariant: "security-scanning-toolchain — pinned manifest or unscanned by construction"
+    pattern-either:
+      - pattern: revision="main"
+      - pattern: revision="master"
+      - pattern: from_pretrained($M)
+
+  - id: kb-py-xml-hardening-downgraded
+    languages: [python]
+    severity: ERROR
+    message: >-
+      lxml disabled entity resolution for the normal parsers in 5.0 but left `iterparse()` and
+      `ETCompatXMLParser()` at resolve_entities=True until 6.1.0 (CVE-2026-41066) — and iterparse
+      is exactly what streaming OOXML readers use. Separately, openpyxl's iterparse path falls back
+      to stdlib xml.etree unless defusedxml is IMPORTABLE, so a dropped transitive dependency
+      silently downgrades XXE hardening with no error. Pin defusedxml directly and assert
+      `openpyxl.DEFUSEDXML is True` at worker startup.
+    metadata:
+      kb-invariant: "kb-security-baseline — uploaded content is hostile data, permanently"
+    pattern-either:
+      - pattern: lxml.etree.iterparse(...)
+      - pattern: etree.iterparse(...)
+      - pattern: ETCompatXMLParser(...)
+      - pattern: XMLParser(..., resolve_entities=True, ...)

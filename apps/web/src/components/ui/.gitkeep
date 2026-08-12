@@ -1,0 +1,10 @@
+shadcn output lands here — VENDORED SOURCE we own and edit, not a dependency. There is no upstream
+version, no lockfile entry for a component, and no update path.
+
+`shadcn add --overwrite` replaces a file wholesale and discards every local edit, so run
+`shadcn add --diff <component>` before any re-add. Every CI/script invocation passes `-b radix`:
+since July 2026 the CLI's default base is Base UI, and an unflagged `add` quietly installs a Base UI
+component next to Radix ones.
+
+Nothing in this directory crosses into apps/widget: Radix is React-only, and cva + tailwind-merge +
+lucide-react are runtime dependencies that would eat the widget's 30 kB brotli budget.

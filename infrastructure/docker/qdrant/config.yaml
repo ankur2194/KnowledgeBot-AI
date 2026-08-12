@@ -1,0 +1,103 @@
+# infrastructure/docker/qdrant/config.yaml — Qdrant v1.18.3
+# Mounted at /qdrant/config/production.yaml, which Qdrant loads after its built-in config.yaml.
+# The server minor is pinned together with qdrant-client==1.18.0 and the two are bumped together:
+# a two-minor gap means the client's request shapes are validated by a server production never runs.
+#
+# ================================================================================================
+# READ THIS BEFORE TOUCHING ANYTHING: WHAT PROTECTS THIS SERVICE
+# ================================================================================================
+# Qdrant's REST API is UNAUTHENTICATED by default. A single unauthenticated DELETE against
+# http://qdrant:6333/collections/... destroys the index. The protections, in order of what actually
+# holds:
+#
+#   1. NETWORK MEMBERSHIP. `qdrant` is on the `data` network only, and `data` is internal:true.
+#      ai-worker-crawl — the one component that fetches attacker-chosen URLs from inside the
+#      private network — is deliberately NOT on `data`, precisely so that a coerced request cannot
+#      reach this port. That is the primary control and the one to preserve.
+#   2. NO PUBLISHED PORT in production, and no Traefik router in any environment.
+#   3. The API key below, as a second latch.
+#
+# <!-- UNVERIFIED / OPEN SEAM --> The api key cannot be read from a file. Qdrant takes it from
+# `service.api_key` in this config or from QDRANT__SERVICE__API_KEY in the environment — and there
+# is no *_FILE convention. Writing it here would commit a secret; writing it into ./env/*.env would
+# put it in `docker compose config` output. So it is left UNSET below, the secret file exists for
+# the CLIENTS (mounted at /run/secrets/qdrant_api_key on ai-api and the workers), and a deployment
+# that wants the second latch must inject QDRANT__SERVICE__API_KEY into this service by a means
+# that does not render into a compose config dump. Until it does, control 1 is the only control —
+# which is why the crawl worker's network membership is a closed-set invariant rather than a
+# preference.
+
+service:
+  host: 0.0.0.0
+  http_port: 6333
+  grpc_port: 6334
+  # 64 MiB. Bulk upserts from ai-worker-embedding batch many points per request; the default is
+  # smaller and a rejected batch surfaces as a generic 413 in the middle of an ingestion run.
+  max_request_size_mb: 64
+  # Workers default to the CPU count. Left unset: the container limit is 4G and an unbounded
+  # worker count on a large host allocates per-worker search buffers the cgroup then kills.
+  # api_key: see the UNVERIFIED note above.
+  enable_cors: false   # nothing in a browser ever talks to Qdrant
+
+storage:
+  storage_path: /qdrant/storage
+  snapshots_path: /qdrant/snapshots
+
+  # ==============================================================================================
+  # SNAPSHOTS ARE FOR RTO, NOT FOR CORRECTNESS.
+  # ==============================================================================================
+  # ADR-010: PostgreSQL and object storage are authoritative and this index must survive being
+  # dropped. A snapshot RESTORE does not prove that — it COPIES THE DRIFT FORWARD. If someone wrote
+  # a payload key that exists in no PostgreSQL column (a curated title, a boost weight, a language
+  # guess), a restore reproduces it perfectly and the ADR is quietly broken: every vector is
+  # present, chunk counts match, and only the ranking moved. The proof is a REBUILD from
+  # PostgreSQL + SeaweedFS, asserted on payload-key SET equality and on golden-query point ids.
+  #
+  # Two further restore traps, both silent:
+  #   * Snapshots contain a collection's points and config but NOT ITS ALIASES. A restore leaves
+  #     the alias unbound and every query fails with "collection not found". Recreating aliases is
+  #     an explicit step in the runbook.
+  #   * Payload indexes are per-collection and are NOT created by uploading points. Without them
+  #     the tenant filter degrades to a full scan: correct, silent, and 20x slower. Creating them
+  #     is a PRECONDITION of the alias swap, asserted before it.
+
+  performance:
+    # Leave unset to use all cores for search; the container limit bounds it.
+    optimizer_cpu_budget: 0
+
+  optimizers:
+    # Deleted points are only reclaimed when a segment's deleted fraction crosses this. The
+    # deletion contract requires that a purged source's vectors are GONE, and the verification job
+    # counts points on the bare org_id+source_id identity with exact=True — which reads deleted
+    # points as absent immediately, so this threshold is a disk-reclamation setting and not a
+    # correctness one. Lowered from the default because retire-and-republish churns segments.
+    deleted_threshold: 0.15
+    vacuum_min_vector_number: 1000
+    default_segment_number: 0
+    # Indexing threshold and HNSW parameters are NOT set here. They are per-collection and belong
+    # in the collection-creation module in services/ai-service, alongside m=0 / payload_m=16 (no
+    # global graph; one sub-graph per tenant) and the int8 quantization config — because they are
+    # part of the retrieval contract, not part of the server's deployment.
+
+  # Write-ahead log. Qdrant is rebuildable, so this is restart durability, not a data guarantee.
+  wal:
+    wal_capacity_mb: 32
+    wal_segments_ahead: 0
+
+telemetry_disabled: true   # Qdrant phones home by default. Nothing tenant-identifying is in it,
+                           # and it is off anyway: an unauthenticated egress from a service on an
+                           # internal network is a hole waiting for a use.
+
+log_level: INFO
+
+# ================================================================================================
+# NOT CONFIGURED HERE, ON PURPOSE
+# ================================================================================================
+# * TLS. Traffic is internal-network only and never leaves the host. Adding it here would mean a
+#   certificate lifecycle for a service with no public name.
+# * Clustering / raft. One node. Collection-per-tenant is not a growth path either (Qdrant Cloud
+#   caps a cluster at 1000 collections); tenancy is payload partitioning with the four mandatory
+#   filters, and there is ONE collection per embedding configuration.
+# * Collection definitions. Nothing here names a concrete collection — the name encodes the
+#   embedding configuration (kb_bge_m3_v1) and is never reused across models, and code addresses an
+#   ALIAS so a re-embed can swap atomically.

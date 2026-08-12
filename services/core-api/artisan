@@ -1,0 +1,16 @@
+#!/usr/bin/env php
+<?php
+
+use Illuminate\Foundation\Application;
+use Symfony\Component\Console\Input\ArgvInput;
+
+// Same definition the HTTP front controller makes. Console commands do not serve a chat deadline,
+// but scheduled and queued work reads elapsed time from this constant too, so it must always exist.
+define('LARAVEL_START', microtime(true));
+
+require __DIR__.'/vendor/autoload.php';
+
+/** @var Application $app */
+$app = require_once __DIR__.'/bootstrap/app.php';
+
+exit($app->handleCommand(new ArgvInput));

@@ -1,0 +1,324 @@
+# Development overlay — AUTO-LOADED whenever no -f flag is passed.
+#
+# THAT AUTO-LOAD IS THE PRODUCTION FOOTGUN. A deploy script that drifted to `docker compose up -d`
+# in this directory gets bind-mounted source, published database ports and dev credentials, and
+# nothing warns. Production must always pass explicit files:
+#     docker compose -f compose.yaml -f compose.prod.yaml up -d
+# `make deploy` hardcodes exactly that, which is the only reason the Makefile exists.
+#
+# Everything here is a development affordance and none of it is safe anywhere else.
+
+# ================================================================================================
+# THE DEV RUNTIME UID. Every service below that runs the core-api or ai-service image needs it.
+# ================================================================================================
+# Both images bake `USER app` = 10001:10001. In PRODUCTION that is right and compose.prod.yaml
+# restates it. In DEVELOPMENT it breaks two things at once, and both failures are silent until a
+# container exits 255:
+#
+#   1. COMPOSE FILE-SECRETS KEEP THE HOST FILE'S OWNER AND MODE. `uid:`, `gid:` and `mode:` on a
+#      secret are SWARM-ONLY and are IGNORED by `docker compose` — with no warning and no error.
+#      Measured on Compose v5.3.1 against a long-form secret carrying all three: the file arrived
+#      as `-rw------- 1 1000 1000`, and `cat` from uid 10001 returned "Permission denied". So
+#      bootstrap.sh's mode-600 secrets — which preflight.sh REQUIRES to be 600 — are unreadable by
+#      every Laravel and FastAPI container. The symptom is `SecretUnavailableException: Secret
+#      [APP_KEY]`, i.e. a message about a missing secret for a file that is present and correct.
+#      (postgres, valkey and seaweedfs are unaffected: their entrypoints start as root.)
+#
+#   2. THE DEV BIND MOUNTS ARE HOST-OWNED. `../../services/core-api:/app` replaces the image's
+#      10001-owned tree with one owned by the developer, so Laravel cannot write
+#      /app/storage/logs or /app/bootstrap/cache. That surfaces as a Monolog
+#      "could not be opened in append mode" fatal that BURIES the real exception underneath it.
+#
+# UID/GID come from .env, which bootstrap.sh fills in from `id -u`/`id -g`. Before this line they
+# were written by bootstrap and read by NOTHING — `grep -rn '${UID}' infrastructure/ scripts/` was
+# empty, which is how a variable that looks like configuration turns out to be decoration.
+# The `:-1000` defaults keep a bare `docker compose up` working in a checkout with no .env.
+x-dev-user: &dev-user "${UID:-1000}:${GID:-1000}"
+
+services:
+
+  # -----------------------------------------------------------------------------------------
+  # Database ports, bound to LOOPBACK ONLY.
+  # "127.0.0.1:" is load-bearing. A bare "5432:5432" publishes on 0.0.0.0 and Docker DNATs it in
+  # the iptables `nat` table, ahead of the INPUT chain ufw uses — so the host firewall rule is
+  # real, is never consulted, and PostgreSQL is on the internet. Production publishes nothing.
+  # -----------------------------------------------------------------------------------------
+  # FOUR OF THESE PORT LINES USED TO BE HERE AND DID NOTHING. THEY ARE DELETED RATHER THAN LEFT
+  # AS DECORATION, AND THE REASON MATTERS MORE THAN THE LINES DID.
+  # ------------------------------------------------------------------------------------------
+  # `postgres`, `qdrant`, `valkey-cache` and `seaweedfs` are on `data` and ONLY `data`, and
+  # compose.yaml declares `data: {internal: true}`. A container attached exclusively to internal
+  # networks has no route to the host bridge, so Docker records the binding and then does not
+  # make it — it does NOT error. MEASURED on this stack, 2026-08-10, with the lines still in
+  # place and the containers freshly recreated (`docker compose up -d --force-recreate qdrant`):
+  #
+  #   qdrant       HostConfig.PortBindings {"6333/tcp":[{"HostIp":"127.0.0.1","HostPort":"6333"}]}
+  #                NetworkSettings.Ports   {"6333/tcp":[]}          <-- requested, never bound
+  #   valkey-core  NetworkSettings.Ports   {"6379/tcp":[{...127.0.0.1:6379}]}   <-- bound
+  #   `ss -ltn` showed a listener on 127.0.0.1:6379 and NOTHING on 6333/5432/6380/8333/9333.
+  #   Control: `docker run -d -p 127.0.0.1:6333:6333 alpine sleep 20` bound 6333 immediately, so
+  #   the daemon is capable and the difference is the internal network, not the environment.
+  #
+  # valkey-core's line survives because valkey-core also joins `application`, which is
+  # deliberately not internal — that is an accident of its membership, not a property of the
+  # port line, which is exactly why the other four looked identical and behaved differently.
+  #
+  # DO NOT "FIX" THE DELETED ONES BY ADDING `application` OR `edge` TO A DATA SERVICE. That is
+  # the trade this comment exists to refuse: it would put PostgreSQL, Qdrant and the S3 gateway
+  # on the same network as ai-worker-crawl, which fetches attacker-chosen URLs, and Qdrant's
+  # REST API takes no credentials. The failure here is fail-CLOSED and the posture is correct;
+  # only the promise was false. Reach these services with `docker compose exec`:
+  #
+  #   docker compose exec postgres    psql -U knowledgebot knowledgebot
+  #   docker compose exec qdrant      /qdrant/qdrant --help        # no shell utils in this image
+  #   docker compose exec ai-api      python -c "..."              # for S3/Qdrant HTTP poking
+  #   docker compose exec valkey-cache valkey-cli -n 0
+  #
+  # ai-api sits on `data` + `application`, so it is the natural place to run an ad-hoc
+  # `aws --endpoint-url http://seaweedfs-s3:8333` or a Qdrant request from.
+  valkey-core:
+    ports: ["127.0.0.1:6379:6379"]   # works ONLY because valkey-core also joins `application`
+
+  # Note what is NOT here: ai-api, any ai-worker-*, laravel-worker*, laravel-scheduler and
+  # ai-beat get no ports in dev either. Debug them with `docker compose exec` or an SSH tunnel.
+  # An "only in dev" port on ai-api is still a complete authorization bypass, and dev overlays
+  # get copied into staging.
+
+  # -----------------------------------------------------------------------------------------
+  # Source bind mounts + develop.watch.
+  # `watch` requires a `build:` section on the service and stat/mkdir/rmdir in the image.
+  # Run it as `docker compose watch` or `up --watch`.
+  # -----------------------------------------------------------------------------------------
+  laravel-api:
+    user: *dev-user
+    build:
+      target: runtime
+    environment:
+      APP_ENV: local
+      APP_DEBUG: "true"
+    volumes:
+      - ../../services/core-api:/app
+      - /app/vendor          # anonymous volume: keep the image's vendor/, not the host's
+      # `/app/bootstrap/cache` IS AN ANONYMOUS VOLUME FOR THE SAME REASON `/app/vendor` IS, and
+      # omitting it breaks the container in a way that names the wrong culprit. Laravel's package
+      # DISCOVERY MANIFEST lives there, and it must describe the vendor tree beside it. The host's
+      # was written by a `composer install` WITH dev dependencies; the image's vendor is a
+      # `--no-dev` install. Bind-mount one over the other and the framework tries to register a
+      # provider that is not installed:
+      #     Error: Class "NunoMaduro\Collision\Adapters\Laravel\CollisionServiceProvider" not found
+      # which reads as a broken composer.json rather than as two halves of one artifact coming from
+      # two different places. Shadowing it keeps the image's manifest with the image's vendor.
+      - /app/bootstrap/cache
+    develop:
+      watch:
+        - {action: sync, path: ../../services/core-api/app, target: /app/app}
+        - {action: sync, path: ../../services/core-api/routes, target: /app/routes}
+        - {action: sync, path: ../../services/core-api/resources, target: /app/resources}
+        - {action: sync+restart, path: ../../services/core-api/config, target: /app/config}
+        - {action: rebuild, path: ../../services/core-api/composer.lock}
+
+  laravel-api-stream:
+    user: *dev-user
+    environment:
+      APP_ENV: local
+      APP_DEBUG: "true"
+    volumes:
+      - ../../services/core-api:/app
+      - /app/vendor
+      - /app/bootstrap/cache   # pairs with the image's vendor/ — see laravel-api above
+    # No debug bar, ever, on this service. An ob_start() from a profiler middleware nests a buffer
+    # inside the streaming callback and swallows every flush — the stream becomes one blob and the
+    # bug is invisible in the one place people test it.
+
+  laravel-worker:
+    user: *dev-user
+    volumes:
+      - ../../services/core-api:/app
+      - /app/vendor
+      - /app/bootstrap/cache   # pairs with the image's vendor/ — see laravel-api above
+    # Dev grace periods stay long. Shortening them here is how a developer learns the wrong thing
+    # about what a deploy costs, and how a "works locally" idempotency bug reaches production.
+
+  laravel-worker-long:
+    user: *dev-user
+    volumes: ["../../services/core-api:/app", "/app/vendor", "/app/bootstrap/cache"]
+
+  laravel-scheduler:
+    user: *dev-user
+    volumes: ["../../services/core-api:/app", "/app/vendor", "/app/bootstrap/cache"]
+
+  laravel-migrate:
+    user: *dev-user
+    volumes: ["../../services/core-api:/app", "/app/vendor", "/app/bootstrap/cache"]
+
+  ai-api:
+    user: *dev-user
+    build:
+      target: runtime
+    command: ["fastapi", "dev", "--host", "0.0.0.0", "--port", "8000", "app/main.py"]
+    environment:
+      # Restated here only because `fastapi dev` honours WEB_CONCURRENCY too — the VALUE is
+      # unchanged and the REASON is compose.yaml's, not the old one. It is no longer "each worker
+      # loads its own copy of the models": ADR-030 left ai-api with no resident model at all.
+      # It is that each worker runs its own lifespan, so N workers open N Qdrant and N psycopg
+      # pools against limits sized for one. Do not re-derive the model-memory argument here;
+      # compose.yaml's ai-api block is the single place that reasoning is written down.
+      WEB_CONCURRENCY: "1"
+    volumes:
+      - ../../services/ai-service:/app
+      - /app/.venv           # anonymous volume: never shadow the image's virtualenv with the host's
+      - models:/models       # writable in dev so the first run can populate the HF cache; :ro in prod
+    develop:
+      watch:
+        - {action: sync, path: ../../services/ai-service/app, target: /app/app}
+        - {action: rebuild, path: ../../services/ai-service/uv.lock}
+        - {action: rebuild, path: ../../services/ai-service/pyproject.toml}
+    healthcheck:
+      # 600s -> 90s. The old number said "dev machines load models from cold disk and there is no
+      # GPU" — ai-api loads NO model (ADR-030; app/api/health.py says so in its own docstring), so
+      # that sentence described nothing this container does. Worse, it doubled the base window
+      # after compose.yaml had already cut it to 30s for a stated reason: start_period is not a
+      # grace window. Failures inside it are not counted, but the FIRST SUCCESS ends it early —
+      # so an oversized window buys a fast-starting service nothing and costs ten minutes of a
+      # genuinely broken ai-api reporting `starting` instead of `unhealthy`.
+      #
+      # 90s is derived, not halved. Measured in this dev container (bind-mounted source, warm
+      # page cache): `python -c "import app.main"` = 0.94 / 0.98 / 1.04 s. Dev then adds, on top
+      # of production's 30s: `fastapi dev`'s reloader imports the app twice (supervisor + child),
+      # the source is read over a bind mount rather than an image layer, the first boot compiles
+      # bytecode for a tree that has no __pycache__, and 18 containers start at once on one
+      # laptop. 3x the production window covers all four with room; worst case the first honest
+      # unhealthy report is now 90 + 3x15 = 135s instead of 645s.
+      start_period: 90s
+
+  ai-worker-ingestion:
+    user: *dev-user
+    volumes: ["../../services/ai-service:/app", "/app/.venv", "models:/models"]
+
+  ai-worker-embedding:
+    user: *dev-user
+    volumes: ["../../services/ai-service:/app", "/app/.venv", "models:/models"]
+
+  ai-worker-crawl:
+    user: *dev-user
+    volumes: ["../../services/ai-service:/app", "/app/.venv"]
+
+  ai-worker-evaluation:
+    user: *dev-user
+    volumes: ["../../services/ai-service:/app", "/app/.venv", "models:/models"]
+
+  ai-beat:
+    user: *dev-user
+    volumes: ["../../services/ai-service:/app", "/app/.venv"]
+
+  web:
+    build:
+      target: deps           # dev runs `next dev`; the standalone runtime stage has no dev server
+    # `pnpm --filter`, NOT `pnpm dev`. WORKDIR in the `deps` stage is the WORKSPACE ROOT (/app), and
+    # the root package.json has no `dev` script — its scripts are namespaced `web:dev`, `web:build`,
+    # `contracts:test` and so on, because four workspaces share one root. `pnpm dev` there exits
+    # immediately with ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL / `Command "dev" not found`, and with
+    # `restart: unless-stopped` the container crash-loops on exit code 254 forever. Measured: 200+
+    # restarts before anyone looks, and `docker compose ps` says only "Restarting".
+    # `--filter` is used rather than the root alias `web:dev` so this line names the package it runs
+    # and does not depend on a root script staying spelled that way; `sdk` below is the same shape.
+    command: ["pnpm", "--filter", "@kb/web", "dev"]
+    environment:
+      # ==========================================================================================
+      # THE ONE PLACE NEXT_PUBLIC_API_ORIGIN IS A RUNTIME VALUE, AND WITHOUT IT `next dev` DIES.
+      # ==========================================================================================
+      # env/web.env.example says at length that no NEXT_PUBLIC_* key belongs in a runtime env file
+      # because the Next compiler INLINES it at build time — true, and correct, FOR THE PRODUCTION
+      # IMAGE, where compose.yaml passes it as a build arg. Dev runs `next dev`, which performs no
+      # production build, so the value is read from process.env when the route is compiled. Nothing
+      # supplied it, and apps/web/src/lib/env.ts validates with Zod and throws:
+      #     invalid_type  path: ["NEXT_PUBLIC_API_ORIGIN"]  expected string, received undefined
+      # then pnpm exits 1 and `restart: unless-stopped` crash-loops the container. MEASURED.
+      # It is deliberately spelled the same way as the build arg above so the two cannot drift, and
+      # env.ts's ALLOWED_PUBLIC_KEYS is exactly ['NEXT_PUBLIC_API_ORIGIN'] — adding a second
+      # NEXT_PUBLIC_* key here does not configure anything, it fails the build.
+      NEXT_PUBLIC_API_ORIGIN: https://api.${DOMAIN}
+    volumes:
+      - ../../apps/web:/app/apps/web
+      - ../../packages:/app/packages
+      # ONE ROOT FILE, AND WITHOUT IT `pnpm lint` CANNOT RUN IN THIS CONTAINER AT ALL.
+      # Both node images copy package.json, pnpm-workspace.yaml, .npmrc, pnpm-lock.yaml and
+      # tsconfig.base.json into the workspace root and stop there — so `tsc` resolves its base
+      # config and `eslint` does not. apps/web/eslint.config.mjs and apps/widget/eslint.config.mjs
+      # both `import '../../eslint.base.mjs'`, and the failure is
+      #     ERR_MODULE_NOT_FOUND: Cannot find module '/app/eslint.base.mjs'
+      # MEASURED 2026-08-12: in this container `pnpm --filter @kb/web typecheck` and
+      # `pnpm --filter @kb/web test` (80 tests) both pass, and only `lint` dies — so the gap is
+      # this single file, not the toolchain. Read-only because it is input to a linter.
+      # It is safe to mount a lone file here for the reason it states about itself: it has ZERO
+      # imports and is plain data, so nothing beside it has to come too.
+      - ../../eslint.base.mjs:/app/eslint.base.mjs:ro
+      - /app/node_modules
+      - /app/apps/web/node_modules
+      - /app/apps/web/.next
+    develop:
+      watch:
+        - {action: sync, path: ../../apps/web, target: /app/apps/web, ignore: [node_modules/, .next/]}
+        - {action: rebuild, path: ../../pnpm-lock.yaml}
+
+  sdk:
+    build:
+      target: build
+    command: ["pnpm", "--filter", "widget", "dev", "--host", "0.0.0.0", "--port", "8080"]
+    volumes:
+      - ../../apps/widget:/app/apps/widget
+      - ../../packages:/app/packages
+      - ../../eslint.base.mjs:/app/eslint.base.mjs:ro   # see `web` above — same file, same reason
+      - /app/node_modules
+      - /app/apps/widget/node_modules
+    healthcheck:
+      # The Vite dev server serves no /healthz, so this probes the index instead — and it must also
+      # DROP wget. The base file's probe is `wget` because the production `sdk` image is
+      # nginx:alpine, where busybox wget exists. Dev overrides `target: build`, which is the
+      # node:22-slim toolchain stage: NO wget AND NO curl. The probe then exits -1 with
+      #     exec: "wget": executable file not found in $PATH
+      # which Docker counts as a failing check, so the container runs perfectly and is reported
+      # unhealthy forever — measured here at a FailingStreak of 43 against a Vite server that was
+      # serving the whole time. Traefik excludes unhealthy containers from its load balancer by
+      # default, so in dev the widget origin 404s at the edge with nothing in any log.
+      # `node -e` is the interpreter that is definitely present, same as `web` above.
+      #
+      # THE `host:` HEADER IS THE PROBE, NOT DECORATION — it is what makes this check measure the
+      # thing Traefik will ask for. Vite refuses any request whose Host is neither an IP literal
+      # nor in `server.allowedHosts`, answering a plain-text 403. An IP host bypasses that check
+      # entirely, so the old probe — `http://127.0.0.1:8080/` with the implicit `Host: 127.0.0.1` —
+      # passed against a server that 403'd every real request. MEASURED 2026-08-12 on this stack:
+      # `curl` to `https://kb-widget.example/` through Traefik returned 403 while this container
+      # reported HEALTHY and had done since it started. Sending the router's own hostname collapses
+      # the two: the probe now fails in exactly the case the edge fails, and `allowedHosts` in
+      # apps/widget/vite.config.ts is what makes it pass.
+      #
+      # `${WIDGET_DOMAIN}` is interpolated by Compose at render time, from the same .env value that
+      # builds the Traefik rule `Host(`${WIDGET_DOMAIN}`)` in compose.yaml — one source, so the
+      # probe cannot drift from the route. It is deliberately NOT read from the container's
+      # environment: WIDGET_DOMAIN is a build ARG there and is EMPTY at runtime, which would send
+      # `Host:` with no value and fail every probe for a reason nothing would explain.
+      test: ["CMD", "node", "-e", "require('http').get({host:'127.0.0.1',port:8080,path:'/',headers:{host:'${WIDGET_DOMAIN}'}},r=>process.exit(r.statusCode<400?0:1)).on('error',()=>process.exit(1))"]
+
+  # -----------------------------------------------------------------------------------------
+  # THERE IS NO `traefik:` OVERRIDE HERE ANY MORE, AND ITS REMOVAL IS THE FIX.
+  # -----------------------------------------------------------------------------------------
+  # This block used to pass four CLI flags — the ACME email, the staging caServer, --log.level
+  # and --accesslog.filepath. NONE OF THEM WERE EVER APPLIED. A mounted static configuration file
+  # short-circuits every flag and every env var in Traefik v3.7 (measured four ways; see the
+  # header of traefik/traefik.yaml), so the dev stack spent its whole life talking to the
+  # PRODUCTION Let's Encrypt directory: 853 failed orders, zero mentions of staging, while this
+  # file claimed the opposite in a comment. A config that lies is worse than one that is absent.
+  #
+  # Dev now gets the staging directory the only way that works: `CERT_RESOLVER=le-staging` in
+  # infrastructure/docker/.env selects the `le-staging` resolver via each router's label. That is
+  # also the compose.yaml default, so dev is safe even with the variable unset.
+  #
+  # Dev log level is likewise not settable from here. Change `log.level` in traefik/traefik.yaml
+  # if you need DEBUG, and change it back — it is one file for both environments by necessity.
+
+  otel-collector:
+    # Dev prints the pipeline to stdout too, so you can see whether a span was dropped by the
+    # tail sampler or never arrived.
+    environment:
+      KB_OTEL_DEBUG_VERBOSITY: detailed

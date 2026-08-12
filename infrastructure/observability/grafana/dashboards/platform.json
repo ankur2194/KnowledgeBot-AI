@@ -1,0 +1,148 @@
+{
+  "uid": "kb-platform",
+  "title": "Platform",
+  "tags": ["kb"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "timezone": "utc",
+  "refresh": "1m",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Infrastructure panels are deliberately absent",
+      "description": "",
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "CPU, memory, disk, database connections, Valkey memory, Qdrant collection size, object-storage usage and worker concurrency are served by **node_exporter, cAdvisor, postgres_exporter, redis_exporter, Qdrant's own /metrics and SeaweedFS**. They are deliberately **not** re-exported under `kb_` — two numbers for one fact disagree during exactly the incident you need them for. See `infrastructure/observability/exporters/README.md`.\n\nThose panels are missing from this dashboard for two concrete reasons, both fixable and neither cosmetic:\n\n1. **The scrape targets are unreachable today.** The `observability` network is `internal: true` and Prometheus is the only member that needs to reach `data`. Every exporter must join **both** networks before a single `node_*` or `pg_*` series exists.\n2. **The CI catalog gate compares dashboard metric names against the closed `kb_*` catalog.** Until that gate learns the exporter families as a second permitted name source, a panel querying `node_memory_MemAvailable_bytes` fails the build.\n\nAn empty dashboard is honest. A panel with a plausible-looking metric name that nothing emits is a green gate over a permanently blank graph."
+      }
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Running builds",
+      "description": "The _info pattern: the value is always 1 and carries nothing, the labels carry everything. git_sha is the one permitted high-churn label value in the entire catalog, which is exactly why it is confined to a single always-1 gauge — one series per running build, replaced on deployment.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "kb_build_info",
+          "instant": true,
+          "format": "table"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Dependency up (0/1)",
+      "description": "What /health/ready decided, per dependency, with `required` alongside. The six dependency values are fixed: postgres, valkey, qdrant, object_storage, ai_api, core_api. `embedding` and `reranker` were removed by ADR-030 and are not coming back — both are provider API calls now, readiness must never probe an external provider, and no process can emit either series. A per-org provider credential is NOT a dependency either: per-credential breaker state is per-tenant data and lives in PostgreSQL, surfaced on the admin dashboard. A reranking capability gap shows on the Retrieval dashboard as kb_retrieval_rerank_skips_total, not here. Optional dependencies at 0 are degraded, not failing, and open a ticket after 15 minutes (KbOptionalDependencyDown).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "kb_dependency_up"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Circuit breaker state (0 closed, 1 half-open, 2 open)",
+      "description": "The breaker is invisible without this series. Open for more than 5 minutes pages (KbCircuitBreakerOpen). Half-open is the breaker working — it admits at most 3 concurrent probes and closes only after 3 consecutive successes — and is never alerted on.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "kb_circuit_breaker_state"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Scheduler freshness by task (seconds since last tick)",
+      "description": "Layer 1 of three. The gauge is exported by core-api from a PostgreSQL row SEEDED IN THE MIGRATION, not by the scheduler container, which has no scrape target of its own — a scheduler that never started after a deployment must read as an ancient timestamp rather than a missing series, because a series that never existed cannot be threshold-alerted. Pages above 900 s (KbSchedulerStalled).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "time() - kb_internal_scheduler_tick_timestamp_seconds"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Scheduled task runs by task and outcome",
+      "description": "The only family where outcome may be `skipped`. A skip is the withoutOverlapping lock working, so it sits outside the error rate — but sustained skips are the fingerprint of a lock stranded by SIGKILL, whose default TTL is 24 hours, during which the freshness gauge above stays perfectly green while no work happens (KbSchedulerSkipStuck).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (task, outcome) (rate(kb_internal_scheduler_tasks_total[5m]))"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Sources overdue for recrawl",
+      "description": "Layer 3. Counted from PostgreSQL by the API on scrape, deliberately not by the scheduler: it is the only signal that catches a scheduler ticking perfectly while the work does not happen — a stranded lock, a wedged queue, a dispatcher that claims and throws.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "kb_crawl_sources_overdue"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Internal seam requests by operation and status_class",
+      "description": "The Laravel-to-FastAPI seam itself, keyed on the X-KB-Operation header and NEVER on the URL path — a path is unbounded once it carries an identifier. This is the panel that distinguishes 'the AI service is failing' from 'we cannot reach the AI service'.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 29 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (operation, status_class) (rate(kb_internal_requests_total[5m]))"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Internal seam requests by operation and error_class",
+      "description": "The same counter split by taxonomy class rather than status. internal_dependency here means the seam itself is down; anything else is the data plane reporting a classified failure through it.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 29 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (operation, error_class) (rate(kb_internal_requests_total[5m]))"
+        }
+      ]
+    }
+  ]
+}

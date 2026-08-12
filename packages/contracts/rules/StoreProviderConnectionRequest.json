@@ -1,0 +1,62 @@
+{
+    "class": "App\\Http\\Requests\\StoreProviderConnectionRequest",
+    "rules": {
+        "credential": [
+            "bail",
+            "required",
+            "string",
+            "min:8",
+            "max:512"
+        ],
+        "label": [
+            "bail",
+            "required",
+            "string",
+            "max:120"
+        ],
+        "models": [
+            "present",
+            "array",
+            "max:50"
+        ],
+        "models.*.context_window": [
+            "required",
+            "integer",
+            "min:0",
+            "max:100000000"
+        ],
+        "models.*.display_name": [
+            "bail",
+            "required",
+            "string",
+            "max:200"
+        ],
+        "models.*.max_output_tokens": [
+            "required",
+            "integer",
+            "min:0",
+            "max:100000000"
+        ],
+        "models.*.model": [
+            "bail",
+            "required",
+            "string",
+            "max:200"
+        ],
+        "models.*.supported": [
+            "present",
+            "array",
+            "max:20"
+        ],
+        "models.*.supported.*": [
+            "string",
+            "max:64"
+        ],
+        "provider": [
+            "bail",
+            "required",
+            "string",
+            "in:\"openai\",\"anthropic\",\"deepseek\",\"nvidia_nim\",\"openrouter\""
+        ]
+    }
+}

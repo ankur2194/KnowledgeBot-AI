@@ -1,0 +1,91 @@
+# §21.2 — Table questions.
+#
+# All four run against the XLSX. What is on trial is whether a table survives chunking as rows
+# with headers attached, rather than as a bag of cells. The distinctive symptom of failure in
+# this category is a confident wrong number with a valid citation — never a refusal.
+
+dataset: kb-platform-golden
+corpus_version: corpus-2026.08.1
+category: tables
+
+cases:
+  - id: t-001
+    question: "What are the lead times for the benchtop Tideline instruments?"
+    unanswerable: false
+    expected_sources: [pricing-catalog-v1]
+    difficulty: medium
+    reference: >-
+      Lead times for the benchtop instruments are 4 weeks for KW-1100-B, 6 weeks for KW-2200-B, and
+      12 weeks for KW-3400-B. KW-2200-F is the field variant at 9 weeks and KW-0450-S is a sampler
+      at 3 weeks.
+    expected_answer: >-
+      KW-1100-B: 4 weeks. KW-2200-B: 6 weeks. KW-3400-B: 12 weeks. (KW-2200-F, the field variant, is
+      9 weeks; the 450 sampler is 3 weeks.)
+    required_facts: ["4", "6", "12"]
+    forbidden_claims: ["any lead time not present in the sheet"]
+    locators: ["pricing sheet Instruments, column 'Lead time (weeks)'"]
+    tags: [table, multi-row, filtered-scan]
+    grading_notes: >-
+      Requires scanning several rows and filtering on a property — "benchtop" — that lives in the
+      Description column rather than in the code. Including the field variant or the sampler with a
+      label explaining what they are is acceptable; including them as benchtop instruments is not.
+      A single-row answer means only one chunk was retrieved: check whether rerank.retain truncated
+      the row set before concluding the table parsed badly.
+
+  - id: t-002
+    question: "Which service plan includes calibrations, and how many per year?"
+    unanswerable: false
+    expected_sources: [pricing-catalog-v1]
+    difficulty: easy
+    reference: >-
+      SP-PLUS includes 2 calibrations per year and SP-CRIT includes 4. SP-STD includes none.
+    expected_answer: "SP-PLUS includes 2 calibrations a year, SP-CRIT includes 4, and SP-STD includes none."
+    required_facts: ["SP-PLUS", "2"]
+    forbidden_claims: ["SP-STD includes calibrations"]
+    locators: ["pricing sheet Service plans, column 'Calibrations included per year'"]
+    tags: [table, zero-value]
+    grading_notes: >-
+      SP-STD's value is 0. A zero in a table is routinely lost — dropped as an empty cell, or read
+      as "not stated" — and an answer claiming SP-STD includes calibrations is the specific failure
+      this case detects. Naming SP-PLUS alone is a partial answer and is acceptable; naming SP-STD
+      as included is wrong.
+
+  - id: t-003
+    question: "What would the SP-CRIT plan cost per year for a KW-2200-B?"
+    unanswerable: false
+    expected_sources: [pricing-catalog-v1]
+    difficulty: hard
+    reference: >-
+      SP-CRIT is charged at 26% of list price per year, and KW-2200-B lists at 18,400 EUR, which is
+      4,784 EUR per year.
+    expected_answer: >-
+      SP-CRIT is 26% of list price per year. KW-2200-B lists at 18,400 EUR, so the plan costs
+      4,784 EUR per year.
+    required_facts: ["26", "18400"]
+    forbidden_claims: ["any product other than 4784 presented as the annual fee"]
+    locators: ["pricing sheets Instruments and Service plans"]
+    tags: [table, cross-sheet, arithmetic]
+    grading_notes: >-
+      Two sheets and one multiplication. Grading rule, per the pricing/ README — an answer stating
+      both inputs (26% and 18,400 EUR) and declining to compute is ACCEPTABLE and scores as correct;
+      an answer computing and getting it wrong is a failure; an answer giving a bare total with
+      neither input is ungrounded even when the number is right, because nothing in the corpus
+      states it. required_facts holds the inputs, not the product, for exactly that reason.
+
+  - id: t-004
+    question: "What does a CN-204 cost, and is it sold individually or in a pack?"
+    unanswerable: false
+    expected_sources: [pricing-catalog-v1]
+    difficulty: easy
+    reference: >-
+      CN-204 is a reference electrode sold individually at 610 EUR each.
+    expected_answer: "CN-204 is a reference electrode, sold individually at 610 EUR."
+    required_facts: ["610", "each"]
+    forbidden_claims: ["box of 12", "box of 5"]
+    locators: ["pricing sheet Consumables, row CN-204"]
+    tags: [table, pack-size, neighbouring-rows]
+    grading_notes: >-
+      The rows above and below CN-204 are both sold in boxes ("Box of 12", "Box of 5"). Answering
+      with a pack size at all means the pack-size column bled across rows, which is the same
+      row-association failure as e-003 but on a non-numeric column — worth testing separately,
+      because a numeric-only table check would miss it.

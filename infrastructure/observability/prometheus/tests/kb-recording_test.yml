@@ -1,0 +1,202 @@
+# promtool unit tests for rules/kb-recording.yml.
+#
+#   cd infrastructure/observability/prometheus/tests
+#   promtool test rules kb-recording_test.yml
+#
+# Run from THIS directory. `rule_files` below are relative paths, and promtool resolves them
+# against the working directory; running from the repository root looks for ./rules/ and fails
+# with a file-not-found that reads like a missing rule file rather than a wrong cwd.
+#
+# These tests need no stack, no containers and no application code. They are the only executable
+# artifact in this repository that is green on day one, which is why they carry the load.
+#
+# ---------------------------------------------------------------------------------------------
+# TWO CONVENTIONS USED THROUGHOUT, BOTH FOR A REASON
+#
+# 1. FLOAT ASSERTIONS ARE BANDS, NOT EQUALITIES. promtool compares expected and actual sample
+#    values exactly, and a rate() over a counter is a chain of floating-point operations. The
+#    idiom below — `(expr > bool LOW) * (expr < bool HIGH)` — evaluates to exactly 1.0 or exactly
+#    0.0, so the assertion is bit-exact while the quantity under test only has to land in a band.
+#    A test that fails on the sixteenth decimal place gets deleted, not fixed.
+#
+# 2. ABSOLUTE rate() VALUES ARE DELIBERATELY NOT ASSERTED. With 1-minute samples in a 5-minute
+#    window, rate() sees 5 samples spanning 4 minutes and extrapolates to the window edge capped
+#    at half a sample interval — so a counter climbing by exactly 120/min yields rate() = 1.8/s,
+#    not 2/s. That is correct Prometheus behaviour and it is not what these rules are about.
+#    RATIOS are immune: numerator and denominator share the window, the samples and the factor,
+#    so the extrapolation cancels exactly. Every assertion here is a ratio or a boolean.
+# ---------------------------------------------------------------------------------------------
+
+evaluation_interval: 30s
+
+rule_files:
+  - ../rules/kb-recording.yml
+
+tests:
+  # ===========================================================================================
+  # THE ONE THAT MATTERS: the error ratio counts `timeout` and ignores `cancelled`.
+  # ===========================================================================================
+  # Traffic is 120 requests/min, split so that exactly one answer is correct:
+  #
+  #     0.05  <- error + timeout counted, cancelled excluded          CORRECT
+  #     0.025 <- outcome="error" only; every timeout invisible        the classic bug
+  #     0.55  <- cancelled folded in; alarms fire during a demo       the other classic bug
+  #
+  # The band below admits only the first. If someone "simplifies" the matcher in kb-recording.yml
+  # this test fails with a number that names the mistake.
+  - name: chat error ratio counts timeout, excludes cancelled
+    interval: 1m
+    input_series:
+      - series: 'kb_chat_requests_total{service="ai-api",env="prod",operation="chat",outcome="success",error_class="none"}'
+        values: "0+54x30"
+      - series: 'kb_chat_requests_total{service="ai-api",env="prod",operation="chat",outcome="error",error_class="provider_temporary"}'
+        values: "0+3x30"
+      - series: 'kb_chat_requests_total{service="ai-api",env="prod",operation="chat",outcome="timeout",error_class="provider_temporary"}'
+        values: "0+3x30"
+      - series: 'kb_chat_requests_total{service="ai-api",env="prod",operation="chat",outcome="cancelled",error_class="user_cancellation"}'
+        values: "0+60x30"
+
+    promql_expr_test:
+      # (3 + 3) / 120 = 0.05
+      - expr: (kb:chat_error_ratio:5m > bool 0.0499) * (kb:chat_error_ratio:5m < bool 0.0501)
+        eval_time: 15m
+        exp_samples:
+          - labels: '{service="ai-api", env="prod", operation="chat"}'
+            value: 1
+
+      # The denominator INCLUDES cancelled — a cancelled request is traffic, it is just not a
+      # failure. Half of this fixture's traffic is cancellations, so the recorded denominator is
+      # exactly twice a cancelled-excluded one. If someone "fixes" kb:chat_requests:rate5m to
+      # skip cancellations, this ratio becomes 1 and the test says so; the error ratio would
+      # meanwhile have silently doubled to 0.1 and every threshold in kb-alerts.yml would mean
+      # something different.
+      - expr: >-
+          (kb:chat_requests:rate5m
+            / sum by (service, env, operation) (rate(kb_chat_requests_total{outcome!="cancelled"}[5m])) > bool 1.999)
+          * (kb:chat_requests:rate5m
+            / sum by (service, env, operation) (rate(kb_chat_requests_total{outcome!="cancelled"}[5m])) < bool 2.001)
+        eval_time: 15m
+        exp_samples:
+          - labels: '{service="ai-api", env="prod", operation="chat"}'
+            value: 1
+
+      # The traffic floor that KbChatErrorRateHigh ANDs onto the ratio. 120 req/min is far above
+      # 0.1 req/s, so a real error ratio is never suppressed by the floor at this volume.
+      - expr: kb:chat_requests:rate5m > bool 0.1
+        eval_time: 15m
+        exp_samples:
+          - labels: '{service="ai-api", env="prod", operation="chat"}'
+            value: 1
+
+      # The recorded series carry exactly the three grouping labels and no others. `error_class`
+      # is aggregated away here on purpose: it is a 19-value dimension and the ratio would
+      # fragment into 19 series, none of which is the error rate. It comes back in the runbook
+      # query, which is where a human wants it.
+      - expr: count(kb:chat_error_ratio:5m)
+        eval_time: 15m
+        exp_samples:
+          - labels: "{}"
+            value: 1
+
+  # ===========================================================================================
+  # A cancellation storm must not move the error ratio at all.
+  # ===========================================================================================
+  # 600 cancellations/min against 60 successes — ten times more cancellations than answers, the
+  # shape of a widget on a page that mounts and unmounts. The error and timeout series exist and
+  # are flat, so the ratio is a real 0 rather than absent.
+  - name: cancellation storm leaves the error ratio at zero
+    interval: 1m
+    input_series:
+      - series: 'kb_chat_requests_total{service="ai-api",env="prod",operation="chat",outcome="success",error_class="none"}'
+        values: "0+60x30"
+      - series: 'kb_chat_requests_total{service="ai-api",env="prod",operation="chat",outcome="error",error_class="provider_temporary"}'
+        values: "0+0x30"
+      - series: 'kb_chat_requests_total{service="ai-api",env="prod",operation="chat",outcome="timeout",error_class="provider_temporary"}'
+        values: "0+0x30"
+      - series: 'kb_chat_requests_total{service="ai-api",env="prod",operation="chat",outcome="cancelled",error_class="user_cancellation"}'
+        values: "0+600x30"
+
+    promql_expr_test:
+      # Exactly 0.0 — zero divided by a positive rate is exact, so this one may be an equality.
+      - expr: kb:chat_error_ratio:5m
+        eval_time: 15m
+        exp_samples:
+          - labels: 'kb:chat_error_ratio:5m{service="ai-api", env="prod", operation="chat"}'
+            value: 0
+
+      # And therefore nowhere near KbChatErrorRateHigh's threshold.
+      - expr: kb:chat_error_ratio:5m > bool 0.05
+        eval_time: 15m
+        exp_samples:
+          - labels: '{service="ai-api", env="prod", operation="chat"}'
+            value: 0
+
+  # ===========================================================================================
+  # The ratio is ABSENT, not zero, when no failure has ever been recorded.
+  # ===========================================================================================
+  # A freshly deployed service has no error series at all. `sum` over an empty selector returns
+  # no samples, so the division has nothing on its left-hand side and the recorded ratio does not
+  # exist. Every alert therefore tests `> threshold`; a rule written as `ratio == 0` to mean
+  # "healthy" would read "no data" as "unhealthy" for the first five minutes of every deployment,
+  # and a rule written as `ratio < 0.05` would never fire on a service that has only ever failed.
+  - name: error ratio is absent, not zero, before the first failure
+    interval: 1m
+    input_series:
+      - series: 'kb_chat_requests_total{service="ai-api",env="prod",operation="chat",outcome="success",error_class="none"}'
+        values: "0+60x30"
+
+    promql_expr_test:
+      - expr: kb:chat_error_ratio:5m
+        eval_time: 15m
+        exp_samples: []
+
+      - expr: kb:chat_errors:rate5m
+        eval_time: 15m
+        exp_samples: []
+
+      # The denominator exists throughout, which is what makes `absent()` a usable meta-alert
+      # later if one is ever wanted.
+      - expr: kb:chat_requests:rate5m > bool 0.1
+        eval_time: 15m
+        exp_samples:
+          - labels: '{service="ai-api", env="prod", operation="chat"}'
+            value: 1
+
+  # ===========================================================================================
+  # The provider rate-limit ratio is per provider, aggregates `model` away, and produces nothing
+  # for a healthy provider.
+  # ===========================================================================================
+  # openai: 50 rate-limited + 30 ok on one model + 20 ok on another = 100/min, ratio 0.5.
+  # anthropic: 100/min, all successful, and therefore NO output series — a healthy provider does
+  # not produce a 0.0 ratio, it produces nothing at all. That is why KbProviderRateLimitSustained
+  # is a `>` test and why the alert cannot be inverted into a "ratio is fine" assertion.
+  - name: provider rate-limit ratio is per provider and drops model
+    interval: 1m
+    input_series:
+      - series: 'kb_provider_requests_total{service="ai-api",env="prod",provider="openai",model="gpt-5.1",outcome="error",error_class="provider_rate_limit"}'
+        values: "0+50x30"
+      - series: 'kb_provider_requests_total{service="ai-api",env="prod",provider="openai",model="gpt-5.1",outcome="success",error_class="none"}'
+        values: "0+30x30"
+      - series: 'kb_provider_requests_total{service="ai-api",env="prod",provider="openai",model="gpt-5.1-mini",outcome="success",error_class="none"}'
+        values: "0+20x30"
+      - series: 'kb_provider_requests_total{service="ai-api",env="prod",provider="anthropic",model="claude-opus-4",outcome="success",error_class="none"}'
+        values: "0+100x30"
+
+    promql_expr_test:
+      # One sample, and only one: openai at 0.5. The absence of an anthropic sample is asserted
+      # by the fact that exp_samples lists every sample the expression returns.
+      - expr: (kb:provider_rate_limit_ratio:5m > bool 0.4999) * (kb:provider_rate_limit_ratio:5m < bool 0.5001)
+        eval_time: 15m
+        exp_samples:
+          - labels: '{service="ai-api", env="prod", provider="openai"}'
+            value: 1
+
+      # `model` must not survive into the recorded series. If it did, the ratio would be computed
+      # per model and a provider-wide 429 storm would fragment across the model dimension —
+      # 50/80 on one model and 0/20 on the other, neither of which is "openai is 429ing half our
+      # calls". The count is 1, not 2.
+      - expr: count(kb:provider_rate_limit_ratio:5m)
+        eval_time: 15m
+        exp_samples:
+          - labels: "{}"
+            value: 1

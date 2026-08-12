@@ -1,0 +1,19 @@
+{
+    "class": "App\\Http\\Requests\\DesignateEmbeddingConnectionRequest",
+    "rules": {
+        "connection_id": [
+            "present",
+            "nullable",
+            "string",
+            "ulid",
+            "required_with:model"
+        ],
+        "model": [
+            "present",
+            "nullable",
+            "string",
+            "max:200",
+            "required_with:connection_id"
+        ]
+    }
+}

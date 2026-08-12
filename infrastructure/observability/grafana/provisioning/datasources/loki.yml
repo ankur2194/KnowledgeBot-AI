@@ -1,0 +1,36 @@
+# Loki datasource, and the log→trace half of the correlation chain.
+#
+# The full chain a support ticket is walked along: a client holds an `X-KB-Request-Id` (clients
+# never receive `traceparent` — returning it would leak internal topology to a widget on someone
+# else's page). That request id finds the log line: `{service="ai-api"} | json | request_id="..."`.
+# The line carries `trace_id` as STRUCTURED METADATA, and the derived field below turns it into a
+# link into Tempo. tempo.yml wires the same chain in reverse.
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      maxLines: 1000
+      derivedFields:
+        - name: trace_id
+          # `matcherType: label` matches a LABEL OR STRUCTURED-METADATA KEY rather than running a
+          # regex over the line body — which works only because the Collector writes `trace_id`
+          # as structured metadata, which in turn requires Loki's `tsdb` store and `schema: v13`
+          # (see loki/loki.yml). On schema v12 the write is rejected, the key never exists, and
+          # this link silently disappears from every log line.
+          #
+          # UNVERIFIED against the pinned Grafana 13.1.2: `matcherType` accepting `label` as well
+          # as `regex`. If links stop rendering after a Grafana bump, the fallback is
+          # `matcherType: regex` with `matcherRegex: '"trace_id":"(\w+)"'` over the JSON body —
+          # slower, and it breaks if the field is ever reordered or renamed, but it is a body
+          # match and needs nothing from the schema.
+          matcherType: label
+          matcherRegex: trace_id
+          datasourceUid: tempo
+          url: "${__value.raw}"
+          urlDisplayLabel: "View trace"

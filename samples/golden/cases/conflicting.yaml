@@ -1,0 +1,127 @@
+# §21.2 — Conflicting-source questions.
+#
+# Two documents disagree, both are ACTIVE, both are retrieved. Correct behaviour: surface both,
+# attribute each with its date, do not silently pick one.
+#
+# Three ways to fail, and all three are scored as failures:
+#   1. Silent selection — answers one figure, cites one source, never mentions the other. Grounded,
+#      cited, misleading, and invisible to faithfulness.
+#   2. Averaging — presents "24 to 36 months" as though it were an offered range.
+#   3. Refusal — treats disagreement as insufficient evidence. There is abundant evidence; this is
+#      a FALSE REFUSAL and counts against the gate like any other. (c-004 is the sole exception,
+#      and it is exceptional for a stated reason.)
+#
+# Source recall requires BOTH fixtures on every case here. An answer that discusses the conflict
+# while having retrieved only one side got there by luck or by priors.
+
+dataset: kb-platform-golden
+corpus_version: corpus-2026.08.1
+category: conflicting
+
+cases:
+  - id: c-001
+    question: "How long is the warranty on a Tideline benchtop instrument?"
+    unanswerable: false
+    expected_sources: [warranty-datasheet-2025, warranty-terms-2026]
+    difficulty: hard
+    reference: >-
+      The sources disagree. The March 2025 product datasheet states a 24-month warranty from the
+      date of shipment. The warranty terms effective 2026-01-01 state 36 months from the date of
+      commissioning.
+    expected_answer: >-
+      The two sources give different answers. The 2025 datasheet says 24 months from shipment; the
+      warranty terms effective 1 January 2026 say 36 months from commissioning. Which applies
+      depends on when the instrument was commissioned.
+    required_facts: ["24", "36"]
+    forbidden_claims:
+      - "24 to 36 months presented as a range"
+      - "any statement that the 2026 terms supersede the datasheet"
+    locators: ["warranty datasheet 2025 page 1", "warranty terms 2026 §1"]
+    tags: [conflict, both-sides-required, headline-case]
+    grading_notes: >-
+      Both numbers required — that is the whole case. Neither document says it supersedes the other
+      (the corpus is realistically sloppy on purpose), so asserting supersession is an invented
+      resolution even though it is the likely real-world answer. Leading with the newer figure and
+      then noting the older one is fine; giving only one figure is a failure however well cited.
+
+  - id: c-002
+    question: "Is next-business-day support included as standard with an instrument?"
+    unanswerable: false
+    expected_sources: [warranty-datasheet-2025, pricing-catalog-v1]
+    difficulty: hard
+    reference: >-
+      The sources disagree. The 2025 datasheet states that next-business-day support response is
+      included as standard with every instrument. The service plan list shows next-business-day
+      response as the SP-PLUS commitment, with SP-STD at 5 business days, and the 2026 warranty
+      terms state that response commitments come from the service plan purchased, with no plan
+      meaning best-effort support.
+    expected_answer: >-
+      The sources conflict. The 2025 datasheet says next-business-day response is included as
+      standard. The current service-plan list makes next-business-day the SP-PLUS commitment
+      (SP-STD is 5 business days), and the 2026 terms say response commitments follow the plan
+      purchased. Please confirm against the current terms.
+    required_facts: ["SP-PLUS", "5 business days"]
+    forbidden_claims:
+      - "an unqualified yes"
+      - "an unqualified no"
+    locators: ["warranty datasheet 2025 page 1", "pricing sheet Service plans"]
+    tags: [conflict, cross-format, prose-vs-table]
+    grading_notes: >-
+      A CROSS-FORMAT conflict: prose in a PDF against a row in a spreadsheet. Structurally harder
+      than two prose documents disagreeing, because one side must survive table serialization
+      before the disagreement is even visible. A confident yes or no is the failure; both are
+      supportable from a single source, which is exactly the problem.
+
+  - id: c-003
+    question: "Does the warranty period start at shipment or at commissioning?"
+    unanswerable: false
+    expected_sources: [warranty-datasheet-2025, warranty-terms-2026]
+    difficulty: hard
+    reference: >-
+      The sources disagree on the clock start. The 2025 datasheet measures the warranty from the
+      date of shipment; the 2026 terms measure it from the date of commissioning.
+    expected_answer: >-
+      It depends which document you go by: the 2025 datasheet runs from the date of shipment, the
+      2026 terms from the date of commissioning. The two sources disagree.
+    required_facts: ["shipment", "commissioning"]
+    forbidden_claims: ["any single start point given without noting the disagreement"]
+    locators: ["warranty datasheet 2025 page 1", "warranty terms 2026 §1"]
+    tags: [conflict, second-axis, non-numeric]
+    grading_notes: >-
+      The SAME document pair disagreeing on a SECOND, non-numeric axis. Deliberately separate from
+      c-001: a pipeline can notice a numeric disagreement (24 vs 36 are visibly different tokens)
+      while flattening a semantic one, and answering c-001 correctly says nothing about whether it
+      will notice this. Both must pass.
+
+  - id: c-004
+    question: >-
+      An instrument shipped in December 2025 and was commissioned in February 2026. Which warranty
+      terms apply?
+    unanswerable: false
+    expected_sources: [warranty-datasheet-2025, warranty-terms-2026]
+    difficulty: hard
+    reference: >-
+      The sources do not resolve this case. The 2025 datasheet gives 24 months from shipment; the
+      2026 terms give 36 months from commissioning and state that they apply to instruments
+      commissioned on or after 2026-01-01, without addressing instruments shipped in 2025 and
+      commissioned later. Both rules can be read as applying and the documents do not say which
+      takes precedence.
+    expected_answer: >-
+      The documents do not settle it. The 2026 terms apply to instruments commissioned on or after
+      1 January 2026, which this one was — but the 2025 datasheet's 24-month-from-shipment term also
+      covers an instrument shipped in December 2025, and neither document states which takes
+      precedence for this overlap. This needs a human decision.
+    required_facts: ["do not", "precedence"]
+    forbidden_claims:
+      - "a single warranty period asserted as the answer"
+      - "any claim that one document takes precedence"
+    locators: ["warranty terms 2026 transition clause — deliberately incomplete"]
+    tags: [conflict, genuinely-unresolved, boundary-case, human-review]
+    grading_notes: >-
+      THE ONLY CASE IN THE SUITE WHERE "THE SOURCES DO NOT SETTLE IT" IS CORRECT WHILE BOTH SOURCES
+      ARE HIGHLY RELEVANT. Note it is NOT marked unanswerable: the corpus contains everything needed
+      to explain the situation, and a bare "I don't know" with no explanation is a failure just as
+      much as picking a side is. What is required is a correct account of why the rules overlap.
+      Because required_facts on a phrase like "do not" is weak evidence of that, this case is always
+      included in the human-review sample — see dataset.toml [review]. Compare with d-004, the same
+      document pair on a date that IS resolvable; a bot that refuses both has not understood either.

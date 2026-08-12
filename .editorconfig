@@ -1,0 +1,104 @@
+# .editorconfig — one formatting contract across PHP, Python, TypeScript, YAML and Make.
+#
+# Three runtimes, four package managers, and a dozen agents writing into the same tree. Without
+# this file the first symptom is a diff where every line changed because someone's editor
+# reindented a file, which buries the one line that actually changed.
+#
+# `charset` and `end_of_line` here are the EDITOR's half. Git's half is .gitattributes, and both
+# are needed: .editorconfig governs what an editor writes to disk, .gitattributes governs what git
+# checks out. On WSL2 a CRLF php.ini or *.sh inside a container fails SILENTLY — see .gitattributes.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# ================================================================================================
+# PHP — PSR-12: 4 spaces.
+# ================================================================================================
+[*.php]
+indent_size = 4
+
+[*.{neon,neon.dist}]
+indent_size = 4
+
+# ================================================================================================
+# Python — PEP 8: 4 spaces.
+# ================================================================================================
+[*.{py,pyi}]
+indent_size = 4
+
+# ================================================================================================
+# TypeScript / JavaScript / JSON / YAML — 2 spaces.
+# ================================================================================================
+# YAML in particular: this is not a preference. A tab in a YAML file is a HARD PARSE ERROR, and
+# 4-space indentation in a deeply nested Compose or Collector config pushes lines past 100 columns
+# and encourages the flow style that hides diffs.
+[*.{ts,tsx,js,jsx,mjs,cjs,json,jsonc,json5,yaml,yml,css,scss,html,vue,svelte}]
+indent_size = 2
+
+[*.{md,mdx}]
+indent_size = 2
+# Trailing whitespace is SIGNIFICANT in Markdown: two trailing spaces is a hard line break. An
+# editor that strips them silently reflows prose and mangles tables. This is the one place the
+# global rule is deliberately reversed.
+trim_trailing_whitespace = false
+
+# ================================================================================================
+# Makefile — TABS, and there is no alternative.
+# ================================================================================================
+# A recipe line must begin with a literal tab character. Make's error for a space-indented recipe
+# is "missing separator", which names neither the file's real problem nor the line's. An editor
+# configured for spaces breaks the Makefile the first time anyone touches it.
+[{Makefile,makefile,GNUmakefile,*.mk}]
+indent_style = tab
+indent_size = 4
+
+# ================================================================================================
+# Shell, Dockerfiles, and the container config files
+# ================================================================================================
+[*.{sh,bash}]
+indent_size = 2
+# Note the deeper reason these must stay LF beyond readability: a shell script with CRLF line
+# endings fails inside a Linux container with `bad interpreter: /usr/bin/env bash^M: no such file
+# or directory` — an error that names a file that plainly exists.
+
+[{Dockerfile,Dockerfile.*,*.dockerfile}]
+indent_size = 4
+
+# nginx, php-fpm, php.ini, valkey.conf. Same LF requirement, and the failure is quieter: a CRLF
+# php.ini parses `output_buffering=0\r` as a non-numeric string and falls back to the default, so
+# every SSE answer arrives as one blob with nothing logged anywhere.
+[*.{conf,ini}]
+indent_size = 4
+
+[*.toml]
+indent_size = 2
+
+[*.sql]
+indent_size = 4
+
+# ================================================================================================
+# Generated and vendored files — left exactly as their generator wrote them
+# ================================================================================================
+# Reformatting a lockfile produces an enormous diff that reviewers skip, which is the file where
+# skipping matters most.
+[{composer.lock,pnpm-lock.yaml,uv.lock,package-lock.json,yarn.lock}]
+indent_style = unset
+indent_size = unset
+insert_final_newline = unset
+trim_trailing_whitespace = false
+
+[samples/**]
+# rag-eval-engineer's golden corpus. The fixtures assert on exact bytes — content hashes, recrawl
+# change detection, extraction output — so an editor that "tidies" whitespace here does not cause a
+# formatting diff, it causes an evaluation regression.
+indent_style = unset
+indent_size = unset
+insert_final_newline = false
+trim_trailing_whitespace = false

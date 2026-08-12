@@ -1,0 +1,1805 @@
+# KnowledgeBot AI — base Compose topology.
+#
+# Docker Compose v5.x on Docker Engine >= 29. There is NO `version:` key: the spec keeps it
+# "only informative" and Compose prefers the most recent schema regardless, warning if you write
+# one. "Compose v3" in a blog post is the 2017 *file format*, not this tool — v5.0.0 skipped v3
+# and v4 deliberately to end that confusion.
+#
+# Production is:   docker compose -f compose.yaml -f compose.prod.yaml up -d
+# Development is:  docker compose up -d          (compose.override.yaml is auto-loaded)
+# Passing any -f disables auto-loading of compose.override.yaml. That is the whole point.
+# See README.md for the -f matrix and the bare-`up` footgun.
+
+name: knowledgebot
+
+# ---------------------------------------------------------------------------------------------
+# NETWORKS — the trust boundary, and the only one Compose can enforce.
+# ---------------------------------------------------------------------------------------------
+networks:
+  # THE DOCKER NAME IS PINNED, AND THAT IS LOAD-BEARING — DO NOT REPLACE THIS WITH `edge: {}`.
+  # Traefik's Docker provider matches backends by DOCKER network name, and its own config lives
+  # in traefik/traefik.yaml, a MOUNTED file that Compose cannot interpolate and that (per that
+  # file's header) discards every flag and env var. So the name cannot be passed to Traefik at
+  # runtime — it has to be a literal on both sides, and the only way a literal stays true is if
+  # the Docker name cannot move.
+  #
+  # Without this key the name is `${project}_edge`, and the project name is settable three ways
+  # (`name:` below, `-p`, COMPOSE_PROJECT_NAME). Any of them would desync traefik.yaml and put
+  # Traefik back to "first available network" — which it resolves NON-DETERMINISTICALLY, so the
+  # symptom is an edge that routes correctly on some boots and times out on others.
+  #
+  # The value equals what Compose already generates for project `knowledgebot`, so pinning it
+  # recreates nothing.
+  edge:
+    name: knowledgebot_edge
+  # `application` is deliberately NOT internal:true.
+  # WHY: `ai-api` calls OpenAI/Anthropic/DeepSeek/NIM/OpenRouter, and `ai-worker-crawl` fetches
+  # tenant-supplied URLs on the public web. An internal network gives its members no route off
+  # the host, so adding `internal: true` here makes every provider call fail with a DNS or
+  # connect error that reads exactly like a provider outage, minutes after an unrelated
+  # "network tidy-up". `data` is the internal one; `application` never is.
+  application: {}
+  data: {internal: true}
+  observability: {internal: true}
+
+# ---------------------------------------------------------------------------------------------
+# VOLUMES
+# ---------------------------------------------------------------------------------------------
+volumes:
+  pgdata: {}        # BACKED UP — source of truth (docs/18 §25.2)
+  seaweed: {}       # BACKED UP — originals + crawl snapshots are the only irreplaceable bytes (§25.4)
+  qdrant: {}        # snapshot for RTO only; rebuildable from PostgreSQL by contract (ADR-010)
+  valkey-core: {}   # AOF for RESTART durability. NEVER restored from a backup: doing so
+                    # resurrects stale reservations and spent idempotency records.
+  beat-schedule: {} # celery beat must persist its schedule or every sweep re-fires on restart
+  models: {}        # HF weights, mounted :ro — baked in prod, cached in dev
+  acme: {}          # Traefik's acme.json. A NAMED VOLUME, never a bind mount: Docker creates a
+                    # *directory* at a missing bind source, the ACME store can then never be
+                    # written, and the only symptom is "TRAEFIK DEFAULT CERT" in every browser.
+  # Telemetry-backend state, only created when the `observability` profile is active. Retention is
+  # configured inside each service's own config file (Prometheus 15d/20GB, Loki 30d, Tempo 7d).
+  prometheus: {}
+  alertmanager: {}
+  loki: {}
+  tempo: {}
+  grafana: {}       # sessions and users only — every dashboard is provisioned from git
+  # valkey-cache: DELIBERATELY ABSENT. Do not add it.
+  # `valkey-cache` is the only place tenant text lives in Valkey (answer + retrieval caches).
+  # It runs --save "" --appendonly no, so it never writes an RDB or an AOF; combined with having
+  # no volume at all, that absence IS the erasure control. A TTL is not a deletion guarantee —
+  # expiry is lazy plus a sampling cycle that tolerates ~10% expired keys resident, and a
+  # snapshot taken before expiry stores the value *with* its TTL. "Nothing was ever written" is
+  # the only provable posture. Adding a volume here silently puts customer answers in a backup.
+
+# ---------------------------------------------------------------------------------------------
+# SECRETS — file-sourced, mounted at /run/secrets/<name>. No value is ever in this file.
+# `docker compose config` renders interpolated values in full, so anything reachable through
+# ${...} leaks into a CI log. Secrets do not.
+# ---------------------------------------------------------------------------------------------
+#
+# =============================================================================================
+# SIGNING SECRETS ARE NAMED BY KEY ID, NEVER BY ROTATION ROLE.
+# =============================================================================================
+# The wire carries the id:  X-KB-Signature = key_id + ":" + hex(hmac_sha256(secret[key_id], canon))
+# Two ids are live at once during a rotation — the verifier accepts both, the signer uses the
+# newer — and the id is the only thing that makes that possible. A file called `hmac_key_current`
+# cannot answer "which id is this", so the verifier cannot map a wire id onto it; and the same
+# physical key would have to be RENAMED on every rotation, in lockstep with the one identifier
+# that exists precisely so it never has to change.
+#
+# ROTATION IS THEREFORE: write the new id's file, mount it, flip the active-id variable
+# (AI_HMAC_ACTIVE_KEY_ID / KB_HMAC_ACTIVE_KEY_ID, and the callback pair), deploy. Retiring the old
+# id is a DELIBERATE SECOND DEPLOY. Nothing is ever renamed, and no window exists in which a
+# signer and a verifier disagree about which bytes a name refers to.
+#
+# TWO DIRECTIONS, TWO DISJOINT KEY SETS:
+#   k1/k2 — request signing,  Laravel  -> FastAPI
+#   c1/c2 — callback signing, FastAPI  -> Laravel
+# Both directions are signed, and they use separate ids so that a compromised OUTBOUND key cannot
+# forge a CALLBACK. Sharing one set silently discards that property while every test still passes.
+#
+# The FastAPI side (services/ai-service/app/core/keys.py) builds its key ring by LISTING this
+# directory and taking the id from the filename after the `hmac_key_` / `callback_hmac_key_`
+# prefix — it never builds a path from the wire-supplied key_id, because that is a file selector
+# an attacker aims. So these names are load-bearing: rename one and the id disappears from the
+# ring. Key ids must match /\A[a-z][a-z0-9]{0,7}\Z/.
+secrets:
+  kek:                      {file: ./secrets/kek}
+  # Laravel's APP_KEY, as a FILE and not an environment value. It is the AES-256-CBC key behind
+  # every `encrypted:` cast — which is where the wrapped provider DEKs and their key_version live —
+  # behind session and cookie payloads, and behind the audit `key_fingerprint` HMAC
+  # (kb-security-baseline §18.4). As `APP_KEY=` in env/core-api.env it would render IN FULL in
+  # `docker compose config`, and `make prod-config` runs exactly that as a documented pre-deploy
+  # step, so the key would land in whatever terminal or CI log captured it.
+  #
+  # NEVER REGENERATE THIS ON AN EXISTING DEPLOYMENT. `php artisan key:generate` or an `rm` followed
+  # by a bootstrap re-run, without moving the outgoing key into app_previous_keys first, makes every
+  # encrypted column, session and cookie PERMANENTLY undecryptable — including the stored provider
+  # credentials, which exist nowhere else. That is unrecoverable data loss, not an outage; there is
+  # no restart, no failover and no rollback that brings it back. Rotation is: append the current key
+  # to app_previous_keys, THEN write the new one to app_key, then re-encrypt.
+  app_key:                  {file: ./secrets/app_key}
+  # The retired APP_KEY values, comma-separated, read by config('app.previous_keys'). Same material
+  # and same custody as app_key — during a rotation window both files are live key material at once,
+  # which is the entire reason this is a secret and not a config value.
+  #
+  # LEGITIMATELY EMPTY on an unrotated deployment. An empty file means "no previous keys"; a file
+  # holding one empty string would make Laravel try the empty key on every decrypt failure.
+  # scripts/ops/preflight.sh exempts this name from its empty-file failure for that reason —
+  # alongside alertmanager_webhook_url, and for a different reason.
+  app_previous_keys:        {file: ./secrets/app_previous_keys}
+  hmac_key_k1:              {file: ./secrets/hmac_key_k1}
+  hmac_key_k2:              {file: ./secrets/hmac_key_k2}
+  callback_hmac_key_c1:     {file: ./secrets/callback_hmac_key_c1}
+  callback_hmac_key_c2:     {file: ./secrets/callback_hmac_key_c2}
+  postgres_password:        {file: ./secrets/postgres_password}
+  s3_secret_key:            {file: ./secrets/s3_secret_key}
+  qdrant_api_key:           {file: ./secrets/qdrant_api_key}
+  alertmanager_webhook_url: {file: ./secrets/alertmanager_webhook_url}
+  # Valkey ACL passwords, one per ACL USER (valkey/users.acl), not one per instance. `user default
+  # off` is set on both servers, so a service with no credential does not degrade — it cannot
+  # connect at all, and the first queue push is the error. The same user authenticates against
+  # both valkey-core and valkey-cache because users.acl is mounted into both; the separation that
+  # matters is per-service key patterns, not per-server passwords.
+  valkey_kb_core_password:  {file: ./secrets/valkey_kb_core_password}   # Laravel
+  valkey_kb_ai_password:    {file: ./secrets/valkey_kb_ai_password}     # FastAPI + Celery
+  # kb-observer is the read-only forensics user. It has NO container consumer today: the two
+  # redis_exporter sidecars that will use it (infrastructure/observability/exporters/README.md)
+  # do not exist yet, and until then it is used by hand — `valkey-cli --user kb-observer`. It is
+  # declared here anyway so that scripts/ops/preflight.sh, which derives its list from this block,
+  # demands the file exist and be well-formed rather than discovering it missing at exporter time.
+  valkey_kb_observer_password: {file: ./secrets/valkey_kb_observer_password}
+
+# ---------------------------------------------------------------------------------------------
+# BUILD FRAGMENTS (YAML anchors — resolved by the YAML parser before Compose sees the document)
+# ---------------------------------------------------------------------------------------------
+# `additional_contexts` gives the Dockerfile a SECOND named build context. The core-api image has
+# to COPY php.ini, both FPM pools and both nginx configs out of infrastructure/docker/php/, and a
+# Dockerfile cannot COPY from outside its own context — `COPY ../../infrastructure/...` is not a
+# relative path that fails, it is a build error. The alternatives were both worse: making the repo
+# root the context ships the entire monorepo to the daemon on every build, and duplicating the
+# configs into services/core-api/ puts the FPM pool sizing in two places that drift.
+x-core-api-build: &core-api-build
+  context: ../../services/core-api
+  dockerfile: Dockerfile
+  target: runtime
+  additional_contexts:
+    infra: ../../infrastructure/docker
+
+# =================================================================================================
+# CREDENTIAL OPT-OUTS — "this service does not hold that key", stated where it is true.
+# =================================================================================================
+# `env_file: ./env/core-api.env` is SHARED by all six Laravel services and declares ELEVEN `*_FILE`
+# / `*_PATH` secret pointers. `secrets:` is PER-SERVICE and deliberately narrow. Those two
+# mechanisms disagree by construction, and Laravel is what turns the disagreement into a crash:
+# booting the framework builds EVERY config file eagerly, so config/kb.php, config/filesystems.php
+# and config/services.php resolve the KEK, the S3 key and all four signing keys on `artisan
+# migrate` exactly as they do on a web request. A pointer that NAMES A PATH is a promise, so a
+# pointer without its mounted file throws:
+#     SecretUnavailableException: Secret [X] is delivered as a file via [X_FILE], but
+#     [/run/secrets/y] does not exist or is not readable by this process.
+# MEASURED on a correctly bootstrapped stack: `laravel-migrate` exited 255 on four successive
+# secrets, one per run, and because every other Laravel and FastAPI service gates on
+# `service_completed_successfully` against that one-shot, THE ENTIRE STACK STOPPED THERE.
+#
+# The fix is NOT to mount every secret everywhere. Widening a secret list to satisfy a config-file
+# side effect is exactly how least privilege erodes one convenience at a time — and the narrow
+# lists are load-bearing (a compromised worker that cannot forge a callback is the whole point of
+# splitting k* from c*). An EMPTY pointer is a documented, supported state:
+# `KbSecrets::resolve()` — "An EMPTY pointer is treated as absent, not as an error."
+#
+# So each service below states, positively, which credentials it does NOT have. The anchor sits
+# next to that service's `secrets:` list, so the two can be read against each other in one glance;
+# a secret added to the list without removing the matching opt-out fails loudly at the first use
+# (the value is null), which is the direction of failure we want.
+#
+# NOTE the pointer suffix set is ['_FILE', '_PATH'] — BOTH. `KB_KEK_PATH` is a pointer for exactly
+# the same reason `APP_KEY_FILE` is, and a grep written as `_FILE=` misses it (and misses
+# `AI_HMAC_KEY_K1_FILE` too if the character class forgets digits).
+x-no-kek: &no-kek
+  KB_KEK_PATH: ""
+x-no-s3-key: &no-s3-key
+  AWS_SECRET_ACCESS_KEY_FILE: ""
+x-no-signing-keys: &no-signing-keys
+  AI_HMAC_KEY_K1_FILE: ""
+  AI_HMAC_KEY_K2_FILE: ""
+x-no-callback-keys: &no-callback-keys
+  AI_CALLBACK_HMAC_KEY_C1_FILE: ""
+  AI_CALLBACK_HMAC_KEY_C2_FILE: ""
+
+# =================================================================================================
+# CELERY WORKER LIVENESS — ONE STANZA, FOUR SERVICES, AND THE PROBE ITSELF LIVES IN THE IMAGE.
+# =================================================================================================
+# This was previously the same 200-character `python -c` one-liner pasted verbatim into all four
+# `ai-worker-*` services, probing `/tmp/kb-worker-heartbeat`. NOTHING WROTE THAT FILE — there is no
+# bootstep, signal handler or task anywhere in services/ai-service/ that touches it — so the probe
+# could never pass. MEASURED before this change: all four workers `unhealthy`, FailingStreak 38-40,
+# while the workers were consuming normally and `celery inspect ping -d celery@$HOSTNAME` returned
+# `pong` in 1.1 s. Worse, the one-liner exited 1 with EMPTY output, so `docker inspect` showed a red
+# container and no reason at all. A probe that is always red is not a conservative default: it
+# teaches whoever operates this that `unhealthy` on a worker means nothing, which is precisely the
+# training you do not want on the day one is genuinely wedged.
+#
+# The probe is now `kb-worker-healthcheck`, built into the image in services/ai-service/Dockerfile
+# beside `kb-assert-no-local-inference`. That is where its reasoning lives, including the measured
+# case against `celery inspect ping` (untargeted it exits 0 when a SIBLING answers — "4 nodes
+# online" from inside one container; targeted it costs 1.1-1.8 s of Celery import plus a broker
+# round trip per probe and couples container health to the pidbox ACL grants that just caused a
+# five-container outage).
+#
+# It still prefers the heartbeat file: that remains the design `celery-workers` specifies, and the
+# bootstep is OWED in services/ai-service/app/worker/heartbeat.py. Until it lands the probe falls
+# back to "is there an ESTABLISHED socket to the broker port in this netns" — kernel state only,
+# no connect, no AUTH, no command — and prints `DEGRADED but alive:` with the full bootstep
+# specification on every single run, so the shortfall is in `docker inspect` rather than in a
+# ticket nobody reads.
+#
+# `interval`/`timeout`/`retries` are shared; `start_period` is NOT, because it differs per worker
+# and is the one field where a wrong shared value is silently harmful. Note the start-period
+# semantics: failures inside it are not counted, but the FIRST success ends it early and every
+# failure after that counts — so these windows must cover real startup, not aspirational startup.
+#
+# DO NOT TUNE THIS PROBE BY PUTTING ITS VARIABLES IN env/ai-service.env — IT WOULD NOT START THE
+# CONTAINER, IT WOULD STOP IT. The script reads `KB_WORKER_HEARTBEAT_PATH` (default
+# /tmp/kb-worker-heartbeat) and `KB_WORKER_HEARTBEAT_MAX_AGE` (default 120), and both carry the
+# `KB_` prefix that `app/core/config.py::check_environment()` polices. `KNOWN_UNMAPPED_VARIABLES`
+# is empty and neither name is in `EXTERNALLY_READ_VARIABLES`, so setting either one in the env
+# file raises RuntimeError in every ai-service process at startup — while leaving the probe itself
+# working, because it imports nothing from `app.`. Override them per-container in `environment:`
+# only after services/ai-service records them in `EXTERNALLY_READ_VARIABLES` (which is also what
+# `test_every_externally_read_variable_is_still_set` reads this file to confirm).
+x-worker-healthcheck: &worker-healthcheck
+  test: ["CMD", "kb-worker-healthcheck"]
+  interval: 30s
+  # 5s is generous for a probe that reads two files. It is deliberately NOT sized for a probe that
+  # talks to the broker, because this one must never become that.
+  timeout: 5s
+  retries: 3
+
+services:
+
+  # =============================================================================================
+  # PUBLIC EDGE
+  # =============================================================================================
+  traefik:
+    image: traefik:v3.7
+    # The ONLY service in this file with a `ports:` key, in the base file and in every overlay.
+    # Published ports are DNAT'd in the iptables `nat` table, ahead of the INPUT chain a host
+    # firewall uses — so an "internal-only" debug port on ai-api is a complete authorization
+    # bypass that `ufw status` reports as blocked.
+    ports:
+      - "80:80"
+      - "443:443"
+    networks: [edge]   # edge ONLY. A Traefik on `application` can reach ai-api regardless of labels.
+    # NO `command:` KEY, AND ADDING ONE NOW BREAKS SOMETHING. There are THREE static-configuration
+    # loaders — FILE, then FLAGS, then ENV — and they are MUTUALLY EXCLUSIVE: Traefik stops at the
+    # first one that returns anything and discards the rest entirely. Re-measured against
+    # traefik:v3.7 = v3.7.10, image digest
+    # sha256:9c3b91d5fb7770853ca5c1124a23c34bf2d9b47ffaebeab2614cbaf410dcb2ac, on 2026-08-07:
+    #
+    #   file loads OK   -> flags AND env are DISCARDED. Measured in both directions:
+    #                      TRAEFIK_PROVIDERS_DOCKER_EXPOSEDBYDEFAULT=true against a file that says
+    #                      false -> still 404; =false against a file that omits it -> still 200.
+    #                      Also `--certificatesresolvers.le.acme.*` against a file with no resolver
+    #                      block -> no acme provider starts at all (that is the compose.prod.yaml
+    #                      bug, fixed there).
+    #   file is a DIR / zero bytes / unparseable / truncated so `docker:` has a null value
+    #                   -> Traefik EXITS 1 before serving anything ("is a directory",
+    #                      "no configuration found in file", "yaml: line 1: did not find expected
+    #                      key", "providers cannot be a standalone element"). With
+    #                      `restart: unless-stopped` that is a crash-loop, not a permissive edge.
+    #                      This is the case a bind mount with a MISSING SOURCE produces, because
+    #                      Docker creates a DIRECTORY at the destination. Neither Compose's
+    #                      `create_host_path: false` nor a top-level `configs:` prevents it —
+    #                      both were measured on Compose v5.3.1 and both still yield the directory.
+    #   the mount line is DELETED from this file, and there are NO flags
+    #                   -> TRAEFIK_* becomes the ENTIRE static configuration, and it is live:
+    #                      measured, a single sub-key (`TRAEFIK_PROVIDERS_DOCKER_WATCH=true`, with
+    #                      nothing else) instantiates the Docker provider with exposedByDefault
+    #                      TRUE and defaultRule Host(`{{normalize .Name}}`), and an unlabelled
+    #                      container on the same network then answers a spoofed Host header with
+    #                      200. With the two latches below present it answers 404.
+    #   the mount line is deleted AND some flag exists
+    #                   -> the FLAG loader wins and env is discarded too. Measured:
+    #                      TRAEFIK_PROVIDERS_DOCKER_WATCH=true plus a single `--log.level=INFO`
+    #                      starts no Docker provider at all. THIS IS WHY THERE IS NO `command:`
+    #                      KEY: one flag anywhere, in this file or an overlay, silently disarms
+    #                      the env latches below.
+    #   no file, no flags, no env
+    #                   -> the Docker provider is not enabled at all, the edge answers 404 on
+    #                      every host, and `docker logs` returns ZERO LINES. Silent total outage.
+    #
+    # So absence never fails open, but the env channel is dormant rather than dead — which is why
+    # it carries the same two latches as the file.
+    #
+    # This block used to hold `--certificatesresolvers.le.acme.email=${ACME_EMAIL}` with a
+    # comment explaining that a mounted file cannot be interpolated. The premise was right and
+    # the conclusion was wrong: the flag was never applied either, so the ACME account has been
+    # registering with NO CONTACT ADDRESS this whole time — precisely the failure the comment
+    # was written to prevent. `email` now lives in traefik.yaml itself, as a committed
+    # placeholder that bootstrap/deploy rewrites in place (the same pattern as
+    # seaweedfs/identities.json and valkey/users.acl).
+    #
+    # Anything that must vary per environment is a DOCKER LABEL instead — labels are dynamic
+    # configuration, Compose interpolates them, and Traefik honours them. That is how
+    # ${CERT_RESOLVER} selects the production or staging ACME directory on each router above.
+    #
+    # ---------------------------------------------------------------------------------------
+    # LATCH 3: the same two latches on the channel that is live when the file is not.
+    # ---------------------------------------------------------------------------------------
+    # Both keys are PROVABLY INERT while traefik.yaml loads (first measurement above), so they
+    # cannot change the behaviour of a working stack. They are NOT decorative, though: the moment
+    # the file is gone and no flag exists, TRAEFIK_* is the whole static configuration, and
+    # measured, ANY single `TRAEFIK_PROVIDERS_DOCKER_*` sub-key is enough to instantiate the
+    # Docker provider with exposedByDefault TRUE. These two turn that state from "unlabelled
+    # containers answer a spoofed Host header with 200" into "…answer 404".
+    #
+    # DO NOT DELETE THEM AS DEAD CONFIG, and do not add a `command:` key next to them — a single
+    # flag makes the flag loader win and discards this block wholesale (measured).
+    environment:
+      TRAEFIK_PROVIDERS_DOCKER_EXPOSEDBYDEFAULT: "false"
+      TRAEFIK_PROVIDERS_DOCKER_CONSTRAINTS: "Label(`kb.edge`,`true`)"
+    volumes:
+      - ./traefik/traefik.yaml:/etc/traefik/traefik.yaml:ro
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
+      - acme:/acme
+      # :ro limits nothing about the Docker API but blocks replacement of the socket itself.
+      # Traefik is a root-equivalent process on the public internet; prefer a socket proxy when
+      # you have one.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    # ---------------------------------------------------------------------------------------
+    # THIS IS NOT A LIVENESS PROBE. READ THE NEXT PARAGRAPH BEFORE TREATING GREEN AS "SERVING".
+    # ---------------------------------------------------------------------------------------
+    # There is still no `ping` endpoint and no Traefik API: a real liveness probe would need an
+    # extra entrypoint, and the edge's availability is measured from OUTSIDE, not from inside its
+    # own netns. What this probe asserts is narrower and is the thing nothing else checks — that
+    # the static configuration Traefik booted from is the file we shipped, with both latches in
+    # it. It answers "is the edge configured", not "is the edge answering". A wedged Traefik will
+    # report healthy here; a dead one exits and `restart:` handles that.
+    #
+    # It exists because exactly two states are otherwise invisible:
+    #   * the volume line above is deleted or retargeted -> Traefik boots on flags/env, routes
+    #     nothing, and logs ZERO lines. Nothing in `docker compose ps` says why the edge 404s.
+    #   * someone edits traefik.yaml and removes both latches -> measured, an unlabelled container
+    #     on `edge` then answers a spoofed Host header with 200. Traefik logs nothing about it,
+    #     because from Traefik's point of view that is a valid configuration.
+    # The `grep`s below are pinned to the two latch lines in traefik.yaml. If you reformat those
+    # lines, this goes red — that coupling is deliberate and is noted beside them in that file.
+    #
+    # Safe to run unhealthy: nothing `depends_on` traefik, and traefik does not route ITSELF
+    # (kb.edge:"false"), so an unhealthy verdict cannot pull anything out of the edge. That is the
+    # opposite of the usual readiness hazard and is why a config assertion is acceptable here.
+    #
+    # start_period is 5s, not a grace window for slow boot: the probe reads one local file and has
+    # no dependency, so it cannot flap on a transient blip, and the FIRST success ends the period
+    # early regardless. It only covers container-start jitter.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          [ -f /etc/traefik/traefik.yaml ]
+          && grep -qE '^[[:space:]]*exposedByDefault:[[:space:]]*false' /etc/traefik/traefik.yaml
+          && grep -qE '^[[:space:]]*constraints:[[:space:]]*"Label\(`kb\.edge`,`true`\)"' /etc/traefik/traefik.yaml
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    stop_grace_period: 150s   # > lifeCycle.graceTimeOut (120s) in traefik.yaml
+    restart: unless-stopped
+    labels:
+      kb.edge: "false"        # Traefik does not route itself. The dashboard/API stays off entirely.
+
+  # =============================================================================================
+  # WEB TIER
+  # =============================================================================================
+  web:
+    build:
+      context: ../../apps/web
+      dockerfile: Dockerfile
+      # `workspace` is a NAMED BUILD CONTEXT pointing at the repo root. apps/web is a pnpm
+      # workspace member: the lockfile, pnpm-workspace.yaml and packages/{contracts,design-tokens}
+      # all live above its own context, and a Dockerfile cannot COPY outside its context. Keeping
+      # the primary context at apps/web (rather than making the repo root the context) is what
+      # keeps apps/web/.dockerignore authoritative and stops the whole monorepo being uploaded.
+      additional_contexts:
+        workspace: ../..
+      # BUILD ARGS, NOT env_file. NEXT_PUBLIC_API_ORIGIN is INLINED INTO THE BUNDLE by the Next
+      # compiler, so it is fixed at build time and env/web.env cannot change it afterwards.
+      # Omitting it is not a build failure of the obvious kind — Next inlines the empty string and
+      # the bundle calls `undefined` origins, with CORS errors in a browser days later as the only
+      # symptom. It is a public origin, not a secret.
+      #
+      # EXACTLY ONE KEY. apps/web/src/lib/env.ts allow-lists NEXT_PUBLIC_API_ORIGIN and nothing
+      # else, and next.config.ts fails the build on any other NEXT_PUBLIC_* it finds in the
+      # environment. Adding app/chat origins here does not configure them — it breaks the build.
+      args:
+        NEXT_PUBLIC_API_ORIGIN: https://api.${DOMAIN}
+    image: knowledgebot/web:${VERSION:-dev}
+    # `edge` ONLY — ratified as ADR-013, NOT an oversight and NOT §24.3 as written.
+    # apps/web has no Server Actions and produces no org-scoped server byte, so it has nothing it
+    # could legitimately ask ai-api for. On `application`, "clients never reach FastAPI" would be
+    # a convention enforced by nobody: one route handler doing fetch('http://ai-api:8000/...')
+    # and it is false, with no network to stop it. Restoring `application` here is a regression.
+    # `observability` is not needed either, and THE REASON IS NOT "TRAEFIK ROUTES OTLP" — this
+    # comment used to say that, and it described a design ADR-025 exists to avoid. There is no
+    # public OTLP router and there must not be one: an unauthenticated OTLP receiver on the edge is
+    # a storage-exhaustion surface in front of the component every other service's telemetry flows
+    # through. What is actually implemented:
+    #   * the BROWSER posts SAME-ORIGIN to /telemetry/v1/traces, handled by a Next route handler
+    #     (apps/web/src/app/telemetry/v1/traces/route.ts + proxy.ts) that forwards it server-side.
+    #     No CORS, no Traefik router for OTLP, and the browser never learns the Collector exists.
+    #   * the NEXT SERVER exports to http://otel-collector:4318 directly, which resolves because
+    #     otel-collector is on `edge` too.
+    # Both paths are satisfied by `edge` alone. See the otel-collector service below.
+    networks: [edge]
+    env_file: [./env/web.env]
+    healthcheck:
+      # `node`, not `curl` — the Next standalone runtime image has no curl, and a CMD curl probe
+      # exits 127 forever while every service_healthy dependent hangs until its own timeout.
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/',r=>process.exit(r.statusCode<400?0:1)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    stop_grace_period: 30s
+    restart: unless-stopped
+    labels:
+      kb.edge: "true"
+      traefik.enable: "true"
+      traefik.http.services.web.loadbalancer.server.port: "3000"
+      # Two deliberately separate ORIGINS from one container. Hosted chat renders model-generated
+      # Markdown — the highest-risk sink in the product — so it must not share an origin with the
+      # admin console's session cookie.
+      traefik.http.routers.admin.rule: "Host(`app.${DOMAIN}`)"
+      traefik.http.routers.admin.entrypoints: websecure
+      traefik.http.routers.admin.tls.certresolver: ${CERT_RESOLVER:-le-staging}
+      traefik.http.routers.admin.priority: "10"
+      traefik.http.routers.admin.middlewares: "compress-safe@docker"
+      traefik.http.routers.hostedchat.rule: "Host(`chat.${DOMAIN}`)"
+      traefik.http.routers.hostedchat.entrypoints: websecure
+      traefik.http.routers.hostedchat.tls.certresolver: ${CERT_RESOLVER:-le-staging}
+      traefik.http.routers.hostedchat.priority: "10"
+      traefik.http.routers.hostedchat.middlewares: "compress-safe@docker"
+      # excludedcontenttypes is what keeps SSE unbuffered. A bare `compress` withholds the head of
+      # the stream until minResponseBodyBytes (1024) exists, then ships it compressed and
+      # chunk-buffered — the answer arrives as one blob and nothing logs a thing.
+      traefik.http.middlewares.compress-safe.compress.excludedcontenttypes: "text/event-stream"
+
+  sdk:
+    build:
+      context: ../../apps/widget
+      dockerfile: Dockerfile
+      additional_contexts:
+        workspace: ../..
+      # apps/widget/vite.config.ts REQUIRES one of these pairs and throws without it — the widget
+      # build is the one place in this file where a missing build arg fails loudly rather than
+      # silently, and deliberately so: a loader built with an unset domain ships the literal
+      # string "https://undefined" onto a customer's live page and every session mint fails CORS.
+      # The comment in vite.config.ts already claims "apps/widget/Dockerfile already passes" these;
+      # this block is what makes that true, since the Dockerfile's ARGs carry no defaults.
+      # WIDGET_DOMAIN is a SEPARATE REGISTRABLE DOMAIN, not a subdomain of ${DOMAIN}.
+      args:
+        KB_WIDGET_ORIGIN: https://${WIDGET_DOMAIN}
+        KB_API_ORIGIN: https://api.${DOMAIN}
+        KB_VERSION: ${VERSION:-dev}
+    image: knowledgebot/widget:${VERSION:-dev}
+    # Directory is apps/widget; the Compose service is `sdk` (§24.2 names it that). The naming
+    # seam is deliberate and documented — do not "fix" one to match the other.
+    networks: [edge]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    stop_grace_period: 30s
+    restart: unless-stopped
+    labels:
+      kb.edge: "true"
+      traefik.enable: "true"
+      traefik.http.services.sdk.loadbalancer.server.port: "8080"
+      # A SEPARATE REGISTRABLE DOMAIN, not a subdomain of ${DOMAIN}. The admin session cookie is
+      # scoped to ${DOMAIN}; anything of ours on the widget's eTLD+1 makes a widget iframe on a
+      # hostile customer page same-site with a real admin credential, and CHIPS cannot help
+      # because the cookie is not the widget's.
+      traefik.http.routers.widget.rule: "Host(`${WIDGET_DOMAIN}`)"
+      traefik.http.routers.widget.entrypoints: websecure
+      traefik.http.routers.widget.tls.certresolver: ${CERT_RESOLVER:-le-staging}
+      traefik.http.routers.widget.priority: "10"
+      traefik.http.routers.widget.middlewares: "compress-safe@docker"
+
+  # =============================================================================================
+  # LARAVEL CONTROL PLANE — one image, six services, selected by `command:`
+  # =============================================================================================
+  laravel-api:
+    build: *core-api-build
+    image: knowledgebot/core-api:${VERSION:-dev}
+    command: ["kb-serve", "api"]        # nginx + the `api` FPM pool, both from php/ inside the image
+    # CLOSED-SET INVARIANT (1 of 2):
+    # `laravel-api` and `laravel-api-stream` are EXACTLY the services on both `edge` AND
+    # `application`. That set is closed — two, no more, no fewer. A third service there is the
+    # trust boundary being dissolved one convenience at a time, and it is a finding rather than a
+    # variation. CI asserts set equality, so a missing one fails too.
+    networks: [edge, application, data, observability]
+    env_file: [./env/core-api.env]
+    # k1/k2 to SIGN outbound internal calls; c1/c2 to VERIFY FastAPI's callbacks, which land on
+    # POST /internal/v1/callbacks/* — this is the only Laravel service that receives them.
+    # app_key/app_previous_keys are on EVERY Laravel service, not just the request-serving ones:
+    # anything that boots the framework decrypts. Sessions and cookies here, `encrypted:` casts
+    # everywhere.
+    secrets: [app_key, app_previous_keys,
+              kek, hmac_key_k1, hmac_key_k2, callback_hmac_key_c1, callback_hmac_key_c2,
+              postgres_password, s3_secret_key, valkey_kb_core_password]
+    healthcheck:
+      # `php -r`, not curl: the PHP image is slim and has no curl. Laravel's /up health route.
+      test: ["CMD", "php", "-r", "exit(@file_get_contents('http://127.0.0.1:8080/up') === false ? 1 : 0);"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    stop_grace_period: 30s
+    depends_on:
+      postgres: {condition: service_healthy}
+      valkey-core: {condition: service_healthy}
+      # depends_on orders containers and says nothing about schema. Without this gate the stack is
+      # healthy and the app 500s on a missing table.
+      laravel-migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+    labels:
+      kb.edge: "true"
+      traefik.enable: "true"
+      traefik.http.services.api.loadbalancer.server.port: "8080"
+      traefik.http.routers.api.rule: "Host(`api.${DOMAIN}`)"
+      traefik.http.routers.api.entrypoints: websecure
+      traefik.http.routers.api.tls.certresolver: ${CERT_RESOLVER:-le-staging}
+      traefik.http.routers.api.priority: "10"
+      traefik.http.routers.api.middlewares: "compress-safe@docker"
+      # Router precedence defaults to RULE LENGTH, so adding `&& Method(...)` to one router can
+      # silently push it ahead of another. Every router sharing a host sets `priority` explicitly.
+      #
+      # Nothing legitimate reaches /internal/* or /horizon through the edge: FastAPI calls Laravel
+      # over `application`, and Horizon renders every tenant's job payloads side by side.
+      traefik.http.routers.api-denied.rule: "Host(`api.${DOMAIN}`) && (PathPrefix(`/internal`) || PathPrefix(`/horizon`))"
+      traefik.http.routers.api-denied.entrypoints: websecure
+      traefik.http.routers.api-denied.tls.certresolver: ${CERT_RESOLVER:-le-staging}
+      traefik.http.routers.api-denied.priority: "1000"
+      traefik.http.routers.api-denied.middlewares: "ops-only@docker"
+      traefik.http.middlewares.ops-only.ipallowlist.sourcerange: "127.0.0.1/32"   # v3 name; v2 was ipwhitelist
+      # The edge limits BYTES, not identities. Rate limiting stays in Laravel, which keys on
+      # organization+bot+session+IP together; Traefik's rateLimit keys on the remote address alone,
+      # which throttles one NAT'd office for one abuser and is evaded from a second IP.
+      # `buffering` is on THIS router only and must never touch a streaming route.
+      traefik.http.routers.api-upload.rule: "Host(`api.${DOMAIN}`) && PathPrefix(`/api/v1/sources/upload`)"
+      traefik.http.routers.api-upload.entrypoints: websecure
+      traefik.http.routers.api-upload.tls.certresolver: ${CERT_RESOLVER:-le-staging}
+      traefik.http.routers.api-upload.priority: "900"
+      traefik.http.routers.api-upload.middlewares: "upload-cap@docker"
+      traefik.http.middlewares.upload-cap.buffering.maxrequestbodybytes: "104857600"
+      # The iframe DOCUMENT is served by Laravel, on the widget's registrable domain, because its
+      # CSP frame-ancestors is derived per bot from the live allow-list on every request — so it
+      # is neither a static file nor a Traefik `headers` middleware.
+      traefik.http.routers.widget-embed.rule: "Host(`${WIDGET_DOMAIN}`) && PathPrefix(`/embed`)"
+      traefik.http.routers.widget-embed.entrypoints: websecure
+      traefik.http.routers.widget-embed.tls.certresolver: ${CERT_RESOLVER:-le-staging}
+      traefik.http.routers.widget-embed.priority: "100"
+      traefik.http.routers.widget-embed.service: "api@docker"
+
+  laravel-api-stream:
+    build: *core-api-build
+    image: knowledgebot/core-api:${VERSION:-dev}
+    command: ["kb-serve", "stream"]     # the `stream` FPM pool + nginx with buffering off
+    # Second member of the closed edge∩application set. It exists because ONE STREAMED ANSWER PINS
+    # ONE FPM CHILD FOR ITS ENTIRE LIFE: on a shared pool a burst of chats exhausts pm.max_children
+    # and takes the admin dashboard down while the app looks idle.
+    networks: [edge, application, data, observability]
+    env_file: [./env/core-api.env]
+    # The opt-out that makes the next comment TRUE rather than aspirational. Without it the shared
+    # env_file still points at c1/c2, config/services.php resolves them on every boot, and this
+    # container cannot start at all — so "it holds no callback key" would have been enforced by a
+    # crash instead of by configuration.
+    environment:
+      <<: *no-callback-keys
+    # k1/k2 only. This service signs the chat request outbound and relays the stream; it never
+    # verifies a callback, so it holds no callback key — a compromise here cannot forge one.
+    # app_key is NOT narrowable the same way: it decrypts the session cookie on every request and
+    # the `encrypted:` provider credential it decrypts-and-attaches per chat call.
+    secrets: [app_key, app_previous_keys,
+              kek, hmac_key_k1, hmac_key_k2, postgres_password, s3_secret_key,
+              valkey_kb_core_password]
+    healthcheck:
+      test: ["CMD", "php", "-r", "exit(@file_get_contents('http://127.0.0.1:8080/up') === false ? 1 : 0);"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    # 150s > the stream pool's request_terminate_timeout (130s) > the chat deadline (60s) plus
+    # Laravel's hard-coded +55_000 ms relay margin. A shorter grace SIGKILLs a live answer before
+    # its usage row is finalized, which is the one row the tenant is billed from.
+    stop_grace_period: 150s
+    depends_on:
+      postgres: {condition: service_healthy}
+      valkey-core: {condition: service_healthy}
+      laravel-migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+    labels:
+      kb.edge: "true"
+      traefik.enable: "true"
+      traefik.http.services.stream.loadbalancer.server.port: "8080"
+      # PathRegexp, because v3 removed {id}-style placeholders from PathPrefix and PathPrefix is
+      # no longer a regex.
+      traefik.http.routers.stream.rule: "Host(`api.${DOMAIN}`) && PathRegexp(`^/api/v1/chat/[^/]+/messages$`)"
+      traefik.http.routers.stream.entrypoints: websecure
+      traefik.http.routers.stream.tls.certresolver: ${CERT_RESOLVER:-le-staging}
+      traefik.http.routers.stream.priority: "950"
+      # NO MIDDLEWARES AT ALL. This is the one router serving text/event-stream: `compress`
+      # without an exclusion buffers the head, and `buffering` reads the whole response first.
+
+  laravel-worker:
+    build: *core-api-build
+    image: knowledgebot/core-api:${VERSION:-dev}
+    command: ["php", "artisan", "horizon"]
+    environment:
+      HORIZON_ENVIRONMENT: worker-fast
+      # No callback keys. Horizon SIGNS outbound internal calls with k1/k2; nothing inbound reaches
+      # a worker, so it never verifies a callback. The shared env_file points at c1/c2 regardless,
+      # and config/services.php resolves them on every framework boot — so without this opt-out the
+      # container cannot start, and the narrow `secrets:` list below would be unreachable rather
+      # than enforced.
+      <<: *no-callback-keys
+    networks: [application, data, observability]
+    env_file: [./env/core-api.env]
+    # Horizon dispatches signed internal calls, so it signs with k1/k2. No callback key: nothing
+    # inbound reaches a worker.
+    # app_key is unavoidable here even though no HTTP session exists: a queued job payload carries
+    # serialized models whose `encrypted:` attributes are decrypted when the job is handled, so a
+    # worker without the key fails at `handle()`, after the job has already been reserved.
+    secrets: [app_key, app_previous_keys,
+              kek, hmac_key_k1, hmac_key_k2, postgres_password, s3_secret_key,
+              valkey_kb_core_password]
+    healthcheck:
+      test: ["CMD", "php", "artisan", "horizon:status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    # 180s > the Horizon supervisor timeout for the `valkey` connection (120s) + SIGKILL settle.
+    # The container's default is 10s, which SIGKILLs a job mid-UPDATE — exactly the state the
+    # idempotency machinery is paying to avoid.
+    stop_grace_period: 180s
+    depends_on:
+      postgres: {condition: service_healthy}
+      valkey-core: {condition: service_healthy}
+      laravel-migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+    labels:
+      # Horizon's dashboard renders every tenant's job payloads, tags and exception traces side by
+      # side. It gets no router and never joins `edge` — same rule as ai-api.
+      kb.edge: "false"
+
+  laravel-worker-long:
+    build: *core-api-build
+    image: knowledgebot/core-api:${VERSION:-dev}
+    command: ["php", "artisan", "horizon"]
+    environment:
+      HORIZON_ENVIRONMENT: worker-long
+      # Same as laravel-worker: signs with k1/k2, verifies nothing, so no callback key.
+      <<: *no-callback-keys
+    # Separate container, separate connection: a 20-minute export must not starve ingestion
+    # submission behind it in one FIFO list, and `retry_after` is a CONNECTION setting, so two
+    # budgets need two connections.
+    networks: [application, data, observability]
+    env_file: [./env/core-api.env]
+    # Horizon dispatches signed internal calls, so it signs with k1/k2. No callback key: nothing
+    # inbound reaches a worker.
+    # app_key is unavoidable here even though no HTTP session exists: a queued job payload carries
+    # serialized models whose `encrypted:` attributes are decrypted when the job is handled, so a
+    # worker without the key fails at `handle()`, after the job has already been reserved.
+    secrets: [app_key, app_previous_keys,
+              kek, hmac_key_k1, hmac_key_k2, postgres_password, s3_secret_key,
+              valkey_kb_core_password]
+    healthcheck:
+      test: ["CMD", "php", "artisan", "horizon:status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    stop_grace_period: 1560s   # > the `valkey-long` supervisor timeout (1500s) + settle
+    depends_on:
+      postgres: {condition: service_healthy}
+      valkey-core: {condition: service_healthy}
+      laravel-migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+    labels:
+      kb.edge: "false"
+
+  laravel-scheduler:
+    build: *core-api-build
+    image: knowledgebot/core-api:${VERSION:-dev}
+    command: ["php", "artisan", "schedule:work"]
+    # Exactly ONE replica, forever. Two schedulers for one schedule means duplicate ticks, and
+    # onOneServer() silently does nothing without a shared cache lock (which lives on valkey-core).
+    networks: [application, data, observability]
+    env_file: [./env/core-api.env]
+    # The scheduler DISPATCHES; the worker that pops the job is what signs it, reads object storage
+    # and decrypts a provider credential. So the same four opt-outs as laravel-migrate, for the same
+    # reason and matching the same four absences from `secrets:` below.
+    environment:
+      <<: [*no-kek, *no-s3-key, *no-signing-keys, *no-callback-keys]
+    # No signing key: the scheduler only enqueues, and the worker that pops the job is what signs.
+    # It DOES need Valkey — onOneServer() and withoutOverlapping() are cache locks on valkey-core,
+    # and with `user default off` an unauthenticated client cannot take one. A scheduler that
+    # cannot lock is a scheduler whose every sweep runs on every replica.
+    # It DOES need app_key: `schedule:work` boots the full framework, and the sweeps it dispatches
+    # hydrate models with `encrypted:` attributes. A scheduler missing the key throws on the first
+    # due task rather than at boot, so the symptom is a schedule that silently stops.
+    secrets: [app_key, app_previous_keys, postgres_password, valkey_kb_core_password]
+    # No healthcheck: `schedule:work` exposes nothing to probe, and the real liveness signal is
+    # kb_internal_scheduler_tick_timestamp_seconds — a gauge the always-scraped API exports from a
+    # PostgreSQL row seeded in the migration, so a scheduler that never started reads as an ancient
+    # timestamp rather than a missing series. You cannot threshold-alert a series that never existed.
+    stop_grace_period: 120s
+    depends_on:
+      postgres: {condition: service_healthy}
+      valkey-core: {condition: service_healthy}
+      laravel-migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+    labels:
+      kb.edge: "false"
+
+  laravel-migrate:
+    build: *core-api-build
+    image: knowledgebot/core-api:${VERSION:-dev}
+    # --isolated takes an atomic lock so a scaled-out `up` cannot run migrations twice and deadlock.
+    command: ["php", "artisan", "migrate", "--force", "--isolated"]
+    restart: "no"              # one-shot. `unless-stopped` here is an infinite migration loop.
+    # `observability` IS A BOOT-LATENCY CONTROL HERE, NOT A TELEMETRY PREFERENCE — do not "tidy" it
+    # back to [data] on the grounds that a migration needs nothing but PostgreSQL.
+    # env/core-api.env:194 sets OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318 for ALL SIX
+    # core-api containers. The other five carry `observability`; this one-shot did not, so its
+    # shutdown flush resolved a name against a network the collector is not on. The evidence is in
+    # every one of the eight runs preserved in the container's own log (Aug 7 and Aug 10):
+    #     cURL error 6: Could not resolve host: otel-collector … Export retry limit exceeded
+    # OTEL_EXPORTER_OTLP_TIMEOUT bounds ONE HTTP attempt; it does not bound the retry loop, and a
+    # failed NAME LOOKUP is charged once per attempt. Docker's embedded DNS answers NXDOMAIN in
+    # microseconds, so the cost measured on this host is 0.6–0.8 s — but the same loop is charged
+    # the daemon's upstream resolver latency wherever that resolver is slow or unreachable, and
+    # ~ten services gate on this container via service_completed_successfully, so the whole stack
+    # boot inherits whatever it costs.
+    #
+    # THE FIX IS A ROUTE, NOT A MUTE. Setting OTEL_SDK_DISABLED / *_EXPORTER=none here would also
+    # stop the retry, and it was rejected: it makes the one container every other service waits on
+    # the only one that emits no span — deleting the signal you need the next time boot is slow —
+    # and it puts a second, contradicting OTLP configuration beside the shared env file that six
+    # services read.
+    #
+    # COST: none that a gate or a threat model can see. `observability` is `internal: true`, so this
+    # grants no egress. It reaches exactly one listener — the collector's OTLP receiver, which holds
+    # no credential and returns no data — already reachable by five sibling containers running this
+    # identical image. It touches neither `edge` nor `application`, so gates.yml `compose-invariants`
+    # check (1) (edge ∩ application == {laravel-api, laravel-api-stream}) is unmoved in both
+    # directions, and check (5) still sees valkey-core as the only non-app-tier data↔application span.
+    networks: [data, observability]   # PostgreSQL and the Collector. Nothing else, deliberately.
+    env_file: [./env/core-api.env]
+    # This one-shot runs schema DDL and nothing else: no object storage, no internal call, no
+    # credential re-encryption. Four opt-outs, matching the four secrets absent from the list below.
+    # THE DAY A DATA MIGRATION RE-ENCRYPTS AN `encrypted:` COLUMN, `*no-kek` comes off here and
+    # `kek` goes onto `secrets:` in the same commit — `config('kb.kek')` being null in the meantime
+    # is what makes that a loud failure rather than a silent write of unwrapped material.
+    environment:
+      <<: [*no-kek, *no-s3-key, *no-signing-keys, *no-callback-keys]
+    # `migrate --isolated` takes its atomic lock through the DEFAULT CACHE STORE, which is
+    # valkey-core. Without a Valkey credential the lock cannot be taken and the one-shot fails —
+    # which then blocks every service gated on service_completed_successfully. valkey-core is
+    # reachable from `data`; no signing key is needed because this container makes no internal call.
+    # app_key is here because `artisan migrate` boots the framework — an unset APP_KEY aborts the
+    # console kernel before the first migration runs, and the one-shot then fails the
+    # service_completed_successfully gate every other Laravel service waits on. Data migrations that
+    # re-encrypt an `encrypted:` column need it for the same reason.
+    secrets: [app_key, app_previous_keys, postgres_password, valkey_kb_core_password]
+    stop_grace_period: 300s    # never SIGKILL a migration mid-DDL
+    depends_on:
+      postgres: {condition: service_healthy}
+    labels:
+      kb.edge: "false"
+
+  # =============================================================================================
+  # FASTAPI DATA PLANE — one image, four runtime targets, six services
+  # =============================================================================================
+  ai-api:
+    build: {context: ../../services/ai-service, dockerfile: Dockerfile, target: runtime}
+    image: knowledgebot/ai-service:${VERSION:-dev}
+    command: ["fastapi", "run", "--host", "0.0.0.0", "--port", "8000", "app/main.py"]
+    # NEVER `edge`. There is no router and no URL to guess, and no `ports:` key in this file or in
+    # ANY overlay — a debug port here is a complete authorization bypass, because the internal API
+    # is built to trust its caller by design.
+    networks: [application, data, observability]
+    environment:
+      # THE REASON FOR THIS CHANGED WHEN THE LOCAL MODELS LEFT — do not re-derive the old one.
+      # It used to be memory: each forked Uvicorn worker ran lifespan and loaded its own embedder
+      # (~2.3 GB) and reranker (~2.3 GB). Those are provider API calls now and ai-api loads no
+      # model at all. It stays at 1 for a weaker, still-real reason: each worker gets its own
+      # lifespan, so N workers open N Qdrant and N psycopg pools against limits sized for one.
+      # Raising it is now a legitimate question, but it must be answered together with the pool
+      # sizes rather than alone. WEB_CONCURRENCY silently sets --workers even with no flag passed.
+      WEB_CONCURRENCY: "1"
+    env_file: [./env/ai-service.env]
+    # ALL FOUR signing keys, on every ai-service container, and this is not over-provisioning:
+    # app/core/keys.py loads BOTH directions at startup and refuses to boot unless the active
+    # request id (k1) AND the active callback id (c1) both have material. k2/c2 are what make the
+    # rotation window survivable — the ring tolerates extra ids, so both halves of a rotation can
+    # be mounted before either side flips its active id.
+    secrets: [hmac_key_k1, hmac_key_k2, callback_hmac_key_c1, callback_hmac_key_c2,
+              postgres_password, s3_secret_key, qdrant_api_key, valkey_kb_ai_password]
+    volumes:
+      - models:/models:ro
+    healthcheck:
+      # No curl in the slim runtime image — probe with the interpreter that is definitely there.
+      # /health/ready, NOT /health/live: readiness means the datastores and the provider-credential
+      # path are usable. It no longer waits for a local model, because there is no longer one.
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/health/ready')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      # 300s -> 30s. THE OLD WINDOW WAS SIZED FOR A COLD MODEL LOAD THAT NO LONGER HAPPENS, and
+      # leaving it was not merely untidy: start_period is NOT a grace window. Failures inside it
+      # do not count toward `retries`, but the FIRST SUCCESS ENDS THE PERIOD EARLY and every
+      # failure after that counts. An oversized window therefore buys nothing once the service
+      # answers in seconds, while delaying by five minutes the moment a genuinely broken container
+      # is first reported unhealthy.
+      #
+      # 30s covers interpreter start plus the first Qdrant/psycopg/Valkey connections with margin.
+      # It must NOT be tuned below the real cold start: readiness that flaps pulls the container
+      # out of every `service_healthy` dependent, and Docker will not restart it (`restart:`
+      # reacts to exit, not health).
+      start_period: 30s
+      start_interval: 5s     # requires Engine >= 25.0
+    # 90s > the 60 s chat deadline, so an in-flight stream finalizes its usage row instead of
+    # being SIGKILLed with the provider tokens already spent and unbilled.
+    stop_grace_period: 90s
+    deploy:
+      resources:
+        limits:
+          # 8G -> 2G. The old figure was "embedder ~2.3 GB + reranker ~2.3 GB + heap +
+          # fragmentation"; both models are gone and ai-api now loads none — parsing (and with it
+          # docling's layout model) lives on the ingestion worker, not here. What remains is an
+          # I/O-bound ASGI process: httpx to the providers, a psycopg pool, a Qdrant client.
+          #
+          # ai-api is NOT a Celery worker, so there is no worker_max_memory_per_child under this
+          # number and the recycle-versus-cgroup-killer hazard does not apply to it. That hazard is
+          # why the two workers below did NOT get the same treatment.
+          memory: 2G
+    depends_on:
+      # `service_started`, not `service_healthy`: the Qdrant image ships no shell utilities, so it
+      # carries no healthcheck (see the qdrant service) and `service_healthy` against a service
+      # with no healthcheck is an invalid model. The real gate is ai-api's own /health/ready,
+      # which checks Qdrant — so the dependency is asserted, just one layer up.
+      qdrant: {condition: service_started}
+      valkey-core: {condition: service_healthy}
+      laravel-migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+    labels:
+      # traefik-routing's second latch. providers.docker.exposedByDefault:false is the first, and
+      # one latch is not enough: `traefik.enable=true` is the most copy-pasted line in the
+      # ecosystem, and the moment ai-api carries it every authorization, quota and credential
+      # check in Laravel has a bypass.
+      kb.edge: "false"
+
+  ai-worker-ingestion:
+    build: {context: ../../services/ai-service, dockerfile: Dockerfile, target: runtime}
+    image: knowledgebot/ai-service:${VERSION:-dev}
+    # --pool=prefork is load-bearing: time limits require SIGUSR1 and the prefork pool. A gevent
+    # or threads pool silently removes the hard time limit the visibility-timeout arithmetic
+    # depends on, and nothing errors.
+    command: ["celery", "-A", "app.worker", "worker", "-Q", "ingest", "-c", "4", "--pool=prefork"]
+    networks: [application, data, observability]
+    # =========================================================================================
+    # THE OVERRIDE env/ai-service.env HAS ALWAYS CLAIMED, AND UNTIL NOW DID NOT EXIST.
+    # =========================================================================================
+    # env/ai-service.env sets `OTEL_SERVICE_NAME=ai-api` with the comment "workers override to
+    # `ai-worker` per container". NOTHING OVERRODE IT. All five ai-service containers
+    # (ai-worker-ingestion / -embedding / -crawl / -evaluation and ai-beat) carry only
+    # `env_file:`, so every span, every metric datapoint and every log line from all five would
+    # have reported `service=ai-api` — the name of the ASGI container they are not.
+    #
+    # This is `environment:`, NOT a second env_file: a key in `environment:` wins over the same
+    # key in `env_file:` for that service, which is exactly the shape already used for
+    # WEB_CONCURRENCY on ai-api and KB_SAMPLES_ROOT on ai-worker-evaluation.
+    #
+    # THE VALUE IS `ai-worker`, NOT `ai-worker-ingestion`, AND THE CATALOG DECIDES THAT — not
+    # taste. `kb-observability-conventions` bounds the `service` label to FOUR values
+    # (`core-api` | `ai-api` | `ai-worker` | `web`); `opentelemetry-instrumentation` repeats the
+    # same closed set against this variable by name. Four distinct per-queue names would answer
+    # "which worker is slow" at the cost of silently widening a label the allow-list unit test
+    # asserts is closed — and that question is already answered without touching `service`: the
+    # allow-list carries `queue` (the 9 named queues) and `task`, so `sum by (queue)` separates
+    # ingest from crawl inside one `service` value. Laravel's queue workers are `core-api` for
+    # the identical reason.
+    #
+    # One variable covers all three signals: app/observability/otel.py builds the Resource from
+    # os.environ["OTEL_SERVICE_NAME"], and app/observability/logging.py reads the SAME variable
+    # first when stamping the `service` field on every JSON line.
+    #
+    # STILL OPEN, AND NOT FIXED HERE (observability-engineer's): with all five collapsed onto one
+    # correct `service`, nothing distinguishes the five CONTAINERS in Tempo or Loki. The standard
+    # answer is a `service.instance.id` resource attribute, and otel/collector.yaml's
+    # transform/metric_labels promotes ONLY `service.name` and `deployment.environment.name`
+    # (resource_to_telemetry_conversion is false), so adding it cannot widen a metric label.
+    # It is not done here because OTEL_RESOURCE_ATTRIBUTES is a single string: setting it
+    # per-container means restating `deployment.environment.name=production` in five places, and
+    # the day someone edits the env file to `staging` the five workers keep reporting
+    # `env=production`. That is a worse defect than the one it fixes. Note also that
+    # otel/collector.yaml's `file_log` receiver sets `include_file_path: false`, so the container
+    # name is not recoverable from the Docker JSON log path either.
+    environment:
+      OTEL_SERVICE_NAME: ai-worker
+    env_file: [./env/ai-service.env]
+    # Both directions: a worker VERIFIES nothing but it SIGNS its progress callbacks into Laravel
+    # with c1, and the key ring refuses to load without material for both active ids.
+    secrets: [hmac_key_k1, hmac_key_k2, callback_hmac_key_c1, callback_hmac_key_c2,
+              postgres_password, s3_secret_key, qdrant_api_key, valkey_kb_ai_password]
+    volumes:
+      - models:/models:ro
+    healthcheck:
+      # Liveness is a heartbeat file touched from a worker-blueprint bootstep in the MAIN process,
+      # so it stays true while every pool child is busy. `celery inspect ping` here would report
+      # unhealthy during a legitimate 15-minute OCR job — and the ingestion worker is the one that
+      # actually has 15-minute jobs (task_time_limit 960), so this service is the reason the file
+      # design wins rather than a preference.
+      <<: *worker-healthcheck
+      # Interpreter + docling import + broker connection. Longest of the four.
+      start_period: 120s
+    # 1320s = task_time_limit 960 + worker_soft_shutdown_timeout 300 + 60 margin.
+    # The honest cost is that a deploy can take 22 minutes; the alternative is corrupting the
+    # thing the deploy was shipping.
+    stop_grace_period: 1320s
+    deploy:
+      resources:
+        limits:
+          # MUST exceed worker_max_memory_per_child, which `celery-workers` puts at 4 000 000 kB
+          # (~3.8 GiB) for this queue. Below it, the cgroup killer fires before Celery recycles
+          # the child, and a SIGNAL-KILLED CHILD REQUEUES WITHOUT INCREMENTING request.retries —
+          # so the job redelivers forever.
+          #
+          # VERIFIED 2026-08-07: that setting is NOT actually set in app/worker/config.py or on
+          # any command line — see the longer note on ai-worker-embedding. 8G is therefore correct
+          # but currently unearned: it is above a ceiling that does not exist yet. Unlike the
+          # embedding worker this one really does load Docling's layout model, TableFormer and
+          # RapidOCR, so 8G is also a genuine working-set figure and stays either way.
+          memory: 8G
+    depends_on:
+      valkey-core: {condition: service_healthy}
+      laravel-migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+    labels:
+      kb.edge: "false"
+
+  ai-worker-embedding:
+    build: {context: ../../services/ai-service, dockerfile: Dockerfile, target: runtime}
+    image: knowledgebot/ai-service:${VERSION:-dev}
+    command: ["celery", "-A", "app.worker", "worker", "-Q", "embed", "-c", "2", "--pool=prefork"]
+    networks: [application, data, observability]
+    environment:
+      # Overrides `OTEL_SERVICE_NAME=ai-api` from env_file. The full reasoning — including why
+      # the value is `ai-worker` and not `ai-worker-embedding` — is on ai-worker-ingestion above.
+      OTEL_SERVICE_NAME: ai-worker
+    env_file: [./env/ai-service.env]
+    # Both directions: a worker VERIFIES nothing but it SIGNS its progress callbacks into Laravel
+    # with c1, and the key ring refuses to load without material for both active ids.
+    secrets: [hmac_key_k1, hmac_key_k2, callback_hmac_key_c1, callback_hmac_key_c2,
+              postgres_password, s3_secret_key, qdrant_api_key, valkey_kb_ai_password]
+    volumes:
+      - models:/models:ro
+    healthcheck:
+      <<: *worker-healthcheck
+      # 300s -> 60s. The old window was "each prefork child loads its own copy of the embedder",
+      # which no longer happens: embedding is a provider API call and this worker loads no model.
+      # Startup is now interpreter + broker connection. 60s keeps margin over a slow first
+      # connection without delaying the first honest unhealthy report by five minutes.
+      start_period: 60s
+    stop_grace_period: 1020s # task_time_limit 660 + worker_soft_shutdown_timeout 300 + 60 margin
+    deploy:
+      resources:
+        limits:
+          # STILL 8G, AND DELIBERATELY NOT LOWERED YET — THIS ONE IS NOT MINE TO CUT ALONE.
+          # This worker no longer loads an embedder, so 8G is far more than it needs.
+          #
+          # UPDATED 2026-08-07, AND THE PREMISE OF THE OLD NOTE WAS WRONG IN A WAY THAT MATTERS.
+          # It said worker_max_memory_per_child "is 6 000 000 kB and is set in the Celery config".
+          # It is not set anywhere. A repo-wide grep finds the setting only in `celery-workers`,
+          # in `docker-compose-stack`, and in Compose comments including this one — never in
+          # app/worker/config.py and never on a Celery command line. So there is NO per-child
+          # recycle ceiling on this worker today, and this 8G cgroup limit is its ONLY memory
+          # backstop. That is the worse half of the pair: a cgroup kill is a SIGNAL kill, and a
+          # signal-killed child REQUEUES WITHOUT INCREMENTING request.retries, so the job
+          # redelivers forever. Only the durable delivery counter stops it.
+          #
+          # `celery-workers` now targets 1 000 000 kB (~954 MiB) for this queue, derived from a
+          # measurement rather than from the removed model: `import app.worker` in this image is
+          # 43 MB RSS, and a child adds an httpx client, a psycopg connection, a Qdrant client
+          # and one in-flight batch.
+          #
+          # Correct order is unchanged and now has a concrete first step: ADD
+          # worker_max_memory_per_child=1000000 to app/worker/config.py — application code this
+          # file's owner does not edit — and only then bring this limit down to roughly 1 GiB
+          # above it (2G). Lowering this first is the exact ordering that breaks.
+          memory: 8G
+    depends_on:
+      valkey-core: {condition: service_healthy}
+      laravel-migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+    labels:
+      kb.edge: "false"
+
+  ai-worker-crawl:
+    build: {context: ../../services/ai-service, dockerfile: Dockerfile, target: runtime-crawl}
+    image: knowledgebot/ai-service-crawl:${VERSION:-dev}
+    command: ["celery", "-A", "app.worker", "worker", "-Q", "crawl", "-c", "8", "--pool=prefork"]
+    # CLOSED-SET INVARIANT (2 of 2):
+    # `ai-worker-crawl` is on [application, observability] and is NEVER on `data`.
+    # WHY: this is the one component that fetches attacker-chosen URLs from *inside* the private
+    # network, so it is the SSRF pivot. Qdrant's REST API needs no credentials — a single coerced
+    # GET or DELETE against http://qdrant:6333 would be unauthenticated index destruction — and
+    # PostgreSQL and object storage sit on the same network. "Only Laravel can reach FastAPI" is a
+    # statement about INGRESS; this worker breaks it from the inside, which is why ingress
+    # isolation alone is half a boundary. It reaches its broker (valkey-core joins `application`
+    # for exactly this) and hands results to ai-api; it speaks to no data store directly.
+    # An egress allow-list denying private ranges is the other half and lives in the app.
+    networks: [application, observability]
+    environment:
+      # Overrides `OTEL_SERVICE_NAME=ai-api` from env_file. The full reasoning — including why
+      # the value is `ai-worker` and not `ai-worker-crawl` — is on ai-worker-ingestion above.
+      OTEL_SERVICE_NAME: ai-worker
+    env_file: [./env/ai-service.env]
+    # No DB password, no S3 key, no Qdrant key — it needs none of them. It does need the signing
+    # keys (it reports page results back through a signed callback) and its broker credential.
+    secrets: [hmac_key_k1, hmac_key_k2, callback_hmac_key_c1, callback_hmac_key_c2,
+              valkey_kb_ai_password]
+    healthcheck:
+      <<: *worker-healthcheck
+      # Chromium and the Playwright bundle make this slower to start than the plain runtime image.
+      start_period: 90s
+    stop_grace_period: 720s      # task_time_limit 360 + worker_soft_shutdown_timeout 300 + 60
+    deploy:
+      resources:
+        limits:
+          memory: 4G             # -c 8 headless Chromium contexts; no worker_max_memory_per_child set
+    depends_on:
+      valkey-core: {condition: service_healthy}
+    restart: unless-stopped
+    labels:
+      kb.edge: "false"
+
+  ai-worker-evaluation:
+    build: {context: ../../services/ai-service, dockerfile: Dockerfile, target: runtime-evaluation}
+    image: knowledgebot/ai-service-eval:${VERSION:-dev}
+    # `maintenance` is co-located here on purpose: the purge, the deletion verification job and the
+    # reapers must not queue behind a 400-page crawl. A source stuck in `Deleting` is a visible
+    # product failure.
+    command: ["celery", "-A", "app.worker", "worker", "-Q", "evaluate,maintenance", "-c", "2", "--pool=prefork"]
+    networks: [application, data, observability]
+    environment:
+      # A LITERAL, and deliberately not `${KB_SAMPLES_ROOT}`. Set-but-EMPTY is a hard failure in
+      # `_default_samples_root()` rather than a fall-through to the walk — `Path("")` is `Path(".")`,
+      # and falling back would hide the misconfiguration on a machine where the walk happens to
+      # work while staying fatal inside this image. That is the right call, and it means a bare
+      # `${KB_SAMPLES_ROOT}` here would turn one unset Compose variable into a failed eval run.
+      # The literal also keeps the variable and the bind mount below agreeing by construction:
+      # change one and you are looking straight at the other.
+      KB_SAMPLES_ROOT: /samples
+      # Overrides `OTEL_SERVICE_NAME=ai-api` from env_file. The full reasoning — including why
+      # the value is `ai-worker` and not `ai-worker-evaluation` — is on ai-worker-ingestion.
+      OTEL_SERVICE_NAME: ai-worker
+    env_file: [./env/ai-service.env]
+    # Both directions: a worker VERIFIES nothing but it SIGNS its progress callbacks into Laravel
+    # with c1, and the key ring refuses to load without material for both active ids.
+    secrets: [hmac_key_k1, hmac_key_k2, callback_hmac_key_c1, callback_hmac_key_c2,
+              postgres_password, s3_secret_key, qdrant_api_key, valkey_kb_ai_password]
+    volumes:
+      - models:/models:ro
+      # ------------------------------------------------------------------------------------------
+      # THE GOLDEN CORPUS IS MOUNTED, NOT BAKED INTO THE IMAGE. THIS IS A DECISION, NOT A DEFAULT.
+      # ------------------------------------------------------------------------------------------
+      # `kb.evaluate.start_run` calls `verify_corpus()` as its FIRST statement and refuses the run
+      # on any digest mismatch, so this worker cannot do its job without `samples/`. The image does
+      # not contain it: `services/ai-service/Dockerfile`'s build context IS `services/ai-service`,
+      # and `samples/` sits at the repository root, outside it. Four reasons this is a `:ro` bind
+      # rather than a widened build context plus a `COPY`:
+      #
+      #   1. samples/README.md: "Corpus and code move independently, and every run records both."
+      #      Baking the corpus into the code image couples exactly the two things that document
+      #      says must not be coupled.
+      #   2. corpus/manifest.toml's own rule is "changing any sha256 requires bumping ../VERSION",
+      #      so every fixture edit is a version bump. Baked in, each one rebuilds and re-pushes a
+      #      3.23 GB image — and the image then pins a corpus version (`corpus-2026.08.1` today)
+      #      that can silently disagree with the checkout beside it.
+      #   3. Widening the context to the repo root would put apps/, packages/, services/core-api
+      #      (with vendor/ when it exists) and infrastructure/docker/secrets/ into the daemon
+      #      transfer for EVERY ai-service build — all three targets — leaving the root
+      #      .dockerignore as the only thing between the eval image and the secrets directory. That
+      #      is a permanent security and cache cost for 900 kB of RUNTIME fixtures. apps/web and
+      #      apps/widget take a `workspace=.` named context because they genuinely need
+      #      pnpm-workspace.yaml and packages/* at BUILD time; this does not.
+      #   4. Precedent in this same file: `corpus-www` (test profile) already binds this exact tree
+      #      read-only, and argues against a COPY for an independent reason of its own.
+      #
+      # `:ro` because samples/ is rag-eval-engineer's directory and nothing here writes to it.
+      #
+      # THE MOUNT ALONE IS NOT ENOUGH — IT NEEDS KB_SAMPLES_ROOT, SET IN `environment:` BELOW.
+      # `start_run` calls `verify_corpus()` with NO argument. Before ADR-030's eval work landed the
+      # root came only from `_default_samples_root()`'s repo-relative walk,
+      # `Path(__file__).resolve().parents[4] / "samples"` — correct in a checkout, and in THIS IMAGE
+      # a crash: the module is at /app/app/evaluation/corpus.py, which has four parents (indices
+      # 0-3), so `parents[4]` raised `IndexError: 4`. MEASURED here, not predicted. It named no
+      # corpus and no path, and it was not a `CorpusUnverified`, so it did not map to `validation`
+      # in kb-error-taxonomy the way that module's docstring says it will.
+      #
+      # No mount point could have fixed that, because the depth is fixed by WORKDIR /app. The fix
+      # was one function in services/ai-service (rag-eval-engineer): precedence is now
+      # explicit argument -> $KB_SAMPLES_ROOT -> the repo-relative walk, and an unresolvable root
+      # raises `CorpusRootUnresolved` (a `CorpusUnverified`) naming the root AND how it was chosen.
+      # The walk is unchanged and is never skipped, so the CI corpus gate keeps working on a bare
+      # checkout with no variable set.
+      - ../../samples:/samples:ro
+    healthcheck:
+      <<: *worker-healthcheck
+      # `import ragas` pulls a large dependency graph before the worker is ready to consume.
+      start_period: 120s
+    stop_grace_period: 720s      # task_time_limit 360 + worker_soft_shutdown_timeout 300 + 60
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    depends_on:
+      valkey-core: {condition: service_healthy}
+      laravel-migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+    labels:
+      kb.edge: "false"
+
+  ai-beat:
+    build: {context: ../../services/ai-service, dockerfile: Dockerfile, target: runtime}
+    image: knowledgebot/ai-service:${VERSION:-dev}
+    # `celery beat`, never `celery worker -B`. Exactly one replica: Celery requires a single
+    # scheduler per schedule, and two means every sweep runs twice a night.
+    command: ["celery", "-A", "app.worker", "beat", "--schedule", "/var/lib/celerybeat/schedule"]
+    # Beat only publishes messages to the broker. It is off `data` because it has no reason to be
+    # there, not because of the crawl-worker rule.
+    networks: [application, observability]
+    environment:
+      # Overrides `OTEL_SERVICE_NAME=ai-api` from env_file. Beat is not a Celery *worker*, but
+      # `service` is a closed set of four and `ai-worker` is the only member it can honestly
+      # take — the same call `core-api` already makes for laravel-scheduler. Its scheduled-task
+      # telemetry (kb_internal_scheduler_tasks_total) is separated by the `task` label, not by
+      # `service`. Full reasoning on ai-worker-ingestion above.
+      OTEL_SERVICE_NAME: ai-worker
+    env_file: [./env/ai-service.env]
+    # Broker credential ONLY. Beat publishes messages and signs nothing, so it holds no signing
+    # key — the workers that pick the message up are what sign the callback.
+    # NOTE for services/ai-service: if the Celery bootstrap ever loads the key ring unconditionally
+    # at import time (app/core/keys.py refuses to start unless BOTH active ids have material), this
+    # container needs hmac_key_k1 + callback_hmac_key_c1 as well, or beat alone fails to boot.
+    secrets: [valkey_kb_ai_password]
+    volumes:
+      # The schedule file MUST persist. An ephemeral one plus any timedelta entry re-fires every
+      # sweep on every restart, so a deploy loop replays the whole schedule.
+      - beat-schedule:/var/lib/celerybeat
+    # No healthcheck: beat has no probe surface and nothing depends on it. A stalled beat surfaces
+    # through kb_crawl_sources_overdue and the sweep-specific alerts, not through a container flag.
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    depends_on:
+      valkey-core: {condition: service_healthy}
+    restart: unless-stopped
+    labels:
+      kb.edge: "false"
+
+  # =============================================================================================
+  # TELEMETRY PIPELINE — ships in EVERY deployment (ADR-024), including single-host self-hosted
+  # =============================================================================================
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.158.0
+    # TWO --config files, merged by the collector's confmap layer. The metric allow-list is a
+    # separate file so CI can diff it against the metric catalog without parsing the pipeline —
+    # and so that adding an instrument is a visible one-file change rather than a line inside a
+    # 200-line processor block.
+    command:
+      - --config=/etc/otelcol/collector.yaml
+      - --config=/etc/otelcol/metric-allowlist.yaml
+    # NO `profiles:` key — ADR-024. This is not optional plumbing: tail sampling cannot exist
+    # without it, it is the buffer that stops a Tempo restart from turning into dropped spans
+    # inside a PHP request, and it is where the redaction backstop and the uncatalogued-metric
+    # filter live. ~100 MB versus losing every error trace.
+    #
+    # ============================================================================================
+    # `edge` IN ADDITION TO `observability` — ADR-025. NETWORK MEMBERSHIP ONLY, NO PUBLIC ROUTE.
+    # ============================================================================================
+    # One membership solves both telemetry paths without opening anything:
+    #   * apps/web is on `edge`, so its SERVER-side exporter reaches http://otel-collector:4318
+    #     directly over the Docker network.
+    #   * the BROWSER posts SAME-ORIGIN to /telemetry/v1/traces, and a Next route handler forwards
+    #     it over `edge`. No CORS, no Traefik router for OTLP, and the browser never learns the
+    #     Collector's address — CSP stays connect-src 'self' and the public hostname count stays
+    #     at four.
+    #
+    # Both closed sets survive untouched, and this is the check that must not report a false
+    # failure: the collector is on `edge` but NOT on `application`, so `edge ∩ application` is
+    # still exactly {laravel-api, laravel-api-stream}. ADR-013 also holds — ai-api is not on
+    # `edge`, so nothing in apps/web can reach it.
+    networks: [edge, observability]
+    env_file: [./env/observability.env]
+    volumes:
+      - ./otel/collector.yaml:/etc/otelcol/collector.yaml:ro
+      - ./otel/metric-allowlist.yaml:/etc/otelcol/metric-allowlist.yaml:ro
+      # The `file_log` receiver reads container stdout from the json-file logging driver. Every
+      # service logs JSON to stdout and sets OTEL_LOGS_EXPORTER=none, so the application never
+      # blocks on the log pipeline — the Collector is the only component permitted to buffer,
+      # retry, or block.
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    # No healthcheck: the contrib image is distroless (no shell, no curl, no interpreter to borrow).
+    # NOTHING `depends_on` this service, deliberately — telemetry fails soft (§19.6), and a
+    # depends_on into a service that can be down is how a telemetry outage becomes a product outage.
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          # THIS LINE IS THE SOURCE, not one half of an agreement. otel/collector.yaml's
+          # memory_limiter is expressed as `limit_percentage`/`spike_limit_percentage`, so it
+          # reads whatever cgroup limit is set here at startup and logs the resolved MiB on every
+          # boot ("Using percentage memory limiter … total_memory_mib":512 -> limit_mib 384).
+          # This comment used to say "must agree with the memory_limiter processor in
+          # collector.yaml" while both files carried independent literals and nothing compared
+          # them; changing this number and forgetting that one left the Collector shedding at the
+          # old figure, silently. Change it here and the limiter follows.
+          memory: 512M
+    restart: unless-stopped
+    labels:
+      # NO ROUTER, and no traefik.enable. Being on `edge` is a NETWORK membership, not a public
+      # route — the two are independent, and conflating them is precisely the mistake the two
+      # latches exist to prevent. An OTLP receiver with a public router would be an unauthenticated
+      # ingest endpoint (a browser has no internal credential to present), which is a spam and
+      # storage-exhaustion surface in front of the component every other service's telemetry
+      # depends on. The browser reaches it through a Next route handler on its own origin instead.
+      kb.edge: "false"
+
+  # =============================================================================================
+  # DATA TIER — every store's image tag is pinned HERE and nowhere else. CI copies three of them
+  # into its service containers and a drift check diffs the two files: a tag written only in a
+  # workflow is how CI and production drift into testing a different product.
+  # =============================================================================================
+  postgres:
+    image: postgres:18-alpine
+    networks: [data]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-knowledgebot}
+      POSTGRES_USER: ${POSTGRES_USER:-knowledgebot}
+      # _FILE is a postgres-image convention, not a Compose feature. The password never becomes an
+      # environment variable and therefore never appears in `docker compose config` or `docker inspect`.
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    secrets: [postgres_password]
+    # `include_dir` is a config-FILE directive and cannot be passed as `-c include_dir=...`, so
+    # postgres is started against a four-line shim that includes conf.d. See postgres/postgresql.conf.
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    volumes:
+      # `/var/lib/postgresql`, NOT `/var/lib/postgresql/data`. postgres:18 moved PGDATA into a
+      # MAJOR-VERSION SUBDIRECTORY (/var/lib/postgresql/18/docker) so that `pg_upgrade --link` does
+      # not have to cross a mount-point boundary. Mounting the 17-and-earlier path leaves an empty
+      # `data` directory sitting inside the real data root, and the image's own entrypoint check
+      # ABORTS THE CONTAINER — it does not fall back:
+      #     "there appears to be PostgreSQL data in /var/lib/postgresql/data (unused mount/volume)"
+      # Reproduced verbatim by booting this stack: postgres crash-looped, and because every Laravel
+      # service and laravel-migrate gate on `service_healthy`/`service_completed_successfully`
+      # against it, TWELVE containers never left `Created`. One wrong path segment, and the only
+      # thing `docker compose ps` says is "dependency failed to start".
+      #
+      # `postgres-test` in the `test` profile below already carried this fix and its explanation;
+      # the production service did not. Keep them the same shape.
+      - pgdata:/var/lib/postgresql
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./postgres/postgresql.conf.d:/etc/postgresql/conf.d:ro
+      # initdb scripts run ONCE, on an empty data directory. Extensions only — Laravel owns every
+      # migration and every table. A schema statement here is a second migration authority.
+      - ./postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # pg_isready is the server's own client binary and is always present. `$$` escapes the
+      # Compose interpolation so the shell inside the container expands it.
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 120s   # fast shutdown needs to complete a checkpoint
+    deploy:
+      resources:
+        limits:
+          memory: 4G          # must agree with shared_buffers/work_mem in postgresql.conf.d/kb.conf
+    restart: unless-stopped
+    labels:
+      kb.edge: "false"
+
+  qdrant:
+    image: qdrant/qdrant:v1.18.3   # server minor tracks qdrant-client==1.18.0; bumped together
+    networks: [data]
+    volumes:
+      - qdrant:/qdrant/storage
+      - ./qdrant/config.yaml:/qdrant/config/production.yaml:ro
+    # NO HEALTHCHECK, deliberately. The Qdrant image ships no shell and no HTTP client utilities,
+    # so any in-container probe exits 127, is counted as unhealthy, and after start_period nothing
+    # ever flips it — every `service_healthy` dependent then hangs until its own timeout. Readiness
+    # is asserted from the outside: ai-api's /health/ready checks Qdrant, and CI waits from the
+    # runner with `until curl -sf localhost:6333/readyz`.
+    stop_grace_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    restart: unless-stopped
+    labels:
+      kb.edge: "false"
+
+  valkey-core:
+    image: valkey/valkey:9.1.1
+    command: ["valkey-server", "/etc/valkey/valkey.conf"]
+    # `application` in ADDITION to `data`, and this is the ONLY store with that membership.
+    # WHY, precisely: ai-worker-crawl is kept off `data` on purpose (SSRF pivot + unauthenticated
+    # Qdrant REST API), but it is still a Celery worker and must reach its broker. valkey-core
+    # joining `application` is the single concession that makes that possible.
+    # DO NOT "tidy" this back to [data]: the crawl queue silently stops being consumed. No error,
+    # no log line — crawl jobs simply accumulate and every crawled source sits in `Fetching`.
+    networks: [data, application]
+    volumes:
+      - valkey-core:/data
+      - ./valkey/core.conf:/etc/valkey/valkey.conf:ro
+      - ./valkey/users.acl:/etc/valkey/users.acl:ro
+    # The probe AUTHENTICATES, so this container holds the read-only forensics credential. It is the
+    # only credential mounted into a Valkey SERVER (the servers otherwise hold only the sha256
+    # hashes in users.acl), and kb-observer is the right one to spend: `+@read +ping +config|get`
+    # and nothing that can write.
+    secrets: [valkey_kb_observer_password]
+    healthcheck:
+      # ==========================================================================================
+      # THE OLD PROBE — `["CMD", "valkey-cli", "ping"]` — COULD NOT FAIL. THIS IS NOT A REFACTOR.
+      # ==========================================================================================
+      # `user default off` is set in users.acl, so an unauthenticated PING is refused. valkey-cli
+      # PRINTS the refusal and EXITS 0:
+      #     $ docker exec knowledgebot-valkey-core-1 valkey-cli ping
+      #     NOAUTH Authentication required.
+      #     $ echo $?
+      #     0
+      # Docker read that 0 and reported the container healthy — MEASURED, with the health log
+      # showing `ExitCode 0, Output "NOAUTH Authentication required.\n\n"` on every single check.
+      # So the probe proved only that the valkey-cli BINARY exists. A server rejecting every
+      # client, an ACL file that loaded the wrong users, a wrong password: all green. And
+      # `valkey-core: {condition: service_healthy}` is the gate on ai-api, every Celery worker,
+      # every Horizon worker and the scheduler — so every one of them would have started against a
+      # broker they cannot use, and the first symptom would be a queue that is never consumed.
+      #
+      # Two changes make it real: authenticate (so the ACL is exercised), and match the RESPONSE
+      # rather than the exit code (so valkey-cli's exit-0-on-error habit stops mattering).
+      # --no-auth-warning suppresses the stderr notice about passwords on the command line; the
+      # grep reads stdout, so the notice would not have broken it, but the log noise every 10s
+      # would train people to ignore this probe.
+      # ==========================================================================================
+      # AND THE `| grep -q PONG` VERSION COULD NOT FAIL EITHER, IN THE OTHER DIRECTION. MEASURED.
+      # ==========================================================================================
+      # The probe above was hardened against a server that rejects EVERYTHING. It was still blind
+      # to a server that accepts everything, which is the state a missing or empty users.acl
+      # actually produces (valkey:9.1.1 starts cleanly with `user default on nopass ~* &* +@all` —
+      # it FAILS OPEN; it does not refuse to start, whatever the older comments in this repo say).
+      #
+      # The mechanism, isolated on 2026-08-11: with no kb-observer user, valkey-cli's AUTH fails
+      # and prints to STDERR, but the connection stays usable because `default` is `on nopass`, so
+      # the subsequent PING succeeds and prints PONG to STDOUT.
+      #     $ valkey-cli --user kb-observer --pass x --no-auth-warning ping 2>/dev/null
+      #     PONG
+      #     $ valkey-cli --user kb-observer --pass x --no-auth-warning ping 2>&1 >/dev/null
+      #     AUTH failed: WRONGPASS invalid username-password pair or user is disabled.
+      # `| grep -q PONG` reads stdout, matches, exits 0 — HEALTHY, against a wide-open server.
+      #
+      # The fix is to merge stderr in and require the WHOLE output to be exactly PONG, so any
+      # diagnostic line at all fails the probe. Verified in four directions: users.acl absent ->
+      # unhealthy; users.acl empty -> unhealthy; real users.acl + wrong password -> unhealthy;
+      # real users.acl + real password -> healthy.
+      #
+      # NOT `ACL WHOAMI`, which is the obvious alternative and does not work: kb-observer holds
+      # `+acl|log` and nothing else from the acl container command, so WHOAMI returns NOPERM and
+      # the probe fails against a CORRECTLY configured server. Checked before choosing this.
+      test: ["CMD-SHELL",
+             "[ \"$$(valkey-cli --user kb-observer --pass \"$$(cat /run/secrets/valkey_kb_observer_password)\" --no-auth-warning ping 2>&1)\" = PONG ]"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    stop_grace_period: 60s    # let the AOF flush before exit
+    deploy:
+      resources:
+        limits:
+          memory: 1536M       # > the 1gb maxmemory in core.conf, with room for COW during rewrite
+    restart: unless-stopped
+    labels:
+      kb.edge: "false"
+
+  valkey-cache:
+    image: valkey/valkey:9.1.1
+    command: ["valkey-server", "/etc/valkey/valkey.conf"]
+    # `data` only. It holds tenant text (answer + retrieval caches) and nothing that a worker off
+    # `data` needs.
+    networks: [data]
+    # NO `volumes:` FOR DATA — see the volumes block. Only the two read-only config files.
+    volumes:
+      - ./valkey/cache.conf:/etc/valkey/valkey.conf:ro
+      # cache.conf carries `aclfile /etc/valkey/users.acl`. Valkey does NOT refuse to start without
+      # it — measured: it comes up with `user default on nopass ~* &* +@all`, wide open. The mount
+      # is therefore mandatory in the fail-open sense, and the healthcheck above is what catches
+      # its absence. users.acl is gitignored and rendered by scripts/dev/bootstrap.sh.
+      # ONE acl file for both instances, on purpose: an ACL user is a SERVICE identity, not a
+      # per-server credential, so kb-core authenticates the same way against the cache instance
+      # (Cache::store('ephemeral')) as against core. Two files would mean two passwords per service
+      # and two rotations, and the key patterns — the part that is actually the boundary — would
+      # drift apart with nothing comparing them.
+      - ./valkey/users.acl:/etc/valkey/users.acl:ro
+    secrets: [valkey_kb_observer_password]   # read-only forensics user; the probe authenticates
+    healthcheck:
+      # Same correction as valkey-core: `valkey-cli ping` prints "NOAUTH Authentication required."
+      # and EXITS 0 against a server with `user default off`, so the old probe reported healthy
+      # unconditionally. Authenticate, and match PONG on stdout rather than trusting the exit code.
+      # ==========================================================================================
+      # AND THE `| grep -q PONG` VERSION COULD NOT FAIL EITHER, IN THE OTHER DIRECTION. MEASURED.
+      # ==========================================================================================
+      # The probe above was hardened against a server that rejects EVERYTHING. It was still blind
+      # to a server that accepts everything, which is the state a missing or empty users.acl
+      # actually produces (valkey:9.1.1 starts cleanly with `user default on nopass ~* &* +@all` —
+      # it FAILS OPEN; it does not refuse to start, whatever the older comments in this repo say).
+      #
+      # The mechanism, isolated on 2026-08-11: with no kb-observer user, valkey-cli's AUTH fails
+      # and prints to STDERR, but the connection stays usable because `default` is `on nopass`, so
+      # the subsequent PING succeeds and prints PONG to STDOUT.
+      #     $ valkey-cli --user kb-observer --pass x --no-auth-warning ping 2>/dev/null
+      #     PONG
+      #     $ valkey-cli --user kb-observer --pass x --no-auth-warning ping 2>&1 >/dev/null
+      #     AUTH failed: WRONGPASS invalid username-password pair or user is disabled.
+      # `| grep -q PONG` reads stdout, matches, exits 0 — HEALTHY, against a wide-open server.
+      #
+      # The fix is to merge stderr in and require the WHOLE output to be exactly PONG, so any
+      # diagnostic line at all fails the probe. Verified in four directions: users.acl absent ->
+      # unhealthy; users.acl empty -> unhealthy; real users.acl + wrong password -> unhealthy;
+      # real users.acl + real password -> healthy.
+      #
+      # NOT `ACL WHOAMI`, which is the obvious alternative and does not work: kb-observer holds
+      # `+acl|log` and nothing else from the acl container command, so WHOAMI returns NOPERM and
+      # the probe fails against a CORRECTLY configured server. Checked before choosing this.
+      test: ["CMD-SHELL",
+             "[ \"$$(valkey-cli --user kb-observer --pass \"$$(cat /run/secrets/valkey_kb_observer_password)\" --no-auth-warning ping 2>&1)\" = PONG ]"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    stop_grace_period: 10s    # nothing to flush, by construction
+    deploy:
+      resources:
+        limits:
+          memory: 2560M       # > the 2gb maxmemory in cache.conf
+    restart: unless-stopped
+    labels:
+      kb.edge: "false"
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.40   # exact tag; floor 4.30 for multipart ETag correctness.
+                                      # #9700 is a DATA-LOSS regression inside the 4.x line, and the
+                                      # project ships every ~5.5 days with no semver and no LTS —
+                                      # so never `:latest`, and every bump is a restore drill.
+    # One container running master+volume+filer+s3 in-process. The §24.2 four-service topology is
+    # explicitly simplifiable for this deployment shape.
+    #
+    # -s3.config is NOT optional — but NOT for the reason this comment used to give (ADR-037,
+    # docs/19; ADR-026's fail-open reasoning is superseded). Measured against this exact pinned
+    # tag on 2026-08-11: an ABSENT, DIRECTORY-shaped or ZERO-BYTE identities.json is a FATAL
+    # config load, the process exits 255, and the container crash-loops. That path FAILS CLOSED.
+    # A mistyped or unreadable path does not open the store; it stops it.
+    #
+    # The Allow-All state is real and is reached two OTHER ways: dropping -s3.config from this
+    # command line, or a config that PARSES to `"identities": []`. So the likeliest wrong move
+    # here is also the worst one: NEVER fix a SeaweedFS crash-loop by writing `{}` into the
+    # config. `{}` and `{"identities": []}` are the ALLOW-ALL state — measured, anonymous
+    # ListBuckets returns 200 OK. The crash is the safe state. Restore the file instead:
+    # scripts/dev/bootstrap.sh renders seaweedfs/identities.json.example when it is absent.
+    #
+    # Assert the posture either way — an anonymous ListBuckets must return 403. The healthcheck
+    # below does that every 15s, because the master's /cluster/healthz answers happily on a
+    # gateway running full Allow-All.
+    command: ["server", "-s3", "-dir=/data", "-s3.config=/etc/s3/identities.json"]
+    networks:
+      data:
+        # `seaweedfs-s3` is the hostname both storage clients are configured with
+        # (endpoint_url=http://seaweedfs-s3:8333). The service is named `seaweedfs`, so without
+        # this alias every client gets NXDOMAIN. No other skill creates this name.
+        aliases: [seaweedfs-s3]
+    volumes:
+      - seaweed:/data
+      - ./seaweedfs/identities.json:/etc/s3/identities.json:ro
+      # The circuit-breaker path is a path inside the FILER'S namespace, not a container path, so
+      # this mount makes the file available for a one-time `weed shell` upload — it does not
+      # activate it. See the __README block inside the file.
+      - ./seaweedfs/circuit_breaker.json:/etc/s3/circuit_breaker.json:ro
+    healthcheck:
+      # busybox wget is present in this alpine-based image; there is no curl.
+      #
+      # TWO assertions, and the second is the one that matters. The first asks the MASTER whether
+      # it is alive, which says nothing at all about the S3 gateway's auth posture — measured on
+      # 2026-08-11, a gateway running full ALLOW-ALL answers /cluster/healthz perfectly happily.
+      # The second is the ADR-026 assertion, run every 15s instead of once at bootstrap: an
+      # ANONYMOUS ListBuckets against the gateway must NOT succeed.
+      #
+      # ==========================================================================================
+      # WHY THIS ASSERTS THE STATUS AND NOT `! wget`. IT FAILED OPEN IN THE THIRD DIRECTION.
+      # ==========================================================================================
+      # The previous form was `… && ! wget -q -O /dev/null http://127.0.0.1:8333/`, and `!` inverts
+      # ANY non-zero exit — not just the 403 it was written for. busybox wget exits 1 on a refused
+      # connection exactly as it exits 1 on a 403, so a container whose S3 gateway never started,
+      # or crashed, or was launched without `-s3`, read as "correctly denying anonymous access" and
+      # was reported HEALTHY. The first arm could not catch it either: it probes the MASTER on
+      # 9333, which is a different listener in the same process and stays up.
+      #
+      # WHY IT MATTERS IS NOT WHAT YOU WOULD GUESS, AND THE GUESS WAS MEASURED AND REFUTED.
+      # Nothing gates on this container: enumerating every `depends_on` edge across all three
+      # compose files on 2026-08-11 returns ZERO pointing at `seaweedfs` — the ~ten
+      # `service_healthy` / `service_completed_successfully` gates in this stack are on
+      # valkey-core, postgres and laravel-migrate. So a fail-open here does not let the stack boot
+      # around a dead store; the stack was never waiting on it in the first place (that gap is its
+      # own question, and not this probe's to answer).
+      # What a fail-open costs instead is the ONLY continuous assertion that the S3 gateway is
+      # closed. ADR-026's anonymous-403 check otherwise runs once, in bootstrap.sh. `docker ps`
+      # saying `healthy` is what an operator, a restart policy and any health-derived alert read,
+      # and it was saying `healthy` for a gateway that was not listening at all.
+      #
+      # Measured 2026-08-11 against chrislusf/seaweedfs:4.40, three configurations, both forms:
+      #
+      #   configuration                     8333 answers            old `! wget`   this probe
+      #   real identities.json              403 Forbidden           healthy  ✓     healthy  ✓
+      #   config parsing to identities:[]   200 OK (Allow-All)      unhealthy ✓    unhealthy ✓
+      #   started without `-s3`             Connection refused      HEALTHY  ✗     unhealthy ✓
+      #
+      # …plus a fourth control, an unreachable master (port 9999): unhealthy, so the `&&` still
+      # short-circuits and the second arm cannot carry the probe on its own.
+      #
+      # `wget -S` prints the status line to stderr even under `-q` (verified on this image's
+      # busybox), `2>&1` brings it into the pipe, and grep's exit status becomes the probe's — so
+      # wget's own non-zero exit on a 403 is deliberately discarded. 401 is accepted alongside 403
+      # because which one the gateway returns depends on whether a malformed Authorization header
+      # was present, and both mean "anonymous access was refused".
+      #
+      # This is a probe, not the whole control. It runs INSIDE the container, so it cannot see a
+      # network-level exposure, and a 403 here does not prove the keys are the right ones. Keep the
+      # signed/unsigned pair in scripts/dev/bootstrap.sh and scripts/ops/restore-drill.md.
+      test: ["CMD-SHELL",
+             "wget -q -O /dev/null http://127.0.0.1:9333/cluster/healthz && wget -S -q -O /dev/null http://127.0.0.1:8333/ 2>&1 | grep -qE 'HTTP/1\\.[01] (401|403)'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    stop_grace_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    restart: unless-stopped
+    labels:
+      # S3 traffic NEVER traverses a reverse proxy: SeaweedFS mistakes HTTP `Transfer-Encoding:
+      # chunked` framing for `Content-Encoding: aws-chunked` and stores the chunk-size lines as
+      # file content — silent corruption with no error. Laravel and the workers speak to
+      # seaweedfs-s3:8333 directly on the internal network. There is also no presigned URL
+      # anywhere in the codebase, so no browser ever needs to reach this host.
+      kb.edge: "false"
+
+  # =============================================================================================
+  # PROFILED SERVICES
+  # Exactly three profiles exist: `observability`, `dev-tools`, `test`.
+  # There is NO `core` profile. §24.5 suggests one and it is not merely redundant, it is harmful:
+  # services WITHOUT a `profiles` key are always enabled, so tagging the required services `core`
+  # makes a bare `docker compose up` start nothing at all. There is no `gpu` profile either, and
+  # no GPU OVERLAY any more: embeddings and reranking are provider API calls, so no service in
+  # this file reserves a device and compose.gpu.yaml has been deleted rather than emptied.
+  # Nothing above `depends_on` anything below: a depends_on pointing into an inactive profile is
+  # an invalid model and Compose errors rather than auto-enabling it.
+  # =============================================================================================
+
+  prometheus:
+    image: prom/prometheus:v3.13.2
+    profiles: [observability]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=20GB
+      - --web.enable-lifecycle
+    networks: [observability]
+    volumes:
+      # Owned by observability-engineer. The profile will not start until infrastructure/
+      # observability/ exists; that is intentional, not a broken reference.
+      - ../observability/prometheus:/etc/prometheus:ro
+      - prometheus:/prometheus
+    restart: unless-stopped
+    labels: {kb.edge: "false"}
+
+  alertmanager:
+    image: prom/alertmanager:v0.33.1
+    profiles: [observability]
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml"]
+    networks: [observability]
+    volumes:
+      - ../observability/alertmanager:/etc/alertmanager:ro
+      - alertmanager:/alertmanager
+    secrets: [alertmanager_webhook_url]   # the pager receiver's URL is a credential
+    restart: unless-stopped
+    labels: {kb.edge: "false"}
+
+  loki:
+    image: grafana/loki:3.7.5
+    profiles: [observability]
+    command: ["-config.file=/etc/loki/loki.yml"]
+    networks: [observability]
+    volumes:
+      - ../observability/loki:/etc/loki:ro
+      - loki:/loki
+    restart: unless-stopped
+    labels: {kb.edge: "false"}
+
+  tempo:
+    image: grafana/tempo:3.0.2
+    profiles: [observability]
+    command: ["-config.file=/etc/tempo/tempo.yml", "-target=all"]   # monolithic; needs no Kafka
+    networks: [observability]
+    volumes:
+      - ../observability/tempo:/etc/tempo:ro
+      - tempo:/var/tempo
+    restart: unless-stopped
+    labels: {kb.edge: "false"}
+
+  grafana:
+    image: grafana/grafana:13.1.2
+    profiles: [observability]
+    networks: [observability]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana:/var/lib/grafana
+    restart: unless-stopped
+    labels:
+      # Grafana is NOT routed. It maps every internal service and every alert; reach it through an
+      # SSH tunnel or `docker compose port`. The four public hostnames are closed.
+      kb.edge: "false"
+    # Not a Compose `secret:`: deleting the grafana volume loses nothing but sessions, because
+    # datasources, dashboards and folders are all provisioned from files under
+    # infrastructure/observability/ with allowUiUpdates:false. The repo IS the backup.
+
+  mailpit:
+    image: axllent/mailpit:v1.28.4
+    profiles: [dev-tools]
+    networks: [application]
+    restart: unless-stopped
+    labels: {kb.edge: "false"}
+
+  adminer:
+    image: adminer:5.4.1
+    profiles: [dev-tools]
+    networks: [data]
+    restart: unless-stopped
+    labels: {kb.edge: "false"}
+
+  # The `test` tier runs the SAME image tags as production. A CI or local suite one minor behind
+  # tests a different product: on valkey/valkey:8 there is no DELIFEQ and no database-level ACL, so
+  # the test that proves a cache credential cannot reach the queue DB passes because there is no
+  # mechanism to fail.
+  postgres-test:
+    image: postgres:18-alpine
+    profiles: [test]
+    networks: [data]
+    # THESE FOUR VALUES ARE CANONICAL AND SHARED — service alias `postgres-test`, database, user and
+    # password all `kb_test`. They must equal `services/core-api/phpunit.xml` and the CI service
+    # container in .github/workflows/ci.yml, byte for byte.
+    #
+    # They previously did not. This file said knowledgebot_test/knowledgebot/test, phpunit.xml said
+    # kb_test/kb_test/kb_test against a host named `postgres`, and the CI reference said
+    # kb_test/postgres/ci — three spellings, no two agreeing, so `make test-up && vendor/bin/pest`
+    # could never have connected. Nothing reported that, because a wrong connection string surfaces
+    # as "connection refused", which reads as an infrastructure flake rather than a config defect.
+    # The alias keeps the `-test` suffix deliberately: a test database reachable as bare `postgres`
+    # is one stale shell away from RefreshDatabase running migrate:fresh against real tenant data.
+    environment:
+      POSTGRES_DB: kb_test
+      POSTGRES_USER: kb_test
+      POSTGRES_PASSWORD: kb_test       # ephemeral, tmpfs-backed, never reachable off `data`
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    # THE MOUNT POINT IS `/var/lib/postgresql`, NOT `/var/lib/postgresql/data`, AND THE DIFFERENCE
+    # IS THE WHOLE SERVICE. postgres:18 moved PGDATA to a MAJOR-VERSION SUBDIRECTORY
+    # (/var/lib/postgresql/18/docker). Mounting the old 17-and-earlier path leaves an empty
+    # `data` directory sitting inside the real data root, and the image's own entrypoint check
+    # aborts the container with:
+    #     "there appears to be PostgreSQL data in /var/lib/postgresql/data (unused mount/volume)"
+    # `make test-up` therefore never started, which is the other half of why the `test` profile has
+    # never been exercised. Verified by actually starting the profile, not by reading this file.
+    # No named volume, still: a test database that survives a run is a flake with a long fuse.
+    tmpfs: [/var/lib/postgresql]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      retries: 10
+    labels: {kb.edge: "false"}
+
+  qdrant-test:
+    image: qdrant/qdrant:v1.18.3
+    profiles: [test]
+    networks: [data]
+    tmpfs: [/qdrant/storage]
+    labels: {kb.edge: "false"}         # no healthcheck — same image constraint as `qdrant`
+
+  valkey-test:
+    image: valkey/valkey:9.1.1
+    profiles: [test]
+    networks: [data]
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      retries: 10
+    labels: {kb.edge: "false"}
+
+  # ----------------------------------------------------------------------------------------------
+  # corpus-www — the crawl fixture origin for the golden evaluation corpus.
+  # ----------------------------------------------------------------------------------------------
+  # Serves samples/corpus/documents/site/www/ over plain HTTP on the internal network. The crawl
+  # source in the evaluation org points HERE and never at the public internet, for four reasons
+  # that all bite: a remote site changing a footer breaks the fixture's hash; a run's score becomes
+  # a function of someone else's deploy schedule; CI acquires an egress dependency and fails
+  # offline; and the SSRF guard's own fixture set stops being the only thing exercising the fetch
+  # path. It is also, plainly, a live SSRF surface in CI.
+  #
+  # `application`, because ai-worker-crawl is on [application, observability] and deliberately NOT
+  # on `data` — the crawl worker is the SSRF pivot, so the fixture has to be reachable on the one
+  # network that worker shares. It is on no other network: nothing else needs it.
+  corpus-www:
+    image: nginx:1.29-alpine
+    profiles: [test]
+    networks:
+      application:
+        # The aliases the crawl tests and the fixture's own robots.txt/sitemap.xml resolve. The
+        # domain-shaped alias exists so the crawled URLs look like real URLs to the extraction and
+        # link-discovery code rather than like a bare hostname it might special-case.
+        aliases: [corpus-www, www.kelpwright.example]
+    volumes:
+      # READ-ONLY, and samples/ is rag-eval-engineer's directory — nothing here writes to it.
+      #
+      # Stable ETag and Last-Modified come from the BIND MOUNT: nginx derives Last-Modified from
+      # the file's mtime and the ETag from mtime + content length, so both survive a container
+      # restart because the bytes on the host do not move. A COPY into an image, or a tmpfs, would
+      # regenerate them on every boot and every recrawl would report "changed" — which is the one
+      # thing this fixture exists to measure.
+      - ../../samples/corpus/documents/site/www:/usr/share/nginx/html:ro
+      - ./corpus-www/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      # Probes /robots.txt, NOT /. If the document root is missing or empty — a fresh clone before
+      # the fixture is authored, or a bind source Docker silently created as an empty directory —
+      # this goes unhealthy immediately instead of serving 404s that read like crawler bugs.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/robots.txt"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    read_only: true
+    tmpfs: ["/var/cache/nginx", "/var/run"]
+    labels:
+      # No router, no ports, no edge. A fixture origin reachable from the internet would be a
+      # public site claiming to be someone else's company.
+      kb.edge: "false"
+    # <!-- OPEN SEAM, for crawler-engineer -->
+    # This container's address is in Docker's bridge range (RFC 1918), and the crawl fetch guard
+    # rejects every non-global destination — `not ip.is_global` is the sole rule. So the crawl
+    # tests need a TEST-ONLY origin exemption in the guard, and that exemption must be impossible
+    # to enable outside the test configuration: an env toggle that a production deployment could
+    # set is a documented SSRF bypass. The guard, not this file, owns how that is expressed.
