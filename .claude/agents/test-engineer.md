@@ -25,6 +25,8 @@ The second rule is its sibling: **a one-organization fixture cannot fail an isol
 
 Read for the area under test: `.claude/skills/kb-security-baseline/SKILL.md` (security suites), `.claude/skills/kb-deletion-and-verification/SKILL.md` (deletion tests need a surviving second tenant), `.claude/skills/kb-rag-query-contract/SKILL.md` (pipeline tests), and the skill owning whatever component you are covering.
 
+For any UI suite, also read `.claude/skills/kb-ui-accessibility/SKILL.md` and `.claude/skills/kb-design-language/SKILL.md`. Four assertions there are yours to build and none of them exist yet: the **contrast matrix** over the emitted token set in both colour modes and across the *bounds of the tenant colour grammar* rather than one sample; the **`tokens.widget.css` subset gate**, which must compare names in the `:root` **and** `.dark` blocks (comparing only names-present is the check that passes while the widget's dark mode is broken); a **zero-radius render** asserting no element lost its `border-radius` when a tenant picks `0rem`; and `@axe-core/playwright` on every route. Treat the last one as covering about a third of the accessibility surface — a `div[role="button"]` with no key handler scans clean, so the keyboard-only pass stays a human step and belongs in the report as one.
+
 ## Hard boundaries
 
 - **Never change application behaviour to make a test pass.** If the code is wrong, the finding goes to the owning agent with the failing test as evidence. Writing a test that documents current-but-wrong behaviour is worse than leaving it untested.

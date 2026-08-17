@@ -1,0 +1,233 @@
+/* The KnowledgeBot design language, as CSS custom properties.
+ *
+ * THIS FILE IS A REFERENCE, NOT A BUILD INPUT. The shipped file is
+ * packages/design-tokens/generated/tokens.css, emitted from
+ * packages/design-tokens/src/tokens.json by `pnpm tokens:build` and committed so CI
+ * can run the build and `git diff --exit-code`. Importing this path from an app, or
+ * pasting it into globals.css, forks the token set — which is the one thing the
+ * package exists to prevent. Use it to seed tokens.json, then delete the copy.
+ *
+ * No @theme here. `@theme inline` lives in apps/web/src/app/globals.css because
+ * `inline` is what makes a subtree override work (tailwind-shadcn, Gotcha 1), and
+ * this file is also consumed by apps/widget, which runs its own Tailwind build.
+ *
+ * Derivation, contrast floors and the reasoning behind each value: ./tokens.md
+ */
+
+:root {
+  /* ---- surface --------------------------------------------------------- */
+  --canvas: oklch(0.945 0.004 264);
+  --card: oklch(1 0 0);
+  --card-inset: oklch(0.976 0.003 264);
+  --popover: oklch(1 0 0);
+  --overlay: oklch(0.205 0.014 266 / 0.45);
+
+  /* ---- text ------------------------------------------------------------ */
+  --foreground: oklch(0.205 0.014 266);
+  --muted-foreground: oklch(0.520 0.020 264);
+  --subtle-foreground: oklch(0.660 0.018 264); /* disabled + decorative ONLY */
+
+  /* ---- line ------------------------------------------------------------ */
+  --border: oklch(0.917 0.006 264);
+  --border-strong: oklch(0.660 0.014 264);
+  --input: oklch(0.900 0.006 264);
+  --ring: var(--primary);
+
+  /* ---- accent (the only tenant-movable family) ------------------------- */
+  --primary: oklch(0.525 0.235 264);
+  --primary-foreground: oklch(0.985 0 0);
+  --primary-hover: oklch(0.470 0.230 264);
+  --primary-active: oklch(0.425 0.215 264);
+  --primary-soft: oklch(0.960 0.022 264);
+  --primary-soft-foreground: oklch(0.440 0.215 264);
+  --accent: oklch(0.960 0.008 264); /* neutral hover wash, NOT a second brand colour */
+  --accent-foreground: oklch(0.205 0.014 266);
+
+  /* ---- status ---------------------------------------------------------- */
+  --success: oklch(0.585 0.145 152);
+  --success-soft: oklch(0.955 0.040 152);
+  --success-soft-foreground: oklch(0.435 0.105 152);
+  --warning: oklch(0.650 0.145 66);
+  --warning-soft: oklch(0.960 0.050 80);
+  --warning-soft-foreground: oklch(0.450 0.100 62);
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-strong: oklch(0.520 0.230 27); /* solid fills only — see tokens.md */
+  --destructive-foreground: oklch(0.985 0 0);
+  --destructive-soft: oklch(0.955 0.030 22);
+  --destructive-soft-foreground: oklch(0.470 0.180 25);
+  --info: oklch(0.560 0.145 245); /* fixed: never follows the tenant accent */
+  --info-soft: oklch(0.958 0.032 240);
+  --info-soft-foreground: oklch(0.440 0.130 250);
+
+  /* ---- tone: the closed set of six, categorical and decorative only ----- */
+  --tone-amber-surface: oklch(0.960 0.045 78);
+  --tone-amber-border: oklch(0.905 0.070 78);
+  --tone-amber-foreground: oklch(0.450 0.100 66);
+  --tone-sky-surface: oklch(0.958 0.035 240);
+  --tone-sky-border: oklch(0.900 0.058 240);
+  --tone-sky-foreground: oklch(0.445 0.125 248);
+  --tone-violet-surface: oklch(0.958 0.035 292);
+  --tone-violet-border: oklch(0.900 0.058 292);
+  --tone-violet-foreground: oklch(0.450 0.140 292);
+  --tone-mint-surface: oklch(0.958 0.038 165);
+  --tone-mint-border: oklch(0.898 0.060 165);
+  --tone-mint-foreground: oklch(0.435 0.098 162);
+  --tone-rose-surface: oklch(0.958 0.035 15);
+  --tone-rose-border: oklch(0.900 0.058 15);
+  --tone-rose-foreground: oklch(0.465 0.145 20);
+  --tone-slate-surface: oklch(0.958 0.005 264);
+  --tone-slate-border: oklch(0.905 0.008 264);
+  --tone-slate-foreground: oklch(0.440 0.016 264);
+
+  /* ---- chart: ordered, adjacent pairs ≥ 0.06 apart in lightness --------- */
+  --chart-1: oklch(0.545 0.225 264);
+  --chart-2: oklch(0.700 0.150 45);
+  --chart-3: oklch(0.575 0.125 168);
+  --chart-4: oklch(0.780 0.135 90);
+  --chart-5: oklch(0.505 0.180 305);
+  --chart-6: oklch(0.680 0.085 225);
+  --chart-grid: oklch(0.930 0.004 264);
+  --chart-axis: oklch(0.520 0.020 264);
+
+  /* ---- elevation: shadow colour is the foreground, never black ---------- */
+  --shadow-hairline: inset 0 0 0 1px oklch(0.917 0.006 264);
+  --shadow-xs: 0 1px 2px 0 oklch(0.205 0.014 266 / 0.05);
+  --shadow-sm: 0 1px 2px 0 oklch(0.205 0.014 266 / 0.04), 0 2px 6px -1px oklch(0.205 0.014 266 / 0.06);
+  --shadow-md: 0 1px 2px 0 oklch(0.205 0.014 266 / 0.04), 0 8px 20px -6px oklch(0.205 0.014 266 / 0.10);
+  --shadow-lg: 0 2px 4px 0 oklch(0.205 0.014 266 / 0.04), 0 16px 32px -10px oklch(0.205 0.014 266 / 0.14);
+  --shadow-xl: 0 4px 8px 0 oklch(0.205 0.014 266 / 0.04), 0 32px 64px -16px oklch(0.205 0.014 266 / 0.18);
+
+  /* ---- radius: max(0px, …) is load-bearing — `radius: 0rem` is in the enum */
+  --radius: 0.625rem;
+  --radius-xs: max(0px, calc(var(--radius) - 6px));
+  --radius-sm: max(0px, calc(var(--radius) - 4px));
+  --radius-md: max(0px, calc(var(--radius) - 2px));
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 10px);
+  --radius-3xl: calc(var(--radius) + 18px);
+  --radius-full: 9999px;
+
+  /* ---- space ----------------------------------------------------------- */
+  --space-0-5: 0.125rem;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+  --space-20: 5rem;
+  --space-24: 6rem;
+  --gutter-sm: 1rem;
+  --gutter-md: 1.5rem;
+  --gutter-lg: 2rem;
+  --card-pad-sm: 1rem;
+  --card-pad-md: 1.25rem;
+  --card-pad-lg: 1.5rem;
+
+  /* ---- type: size / line-height / weight / tracking travel together ----- */
+  --font-sans: "Inter Variable", "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --text-caption: 0.75rem;      --text-caption-lh: 1rem;      --text-caption-w: 500; --text-caption-ls: 0.01em;
+  --text-sm: 0.8125rem;         --text-sm-lh: 1.25rem;        --text-sm-w: 400;      --text-sm-ls: 0;
+  --text-base: 0.875rem;        --text-base-lh: 1.375rem;     --text-base-w: 400;    --text-base-ls: 0;
+  --text-md: 1rem;              --text-md-lh: 1.5rem;         --text-md-w: 400;      --text-md-ls: 0;
+  --text-lg: 1.125rem;          --text-lg-lh: 1.625rem;       --text-lg-w: 400;      --text-lg-ls: 0;
+  --text-h3: 1.0625rem;         --text-h3-lh: 1.5rem;         --text-h3-w: 600;      --text-h3-ls: -0.006em;
+  --text-h2: 1.25rem;           --text-h2-lh: 1.75rem;        --text-h2-w: 600;      --text-h2-ls: -0.01em;
+  --text-h1: 1.5rem;            --text-h1-lh: 2rem;           --text-h1-w: 600;      --text-h1-ls: -0.014em;
+  --text-display: 2rem;         --text-display-lh: 2.25rem;   --text-display-w: 600; --text-display-ls: -0.02em;
+  --text-metric: 2.25rem;       --text-metric-lh: 2.5rem;     --text-metric-w: 600;  --text-metric-ls: -0.02em;
+
+  /* ---- motion ---------------------------------------------------------- */
+  --dur-1: 120ms;
+  --dur-2: 180ms;
+  --dur-3: 260ms;
+  --dur-4: 400ms;
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-spring: cubic-bezier(0.34, 1.3, 0.64, 1);
+}
+
+.dark {
+  /* In dark the card is LIGHTER than the canvas, and the inset ring — not the
+   * shadow — is what separates them. Re-declare the same names; nothing else. */
+  --canvas: oklch(0.185 0.012 266);
+  --card: oklch(0.235 0.012 266);
+  --card-inset: oklch(0.275 0.012 266);
+  --popover: oklch(0.265 0.012 266);
+  --overlay: oklch(0.145 0.010 266 / 0.65);
+
+  --foreground: oklch(0.965 0.004 264);
+  --muted-foreground: oklch(0.720 0.018 264);
+  --subtle-foreground: oklch(0.560 0.018 264);
+
+  --border: oklch(0.310 0.012 266);
+  --border-strong: oklch(0.620 0.016 266);
+  --input: oklch(0.330 0.012 266);
+
+  --primary: oklch(0.585 0.215 264);
+  --primary-foreground: oklch(0.985 0 0);
+  --primary-hover: oklch(0.645 0.200 264);
+  --primary-active: oklch(0.700 0.180 264);
+  --primary-soft: oklch(0.300 0.055 264);
+  --primary-soft-foreground: oklch(0.800 0.120 264);
+  --accent: oklch(0.300 0.012 266);
+  --accent-foreground: oklch(0.965 0.004 264);
+
+  --success: oklch(0.700 0.145 152);
+  --success-soft: oklch(0.300 0.055 155);
+  --success-soft-foreground: oklch(0.820 0.130 155);
+  --warning: oklch(0.780 0.145 78);
+  --warning-soft: oklch(0.310 0.055 70);
+  --warning-soft-foreground: oklch(0.850 0.120 82);
+  --destructive: oklch(0.704 0.191 22.216);
+  --destructive-strong: oklch(0.560 0.220 25);
+  --destructive-foreground: oklch(0.985 0 0);
+  --destructive-soft: oklch(0.305 0.070 20);
+  --destructive-soft-foreground: oklch(0.830 0.110 22);
+  --info: oklch(0.680 0.130 245);
+  --info-soft: oklch(0.300 0.055 243);
+  --info-soft-foreground: oklch(0.830 0.100 245);
+
+  --tone-amber-surface: oklch(0.295 0.045 70);
+  --tone-amber-border: oklch(0.360 0.060 72);
+  --tone-amber-foreground: oklch(0.845 0.095 80);
+  --tone-sky-surface: oklch(0.292 0.045 242);
+  --tone-sky-border: oklch(0.358 0.058 242);
+  --tone-sky-foreground: oklch(0.840 0.085 244);
+  --tone-violet-surface: oklch(0.295 0.048 292);
+  --tone-violet-border: oklch(0.360 0.062 292);
+  --tone-violet-foreground: oklch(0.845 0.090 292);
+  --tone-mint-surface: oklch(0.292 0.045 165);
+  --tone-mint-border: oklch(0.356 0.058 165);
+  --tone-mint-foreground: oklch(0.840 0.085 165);
+  --tone-rose-surface: oklch(0.298 0.048 18);
+  --tone-rose-border: oklch(0.362 0.062 18);
+  --tone-rose-foreground: oklch(0.845 0.090 18);
+  --tone-slate-surface: oklch(0.292 0.010 264);
+  --tone-slate-border: oklch(0.356 0.012 264);
+  --tone-slate-foreground: oklch(0.840 0.012 264);
+
+  --chart-1: oklch(0.640 0.200 264);
+  --chart-2: oklch(0.760 0.140 48);
+  --chart-3: oklch(0.665 0.120 168);
+  --chart-4: oklch(0.830 0.125 90);
+  --chart-5: oklch(0.610 0.170 305);
+  --chart-6: oklch(0.740 0.080 225);
+  --chart-grid: oklch(0.290 0.010 266);
+  --chart-axis: oklch(0.720 0.018 264);
+
+  --shadow-hairline: inset 0 0 0 1px oklch(1 0 0 / 0.07);
+  --shadow-xs: inset 0 1px 0 0 oklch(1 0 0 / 0.05), 0 1px 2px 0 oklch(0 0 0 / 0.40);
+  --shadow-sm: inset 0 0 0 1px oklch(1 0 0 / 0.06), 0 2px 6px -1px oklch(0 0 0 / 0.45);
+  --shadow-md: inset 0 0 0 1px oklch(1 0 0 / 0.06), 0 8px 20px -6px oklch(0 0 0 / 0.50);
+  --shadow-lg: inset 0 0 0 1px oklch(1 0 0 / 0.08), 0 16px 32px -10px oklch(0 0 0 / 0.55);
+  --shadow-xl: inset 0 0 0 1px oklch(1 0 0 / 0.10), 0 32px 64px -16px oklch(0 0 0 / 0.60);
+}
