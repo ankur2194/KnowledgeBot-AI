@@ -19,7 +19,7 @@ import { authHeaders, refreshSession } from './session.js';
  * stream, and three hand-written parsers is three ways to disagree about `: ping` — the one that
  * drifts is the one nobody notices until a terminal event stops being handled.
  *
- * NOT enforced by anything today — no lint rule, and gates.yml greps nothing under apps/. Reviewer
+ * NOT enforced by anything today — no lint rule, and no CI at all. Reviewer
  * check, and the same one `packages/contracts` states from the declaring side:
  *
  *   grep -rnE '^[[:space:]]*(export )?(function parseFrame|class KbError)' apps/widget/src

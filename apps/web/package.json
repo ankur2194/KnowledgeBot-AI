@@ -14,7 +14,7 @@
     "test:unit": "vitest run --project unit",
     "test:components": "vitest run --project components",
     "e2e": "playwright test",
-    "ui:add": "shadcn add -b radix"
+    "ui:add": "shadcn add"
   },
   "dependencies": {
     "@hookform/resolvers": "5.7.1",

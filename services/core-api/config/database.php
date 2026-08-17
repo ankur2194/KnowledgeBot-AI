@@ -27,9 +27,56 @@ return [
             'host' => env('DB_HOST', 'postgres'),
             'port' => (int) env('DB_PORT', 5432),
             'database' => env('DB_DATABASE', 'knowledgebot'),
-            'username' => env('DB_USERNAME', 'knowledgebot'),
+            // kb_app, NOT knowledgebot. `POSTGRES_USER` makes exactly one role and makes it a
+            // SUPERUSER, and a superuser bypasses every ACL check — which is why `audit_logs`' REVOKE
+            // was an audit artifact rather than a control until the role split (D21). The fallback is
+            // the least-privileged role on purpose: if the variable goes missing, the failure is
+            // "cannot connect", not "connected with more authority than intended".
+            'username' => env('DB_USERNAME', 'kb_app'),
             // DB_PASSWORD_FILE=/run/secrets/postgres_password
             'password' => KbSecrets::get('DB_PASSWORD', ''),
+            'charset' => 'utf8',
+            'prefix' => '',
+            'prefix_indexes' => true,
+            'search_path' => 'public',
+            'sslmode' => env('DB_SSLMODE', 'prefer'),
+        ],
+
+        /**
+         * The DDL connection (D21). SAME server, SAME database, DIFFERENT ROLE.
+         *
+         * WHY IT HAS TO EXIST. Measured: as `kb_app`,
+         * `CREATE TABLE … PARTITION OF audit_logs` fails at `permission denied for schema public` —
+         * before any ownership check — because the application role holds USAGE and not CREATE. So
+         * `kb:create-audit-partitions` cannot run on the default connection, and without it, at 00:00 on
+         * the first of a month past the runway EVERY audit insert fails with 23514 and every
+         * ABORT-policy action returns 500, on a clock.
+         *
+         * ONE CONSUMER, DELIBERATELY: `EloquentAuditLogPartitionRepository`. Naming a connection rather
+         * than swapping `DB_USERNAME` is what keeps the rest of the scheduler unable to reach it — a role
+         * that can `DROP TABLE` must not be the ambient default inside a long-running container.
+         *
+         * ── THE FALLBACK IS THE APP ROLE, NOT `kb_migrate`, AND THAT IS THE LOAD-BEARING CHOICE ──────
+         * The handoff proposed `env('DB_DDL_USERNAME', 'kb_migrate')`. That would have broken every
+         * environment where the split is not deployed — including the whole test suite, which connects as
+         * its own role and where no `kb_migrate` exists, so every partition test would fail at
+         * authentication rather than at anything it was written to check. Falling back to the APP role
+         * degrades to exactly today's behaviour: one role doing both jobs.
+         *
+         * The cost of that choice, stated because it is a real one: deploy the role split and forget
+         * `DB_DDL_USERNAME`, and partition creation runs as `kb_app` and fails with
+         * `permission denied for schema public` — at the point of use, on a scheduled command, which
+         * `scripts/ops/preflight.sh` §8 also detects. A loud failure in the environment that HAS the
+         * split beats a broken suite in every environment that does not.
+         */
+        'pgsql_ddl' => [
+            'driver' => 'pgsql',
+            'host' => env('DB_HOST', 'postgres'),
+            'port' => (int) env('DB_PORT', 5432),
+            'database' => env('DB_DATABASE', 'knowledgebot'),
+            'username' => env('DB_DDL_USERNAME', env('DB_USERNAME', 'kb_app')),
+            // DB_DDL_PASSWORD_FILE=/run/secrets/postgres_migrate_password
+            'password' => KbSecrets::get('DB_DDL_PASSWORD', KbSecrets::get('DB_PASSWORD', '')),
             'charset' => 'utf8',
             'prefix' => '',
             'prefix_indexes' => true,

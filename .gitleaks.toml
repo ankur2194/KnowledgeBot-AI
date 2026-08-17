@@ -1,0 +1,97 @@
+# =================================================================================================
+# gitleaks configuration — ONE narrow allowlist, and a `useDefault` line that is the whole safety net.
+# =================================================================================================
+# WHY THIS FILE EXISTS. A `secret-scan` CI job used to run gitleaks twice — `git --log-opts=--all`
+# over the whole history, and `dir .` over the worktree — and it was deleted with `.github/` on
+# 2026-08-17, hours after this file was written to unblock it. THIS CONFIG IS STILL WORTH KEEPING,
+# for the reason it was needed in the first place: the dir scan exits 1 with EIGHT findings, every
+# one of them `generic-api-key` firing on a TEST FIXTURE PASSWORD, so without it anyone who runs
+# gitleaks by hand gets eight false positives and learns to ignore the tool. The history scan is
+# CLEAN — 0 findings — with or without this file.
+#
+# NOTHING RUNS GITLEAKS AUTOMATICALLY ANY MORE. The command is in the footer; running it is now a
+# manual step, and the eight findings this file exempts are the reason the manual step is legible.
+#
+# Measured 2026-08-17 against gitleaks v8.30.1 on a tree of only the 1022 tracked files, so these
+# are not build-artifact false positives:
+#
+#   packages/contracts/test/auth-schemas.test.ts                174, 175   'Nope-12345678'
+#   services/core-api/tests/Feature/AuthPasswordResetTest.php   224, 225   'Second-Replacement-9'
+#   services/core-api/tests/Security/AccountEnumerationTest.php 343 (x2), 459, 460
+#                                                                          'Enumeration-Probe-1'
+#
+# All three files are STAGED AND NOT YET COMMITTED, which is exactly why the history scan is green
+# and why this was latent: the fixtures only enter history on the commit that lands them. With CI
+# gone there is no build to go red, so the failure mode has changed shape rather than disappeared —
+# it is now "the person who runs the scan gets eight findings and stops trusting it".
+#
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+# `useDefault = true` IS LOAD-BEARING AND ITS ABSENCE IS SILENT.
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+# A .gitleaks.toml REPLACES the default ruleset rather than extending it. Without the [extend]
+# block below, this file would define ZERO rules and every scan would find nothing — reporting "no
+# leaks found" for a scan that looked for no secret at all, which is byte-identical to a scan that
+# looked for every one of them. That hazard got WORSE when CI was removed, not better: a human
+# running one command and reading one reassuring line has no second opinion. It is why the positive
+# controls below are recorded rather than merely run once.
+[extend]
+useDefault = true
+
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+# THE ALLOWLIST IS SCOPED THREE WAYS AT ONCE, AND EVERY ONE OF THE THREE IS NECESSARY.
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+# The tempting fix — `paths = ['''tests/''']` — is the wrong one, and not by a little: it would mean
+# a real provider credential pasted into a test file is invisible to the scanner forever. Tests are
+# where credentials get pasted "just to see it work". So the exemption is not "tests are exempt";
+# it is "a password-shaped assignment, in a test path, matched by this one rule, is exempt":
+#
+#   * targetRules  — ONLY `generic-api-key`. Every other default rule (AWS, GitHub PAT, Stripe,
+#                    private keys, JWTs…) still applies at full strength inside these same files.
+#   * paths        — only the three test roots that actually carry these fixtures. Not `tests/`
+#                    repo-wide, and not `services/` or `apps/`.
+#   * regexes      — the match must LOOK like a password assignment (`'password' => '...'` or
+#                    `password_confirmation: '...'`). A bare high-entropy string in one of these
+#                    files is still a finding.
+#
+# `condition = "AND"` is what makes the three compose instead of collapsing to "any of these".
+# Default is OR, under which the `paths` entry alone would exempt whole directories from
+# generic-api-key — most of the protection lost to one missing line.
+[[allowlists]]
+id = "test-fixture-passwords"
+description = "Synthetic password fixtures in auth test suites (docs/22 secret-scan finding, 2026-08-17)"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = [
+  '''^packages/contracts/test/''',
+  '''^services/core-api/tests/''',
+]
+regexes = [
+  # `password` or `password_confirmation`, PHP fat-arrow or JS/TS colon, quoted value.
+  '''(?i)['"]?password(_confirmation)?['"]?\s*(=>|:)\s*['"][^'"]{6,64}['"]''',
+]
+
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+# POSITIVE CONTROLS — all four executed 2026-08-17 against v8.30.1, and all four must stay true.
+# A config change that leaves the suite green is not evidence; these are what make it evidence.
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+#   1. tracked tree, this config                -> no leaks found, exit 0  (fixtures are exempt)
+#   2. AWS key planted in apps/web app source   -> STILL CAUGHT   (useDefault really extends)
+#   3. AWS key planted in an ALLOWLISTED test   -> STILL CAUGHT   (this is not "tests are exempt")
+#   4. THE EXACT exempted line — `'password' => 'Second-Replacement-9'` — relocated into
+#      services/core-api/app/…  -> STILL CAUGHT  (the `paths` scoping really applies)
+#
+# CONTROL 4 IS WORDED THAT PEDANTICALLY BECAUSE THE FIRST VERSION OF IT WAS A BAD PROBE AND PASSED
+# FOR THE WRONG REASON. It planted a *plausible-looking* invention (`'password' =>
+# 'Not-A-Fixture-Value-9'`) in app source, saw "no leaks found", and that reads as "the allowlist is
+# leaking outside tests". Removing this file and re-scanning showed 8 findings rather than 9 — so the
+# invented string was never detected by `generic-api-key` AT ALL, with or without any config, and the
+# probe proved nothing either way. Only re-using a string gitleaks demonstrably DOES catch turns the
+# control into evidence: with this config it is caught in app source (1) and exempt in the test file
+# (0), which is exactly the asymmetry the `paths` list is supposed to produce.
+#
+# The lesson generalises past gitleaks: a negative result from a probe you have not proved is
+# detectable is indistinguishable from a broken detector.
+#
+# Re-run them after touching this file:
+#   docker run --rm -v "$PWD:/repo:ro" -w /repo zricethezav/gitleaks:v8.30.1 dir . --redact --verbose

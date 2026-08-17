@@ -141,9 +141,10 @@ amtool config routes test --config.file=.../alertmanager.yml severity=page sever
 
 ## The CI gates this directory is written against
 
-CI is deferred (`github-actions-pipeline` owns it), so this is the specification the gates must be
-written to. Each is phrased precisely, because a gate that is slightly wrong is worse than none —
-it is a green check over a hole.
+There is no CI in this repository — `.github/` was deleted on 2026-08-17 — so nothing below is
+enforced by a gate. It is kept as a specification anyway, for whoever wires this up somewhere else,
+and each item stays phrased precisely for the original reason: a gate that is slightly wrong is
+worse than none, because it is a green check over a hole.
 
 1. **Catalog diff.** Scrape **the Collector's `prometheus` exporter on `:8889`**, never a service's
    own `/metrics`. Under PHP-FPM and Celery prefork each request lands in a different process, so a

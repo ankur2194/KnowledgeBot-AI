@@ -43,9 +43,28 @@ bootstrap:
 up:
 	@cd $(COMPOSE_DIR) && docker compose up -d
 
-## down: stop the development stack, keeping volumes
+## down: stop the ENTIRE development stack — every profile — keeping volumes
+# ADR-044 / docs/22 § I1.
+# `--profile '*'` is load-bearing and `--remove-orphans` is NOT the alternative. MEASURED on Compose
+# v5.3.1 (2026-08-14) with a two-service scratch project, one service behind `profiles: [test]`:
+#
+#   docker compose down                    -> removed the unprofiled service; the profiled container
+#                                             was left RUNNING, and the network then failed to remove
+#                                             with "Resource is still in use"
+#   docker compose down --remove-orphans   -> left it running too. A profiled service is NOT an
+#                                             orphan: Compose can see it in the file, it is merely
+#                                             not in the active profile set, so this flag never
+#                                             looks at it. This is why `deploy` carrying the flag
+#                                             says nothing about the case.
+#   docker compose --profile '*' down      -> removed the container AND the network
+#
+# That is the whole reason `postgres-test` and `valkey-test` outlive a `make down` and sit in
+# `docker ps -a` for days. The wildcard needs Compose >= 2.24; `COMPOSE_PROFILES='*'` is the
+# equivalent for an older client. There is deliberately no `stop` target to go with this — the
+# 15-target cap at the head of this file is a real constraint, and with dev's `restart: "no"`
+# (compose.override.yaml, SHUTDOWN DETERMINISM) a plain `docker compose stop` now stays stopped.
 down:
-	@cd $(COMPOSE_DIR) && docker compose down
+	@cd $(COMPOSE_DIR) && docker compose --profile '*' down
 
 ## watch: development with file syncing (needs a build: section and stat/mkdir/rmdir in the image)
 watch:

@@ -215,7 +215,7 @@ to read — still less delete — Laravel's queues.
 
 That boundary has been **verified by hand** against `valkey/valkey:9.1.1` (`kb-ai` → `LLEN
 queues:t` returns `NOPERM`; see the table under "Passwords"). It is **not covered by any automated
-test** — nothing in `services/*/tests/` or `.github/workflows/` exercises a per-user key pattern.
+test** — nothing in `services/*/tests/` exercises a per-user key pattern, and there is no CI either.
 Writing that test is listed as pre-deployment work under "`<!-- UNVERIFIED -->` Database-level
 ACL" below; until it exists, a pattern edited out of this file breaks the boundary silently.
 

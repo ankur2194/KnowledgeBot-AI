@@ -10,8 +10,8 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   // Blob reports merge across shards with `npx playwright merge-reports`.
   //
-  // There is NO CI invocation of Playwright yet — ci.yml has not been authored and no lockfile
-  // exists, so nothing here has ever run outside a laptop. When that job is written it must pass
+  // There is NO automated invocation of Playwright, and no CI in this repo to add one to, so
+  // nothing here has ever run outside a laptop. Whoever runs it must pass
   // --fail-on-flaky-tests: with retries=1 below, a spec that only ever passes on the retry exits 0
   // forever, and the org-switch and streaming specs are exactly the kind that flake first and mean
   // it. The flag is a property of the invocation, not of this file; it cannot be set from here.
@@ -37,7 +37,9 @@ export default defineConfig({
       testMatch: /.*\.setup\.ts/,
     },
     {
-      // storageState persists cookies, so laravel_session AND XSRF-TOKEN both come back.
+      // storageState persists cookies, so kb_session AND XSRF-TOKEN both come back. The name is
+      // `config('session.cookie')` (services/core-api/config/session.php:23), never Laravel's
+      // `laravel_session` factory default — see the constant in src/proxy.ts.
       // sessionStorage is never captured; anything kept there is restored with addInitScript().
       name: 'admin',
       dependencies: ['setup'],

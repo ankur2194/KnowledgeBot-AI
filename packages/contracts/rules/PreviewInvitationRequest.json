@@ -1,0 +1,11 @@
+{
+    "class": "App\\Http\\Requests\\PreviewInvitationRequest",
+    "rules": {
+        "token": [
+            "bail",
+            "required",
+            "string",
+            "size:64"
+        ]
+    }
+}

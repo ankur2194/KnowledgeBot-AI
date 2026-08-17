@@ -12,6 +12,67 @@
 
 name: knowledgebot
 
+# =============================================================================================
+# THE EDGE SUBNET IS A SECURITY VALUE, NOT AN ADDRESSING DETAIL — ONE LITERAL, TWO CONSUMERS.
+# =============================================================================================
+# This anchor is aliased in exactly two places, and they must never be allowed to disagree:
+#
+#   1. `networks.edge.ipam.config[0].subnet` below — what Docker actually allocates from.
+#   2. `TRUSTED_PROXIES` on laravel-api and laravel-api-stream — the CIDR Laravel's TrustProxies
+#      middleware will accept an `X-Forwarded-For` from. Anything outside it is treated as the
+#      real client and its forwarded headers are ignored.
+#
+# A YAML anchor rather than two `${KB_EDGE_SUBNET:-...}` occurrences: an alias is resolved by the
+# YAML parser before Compose sees the document, so the two sites are the SAME scalar and cannot
+# drift by half an edit. The `${...}` inside it still interpolates, so an operator whose host
+# already uses this range can override it in .env with ONE variable and both sites move together.
+# A CIDR typed a second time into config/trustedproxy.php or into env/core-api.env would be a
+# third copy that Docker is free to invalidate — which is the defect this pin exists to close.
+#
+# WHY IT MUST BE PINNED AT ALL. Without `ipam:` Docker allocates the subnet from its address pool
+# in creation order, interleaved with every other project on the host. MEASURED on this host
+# 2026-08-13: knowledgebot_edge=172.24.0.0/16, application=172.25, data=172.26,
+# observability=172.28 — note the gap at .27, which a third-party network took BETWEEN two of our
+# own. Prune the networks, or bring another project up first, and every one of those values moves.
+# A trusted-proxy CIDR that Docker may reassign is a silent failure in the dangerous direction:
+# the range stops matching, `$request->ip()` reverts to Traefik's address, and all five per-IP
+# rate limiters collapse back into one global bucket with nothing red anywhere.
+#
+# PINNING THIS RECREATES THE NETWORK ONCE, AND THE "MATCHES WHAT DOCKER ALREADY CHOSE, SO IT
+# RECREATES NOTHING" ARGUMENT USED FOR THE `name:` KEY BELOW DOES NOT TRANSFER. Measured against
+# Compose v5 on a throwaway project 2026-08-13: a network created with NO ipam and then re-upped
+# with an ipam block declaring THE VERY SUBNET DOCKER HAD ALREADY ASSIGNED was still stopped,
+# removed, recreated and its container restarted — Compose compares "declared" against "recorded",
+# and auto is not equal to explicit-with-the-same-value. A second `up` after that is a clean no-op
+# ("Running"). So the cost is one ordinary restart of the six containers on `edge`, once.
+#
+# THE DEFAULT IS OUTSIDE DOCKER'S DYNAMIC POOL, AND THAT IS THE WHOLE POINT OF THE VALUE.
+# ADR-046 (docs/19); the documents that went stale afterwards are docs/22 § I5.
+# It used to be `172.24.0.0/16`, which is INSIDE the daemon's built-in default address pool
+# (172.17.0.0/12 in /16 chunks, plus 192.168.0.0/16 — this host sets no `default-address-pools`, so
+# the built-ins apply). A pinned range inside the pool can be handed to an UNPINNED network, and on
+# 2026-08-14 it was handed to one of OUR OWN. After `make down` freed all four project networks, the
+# next `up` failed with
+#     failed to create network knowledgebot_edge: invalid pool request:
+#     Pool overlaps with other one on this address space
+# because `knowledgebot_data` had been created first and taken 172.24.0.0/16 — the allocator hands
+# out the lowest free /16, other projects on this host hold 172.17–172.23, so 172.24 IS the lowest
+# free one, and Compose does not create `edge` first. NOT A ONE-OFF: it reproduces on every down/up
+# cycle until something else happens to hold 172.24 at create time, which is the worst kind of
+# intermittent — the failure is a hard stop, and the "fix" (retry, or `docker network prune`) looks
+# like it works at random.
+#
+# 10.0.0.0/8 is in NEITHER built-in pool, so no dynamically allocated network — ours or another
+# project's — can ever be given this range. That removes the collision class instead of moving it
+# around, and it is why the three unpinned networks below STAY unpinned: pinning them would put three
+# more ranges at risk to fix a problem this one line already fixes. Verified on this host before the
+# change: `docker network create --subnet 10.207.0.0/16` succeeds, and `ip route get 10.207.0.1`
+# resolves via the default gateway, i.e. nothing local claims the range.
+#
+# THE RESIDUAL RISK IS THE ONE THE `edge` BLOCK BELOW ALREADY NAMES, and it is now the only one: a
+# host route or VPN that really does use 10.207/16. That is exactly what KB_EDGE_SUBNET is for.
+x-edge-subnet: &edge-subnet "${KB_EDGE_SUBNET:-10.207.0.0/16}"
+
 # ---------------------------------------------------------------------------------------------
 # NETWORKS — the trust boundary, and the only one Compose can enforce.
 # ---------------------------------------------------------------------------------------------
@@ -32,6 +93,25 @@ networks:
   # recreates nothing.
   edge:
     name: knowledgebot_edge
+    # PINNED because Laravel has to name this range in configuration — see x-edge-subnet above for
+    # what reads it, why an auto-assigned value cannot be named, and what pinning costs on the
+    # first `up` after this change. `application`, `data` and `observability` stay auto-assigned:
+    # nothing outside Compose needs to name them, and every pinned range is one more chance of a
+    # collision with a host route or a VPN. Do NOT pin them "for consistency".
+    #
+    # A COLLISION HERE IS LOUD, WHICH IS CORRECT. If another network on the host already holds this
+    # range, `up` fails with "Pool overlaps with other one on this address space" and nothing
+    # starts. Fix it by setting KB_EDGE_SUBNET in infrastructure/docker/.env — never by deleting
+    # this block, which silently un-pins the CIDR that TRUSTED_PROXIES depends on.
+    #
+    # ONE CLASS OF THAT COLLISION IS NOW STRUCTURALLY IMPOSSIBLE rather than merely loud, and it was
+    # the class that actually fired: the default moved out of Docker's dynamic address pool on
+    # 2026-08-14 after `knowledgebot_data` took this pin's old value and broke every `up` following a
+    # `down`. See x-edge-subnet above for the measurement. What is left is a genuine third-party
+    # collision — a host route or VPN — which no compose-side change can prevent.
+    ipam:
+      config:
+        - subnet: *edge-subnet
   # `application` is deliberately NOT internal:true.
   # WHY: `ai-api` calls OpenAI/Anthropic/DeepSeek/NIM/OpenRouter, and `ai-worker-crawl` fetches
   # tenant-supplied URLs on the public web. An internal network gives its members no route off
@@ -132,7 +212,22 @@ secrets:
   hmac_key_k2:              {file: ./secrets/hmac_key_k2}
   callback_hmac_key_c1:     {file: ./secrets/callback_hmac_key_c1}
   callback_hmac_key_c2:     {file: ./secrets/callback_hmac_key_c2}
+  # THREE PostgreSQL passwords, one per role, and the split is the point (D21).
+  #   postgres_password           the POSTGRES_USER superuser. After the role split this is no longer
+  #                               a RUNTIME credential — only `postgres` itself and the
+  #                               `postgres-roles` one-shot mount it. It still owns the database, is
+  #                               what CREATE EXTENSION needs, and is the break-glass account.
+  #   postgres_migrate_password   kb_migrate, the NOSUPERUSER owner. Two services: laravel-migrate
+  #                               and laravel-scheduler (audit-partition DDL only).
+  #   postgres_app_password       kb_app, NOSUPERUSER and owns nothing. Every other service.
+  #
+  # WHY THREE FILES AND NOT ONE WITH THREE ROLES SHARING IT: the whole control is that the role a
+  # request-serving container can authenticate as cannot UPDATE or DELETE an audit row. One shared
+  # password makes every container able to authenticate as the owner, and the ACL then constrains
+  # nothing that a compromised container is bound by.
   postgres_password:        {file: ./secrets/postgres_password}
+  postgres_migrate_password: {file: ./secrets/postgres_migrate_password}
+  postgres_app_password:    {file: ./secrets/postgres_app_password}
   s3_secret_key:            {file: ./secrets/s3_secret_key}
   qdrant_api_key:           {file: ./secrets/qdrant_api_key}
   alertmanager_webhook_url: {file: ./secrets/alertmanager_webhook_url}
@@ -208,6 +303,80 @@ x-no-callback-keys: &no-callback-keys
   AI_CALLBACK_HMAC_KEY_C2_FILE: ""
 
 # =================================================================================================
+# THE POSTGRES ROLE SPLIT (D21) — WHICH ROLE EACH SERVICE CONNECTS AS, AND WHY IT IS AN ANCHOR.
+# =================================================================================================
+# `POSTGRES_USER` creates exactly one role and makes it a SUPERUSER, and a superuser BYPASSES EVERY
+# ACL CHECK. So while every container connected as `knowledgebot`, `audit_logs`' `REVOKE UPDATE,
+# DELETE` was an audit artifact and not a control: measured on PostgreSQL 18.4, `pg_class.relacl`
+# showed no UPDATE and no DELETE on the parent or on any partition, and
+# `UPDATE audit_logs SET operation='tampered'` returned `UPDATE 1` anyway.
+#
+# TWO ROLES, CREATED BY THE `postgres-roles` ONE-SHOT BELOW:
+#   kb_migrate  NOSUPERUSER, OWNS every relation, has CREATE on schema public. `artisan migrate`
+#               and the audit-partition DDL, and NOTHING ELSE.
+#   kb_app      NOSUPERUSER, OWNS NOTHING, has USAGE and NOT CREATE on schema public. Every
+#               request-serving container and every worker.
+#
+# WHY THESE ARE `environment:` ANCHORS AND NOT env/*.env KEYS — the same argument TRUSTED_PROXIES
+# makes fifteen lines further down, plus one that is specific to this change. env/*.env are
+# gitignored files rendered ONCE from a template and never updated again, so a key placed there
+# reaches a new deployment and silently misses every existing one. AND: which role a container
+# connects as is a per-SERVICE fact, while env/core-api.env is ONE file shared by all six core-api
+# containers. It physically cannot express "laravel-migrate connects as the owner and the other five
+# do not". The shared file keeps `DB_USERNAME=kb_app`, the least-privileged value, so a service that
+# forgets its override degrades to *less* access rather than more.
+#
+# THE DEFAULT DIRECTION IS THE WHOLE DESIGN, SO THE APP ROLE HAS NO ANCHOR AND NEEDS NONE.
+# `env/core-api.env` carries `DB_USERNAME=kb_app` + `DB_PASSWORD_FILE=/run/secrets/postgres_app_password`
+# and `env/ai-service.env` carries the `KB_PG_*` equivalents. A service that declares nothing
+# therefore connects as the LEAST-privileged role, and forgetting an override degrades access rather
+# than widening it. Two anchors below, each opting exactly one service IN to the owner role by name;
+# there is deliberately no third anchor saying "and this one is only the app role", because such an
+# anchor is a thing to forget, and forgetting it would be silent.
+#
+# `laravel-migrate` connects AS the owner: `artisan migrate` creates and alters every table.
+x-db-migrate-connection: &db-migrate-connection
+  DB_USERNAME: kb_migrate
+  DB_PASSWORD_FILE: /run/secrets/postgres_migrate_password
+  # AND IT MUST BE TOLD THE APPLICATION ROLE, because it cannot infer it — this container's
+  # DB_USERNAME is deliberately the OWNER. `create_audit_logs_table` revokes UPDATE/DELETE/TRUNCATE
+  # from the role that serves requests, and it used to read that name from the connection it was
+  # using: inside THIS container that is `kb_migrate`, so the migration revoked from ITSELF.
+  # Measured on the live cluster before the fix — `audit_logs` came out
+  # `{kb_migrate=arxtm/kb_migrate,kb_app=ar/kb_migrate}`, correct only because apply-roles.sh had
+  # already run. On a fresh deployment the table would have been writable by the application for the
+  # whole session, because postgres-roles runs BEFORE the migration and so finds no audit_logs to
+  # revoke on. Read as `kb.db_app_role`; see that config key for the full account.
+  DB_APP_USERNAME: kb_app
+# `laravel-scheduler` connects as the APP role for its normal work and holds the owner credential on
+# a SECOND, separate connection used by one thing only: the audit-partition DDL.
+#
+# MEASURED, AND THIS IS WHY THE SECOND CONNECTION CANNOT BE AVOIDED: as kb_app,
+# `CREATE TABLE ... PARTITION OF audit_logs` fails at `permission denied for schema public` — before
+# it ever reaches the ownership check — so the runtime application role cannot create an audit
+# partition at all. Without it, at 00:00 on the first of a month past `kb:create-audit-partitions`'
+# three-month runway EVERY audit insert fails with 23514 and every ABORT-policy action returns 500,
+# on a clock.
+#
+# THE COST, STATED: `laravel-scheduler` is a long-running container that now holds a credential for a
+# role which can create and drop tables. That is a real widening and it is the reason the credential
+# arrives on a SEPARATE connection name rather than as `DB_USERNAME` — `config/database.php` gains a
+# `pgsql_ddl` connection reading `DB_DDL_USERNAME`, and
+# `App\Repositories\Eloquent\EloquentAuditLogPartitionRepository` is its only consumer, so nothing
+# else in the scheduler can reach it without an explicit `connection('pgsql_ddl')`. That diff is
+# `control-plane-engineer`'s and is in the report for this change; until it lands these two keys are
+# inert, because nothing reads them.
+#
+# THE ALTERNATIVE THAT WAS REJECTED: a SECURITY DEFINER function owned by kb_migrate which creates
+# the partition and revokes on it, granted EXECUTE to kb_app. It needs no second credential anywhere
+# and cannot forget the revoke, which is genuinely better on both counts — and it adds a standing
+# privilege-escalation primitive to the schema, invisible to anyone debugging a permission problem,
+# created by a migration nobody would think to read. Recorded as the upgrade rather than taken.
+x-db-ddl-connection: &db-ddl-connection
+  DB_DDL_USERNAME: kb_migrate
+  DB_DDL_PASSWORD_FILE: /run/secrets/postgres_migrate_password
+
+# =================================================================================================
 # CELERY WORKER LIVENESS — ONE STANZA, FOUR SERVICES, AND THE PROBE ITSELF LIVES IN THE IMAGE.
 # =================================================================================================
 # This was previously the same 200-character `python -c` one-liner pasted verbatim into all four
@@ -263,7 +432,11 @@ services:
   # =============================================================================================
   traefik:
     image: traefik:v3.7
-    # The ONLY service in this file with a `ports:` key, in the base file and in every overlay.
+    # The ONLY service with a `ports:` key in THIS file and in compose.prod.yaml — which is the
+    # invariant a CI check used to assert over those two files only (deleted with `.github/`).
+    # `compose.override.yaml` deliberately adds two, both bound to 127.0.0.1: valkey-core `6379`
+    # and mailpit `8025` (the dev mail catcher's UI, which a browser has to reach). That gap is why
+    # `make deploy` hardcodes the `-f` pair instead of letting the override auto-load.
     # Published ports are DNAT'd in the iptables `nat` table, ahead of the INPUT chain a host
     # firewall uses — so an "internal-only" debug port on ai-api is a complete authorization
     # bypass that `ufw status` reports as blocked.
@@ -522,6 +695,42 @@ services:
     # variation. CI asserts set equality, so a missing one fails too.
     networks: [edge, application, data, observability]
     env_file: [./env/core-api.env]
+    # =========================================================================================
+    # TRUSTED_PROXIES — the only reason `$request->ip()` is a client address and not Traefik's.
+    # =========================================================================================
+    # THIS IS AN `environment:` KEY AND NOT AN env/core-api.env KEY, DELIBERATELY. env/*.env are
+    # gitignored files rendered ONCE from a template and never updated again (the gap
+    # scripts/dev/bootstrap.sh now reports and scripts/ops/preflight.sh §2b fails on), so a
+    # security value placed there reaches a new deployment and silently misses every existing one.
+    # It also has to equal the network's real subnet, and the network is declared HERE.
+    #
+    # WHY IT MATTERS. Traefik is the direct peer of every internet request, so with no trusted
+    # proxies configured `$request->ip()` is Traefik's container address for ALL of them —
+    # identical for every caller on earth. AppServiceProvider's five auth limiters each carry an
+    # `ip:` arm (login 20/min, password-request 10/min, password-reset/verification/invitation
+    # 20/min), so each becomes ONE GLOBAL BUCKET: 20 login attempts per minute for the whole
+    # internet, and one host can hold password reset unavailable for every tenant indefinitely.
+    # AuditLogger::ipFrom() writes the same value into audit_logs.ip_address, so `auth.login.failed`
+    # — which has a null organization_id and a null actor_id by design — records the reverse proxy
+    # and locates nothing.
+    #
+    # THE SCOPE IS THE `edge` SUBNET, NOT A WILDCARD AND NOT A SINGLE ADDRESS.
+    #   * NEVER '*'. It expands to 0.0.0.0/0 (TrustProxies::setTrustedProxyIpAddressesToTheCallingIp)
+    #     and makes X-Forwarded-For fully attacker-controlled — strictly WORSE than today, because
+    #     an attacker then picks a fresh address per request and evades every per-IP limiter
+    #     instead of merely sharing one bucket. Measured: with the wildcard, XFF `9.9.9.9` becomes
+    #     `$request->ip()` verbatim.
+    #   * Not Traefik's single IP: a stable one requires `ipv4_address`, which Docker allocates
+    #     sequentially from the low end of the range and does NOT reserve in advance — the seventh
+    #     container on `edge` collides with a hand-picked .10 and Traefik then fails to start. The
+    #     network IS the trust boundary the rest of this file already draws, and `edge` membership
+    #     is a closed set CI asserts (see the closed-set invariant above).
+    #   * Requests that arrive over `application` (ai-api's HMAC callbacks) come from outside this
+    #     range, so their forwarded headers are ignored and their peer address stands. Verified.
+    #
+    # ONE VALUE, TWO SITES, ONE LITERAL: the alias is the same scalar as networks.edge's subnet.
+    environment:
+      TRUSTED_PROXIES: *edge-subnet
     # k1/k2 to SIGN outbound internal calls; c1/c2 to VERIFY FastAPI's callbacks, which land on
     # POST /internal/v1/callbacks/* — this is the only Laravel service that receives them.
     # app_key/app_previous_keys are on EVERY Laravel service, not just the request-serving ones:
@@ -529,7 +738,7 @@ services:
     # everywhere.
     secrets: [app_key, app_previous_keys,
               kek, hmac_key_k1, hmac_key_k2, callback_hmac_key_c1, callback_hmac_key_c2,
-              postgres_password, s3_secret_key, valkey_kb_core_password]
+              postgres_app_password, s3_secret_key, valkey_kb_core_password]
     healthcheck:
       # `php -r`, not curl: the PHP image is slim and has no curl. Laravel's /up health route.
       test: ["CMD", "php", "-r", "exit(@file_get_contents('http://127.0.0.1:8080/up') === false ? 1 : 0);"]
@@ -538,6 +747,10 @@ services:
       retries: 3
       start_period: 60s
     stop_grace_period: 30s
+    # SIGTERM, because PID 1 here is `kb-serve` (bash) and its trap is `TERM INT` — see the block on
+    # laravel-api-stream's stop_signal for the measurement. The image's inherited SIGQUIT is right
+    # for php-fpm and wrong for this entrypoint, which forwards SIGQUIT to fpm itself.
+    stop_signal: SIGTERM
     depends_on:
       postgres: {condition: service_healthy}
       valkey-core: {condition: service_healthy}
@@ -599,12 +812,18 @@ services:
     # crash instead of by configuration.
     environment:
       <<: *no-callback-keys
+      # Same value, same reason, same alias as laravel-api — see the block there. It is repeated
+      # rather than shared because this service has its own `environment:` and a Compose merge of
+      # two mappings is exactly where a missing key stops being visible. Both services boot the
+      # same framework and both are routed by Traefik, so both need it: the streaming router
+      # (`/api/v1/chat/{id}/messages`) is a public surface with its own rate limiting.
+      TRUSTED_PROXIES: *edge-subnet
     # k1/k2 only. This service signs the chat request outbound and relays the stream; it never
     # verifies a callback, so it holds no callback key — a compromise here cannot forge one.
     # app_key is NOT narrowable the same way: it decrypts the session cookie on every request and
     # the `encrypted:` provider credential it decrypts-and-attaches per chat call.
     secrets: [app_key, app_previous_keys,
-              kek, hmac_key_k1, hmac_key_k2, postgres_password, s3_secret_key,
+              kek, hmac_key_k1, hmac_key_k2, postgres_app_password, s3_secret_key,
               valkey_kb_core_password]
     healthcheck:
       test: ["CMD", "php", "-r", "exit(@file_get_contents('http://127.0.0.1:8080/up') === false ? 1 : 0);"]
@@ -616,6 +835,26 @@ services:
     # Laravel's hard-coded +55_000 ms relay margin. A shorter grace SIGKILLs a live answer before
     # its usage row is finalized, which is the one row the tenant is billed from.
     stop_grace_period: 150s
+    # ==========================================================================================
+    # STOP_SIGNAL: SIGTERM — AND UNTIL 2026-08-14 THE 150s ABOVE PROTECTED NOTHING.
+    # ==========================================================================================
+    # PID 1 in this container is `kb-serve`, a bash script, and its only trap is `trap shutdown
+    # TERM INT` (see the Dockerfile's kb-serve heredoc). The image inherits `STOPSIGNAL SIGQUIT`
+    # from its `php:*-fpm*` base — correct if PID 1 WERE php-fpm, and this entrypoint is not: it
+    # RUNS fpm as a child and its `shutdown()` sends SIGQUIT onward itself, which is why the
+    # script's own comment says the 150s "is what gives this time to complete".
+    #
+    # It never completed. An unhandled signal is discarded for PID 1 (the kernel ignores signals
+    # with the default disposition for PID 1, SIGKILL and SIGSTOP excepted), so `docker stop` did
+    # nothing, Docker waited 150s and SIGKILLed — cutting a live answer mid-stream before its
+    # usage row is finalized, i.e. precisely the outcome this grace period is priced to prevent.
+    # Measured with the image itself: a PID 1 trapping only TERM survives SIGQUIT indefinitely,
+    # while a PID 1 trapping SIGQUIT exits on it — so delivery is fine and the handler is the gap.
+    #
+    # BELT-AND-BRACES FOLLOW-UP, deliberately not taken here: adding `QUIT` to kb-serve's trap
+    # would make the container correct under either signal, but it needs an image rebuild and the
+    # Dockerfile is not this file. Recorded rather than smuggled in.
+    stop_signal: SIGTERM
     depends_on:
       postgres: {condition: service_healthy}
       valkey-core: {condition: service_healthy}
@@ -654,7 +893,7 @@ services:
     # serialized models whose `encrypted:` attributes are decrypted when the job is handled, so a
     # worker without the key fails at `handle()`, after the job has already been reserved.
     secrets: [app_key, app_previous_keys,
-              kek, hmac_key_k1, hmac_key_k2, postgres_password, s3_secret_key,
+              kek, hmac_key_k1, hmac_key_k2, postgres_app_password, s3_secret_key,
               valkey_kb_core_password]
     healthcheck:
       test: ["CMD", "php", "artisan", "horizon:status"]
@@ -666,6 +905,9 @@ services:
     # The container's default is 10s, which SIGKILLs a job mid-UPDATE — exactly the state the
     # idempotency machinery is paying to avoid.
     stop_grace_period: 180s
+    # AND THE SIGNAL, WITHOUT WHICH THE GRACE PERIOD ABOVE BOUGHT NOTHING BUT DELAY. See the block
+    # above laravel-worker-long for the measurement; it applies identically here.
+    stop_signal: SIGTERM
     depends_on:
       postgres: {condition: service_healthy}
       valkey-core: {condition: service_healthy}
@@ -695,7 +937,7 @@ services:
     # serialized models whose `encrypted:` attributes are decrypted when the job is handled, so a
     # worker without the key fails at `handle()`, after the job has already been reserved.
     secrets: [app_key, app_previous_keys,
-              kek, hmac_key_k1, hmac_key_k2, postgres_password, s3_secret_key,
+              kek, hmac_key_k1, hmac_key_k2, postgres_app_password, s3_secret_key,
               valkey_kb_core_password]
     healthcheck:
       test: ["CMD", "php", "artisan", "horizon:status"]
@@ -704,6 +946,30 @@ services:
       retries: 3
       start_period: 60s
     stop_grace_period: 1560s   # > the `valkey-long` supervisor timeout (1500s) + settle
+    # ==========================================================================================
+    # STOP_SIGNAL: SIGTERM — AND WITHOUT IT THE 1560s ABOVE WAS 26 MINUTES OF DEAD TIME.
+    # ADR-045 (docs/19).
+    # ==========================================================================================
+    # The core-api image inherits `STOPSIGNAL SIGQUIT` from its `php:*-fpm*` base, which sets it
+    # because SIGQUIT is php-fpm's GRACEFUL stop. This container does not run php-fpm — PID 1 is
+    # `php artisan horizon` — and Horizon traps SIGTERM, SIGUSR1, SIGUSR2, SIGCONT
+    # (`vendor/laravel/horizon/src/ListensForSignals.php`) plus SIGINT in its command. NOT SIGQUIT.
+    #
+    # PID 1 makes an unhandled signal disappear rather than terminate: the kernel ignores signals
+    # with the default disposition for PID 1 (SIGKILL and SIGSTOP excepted). So `docker stop` sent a
+    # signal Horizon had no handler for, nothing happened, Docker waited out the full grace period
+    # and then SIGKILLed — the exact outcome the grace period exists to prevent, after the longest
+    # possible wait. MEASURED 2026-08-14 with the image itself, two arms, no stack:
+    #   PID 1 traps SIGTERM only (Horizon's set)  -> SIGQUIT: STILL RUNNING.  SIGTERM: exits 0.
+    #   PID 1 traps SIGQUIT                       -> SIGQUIT: exits 0.
+    # The second arm is the control: the signal IS delivered, so this is the handler, not delivery.
+    # Reported as `make down` "taking too long and yet not down" — 26 minutes for this one container.
+    #
+    # Set per service rather than by adding STOPSIGNAL to the Dockerfile, because the SAME image runs
+    # php-fpm for laravel-api and laravel-api-stream, where SIGQUIT is the correct graceful signal and
+    # SIGTERM would cut a stream mid-answer. laravel-scheduler is a separate case with no fix at this
+    # layer — see the note in its block.
+    stop_signal: SIGTERM
     depends_on:
       postgres: {condition: service_healthy}
       valkey-core: {condition: service_healthy}
@@ -723,8 +989,14 @@ services:
     # The scheduler DISPATCHES; the worker that pops the job is what signs it, reads object storage
     # and decrypts a provider credential. So the same four opt-outs as laravel-migrate, for the same
     # reason and matching the same four absences from `secrets:` below.
+    #
+    # AND the one thing this service has that no other long-running container does: the owner
+    # credential, on a SECOND connection name. `DB_USERNAME` is untouched — it comes from the shared
+    # env file as kb_app, so everything the scheduler normally does runs with no DDL rights. Only
+    # `pgsql_ddl` reaches kb_migrate, and only the audit-partition repository names that connection.
+    # x-db-ddl-connection carries the measurement, the cost, and the rejected alternative.
     environment:
-      <<: [*no-kek, *no-s3-key, *no-signing-keys, *no-callback-keys]
+      <<: [*no-kek, *no-s3-key, *no-signing-keys, *no-callback-keys, *db-ddl-connection]
     # No signing key: the scheduler only enqueues, and the worker that pops the job is what signs.
     # It DOES need Valkey — onOneServer() and withoutOverlapping() are cache locks on valkey-core,
     # and with `user default off` an unauthenticated client cannot take one. A scheduler that
@@ -732,7 +1004,18 @@ services:
     # It DOES need app_key: `schedule:work` boots the full framework, and the sweeps it dispatches
     # hydrate models with `encrypted:` attributes. A scheduler missing the key throws on the first
     # due task rather than at boot, so the symptom is a schedule that silently stops.
-    secrets: [app_key, app_previous_keys, postgres_password, valkey_kb_core_password]
+    secrets: [app_key, app_previous_keys,
+              # BOTH POSTGRES PASSWORDS, and this is the ONLY long-running service that holds the
+              # owner credential. postgres_app_password serves DB_USERNAME — everything the
+              # scheduler normally does. postgres_migrate_password serves the SEPARATE `pgsql_ddl`
+              # connection, whose only consumer is
+              # App\Repositories\Eloquent\EloquentAuditLogPartitionRepository. See
+              # x-db-ddl-connection above for the measurement that forces a second connection (as
+              # kb_app, `CREATE TABLE ... PARTITION OF audit_logs` fails at `permission denied for
+              # schema public`), the cost this accepts, and the SECURITY DEFINER alternative that
+              # was rejected and recorded instead.
+              postgres_app_password, postgres_migrate_password,
+              valkey_kb_core_password]
     # No healthcheck: `schedule:work` exposes nothing to probe, and the real liveness signal is
     # kb_internal_scheduler_tick_timestamp_seconds — a gauge the always-scraped API exports from a
     # PostgreSQL row seeded in the migration, so a scheduler that never started reads as an ancient
@@ -775,9 +1058,11 @@ services:
     # COST: none that a gate or a threat model can see. `observability` is `internal: true`, so this
     # grants no egress. It reaches exactly one listener — the collector's OTLP receiver, which holds
     # no credential and returns no data — already reachable by five sibling containers running this
-    # identical image. It touches neither `edge` nor `application`, so gates.yml `compose-invariants`
-    # check (1) (edge ∩ application == {laravel-api, laravel-api-stream}) is unmoved in both
-    # directions, and check (5) still sees valkey-core as the only non-app-tier data↔application span.
+    # identical image. It touches neither `edge` nor `application`, so the network invariants hold
+    # unmoved in both directions — edge ∩ application == {laravel-api, laravel-api-stream}, and
+    # valkey-core is still the only non-app-tier data↔application span. Those two used to be checked
+    # mechanically; since `.github/` was deleted they are review properties, stated here so a reader
+    # can re-derive them from this file.
     networks: [data, observability]   # PostgreSQL and the Collector. Nothing else, deliberately.
     env_file: [./env/core-api.env]
     # This one-shot runs schema DDL and nothing else: no object storage, no internal call, no
@@ -785,8 +1070,14 @@ services:
     # THE DAY A DATA MIGRATION RE-ENCRYPTS AN `encrypted:` COLUMN, `*no-kek` comes off here and
     # `kek` goes onto `secrets:` in the same commit — `config('kb.kek')` being null in the meantime
     # is what makes that a loud failure rather than a silent write of unwrapped material.
+    #
+    # AND IT CONNECTS AS THE OWNER. `*db-migrate-connection` overrides the shared env file's
+    # DB_USERNAME/DB_PASSWORD_FILE (which name kb_app) with kb_migrate. Getting this wrong in either
+    # direction is loud rather than silent, which is the useful property: as kb_app, `artisan migrate`
+    # fails on the first CREATE TABLE with `permission denied for schema public` and this one-shot
+    # exits non-zero, so the ~ten services gated on its service_completed_successfully never start.
     environment:
-      <<: [*no-kek, *no-s3-key, *no-signing-keys, *no-callback-keys]
+      <<: [*no-kek, *no-s3-key, *no-signing-keys, *no-callback-keys, *db-migrate-connection]
     # `migrate --isolated` takes its atomic lock through the DEFAULT CACHE STORE, which is
     # valkey-core. Without a Valkey credential the lock cannot be taken and the one-shot fails —
     # which then blocks every service gated on service_completed_successfully. valkey-core is
@@ -795,10 +1086,31 @@ services:
     # console kernel before the first migration runs, and the one-shot then fails the
     # service_completed_successfully gate every other Laravel service waits on. Data migrations that
     # re-encrypt an `encrypted:` column need it for the same reason.
-    secrets: [app_key, app_previous_keys, postgres_password, valkey_kb_core_password]
-    stop_grace_period: 300s    # never SIGKILL a migration mid-DDL
+    # postgres_migrate_password, NOT postgres_app_password: this one-shot connects AS the owner role,
+    # because it is the thing that creates and alters every table. It is also the only Laravel
+    # service that does — the other five connect as kb_app and cannot issue DDL at all (kb_app has
+    # USAGE and not CREATE on schema public; measured).
+    secrets: [app_key, app_previous_keys, postgres_migrate_password, valkey_kb_core_password]
+    stop_grace_period: 300s    # never SIGKILL a migration mid-DDL — see the qualification below
+    # NO `stop_signal:` HERE, AND THE COMMENT ABOVE IS A DEADLINE RATHER THAN A PROMISE.
+    # `MigrateCommand` traps NO signal at all (measured: no `trap(`, no `pcntl` in
+    # vendor/.../Migrations/MigrateCommand.php), and PID 1 discards any signal it has no handler for.
+    # So neither the image's inherited SIGQUIT nor a SIGTERM would reach it, and a `docker stop`
+    # during a migration waits these 300s and then SIGKILLs mid-DDL anyway. The 300s is therefore
+    # "how long a migration is given to finish on its own before it is killed", which is still worth
+    # having and is not what "never SIGKILL" says. The sibling services get `stop_signal: SIGTERM`
+    # because their PID 1 actually handles it; setting it here would only look like a fix.
+    # Non-issue in normal operation: this is a one-shot that exits by itself, so the window only
+    # exists if someone stops the stack DURING a migration.
     depends_on:
       postgres: {condition: service_healthy}
+      # THE ROLE THIS ONE-SHOT AUTHENTICATES AS DOES NOT EXIST UNTIL postgres-roles HAS RUN.
+      # `service_healthy` on postgres says the server accepts connections; it says nothing about
+      # kb_migrate existing. Without this gate the first `docker compose up` on any deployment —
+      # fresh volume or not — dies with `FATAL: role "kb_migrate" does not exist`, and because every
+      # Laravel and FastAPI service gates on THIS container's service_completed_successfully, the
+      # whole stack stops here. postgres-roles is idempotent, so paying for it on every up is free.
+      postgres-roles: {condition: service_completed_successfully}
     labels:
       kb.edge: "false"
 
@@ -829,7 +1141,7 @@ services:
     # rotation window survivable — the ring tolerates extra ids, so both halves of a rotation can
     # be mounted before either side flips its active id.
     secrets: [hmac_key_k1, hmac_key_k2, callback_hmac_key_c1, callback_hmac_key_c2,
-              postgres_password, s3_secret_key, qdrant_api_key, valkey_kb_ai_password]
+              postgres_app_password, s3_secret_key, qdrant_api_key, valkey_kb_ai_password]
     volumes:
       - models:/models:ro
     healthcheck:
@@ -936,7 +1248,7 @@ services:
     # Both directions: a worker VERIFIES nothing but it SIGNS its progress callbacks into Laravel
     # with c1, and the key ring refuses to load without material for both active ids.
     secrets: [hmac_key_k1, hmac_key_k2, callback_hmac_key_c1, callback_hmac_key_c2,
-              postgres_password, s3_secret_key, qdrant_api_key, valkey_kb_ai_password]
+              postgres_app_password, s3_secret_key, qdrant_api_key, valkey_kb_ai_password]
     volumes:
       - models:/models:ro
     healthcheck:
@@ -986,7 +1298,7 @@ services:
     # Both directions: a worker VERIFIES nothing but it SIGNS its progress callbacks into Laravel
     # with c1, and the key ring refuses to load without material for both active ids.
     secrets: [hmac_key_k1, hmac_key_k2, callback_hmac_key_c1, callback_hmac_key_c2,
-              postgres_password, s3_secret_key, qdrant_api_key, valkey_kb_ai_password]
+              postgres_app_password, s3_secret_key, qdrant_api_key, valkey_kb_ai_password]
     volumes:
       - models:/models:ro
     healthcheck:
@@ -1093,7 +1405,7 @@ services:
     # Both directions: a worker VERIFIES nothing but it SIGNS its progress callbacks into Laravel
     # with c1, and the key ring refuses to load without material for both active ids.
     secrets: [hmac_key_k1, hmac_key_k2, callback_hmac_key_c1, callback_hmac_key_c2,
-              postgres_password, s3_secret_key, qdrant_api_key, valkey_kb_ai_password]
+              postgres_app_password, s3_secret_key, qdrant_api_key, valkey_kb_ai_password]
     volumes:
       - models:/models:ro
       # ------------------------------------------------------------------------------------------
@@ -1317,6 +1629,69 @@ services:
         limits:
           memory: 4G          # must agree with shared_buffers/work_mem in postgresql.conf.d/kb.conf
     restart: unless-stopped
+    labels:
+      kb.edge: "false"
+
+  # ===============================================================================================
+  # postgres-roles — the D21 role split. One-shot, idempotent, gates laravel-migrate.
+  # ===============================================================================================
+  # Same shape as `laravel-migrate` and for the same reason: something has to happen once, against a
+  # healthy database, before anything else may connect. It creates kb_migrate (NOSUPERUSER owner) and
+  # kb_app (NOSUPERUSER, owns nothing), moves ownership of every existing relation to kb_migrate,
+  # grants the app role SELECT/INSERT/UPDATE/DELETE (never TRUNCATE), and revokes UPDATE/DELETE/
+  # TRUNCATE on `audit_logs` and every partition. Full reasoning and every measurement:
+  # ./postgres/roles/apply-roles.sh.
+  #
+  # ── WHY THIS IS NOT AN initdb SCRIPT. BOTH REASONS MEASURED, NEITHER IN ANY DOCUMENTATION. ─────
+  # (1) AN INIT SCRIPT CANNOT READ A COMPOSE SECRET. The postgres entrypoint reads
+  #     POSTGRES_PASSWORD_FILE inside `docker_setup_env` while still root, and only THEN
+  #     `exec gosu postgres`. Everything after that — including
+  #     `docker_process_init_files /docker-entrypoint-initdb.d/*` — runs as uid 70, and a Compose
+  #     file-secret arrives with the HOST file's mode, which for secrets/ is `-rw------- 1000 1000`.
+  #     Measured, verbatim, from a real boot through the real entrypoint:
+  #         /docker-entrypoint-initdb.d/01-roles.sh: line 90:
+  #           /run/secrets/postgres_migrate_password: Permission denied
+  # (2) `uid:`/`gid:`/`mode:` ON A FILE SECRET ARE SILENTLY IGNORED. Measured on Compose v5.3.1: a
+  #     service declaring `{source: s, target: s, uid: "70", gid: "70", mode: 0400}` received
+  #     `-rw------- 1 1000 1000`, identical to the plain form, with NO warning and NO error. That is
+  #     why this service pins `user: "0:0"` — root is the only uid that can read secrets/ as mounted.
+  # (3) And the reason to prefer this anyway: init scripts run ONLY on an empty data directory, so
+  #     that path could never have reached the deployment that already exists. A role split present
+  #     on every fresh machine and absent from every existing one is exactly the divergence
+  #     postgres/initdb/00-extensions.sql's own header warns about.
+  #
+  # NO `profiles:` KEY, DELIBERATELY. A service with a profile is only enabled when that profile is
+  # active, and laravel-migrate depends_on this one — a `depends_on` pointing into an inactive
+  # profile is an invalid model, so Compose would error rather than auto-enable it.
+  postgres-roles:
+    # The SAME tag as the server, read from the same place, because `psql` must match the server
+    # major and a second literal is a second thing to forget to bump.
+    image: postgres:18-alpine
+    # `user: "0:0"` — see (2) above. This container reads three 0600 host files and issues SQL; it
+    # runs for under a second and holds no listening socket.
+    user: "0:0"
+    # `data` only. It talks to PostgreSQL and to nothing else — no egress, no collector, no edge.
+    # Unlike laravel-migrate it emits no telemetry (it is a shell script, not an instrumented app),
+    # so the `observability` membership that one-shot needs would buy nothing here.
+    networks: [data]
+    restart: "no"              # one-shot. `unless-stopped` here is an infinite DDL loop.
+    entrypoint: ["/bin/sh", "/apply-roles.sh"]
+    environment:
+      PGHOST: postgres
+      PGDATABASE: ${POSTGRES_DB:-knowledgebot}
+      PGUSER: ${POSTGRES_USER:-knowledgebot}
+      # Role NAMES, not credentials. They are also the defaults inside apply-roles.sh. A CI check
+      # compared these against the app services' values and the script's defaults; it was deleted
+      # with `.github/`, so a rename is now one PR with nothing but review and preflight on it.
+      POSTGRES_MIGRATE_USER: kb_migrate
+      POSTGRES_APP_USER: kb_app
+    volumes:
+      - ./postgres/roles/apply-roles.sh:/apply-roles.sh:ro
+    # All three, and this is the ONLY service that mounts all three. The superuser password is what
+    # it authenticates as; the other two are the passwords it sets.
+    secrets: [postgres_password, postgres_migrate_password, postgres_app_password]
+    depends_on:
+      postgres: {condition: service_healthy}
     labels:
       kb.edge: "false"
 
@@ -1677,13 +2052,29 @@ services:
     # Not a Compose `secret:`: deleting the grafana volume loses nothing but sessions, because
     # datasources, dashboards and folders are all provisioned from files under
     # infrastructure/observability/ with allowUiUpdates:false. The repo IS the backup.
-
-  mailpit:
-    image: axllent/mailpit:v1.28.4
-    profiles: [dev-tools]
-    networks: [application]
-    restart: unless-stopped
-    labels: {kb.edge: "false"}
+  # ----------------------------------------------------------------------------------------------
+  # mailpit — DEFINED IN compose.override.yaml, NOT HERE, AND DELIBERATELY SO.
+  # ----------------------------------------------------------------------------------------------
+  # It is a DEVELOPMENT mail catcher. Production sends through real SMTP (`MAIL_HOST`/`MAIL_PORT` in
+  # env/core-api.env), so mailpit is not merely unnecessary there — it must not exist, because a
+  # catcher that is reachable silently swallows real mail, which is worse than failing to send.
+  #
+  # IT LIVED HERE WITH `profiles: [dev-tools]` AND THAT WAS WRONG IN BOTH DIRECTIONS. The profile
+  # meant `docker compose up -d` started the whole stack and NOT the mail catcher, so every queued
+  # reset, verification and invitation notification went to a host that does not resolve — loud in
+  # Horizon, silent to whoever is trying to use the app, who requests a reset, is told it succeeded,
+  # and never receives anything. Moving the profile to compose.prod.yaml fixed that half and left the
+  # other: a deploy that runs `-f compose.yaml` ALONE, with no overlay, would still have created it.
+  #
+  # Defining it in the dev overlay closes both. `docker compose up` in this directory auto-loads
+  # compose.override.yaml, so a developer gets it with no flag; production runs
+  # `-f compose.yaml -f compose.prod.yaml` and the service does not exist to be excluded. There is no
+  # profile to remember in either direction.
+  #
+  # NOTE FOR WHOEVER READS THIS FILE AS THE SERVICE INVENTORY: it is no longer quite that. mailpit is
+  # the ONE service defined only in an overlay. The network-membership checks that used to run over
+  # this computed membership as the UNION across all three files, which is why `application members`
+  # still lists mailpit; they are gone, and the union is still the right way to read the inventory.
 
   adminer:
     image: adminer:5.4.1
@@ -1701,8 +2092,9 @@ services:
     profiles: [test]
     networks: [data]
     # THESE FOUR VALUES ARE CANONICAL AND SHARED — service alias `postgres-test`, database, user and
-    # password all `kb_test`. They must equal `services/core-api/phpunit.xml` and the CI service
-    # container in .github/workflows/ci.yml, byte for byte.
+    # password all `kb_test`. They must equal `services/core-api/phpunit.xml` byte for byte. They
+    # also had to match a CI service container until `.github/` was deleted, which is why the drift
+    # described below was worth three separate spellings of the same bug.
     #
     # They previously did not. This file said knowledgebot_test/knowledgebot/test, phpunit.xml said
     # kb_test/kb_test/kb_test against a host named `postgres`, and the CI reference said

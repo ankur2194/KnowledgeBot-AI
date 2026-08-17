@@ -35,6 +35,60 @@
 # The `:-1000` defaults keep a bare `docker compose up` working in a checkout with no .env.
 x-dev-user: &dev-user "${UID:-1000}:${GID:-1000}"
 
+# ================================================================================================
+# SHUTDOWN DETERMINISM. In DEVELOPMENT, stopped means stopped: nothing self-restarts.
+# ADR-044 (docs/19); the `down` half is docs/22 § I1.
+# ================================================================================================
+# compose.yaml gives every long-running service `restart: unless-stopped` (the two one-shots get
+# `"no"` there and the four `test`-profile services get no policy at all — count it with the grep at
+# the foot of this block rather than trusting a figure here, which is how an earlier draft of this
+# sentence came to be off by one). That is right for production and is where production still reads
+# it from — this overlay is the only place it is overridden, so a
+# production render (`compose.yaml` alone, or with `compose.prod.yaml`) is untouched. Same rule as
+# mailpit and the dev TLS mounts: dev-only behaviour lives in the file production never loads,
+# because a `profiles:` key in the base file is one forgotten flag away from applying everywhere.
+#
+# WHY. `unless-stopped` means "restart unless the operator explicitly stopped it BEFORE the daemon
+# went away". Docker keeps that exemption per container, and it does not cover a container that was
+# still running — or still flapping — when the daemon stopped. On Docker Desktop the daemon stops
+# and starts constantly: Desktop restarts, `wsl --shutdown`, a Desktop auto-update, a host reboot.
+# Every time it comes back, every container that was not cleanly stopped first comes back with it.
+# `AutoStart=False` in Docker Desktop's own settings does not change this — the revival is the
+# daemon's restart manager, not Desktop's launcher, so it happens whenever the daemon next starts.
+# That is the "I stopped them and they came back by themselves" report this block answers.
+#
+# THE SECOND MECHANISM, MEASURED ON THIS HOST (Engine 29.6.2, 2026-08-14). Two identical containers
+# that exit 255 immediately, one per policy, observed for 30 s:
+#     --restart unless-stopped  ->  state `restarting`, RestartCount 9
+#     --restart no              ->  state `exited`,     RestartCount 0
+# Then `docker stop` on both: BOTH settled to `exited` and stayed there. So a crash loop does NOT
+# defeat the stop button on this engine — that half of the symptom is the daemon-restart mechanism
+# above, and the loop is a separate cost paid while the stack is up. It is a cost this file already
+# records twice from real incidents: `web` exiting 254 on `pnpm dev` ("200+ restarts before anyone
+# looks", below) and `web` exiting 1 on the missing NEXT_PUBLIC_API_ORIGIN. Under `no` each of
+# those is one dead container with one readable log instead of a scrolling loop.
+#
+# WHAT IT COSTS, and why that is the right trade IN DEV ONLY. A container killed by a transient
+# hiccup — a dependency restarting, an OOM, a laptop resuming from sleep — now stays dead until
+# `docker compose up -d`, which is idempotent and starts only what is missing. In development that
+# is the feature: a crash you have to notice is a crash you fix, and the alternative is what
+# laravel-worker-long did on this host on 2026-08-14, logging RedisException connection-refused for
+# 98 minutes after valkey-core was stopped and outliving the rest of the stack. In PRODUCTION the
+# trade inverts — self-healing beats a human noticing — which is why the base file keeps
+# `unless-stopped` and this override is not repeated in compose.prod.yaml.
+#
+# ENFORCED, not merely intended. Compose merges `restart:` per service by REPLACEMENT, so a service
+# absent from this file silently keeps `unless-stopped` in dev — measured, and it is the whole drift
+# hazard here. A CI job used to assert both directions — every service in the DEV render resolving to
+# `no` (or carrying no policy), and the BASE render still carrying `unless-stopped` so nobody "fixes"
+# a dev restart loop by deleting production's self-healing. IT WAS DELETED WITH `.github/` ON
+# 2026-08-17, so both directions are now review properties. The two measuring greps at the foot of
+# this block are what remain: run them.
+# The two measuring commands, neither of which can go stale:
+#   grep -c 'restart: \*dev-no-restart' compose.override.yaml      # every dev override, plus mailpit
+#   grep -c 'restart: unless-stopped'   compose.yaml               # what production self-heals
+x-dev-no-restart: &dev-no-restart "no"
+
 services:
 
   # -----------------------------------------------------------------------------------------
@@ -76,7 +130,50 @@ services:
   #
   # ai-api sits on `data` + `application`, so it is the natural place to run an ad-hoc
   # `aws --endpoint-url http://seaweedfs-s3:8333` or a Qdrant request from.
+  # -----------------------------------------------------------------------------------------
+  # LOCALLY-TRUSTED TLS — the dev-only certificate, mounted HERE and nowhere else.
+  # -----------------------------------------------------------------------------------------
+  # ACME cannot issue for a development `DOMAIN`: `knowledgebot.example` is RFC 2606 reserved and
+  # resolves only through the operator's hosts file, so Let's Encrypt can never reach it. Traefik
+  # falls back to `CN = TRAEFIK DEFAULT CERT`, which no browser trusts.
+  #
+  # WHY THAT IS AN OUTAGE AND NOT A WARNING. A certificate interstitial is offered only for a
+  # top-level NAVIGATION. The console is `app.<domain>` and the API is `api.<domain>` — two origins —
+  # so accepting the warning on `app` leaves the page loading and looking healthy while every
+  # `fetch` to `api` fails with `ERR_CERT_AUTHORITY_INVALID`, no interstitial, and nothing at all in
+  # any server log. Measured: `GET https://api.<domain>/sanctum/csrf-cookie` failed at the preflight
+  # and every auth form showed a generic error.
+  #
+  # DEFINED IN THE DEV OVERLAY, DELIBERATELY — the same rule mailpit follows. A production render
+  # (`compose.yaml` alone, or with `compose.prod.yaml`) does not mount these paths, so a hand-made
+  # certificate cannot displace ACME on a real domain even if the files are sitting on disk. A
+  # `profiles:` key in the base file would not give that property: it would still be one forgotten
+  # `--profile` away from serving a self-signed certificate in production.
+  #
+  # PREREQUISITE: `scripts/dev/tls-dev-cert.sh` must have run, and its CA must be trusted in the OS
+  # store of the machine running the BROWSER (Windows, not WSL). If it has not run, Docker creates
+  # `traefik/certs/` as an empty directory, Traefik logs that it cannot load the certificate and
+  # serves the default one — i.e. exactly the pre-fix behaviour, which `preflight.sh` reports.
+  # `bootstrap.sh` runs the script, so the normal path cannot miss it.
+  traefik:
+    restart: *dev-no-restart
+    volumes:
+      # The base file's four mounts are preserved: Compose merges a service's `volumes` BY TARGET
+      # PATH, so these are additive and the one repeated target below replaces its base entry.
+      - ./traefik/certs:/etc/traefik/certs:ro
+      # NOT `:ro`, and the base file's identical entry IS `:ro` — this line exists to override it.
+      # The next mount lands INSIDE this one, and runc has to create the mountpoint file to do that:
+      # against a read-only mount it dies before Traefik starts, with
+      #   `create mountpoint for /etc/traefik/dynamic/dev-tls.yaml: read-only file system`
+      # Writable here costs nothing — Traefik's file provider only ever reads this directory — and
+      # production keeps the read-only entry from the base file untouched.
+      - ./traefik/dynamic:/etc/traefik/dynamic
+      # The generated dynamic snippet, dropped into the directory the file provider already watches.
+      # Kept in the gitignored certs/ directory so it cannot exist without the certificates it names.
+      - ./traefik/certs/dev-tls.yaml:/etc/traefik/dynamic/dev-tls.yaml:ro
+
   valkey-core:
+    restart: *dev-no-restart
     ports: ["127.0.0.1:6379:6379"]   # works ONLY because valkey-core also joins `application`
 
   # Note what is NOT here: ai-api, any ai-worker-*, laravel-worker*, laravel-scheduler and
@@ -90,6 +187,7 @@ services:
   # Run it as `docker compose watch` or `up --watch`.
   # -----------------------------------------------------------------------------------------
   laravel-api:
+    restart: *dev-no-restart
     user: *dev-user
     build:
       target: runtime
@@ -118,6 +216,7 @@ services:
         - {action: rebuild, path: ../../services/core-api/composer.lock}
 
   laravel-api-stream:
+    restart: *dev-no-restart
     user: *dev-user
     environment:
       APP_ENV: local
@@ -131,6 +230,7 @@ services:
     # bug is invisible in the one place people test it.
 
   laravel-worker:
+    restart: *dev-no-restart
     user: *dev-user
     volumes:
       - ../../services/core-api:/app
@@ -140,10 +240,12 @@ services:
     # about what a deploy costs, and how a "works locally" idempotency bug reaches production.
 
   laravel-worker-long:
+    restart: *dev-no-restart
     user: *dev-user
     volumes: ["../../services/core-api:/app", "/app/vendor", "/app/bootstrap/cache"]
 
   laravel-scheduler:
+    restart: *dev-no-restart
     user: *dev-user
     volumes: ["../../services/core-api:/app", "/app/vendor", "/app/bootstrap/cache"]
 
@@ -152,6 +254,7 @@ services:
     volumes: ["../../services/core-api:/app", "/app/vendor", "/app/bootstrap/cache"]
 
   ai-api:
+    restart: *dev-no-restart
     user: *dev-user
     build:
       target: runtime
@@ -192,26 +295,32 @@ services:
       start_period: 90s
 
   ai-worker-ingestion:
+    restart: *dev-no-restart
     user: *dev-user
     volumes: ["../../services/ai-service:/app", "/app/.venv", "models:/models"]
 
   ai-worker-embedding:
+    restart: *dev-no-restart
     user: *dev-user
     volumes: ["../../services/ai-service:/app", "/app/.venv", "models:/models"]
 
   ai-worker-crawl:
+    restart: *dev-no-restart
     user: *dev-user
     volumes: ["../../services/ai-service:/app", "/app/.venv"]
 
   ai-worker-evaluation:
+    restart: *dev-no-restart
     user: *dev-user
     volumes: ["../../services/ai-service:/app", "/app/.venv", "models:/models"]
 
   ai-beat:
+    restart: *dev-no-restart
     user: *dev-user
     volumes: ["../../services/ai-service:/app", "/app/.venv"]
 
   web:
+    restart: *dev-no-restart
     build:
       target: deps           # dev runs `next dev`; the standalone runtime stage has no dev server
     # `pnpm --filter`, NOT `pnpm dev`. WORKDIR in the `deps` stage is the WORKSPACE ROOT (/app), and
@@ -262,6 +371,7 @@ services:
         - {action: rebuild, path: ../../pnpm-lock.yaml}
 
   sdk:
+    restart: *dev-no-restart
     build:
       target: build
     command: ["pnpm", "--filter", "widget", "dev", "--host", "0.0.0.0", "--port", "8080"]
@@ -318,7 +428,199 @@ services:
   # if you need DEBUG, and change it back — it is one file for both environments by necessity.
 
   otel-collector:
+    restart: *dev-no-restart
     # Dev prints the pipeline to stdout too, so you can see whether a span was dropped by the
     # tail sampler or never arrived.
     environment:
       KB_OTEL_DEBUG_VERBOSITY: detailed
+
+  # -----------------------------------------------------------------------------------------
+  # mailpit's web UI — THE ONLY WAY IT IS EVER REACHABLE, and only from this host.
+  # -----------------------------------------------------------------------------------------
+  # The base file gives mailpit no `ports:` key and `kb.edge: "false"`, so it has no Traefik router
+  # and no published port in a production render. This line is the deliberate dev exception, and
+  # every part of it is load-bearing:
+  #
+  #   "127.0.0.1:" — a bare "8025:8025" publishes on 0.0.0.0 and Docker DNATs it in the iptables
+  #   `nat` table AHEAD of the INPUT chain ufw uses, so `ufw status` would report it blocked while
+  #   the mailbox — which has NO authentication and whose API returns every captured message body,
+  #   including live single-use password-reset URLs — answered the internet.
+  #
+  #   Only 8025 (HTTP UI/API). SMTP 1025 is NOT published: the senders are laravel-worker and
+  #   laravel-scheduler on the `application` network, and nothing on the host sends mail.
+  #
+  # It still needs the profile, which is the second latch:
+  #   docker compose up -d mailpit          # no --profile needed; see the base file's mailpit note
+  #   docker compose port mailpit 8025     # prints 127.0.0.1:8025 — check the IP, not just the port
+  #   open http://127.0.0.1:8025/
+  # Remote host: `ssh -N -L 8025:127.0.0.1:8025 <host>`; never a Traefik router, never a fifth
+  # public hostname. Unlike the four deleted data-service port lines above, this one really does
+  # bind, because `application` is not an internal network.
+
+  # ----------------------------------------------------------------------------------------------
+  # mailpit — the LOCAL MAIL PATH, not a convenience.
+  # ----------------------------------------------------------------------------------------------
+  # Every password reset, email-verification and organization-invitation mail in local development
+  # goes over SMTP to this container. It is not an optional nicety, because `config/mail.php`
+  # defines exactly two mailers — `smtp` and `array` (the test transport) — and DELIBERATELY NO
+  # `log` MAILER: `MAIL_MAILER=log` writes the full password-reset URL, which is a live
+  # single-use credential, into storage/logs, where no redaction fixture covers it. So there is no
+  # "just look in the log" fallback by design; the choice is a real relay or this.
+  # `env/core-api.env` ships MAIL_HOST=mailpit / MAIL_PORT=1025 and config/mail.php repeats both as
+  # env() defaults. Nothing sends inline — every auth mail is queued onto `notify` — so the sender
+  # is usually laravel-worker (Horizon), occasionally laravel-scheduler, never a web request.
+  #
+  # PROFILE `dev-tools`, NOT always-on, and the trade is deliberate rather than tidy. Always-on
+  # would mean a production stack SWALLOWS every auth mail into a web UI nobody watches: mail is
+  # "sent", the job succeeds, no metric moves, and the first report is a user who never got a link.
+  # Profiled, a deployment that forgot to configure a relay fails in the `notify` worker with a
+  # connection error to host `mailpit` — visible in Horizon, retried, and alertable. A loud failure
+  # beats a silent one. It also keeps the rule that no REQUIRED service carries a `profiles` key
+  # (there is no `core` profile — see the section header above), and nothing `depends_on` this
+  # service, which would be an invalid model across profiles.
+  #   FOR A STACK WITHOUT THIS PROFILE — i.e. every real deployment — set in env/core-api.env:
+  #     MAIL_MAILER=smtp, MAIL_HOST=<relay>, MAIL_PORT=587, MAIL_SCHEME=smtps|smtp,
+  #     MAIL_EHLO_DOMAIN=<a name the relay accepts>, MAIL_FROM_ADDRESS/MAIL_FROM_NAME on a domain
+  #     whose SPF/DKIM you control, and — if the relay authenticates — MAIL_USERNAME plus a
+  #     MAIL_PASSWORD_FILE=/run/secrets/<name> secret. Never enable `dev-tools` there.
+  #
+  # `application` ONLY, and never `edge`. The three services that need it are laravel-api,
+  # laravel-worker and laravel-scheduler, all of which are on `application`; nothing else has any
+  # business reaching a mailbox. THE UI AND ITS API HAVE NO AUTHENTICATION and the API returns
+  # every captured message body verbatim, so `kb.edge: "false"` plus the absence of any `ports:`
+  # key here are the two latches `traefik-routing` requires: without the label, Traefik's Docker
+  # provider `defaultRule` would hand this container a router keyed on ``Host(`mailpit`)`` /
+  # ``Host(`knowledgebot-mailpit-1`)`` and one spoofed header would read every reset link.
+  # Reachability caveat worth knowing: `ai-worker-crawl` is also on `application` and fetches
+  # attacker-chosen URLs, so while this profile is active the mailbox is reachable from the SSRF
+  # pivot. Acceptable for a dev-only catcher holding dev-only mail, and one more reason `dev-tools`
+  # never runs anywhere real.
+  #
+  # OPENING THE UI:  docker compose up -d mailpit      # no --profile: it is in the default dev set
+  #                  docker compose port mailpit 8025      # -> 127.0.0.1:8025, and prints the IP
+  #                  then browse http://127.0.0.1:8025/
+  # The port is published by compose.override.yaml ONLY, bound to 127.0.0.1. It cannot accidentally
+  # become public: a loopback binding is not reachable off-host, and a production render
+  # (`-f compose.yaml -f compose.prod.yaml`, which is what `make deploy` passes) drops the override
+  # entirely, so mailpit has no `ports:` key at all there. On a remote host, tunnel:
+  #   ssh -N -L 8025:127.0.0.1:8025 <host>
+  #
+  # NO VOLUME, deliberately, and the reason is measured rather than assumed. With no `--database`
+  # flag v1.28.4 creates a TEMPORARY SQLite database inside the container (`/tmp/mailpit-<n>.db`)
+  # and discards it on shutdown — verified on this tag on 2026-08-13: one message accepted, then
+  # `docker stop` + `docker start` came back with a NEW filename and `"Messages":0`. So the mailbox
+  # already dies with the container and a volume would only make live single-use reset links
+  # durable and backup-eligible. Same argument as `valkey-cache`: the absence IS the control.
+  mailpit:
+    image: axllent/mailpit:v1.28.4       # tag-pinned like every other image in this file. No digest
+                                         # here because compose.prod.yaml — where the digests live —
+                                         # deliberately carries no profiled service.
+    # NO `profiles:` KEY, DELIBERATELY — and this is the one dev-only service that has none.
+    #
+    # It used to be `profiles: [dev-tools]`, which meant `docker compose up -d` started the whole
+    # stack and NOT the mail catcher, so every queued password-reset, verification and invitation
+    # notification was handed to a host that did not exist. The failure is loud in Horizon (a
+    # connection error to `mailpit`) and silent to whoever is trying to use the app: they request a
+    # reset, the command reports success, and no mail ever appears. A dev stack whose mail path is
+    # off by default is a dev stack where the auth flows cannot be exercised at all.
+    #
+    # PRODUCTION STILL EXCLUDES IT — by this service existing ONLY in this file, which production
+    # never loads. THAT IS NOT WHAT THIS PARAGRAPH USED TO SAY, and the old sentence is quoted rather
+    # than deleted because it describes a mechanism a reader will look for and not find: "by the
+    # profile moving to compose.prod.yaml rather than by living here". Measured 2026-08-14 —
+    # `grep -c mailpit compose.prod.yaml` is **0** and the base+prod render carries no mailpit service
+    # at all, so there is no profile in that file and never was one. The final form of D70 is the
+    # true one and it is strictly stronger: production has nothing to exclude, so there is no
+    # `--profile` to remember in either direction.
+    # The safety argument survives the correction unchanged: forgetting the prod override ships a mail
+    # catcher nobody routes to (it has no `ports:` and `kb.edge: "false"`), whereas forgetting a dev
+    # profile ships a stack that cannot send mail. Measured while making the original change:
+    # `profiles: []` in compose.override.yaml does NOT clear a profile set in the base file — Compose
+    # keeps the base list — so an override could not have fixed the `profiles: [dev-tools]` form.
+    networks: [application]
+    # `--max` is also the upstream default; stated because the memory limit below is sized on it and
+    # a default that moves upstream would move the limit's basis silently. Listener addresses are
+    # left at their defaults ([::]:1025 SMTP, [::]:8025 HTTP) — both must accept from the bridge,
+    # and `readyz` autodetects the HTTP one from the same settings.
+    command: ["--max", "500"]
+    healthcheck:
+      # The probe binary IS the image entrypoint, so the `CMD curl` trap that makes a probe exit 127
+      # forever cannot happen here. `readyz` GETs http://[::]:8025/readyz.
+      #
+      # It is not a probe that passes against a broken server — the ADR-037 failure shape — and that
+      # was checked in both directions against this exact tag on 2026-08-13: with no server
+      # listening `/mailpit readyz` exits **1**; against a running container it exits **0** and
+      # Docker reported `healthy`. What it does NOT cover is the SMTP listener on 1025, which is
+      # what the queue worker actually uses. That gap is adequate for a measured reason: an SMTP
+      # bind failure here is FATAL, not degraded. Started with an unbindable `--smtp` address, the
+      # process logged `level=fatal msg="listen tcp ...: bind: cannot assign requested address"`
+      # AFTER the HTTP server was already up and exited 1 — so "UI healthy, mail silently dropped"
+      # is not a state this image can sit in: it exits, and under the dev restart policy below it
+      # STAYS exited with that fatal line as the last thing in its log. (This sentence used to end
+      # "and `restart: unless-stopped` loops it", which is what the line below said until the
+      # SHUTDOWN DETERMINISM block at the head of this file changed it. A loop was the worse of the
+      # two readings anyway: the fatal scrolls past instead of sitting at the end of the log.)
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 15s
+      timeout: 5s            # the image's own HEALTHCHECK sets none, i.e. the 30 s default
+      retries: 3
+      start_period: 10s      # measured: both listeners were up and `readyz` returned 0 within 3 s
+                             # of `docker start`. A longer window would only delay the moment a
+                             # genuinely broken container is reported — and the FIRST success ends
+                             # the period early regardless, so it is not a grace window.
+      start_interval: 2s     # Engine >= 25.0
+    restart: *dev-no-restart # mailpit is defined ONLY here, so this is not an override of a base
+                             # value — it is the whole policy, and dev is the only place it applies.
+    stop_grace_period: 5s    # nothing to flush by construction: the temp SQLite database is
+                             # discarded on shutdown either way, so waiting the 10 s default for a
+                             # clean close buys nothing. Not a worker; no in-flight job to finish.
+    deploy:
+      resources:
+        limits:
+          memory: 256M       # bounded by `--max 500` above, not by traffic; message bodies live in
+                             # SQLite on disk, not on the heap (12 MB RSS observed with a message
+                             # stored). No `worker_max_memory_per_child` to clear — this is neither
+                             # a Celery nor a Horizon container, so the cgroup-kill-before-recycle
+                             # redelivery loop does not apply.
+    labels: {kb.edge: "false"}
+    # ── DEV-ONLY ADDITIONS BELOW (the UI port). Everything above is the service itself,
+    #    moved here from compose.yaml so production never defines it at all.
+
+    ports: ["127.0.0.1:8025:8025"]
+
+  # -----------------------------------------------------------------------------------------
+  # SHUTDOWN DETERMINISM, PART TWO: the services this overlay otherwise has nothing to say about.
+  # -----------------------------------------------------------------------------------------
+  # Every service above appears in this file because dev needs to change something about it. The ten
+  # below need nothing changed except the restart policy — but Compose merges `restart:` by REPLACING
+  # a service's own value, so a service absent from this file keeps compose.yaml's `unless-stopped`
+  # in the dev render. MEASURED with a two-service probe: overriding service `a` gave `a -> no` and
+  # `b -> unless-stopped` from the same command. There is no file-wide restart setting in Compose and
+  # no `x-` extension that becomes one, so "every service" has to be spelled service by service.
+  #
+  # THE LIST IS THEREFORE A DRIFT HAZARD, and it is not defended by being written down — it is
+  # defended by nothing mechanical any more. A CI job recomputed the dev render and failed on any
+  # service still resolving to a self-restarting policy; it went with `.github/` on 2026-08-17. So a
+  # service added to compose.yaml and forgotten here is once again a container that quietly comes back from the
+  # dead three weeks later. Do not maintain this list by counting it; run the gate.
+  #
+  # Six of the ten are behind a profile (`adminer` in dev-tools, the five observability services),
+  # so `docker compose up -d` never starts them — but `make obs-up` does, and a Grafana that
+  # resurrects itself after `docker compose down` is the same surprise as a Postgres that does.
+  postgres:      {restart: *dev-no-restart}
+  qdrant:        {restart: *dev-no-restart}
+  valkey-cache:  {restart: *dev-no-restart}
+  seaweedfs:     {restart: *dev-no-restart}
+  adminer:       {restart: *dev-no-restart}
+  prometheus:    {restart: *dev-no-restart}
+  alertmanager:  {restart: *dev-no-restart}
+  loki:          {restart: *dev-no-restart}
+  tempo:         {restart: *dev-no-restart}
+  grafana:       {restart: *dev-no-restart}
+  # NOT LISTED, and each absence is deliberate:
+  #   laravel-migrate, postgres-roles  — compose.yaml already sets `restart: "no"` on both one-shots
+  #                                      (an `unless-stopped` there is an infinite migration loop, as
+  #                                      the base file says beside each). Restating it here would
+  #                                      imply dev differs from production, and it does not.
+  #   postgres-test, qdrant-test,      — the `test` profile carries no restart policy at all in the
+  #   valkey-test, corpus-www            base file, so Docker's own default ("no") already applies.

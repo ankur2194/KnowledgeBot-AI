@@ -8,8 +8,8 @@ import { QueryClient } from '@tanstack/react-query';
  * `retry` in any object literal and ignores every mention in a comment or a string. (It runs only
  * under `pnpm lint`. Next 16 removed `next lint` AND `next build` no longer lints, so a pipeline
  * that relies on the build to lint passes while checking nothing — `pnpm web:lint` has to be its
- * own CI step. Today `.github/workflows/` holds `gates.yml` only, which runs source greps and no
- * ESLint, so until `ci.yml` lands this rule fires in editors and on `pnpm web:lint` locally.)
+ * own step. This repo has no CI, so the rule fires in editors and on `pnpm web:lint` — nowhere
+ * else, and nothing will notice if it stops firing.)
  *
  * `grep -rn 'retry:' apps/web/src` is NOT that check and returns 5 hits across 2 files, three of
  * them prose. The closest text approximation, which drops comment lines and returns only the two

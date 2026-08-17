@@ -110,7 +110,7 @@ all three properties its docstring sets out: the row is **derived and rebuildabl
 ADR-010 sense, **no public API path reads or writes it**, and **Laravel owns its migration**.
 Miss the second and the write lands beside Laravel's own writer with no policy check, no audit
 row and no framework-applied tenant scope — and it fails nowhere. CI pins the reviewed set by
-name (`KB_TABLE_REVIEW_PIN` in `gates.yml`), deliberately not by count: a count is bumped in
+name (a `KB_TABLE_REVIEW_PIN` check, deleted with CI on 2026-08-17), deliberately not by count: a count is bumped in
 the same commit that breaks the rule, and it cannot see a swap or a rename at all.
 
 **`import ragas` must fail everywhere except `ai-worker-evaluation`.** `ragas` is a wheel

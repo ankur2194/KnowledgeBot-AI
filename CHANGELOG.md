@@ -76,17 +76,17 @@ exists and is configured, and no business logic does.
 - **`docs/22` has 27 findings open after scaffolding and 3 open after ADR-030.** O1, the one blocking
   item, is closed by ADR-029. Of the rest, **C2** is the largest: hybrid retrieval has lost its sparse
   producer, and whether it is replaced by local BM25 or dropped decides the shape of the query path.
-- **CI is partial.** `.github/workflows/gates.yml` exists and carries six jobs — `enforcement-greps`,
-  `observability-rules`, `compose-ci-tag-drift`, `compose-invariants`, `repo-artifact-consistency` and
-  `boundary-greps` — deliberately scoped to pure text and file passes so they can be required checks
-  before any lockfile exists. **`ci.yml` has not been authored**, so nothing that needs
-  `composer install`, `uv sync`, `pnpm install`, a built image or a running stack runs anywhere: Pest,
-  pytest, Vitest, Playwright, ESLint, `next build`, `size-limit`, and the ADR-010 Qdrant rebuild proof.
-  Four further gates are specified but held out of `gates.yml` because they are **red today**, not
-  because they were forgotten — the error-taxonomy-to-alert-name diff (eight classes uncovered by
-  design), the `vuln-ignores.toml` `test_id` existence check, the `license_gate.py` model arm, and the
-  metric-catalog and form-rules diffs. `CONTRIBUTING.md` § _The enforcement greps_ carries the split.
-- **Roughly a third of the landed gates cannot fail on today's tree.** The corpus they scan is a
-  skeleton, so the banned token has nowhere to appear yet. Each job prints a `vacuous-today:` ledger
+- **There is no CI.** `.github/` was **removed on 2026-08-17**, together with `gates.yml` (seven
+  install-free grep/parse jobs, 33 steps) and `ci.yml` (seven jobs that installed every lockfile and
+  ran Pest, pytest, Vitest, Playwright, ESLint, `next build`, `size-limit`, and six image builds).
+  Nothing replaced them, so **every suite and every gate is now run by hand or not at all**. The
+  suites themselves are unaffected and pass: see `CONTRIBUTING.md` § _Running the tests_ for the
+  commands, and § _The invariants that used to be enforced, and now are not_ for the review checklist
+  that replaced the gates. Three things no checklist recovers, because only a job ever did them: the
+  six live-parse assertions that need the pinned weights inside `knowledgebot/ai-service:dev`, the six
+  image builds that put those Dockerfiles' own `RUN` assertions under enforcement, and `size-limit`
+  on the widget's 30 kB brotli shell. `docs/22` § _Removing CI/CD_ is the full record.
+- **Roughly a third of the gates could not fail on this tree while they existed.** The corpus they
+  scanned was a skeleton, so the banned token had nowhere to appear. Each job printed a `vacuous-today:` ledger
   naming its own zero-candidate checks, so the gap is stated in the job output rather than implied
   away by a green tick.

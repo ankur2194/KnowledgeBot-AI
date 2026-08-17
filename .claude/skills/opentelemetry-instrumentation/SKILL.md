@@ -15,7 +15,7 @@ Python **1.44.0** SDK / **0.65b0** instrumentation (2026-07-16) · PHP SDK **1.1
 - **One trace spans client → Laravel → FastAPI → provider** (`kb-observability-conventions`, §20.1). `traceparent` is a required header on the seam (`kb-internal-api-contracts`); it is injected by `opentelemetry-auto-guzzle`, never by hand. If that package is absent every internal call starts a fresh root and nothing errors.
 - **Queue hops start a new root with a link, never a child.** Laravel: implement `TracingLinked` — `opentelemetry-auto-laravel` 1.8's `Worker` hook calls `setParent($parentContext)` by default, so the default is parent-child. Celery: `CeleryInstrumentor().instrument(use_span_links=True)` — 0.65b0 still defaults `use_span_links` to `False`. Rationale, and the payload plumbing, in `kb-observability-conventions` rule 3, `laravel-queues-valkey`, `celery-workers`.
 - **The semconv version is pinned in code and bumped deliberately.** Every `Resource.create` carries `schema_url=1.43.0`. Unpinned semconv is a silent rename of every attribute a dashboard queries; the SDK will happily emit the new name against the old panel.
-- **Instruments are a closed catalog.** Any instrument reaching `/metrics` that is not in `kb-observability-conventions` fails the CI diff (`github-actions-pipeline`). Auto-instrumentation emits its own metrics — suppress them at the SDK or drop them at the Collector; adding a real one is a catalog PR **first**, then code.
+- **Instruments are a closed catalog.** Any instrument reaching `/metrics` that is not in `kb-observability-conventions` fails the CI diff. Auto-instrumentation emits its own metrics — suppress them at the SDK or drop them at the Collector; adding a real one is a catalog PR **first**, then code.
 - **Head sampling is 100% everywhere; the Collector decides.** `OTEL_TRACES_SAMPLER=parentbased_always_on` in every service. A head sampler drops the one request someone is investigating, and the drop is irreversible: non-recording spans never reach a processor, so no tail sampler can recover them.
 - **No telemetry failure is allowed to fail a request** (§19.6). Exporters are fire-and-forget with a short timeout to a *local* Collector; the Collector is the only component permitted to buffer, retry, or block.
 
@@ -214,7 +214,8 @@ as end-of-span attributes, and the span ends in a `finally` with `kb.finish_reas
 
 1. PR to `kb-observability-conventions` — name, type, labels, and what it answers. Names are permanent.
 2. Then create the instrument at **module import**, so a freshly booted service exposes it.
-3. CI scrapes and diffs against the catalog (`github-actions-pipeline`). Green means it is a contract.
+3. Somebody scrapes `/metrics` and diffs it against the catalog by hand. This was specified as a CI
+   gate and was never wired; there is no CI now, so the catalog is a convention held by review.
 
 ## Gotchas
 

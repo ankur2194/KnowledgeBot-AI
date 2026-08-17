@@ -17,7 +17,8 @@ the spec keeps it "only informative" and Compose prefers the most recent schema 
 | Development + file watching | `docker compose watch` (or `up --watch`) |
 | **Production** | `docker compose -f compose.yaml -f compose.prod.yaml up -d` |
 | Telemetry backend | add `--profile observability` |
-| Local mail / DB UI | add `--profile dev-tools` |
+| Local mail | Mailpit starts with the default dev stack; its UI is `http://127.0.0.1:8025/` |
+| Local DB UI | add `--profile dev-tools` for Adminer |
 | Test dependencies | add `--profile test` |
 
 `make deploy` hardcodes the production line. That is the entire justification for the Makefile:
@@ -66,9 +67,10 @@ A plain `grep -E 'ports:|bind'` on this render returns **33 lines on a correct c
 `ports:` and 32 lines belonging to the 16 legitimate `:ro` config mounts. An instruction that fires
 on correct output teaches people to ignore it, which is why the three commands above are specific.
 
-**No CI job renders the production config.** `compose-invariants` in `.github/workflows/gates.yml`
-asserts the port, network, profile and volume invariants by parsing the four compose *files*
-statically with `yq`; `scripts/ops/preflight.sh` does render the production pair, but at **deploy**
+**Nothing renders the production config automatically, and since 2026-08-17 nothing checks it at
+all.** A `compose-invariants` CI job asserted the port, network, profile and volume invariants by
+parsing the four compose *files* statically; it was deleted with `.github/`.
+`scripts/ops/preflight.sh` does render the production pair, but at **deploy**
 time, with `--quiet`, only to prove it parses and that no variable is unset. Neither inspects bind
 mounts or router rules. The three commands above are a human check with no automated substitute
 today — see "Read-only config mounts" below for why an outright no-bind-mounts assertion cannot be
@@ -100,10 +102,13 @@ compose file interpolates to `""` — a client pointed at localhost, not an erro
 
 ## The invariants this directory enforces
 
-1–5 and 8 are enforced by the `compose-invariants` job in `.github/workflows/gates.yml`, which
-parses all four compose files and compares the union of what it finds against the expected sets.
-6 is enforced only in part and 7 is not enforced at all; each says so below. Read all eight before
-editing anything.
+1–5 and 8 **were** enforced by a `compose-invariants` CI job, which parsed all four compose files
+and compared the union of what it found against the expected sets. That job was deleted with
+`.github/` on 2026-08-17, so **every invariant in this list is now a review property**: 6 was only
+partly enforced and 7 never was, and now none of them is. Each says so below. 9 is enforced from a
+checkout by the `config-delivery` job and against a live host by `scripts/ops/preflight.sh` §3b.
+Read all of them before editing anything — and do not restate the count in this sentence, which is
+what went stale when 9 was added.
 
 1. **No `ai-*` or `laravel-*` service has a `ports:` key in any of the four files**, and in
    `compose.yaml` and `compose.prod.yaml` `traefik` is the only service with one at all.
@@ -111,10 +116,23 @@ editing anything.
    firewall uses — so an "internal-only" debug port on `ai-api` is a complete authorization
    bypass that `ufw status` reports as blocked.
 
-   `compose.override.yaml` **deliberately publishes five data services on loopback** for local
-   development — `postgres` `127.0.0.1:5432`, `qdrant` `6333`, `valkey-core` `6379`,
-   `valkey-cache` `6380`, `seaweedfs` `8333`/`9333` — so "traefik is the only `ports:` key" is
-   true of production and false of the dev overlay. That gap is the entire reason `make deploy`
+   `compose.override.yaml` **publishes two ports on loopback** for local development, and the
+   sentence that used to be here — "five data services … `postgres` `127.0.0.1:5432`, `qdrant`
+   `6333`, `valkey-cache` `6380`, `seaweedfs` `8333`/`9333`" — went **false on 2026-08-10**, when
+   those four lines were deleted after being measured to bind nothing: a container attached only to
+   `data` (`internal: true`) has no route to the host bridge, so Docker records the binding and
+   never makes it. Read the file, not this paragraph:
+   `grep -n 'ports:' compose.override.yaml`. Today it returns
+
+   - `valkey-core` `127.0.0.1:6379` — binds **only** because `valkey-core` also joins
+     `application`, which is not internal;
+   - `mailpit` `127.0.0.1:8025` — the `dev-tools` mail catcher's UI, which needs a published port
+     because a *browser* has to reach it. Its SMTP `1025` is deliberately **not** published: the
+     senders are `laravel-worker` and `laravel-scheduler` on `application`, and nothing on the host
+     sends mail.
+
+   So "traefik is the only `ports:` key" is true of production and false of the dev overlay. That
+   gap is the entire reason `make deploy`
    hardcodes the `-f` pair instead of letting the override auto-load, and the reason the two
    halves above are stated separately: the `ai-*`/`laravel-*` half holds in **all four** files,
    the traefik-only half holds in **two**. `compose-invariants` check (6) asserts exactly that
@@ -153,6 +171,39 @@ editing anything.
    `depends_on` a profiled service. There is no `core` profile, and no `gpu` profile or overlay
    — nothing reserves a device now that embeddings and reranking are provider API calls.
 
+9. **The `edge` network's subnet is pinned, and it is the same scalar as `TRUSTED_PROXIES`.**
+   `x-edge-subnet` is a YAML anchor aliased in exactly two places: `networks.edge.ipam.config[0]`
+   and the `environment:` of `laravel-api` and `laravel-api-stream`. It is the only network with a
+   pinned range, and it is pinned because **Laravel has to name it in configuration** — Traefik is
+   the direct TCP peer of every request from the internet, so `$request->ip()` comes from
+   `X-Forwarded-For` or it comes from nowhere, and Laravel believes that header only from a CIDR it
+   is told to trust.
+
+   Unpinned, Docker allocates the range from its address pool in creation order, interleaved with
+   every other Compose project on the host. Measured on the development host: `edge` `172.24.0.0/16`,
+   `application` `172.25`, `data` `172.26`, `observability` `172.28` — with the gap at `.27` taken by
+   an unrelated network *between two of ours*. Prune the networks, or bring another project up
+   first, and every value moves while the configured CIDR does not. Nothing errors; the five per-IP
+   auth rate limiters simply stop being per-IP.
+
+   Two things to know before touching it:
+
+   - **Never `trustProxies(at: '*')`.** It expands to `0.0.0.0/0`, which makes `X-Forwarded-For`
+     fully attacker-controlled — *strictly worse* than trusting nothing, because a forged address
+     per request evades every per-IP limiter instead of sharing one bucket, and `audit_logs`
+     faithfully records whatever it was told.
+   - **Pinning or changing the subnet recreates the network once**, which stops and restarts the six
+     containers on `edge`. This happens **even when the pinned value equals the one Docker had
+     already auto-assigned** — Compose compares the network's `com.docker.compose.config-hash`
+     label, and "auto" is not the same recorded config as "explicit with the same value". Measured
+     against Compose v5.3.1. It is a clean no-op on every `up` after that. If the range collides
+     with a host route or a VPN, `up` fails loudly with *"Pool overlaps with other one on this
+     address space"*; set `KB_EDGE_SUBNET` in `.env` rather than deleting the `ipam:` block, which
+     silently un-pins the CIDR that `TRUSTED_PROXIES` depends on.
+
+   `scripts/ops/preflight.sh` §3b checks the whole chain, including the live network's range against
+   the declared one. A `config-delivery` CI job checked the compose half from a checkout; it is gone.
+
 ### Proving 1–3, actively
 
 A config review is not a substitute. From outside the host:
@@ -189,6 +240,14 @@ infrastructure/docker/
   compose.prod.yaml       explicit -f; digests, read_only, cap_drop, non-root, restart_policy
   .env.example            Compose INTERPOLATION only  ->  copy to .env
   env/*.env.example       CONTAINER environment via env_file:  ->  copy to *.env
+                          RENDERED ONCE AND NEVER UPDATED: bootstrap.sh will not clobber an
+                          existing copy (that is where your values live), so a template that
+                          later GAINS a key delivers it to new deployments and to nobody else.
+                          Both scripts now compare NAME SETS through scripts/lib/env-drift.sh —
+                          bootstrap.sh refuses to `up` on drift, preflight.sh §2b fails the
+                          deploy. Neither writes a value: for these keys "present but empty" and
+                          "absent" behave differently in both directions, so there is no safe
+                          filler. Add the names by hand and choose each value.
   secrets/                file-sourced Compose secrets; gitignored except .gitkeep
   php/                    php.ini, two FPM pools, two nginx configs — COPY'd into the core-api image
   traefik/                static config + dynamic/tls.yaml
@@ -204,6 +263,15 @@ infrastructure/docker/
                           circuit_breaker.json
   postgres/               postgresql.conf shim, conf.d/kb.conf, initdb/ (extensions ONLY)
   qdrant/                 config.yaml
+```
+
+Repo-level scripts that read this directory live in `scripts/`:
+
+```
+scripts/lib/env-drift.sh    the template-vs-rendered NAME-SET comparison, in ONE place.
+                            Sourced by scripts/dev/bootstrap.sh and scripts/ops/preflight.sh.
+                            It offers no "repair" function on purpose; the header records the
+                            per-key measurement of why no automatic filler is safe.
 ```
 
 `infrastructure/observability/` — Prometheus rules, Alertmanager routing, Loki, Tempo and Grafana
@@ -246,9 +314,8 @@ The closed set, as `make prod-config` renders it today — 14 from this director
 Collector's log tailer). `users.acl` is mounted twice, so the 16 mounts have 15 distinct sources.
 
 A CI assertion that forbade bind mounts outright would go red on this correct config; it would
-have to allow-list exactly the paths above. **No such assertion exists today** — nothing in
-`.github/workflows/gates.yml` renders the production config, and `scripts/ops/preflight.sh` renders
-it only with `--quiet`. Anything bind-mounted from `services/` or `apps/` therefore reaches
+have to allow-list exactly the paths above. **No such assertion exists today** — there is no CI at
+all, and `scripts/ops/preflight.sh` renders the production config only with `--quiet`. Anything bind-mounted from `services/` or `apps/` therefore reaches
 production undetected by machine, which is why the render is read by a human before every deploy.
 
 ---
@@ -274,6 +341,32 @@ provider, so a slow vendor can never take this container out of the edge.
 its load balancer by default, and Docker will not restart them — so a readiness probe that trips
 on a transient dependency blip pulls every replica out of the edge with nothing to recover it.
 
+**The stop signal must be one PID 1 handles, and for five of six core-api services it wasn't.** The
+image inherits `STOPSIGNAL SIGQUIT` from its `php:*-fpm*` base — right when PID 1 *is* php-fpm, and
+it isn't: PID 1 is `kb-serve` (traps `TERM INT`) or `php artisan horizon` (traps `TERM USR1 USR2
+CONT`). A signal PID 1 has no handler for is **discarded**, so `docker stop` did nothing, Docker
+waited out the whole `stop_grace_period` and SIGKILLed — 26 minutes for `laravel-worker-long`, and
+every "graceful drain" those grace periods pay for never ran. With `stop_signal: SIGTERM` the same
+five services stop in **15 s, all exit 0**. `laravel-scheduler` is exempt (`schedule:work` traps
+`INT TERM QUIT`) and `laravel-migrate` traps nothing, so no signal helps it. Gated by
+`compose-invariants` check (9d).
+
+**The `edge` subnet is pinned outside Docker's dynamic address pool.** It used to be `172.24.0.0/16`,
+inside the daemon's built-in pool, so after a `down` freed all four project networks the next `up`
+handed 172.24 to our own unpinned `data` network and failed with *"Pool overlaps with other one on
+this address space"* — reproducibly, on every down/up cycle. `10.0.0.0/8` is in neither built-in
+pool, so nothing dynamic can ever take it; that is also why the other three networks stay unpinned.
+Override with `KB_EDGE_SUBNET` if a host route or VPN really uses that range.
+
+**…and `unless-stopped` is production-only.** `compose.override.yaml` overrides every service to
+`restart: "no"`, so in development a stopped container stays stopped across a Docker Desktop or WSL
+restart. `unless-stopped` exempts only containers that were explicitly stopped *before* the daemon
+went down; anything still running when the daemon stops comes back when it starts, which is the
+"I stopped them and they restarted themselves" report. The full reasoning is in that file under
+**SHUTDOWN DETERMINISM**. A `compose-invariants` CI job used to assert both directions — dev never
+self-restarts, and the base file never loses `unless-stopped` — and it was deleted on 2026-08-17,
+so the two measuring greps in that file's footer are what remain.
+
 **`qdrant` has no healthcheck** and `ai-api` therefore depends on it with `service_started`. The
 image ships no shell utilities, so an in-container probe exits 127 forever and every
 `service_healthy` dependent hangs. Readiness is asserted one layer up, by `/health/ready`.
@@ -281,6 +374,39 @@ image ships no shell utilities, so an in-container probe exits 127 forever and e
 **Container memory limits sit *above* each worker's `worker_max_memory_per_child`.** Below it, the
 cgroup killer fires before Celery recycles the child — and a signal-killed child requeues **without
 incrementing `request.retries`**, so the job redelivers forever.
+
+**Mailpit is the local mail path, not a convenience — and it is never routed.** `config/mail.php`
+defines exactly two mailers, `smtp` and `array` (the test transport), and **no `log` mailer**:
+`MAIL_MAILER=log` writes a live single-use password-reset URL into `storage/logs`. So password
+reset, email verification and organization invitation all go over SMTP, and in local development
+that means this container.
+
+```bash
+docker compose up -d mailpit          # no --profile: mailpit is in the default dev set
+docker compose port mailpit 8025        # -> 127.0.0.1:8025  (check the IP, not just the port)
+xdg-open http://127.0.0.1:8025/         # remote host: ssh -N -L 8025:127.0.0.1:8025 <host>
+```
+
+The UI and its API have **no authentication** and the API returns every captured message body, so
+mailpit carries `kb.edge: "false"`, has no `ports:` key in `compose.yaml`, and appears in no Traefik
+router — the two latches, because otherwise the Docker provider's `defaultRule` would give it a
+router keyed on ``Host(`mailpit`)``. Its only published port lives in the dev overlay, bound to
+loopback, so a production render (`make deploy`) publishes nothing for it even with the profile on.
+It is on `application` only. Note that `ai-worker-crawl` is also on `application` and fetches
+attacker-chosen URLs, so while `dev-tools` is up the mailbox is reachable from the SSRF pivot —
+dev-only mail, dev-only profile, and one more reason not to run `dev-tools` anywhere real.
+
+**For a real deployment, do not enable this profile — configure a relay** in `env/core-api.env`:
+`MAIL_HOST`, `MAIL_PORT`, `MAIL_SCHEME`, `MAIL_FROM_ADDRESS`/`MAIL_FROM_NAME` on a domain whose
+SPF/DKIM you control, and `MAIL_EHLO_DOMAIN` (unset, Symfony sends the container ID as its HELO name
+and a strict relay refuses the session). If the relay authenticates, add `MAIL_USERNAME` and a
+`MAIL_PASSWORD_FILE=/run/secrets/<name>` secret — never a password value in an env file. Without a
+relay **and** without the profile, every auth mail fails in the `notify` queue worker with a
+connection error to host `mailpit`; that is the intended loud failure, and it is why mailpit is
+profiled rather than always-on (always-on would swallow production mail into a UI nobody watches).
+`FRONTEND_URL` is the other half of a working mail: it is the **SPA's** base URL, `app.<domain>`,
+not `APP_URL`, which is `api.<domain>`. Every emailed link is built from it, and with the key absent
+Laravel falls back to `http://localhost:3000`.
 
 **ACME**: `acme.json` is on a **named volume**. A bind mount whose host path does not exist makes
 Docker create a *directory* there, the store can never be written, and the only symptom is

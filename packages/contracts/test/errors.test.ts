@@ -172,6 +172,82 @@ describe('toKbError', () => {
 });
 
 /**
+ * The 422 `errors` map (finding F-2). `browserFetch` throws `KbError`, not the envelope, so before
+ * this the map was declared on the envelope, exported a type guard for, documented in
+ * `applyServerErrors` — and read by nothing. Every per-field 422 mapping in apps/web was dead code
+ * with no visible symptom: the form simply showed a generic banner where the server had computed a
+ * message per field.
+ *
+ * Both assertions are about a value that fails silently. Nothing throws when `errors` is dropped;
+ * the user is told "Please check your input" and is not told which input.
+ */
+describe('toKbError and the validation errors map', () => {
+  it('round-trips the 422 field map, dot-paths and all', async () => {
+    const error = await toKbError(
+      responseLike(422, {}, () =>
+        Promise.resolve({
+          error_class: 'validation',
+          message: 'The given data was invalid.',
+          retryable: false,
+          request_id: '01JVALID',
+          errors: {
+            email: ['These credentials do not match our records.'],
+            // Laravel dot-paths nested and indexed fields, and those are valid
+            // react-hook-form names as-is — no rename layer, here or in apps/web.
+            'retrieval.top_k': ['The retrieval.top_k must be at least 1.'],
+            'starter_questions.2': ['Too long.'],
+          },
+        }),
+      ),
+    );
+
+    expect(error.error_class).toBe('validation');
+    expect(error.errors).toEqual({
+      email: ['These credentials do not match our records.'],
+      'retrieval.top_k': ['The retrieval.top_k must be at least 1.'],
+      'starter_questions.2': ['Too long.'],
+    });
+    // The keys are what `applyServerErrors` routes on: a known path goes to `setError(path)`, an
+    // unknown one to `root.serverError`. A dropped map sends every field error to neither.
+    expect(Object.keys(error.errors ?? {})).toContain('starter_questions.2');
+  });
+
+  it('yields errors === null on a class that carries no map — never {}', async () => {
+    const error = await toKbError(
+      responseLike(403, {}, () =>
+        Promise.resolve({
+          error_class: 'authorization',
+          message: 'This action is not permitted.',
+          retryable: false,
+        }),
+      ),
+    );
+
+    expect(error.error_class).toBe('authorization');
+    // NULL, not `{}`. An empty map reads as "the server sent field errors and there were none",
+    // which is not a state that exists, and `Object.keys(e.errors).length === 0` is the check a
+    // caller would then write instead of `e.errors === null`.
+    expect(error.errors).toBeNull();
+  });
+
+  it('yields errors === null when no envelope parsed at all', async () => {
+    const error = await toKbError(
+      responseLike(502, {}, () => Promise.reject(new SyntaxError('Unexpected token <'))),
+    );
+    expect(error.error_class).toBeNull();
+    expect(error.errors).toBeNull();
+  });
+
+  it('defaults to null on the constructor, so no existing call site had to change', () => {
+    // The five-argument form is what apps/web, apps/widget and apps/mobile all use (verified: no
+    // call site anywhere passes six). `errors` is SIXTH for exactly that reason — beside
+    // `error_class`, where it reads better, it would have broken every one of them.
+    const error = new KbError(STREAM_LOST, true, null, null, 'connection lost mid-answer');
+    expect(error.errors).toBeNull();
+  });
+});
+
+/**
  * `X-KB-Request-Id` (finding #69b). `request_id` is the ONE identifier a user is ever shown and the
  * one string a support engineer can grep across both planes — and before this it was read only off
  * the parsed envelope, so it was null on exactly the failures people have to debug: a proxy's 502

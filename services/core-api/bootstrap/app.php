@@ -26,9 +26,19 @@ return Application::configure(basePath: dirname(__DIR__))
         // `schedule:list` be asserted in CI against one file (laravel-scheduler).
         health: '/up',
         then: function (): void {
-            // FOUR DISJOINT GROUPS. There is deliberately no routes/api.php: one shared api file is
-            // exactly how a public runtime route ends up inheriting the admin group's session,
-            // CSRF and cookie stack (laravel-sanctum-auth NN2, laravel-control-plane DoD).
+            // FOUR DISJOINT GROUPS — AND FIVE FILES. There is deliberately no routes/api.php: one
+            // shared api file is exactly how a public runtime route ends up inheriting the admin
+            // group's session, CSRF and cookie stack (laravel-sanctum-auth NN2,
+            // laravel-control-plane DoD).
+            //
+            // A FIFTH FILE IS NOT A FIFTH GROUP, AND THIS SENTENCE EXISTS SO NOBODY READS IT AS ONE.
+            // routes/api_auth.php mounts on the SAME `api` middleware group as routes/api_admin.php,
+            // at the same `api/v1` prefix, and every route in it binds `surface:admin`. The split is
+            // by SHAPE, not by surface: everything in api_admin.php sits under `{organization}` with
+            // ->scopeBindings() and carries auth:sanctum + org.member, which login, /me and the
+            // password-reset family cannot. Two files, one group, one surface — the count of GROUPS
+            // below is still four, and the day a sixth file appears it must join one of them or
+            // declare itself a fifth group here explicitly.
             //
             // Only the admin group uses the `api` middleware group, because statefulApi() prepends
             // EnsureFrontendRequestsAreStateful to `api` — and the public runtime, the SDK, and the
@@ -39,6 +49,19 @@ return Application::configure(basePath: dirname(__DIR__))
                 ->prefix('api/v1')
                 ->name('admin.')
                 ->group(base_path('routes/api_admin.php'));
+
+            // 1b. Authentication & session — the SAME group, the SAME surface, the SAME prefix.
+            //     Mounted with NO name prefix because its routes name themselves in full (`auth.*`):
+            //     these are not admin.* resources, they are the session itself, and `admin.auth.me`
+            //     would read as an organization-scoped route.
+            //
+            //     ORDER MATTERS ONLY IN ONE DIRECTION and it is satisfied here: api_admin.php's
+            //     routes are all under `organizations/{organization}/...`, so no static path in this
+            //     file can be shadowed by one of its patterns. Registering it second keeps the admin
+            //     file — the one that grows — first in `route:list`.
+            Route::middleware('api')
+                ->prefix('api/v1')
+                ->group(base_path('routes/api_auth.php'));
 
             // 2. Public chat runtime — widget/hosted-chat/mobile. Surface: public (404 deny).
             //    `rt` sits OUTSIDE `api/` so it is impossible to accidentally inherit the admin
@@ -81,9 +104,60 @@ return Application::configure(basePath: dirname(__DIR__))
         // guarantee it does not provide.
         $middleware->prepend(\App\Http\Middleware\RequestId::class);
 
+        // TRUSTED PROXIES — Traefik is the direct TCP peer of every request from the internet, so
+        // `$request->ip()` comes from `X-Forwarded-For` or from nowhere. Without this, the per-IP axis
+        // of five rate limiters is ONE GLOBAL BUCKET (20 logins/minute for the whole internet;
+        // 10 password-reset requests/minute, i.e. a one-host denial of service against every user), and
+        // `audit_logs.ip_address` records the reverse proxy on every row. See config/trustedproxy.php.
+        //
+        // The ADDRESSES come from that config file (env `TRUSTED_PROXIES`, set from compose.yaml's
+        // `edge` subnet anchor); only the BITMASK can be set here, because `getTrustedHeaderNames()`
+        // does not read config.
+        //
+        // NO `at:` ARGUMENT ON PURPOSE. `trustProxies()` guards with `if (! is_null($at))`, so passing
+        // only `headers:` leaves `TrustProxies::$alwaysTrustProxies` null and lets the middleware read
+        // config at REQUEST time — which is the only time config is loaded. A `config()` call in this
+        // closure would return null: the application builder runs before config boots.
+        //
+        // THREE HEADERS, NOT THE FRAMEWORK DEFAULT OF SIX. Dropped, each for a reason:
+        //   X_FORWARDED_HOST     Traefik's `passHostHeader` defaults to true and is not overridden, so
+        //                        the real Host already arrives intact and the forwarded copy adds
+        //                        nothing. Trusting it would make `getHost()` — and therefore `url()`,
+        //                        `route()` and every Location header — depend on a client header rather
+        //                        than on the router rule the unroutability latches are built around.
+        //                        (It is NOT about SANCTUM_STATEFUL_DOMAINS: `fromFrontend()` matches
+        //                        `Referer`/`Origin`, never the Host.)
+        //   X_FORWARDED_PREFIX   Traefik emits it only behind StripPrefix, which is not used here; a
+        //                        forged value would rewrite `getBaseUrl()`.
+        //   X_FORWARDED_AWS_ELB  there is no ELB.
+        // PROTO and PORT are NOT optional: without them `isSecure()` is false and `getPort()` is the
+        // container port behind TLS, so Laravel builds `http://` URLs and admin login loops silently.
+        $middleware->trustProxies(headers: Request::HEADER_X_FORWARDED_FOR
+            | Request::HEADER_X_FORWARDED_PROTO
+            | Request::HEADER_X_FORWARDED_PORT);
+
         // Sanctum SPA cookie auth for the admin API. Prepends EnsureFrontendRequestsAreStateful to
         // the `api` group only — which is why the other three groups are defined separately below.
         $middleware->statefulApi();
+
+        // "FOUR CLIENT CLASSES, FOUR MECHANISMS, NO FIFTH" (laravel-sanctum-auth NN2), made
+        // executable. The admin surface's credential is the cookie session; nothing in this
+        // application mints a personal access token (App\Models\User deliberately omits
+        // HasApiTokens), so an `Authorization: Bearer` header on `api/*` is a 401 BY DEFINITION.
+        //
+        // IT ALSO CLOSES A LIVE UNAUTHENTICATED 500 THAT PREDATES THIS UNIT: Sanctum's guard falls
+        // through to its bearer branch whenever an auth:sanctum route carries a bearer token and no
+        // valid session, and that branch queries `personal_access_tokens` — a table no migration
+        // creates. SQLSTATE 42P01, rendered as 500 / internal_dependency, from any anonymous caller.
+        // Do NOT "fix" that by creating the table: it would make the wrong credential merely FAIL
+        // instead of being REFUSED, and add a table with no writer plus a prune schedule with
+        // nothing to prune.
+        //
+        // AFTER statefulApi() ON PURPOSE — prependToGroup puts the LAST prepend first, so this runs
+        // ahead of EnsureFrontendRequestsAreStateful and never touches the session at all. Scoped to
+        // `api` rather than global because `rt/*`, `sdk/*` and `internal/*` will make their own
+        // credential decisions, and mobile's is a bearer token.
+        $middleware->prependToGroup('api', \App\Http\Middleware\RejectBearerToken::class);
 
         // The three non-admin groups. Each is defined explicitly rather than reusing `api`, so that
         // a route-list test can assert no session middleware reaches a token-authenticated surface.
@@ -149,10 +223,49 @@ return Application::configure(basePath: dirname(__DIR__))
         // The class name matches the entry already in the priority list above, which is what puts
         // it BEFORE SubstituteBindings — a scoped route binding needs the organization already in
         // the container, and registered after it, bindings resolve with no context and 404.
+        // `verified` DELIBERATELY SHADOWS the framework's own alias, and the shadowing is the fix.
+        // Illuminate's EnsureEmailIsVerified redirects a non-JSON caller to a route named
+        // `verification.notice`, which does not exist here and never will — this application serves no
+        // HTML, and the notice is a Next.js page on another host. That branch is reachable with a plain
+        // curl carrying a valid session cookie and no Accept header, and it renders as a 500. Ours
+        // throws AuthorizationException instead, so the render closure applies the surface-aware
+        // 403-admin / 404-public split rather than leaking a 500. See the class docblock.
         $middleware->alias([
             'org.member' => \App\Http\Middleware\TenantContext::class,
             'surface' => \App\Http\Middleware\BindSurface::class,
+            'verified' => \App\Http\Middleware\EnsureEmailIsVerified::class,
         ]);
+
+        // NO GUEST REDIRECT TARGET. THIS IS THE SAME DEFECT AS THE `verified` ALIAS ABOVE, on the
+        // authentication middleware instead of the verification one — and it was live in production
+        // while the entire Pest suite was green.
+        //
+        // `ApplicationBuilder::withMiddleware()` installs `redirectGuestsTo(fn () => route('login'))`
+        // BEFORE it calls this closure, unconditionally, for every application. No route here is named
+        // `login` — ours is `auth.login` — and none ever will be, because this service serves no HTML
+        // and the sign-in screen is a Next.js page on another host.
+        //
+        // Why it hid. `Authenticate::unauthenticated()` reads
+        //     $request->expectsJson() ? null : $this->redirectTo($request)
+        // so the callback is evaluated ONLY for a caller that does not accept JSON. The SPA always
+        // sends `Accept: application/json`, and `tests/Support/spa.php`'s `spaHeaders()` — which 5A's
+        // brief REQUIRES on every request, for an unrelated and correct reason — sends it too. So every
+        // test took the `null` branch and every one of them passed, while a plain browser navigation to
+        // `https://api.<domain>/api/v1/me` threw RouteNotFoundException from inside the middleware.
+        //
+        // MEASURED, on the deployed stack, before and after this line:
+        //     with    `Accept: application/json` -> 401 authentication      (both)
+        //     without that header                -> 500 internal_dependency (before) / 401 (after)
+        // A 500 there is wrong three times over: it is a server-fault status for a client condition, it
+        // claims `internal_dependency` when no dependency was involved, and `retryable: false` tells a
+        // caller their credentials are irreparable when they merely need to sign in.
+        //
+        // `null` is the framework's own supported spelling — `redirectGuestsTo()` converts it to
+        // `fn () => null` (Middleware.php:541) — so the exception carries no redirect and the render
+        // closure produces one 401 `authentication` for every caller, whatever they accept. Do not
+        // replace this with a route name to "make the redirect work": an HTML redirect from a JSON API
+        // is how a fetch() ends up parsing a login page as a session payload.
+        $middleware->redirectGuestsTo(null);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         // Nothing here may echo a provider credential, a signature, or a provider error body.

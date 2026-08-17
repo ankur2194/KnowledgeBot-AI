@@ -1,0 +1,18 @@
+{
+    "class": "App\\Http\\Requests\\StoreInvitationRequest",
+    "rules": {
+        "email": [
+            "bail",
+            "required",
+            "string",
+            "email:rfc,strict",
+            "max:254"
+        ],
+        "role": [
+            "bail",
+            "required",
+            "string",
+            "in:\"owner\",\"admin\",\"knowledge_manager\",\"analyst\""
+        ]
+    }
+}

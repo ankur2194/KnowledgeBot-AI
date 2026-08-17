@@ -1,0 +1,18 @@
+{
+    "class": "App\\Http\\Requests\\LoginRequest",
+    "rules": {
+        "email": [
+            "bail",
+            "required",
+            "string",
+            "email:rfc,strict",
+            "max:254"
+        ],
+        "password": [
+            "bail",
+            "required",
+            "string",
+            "max:255"
+        ]
+    }
+}

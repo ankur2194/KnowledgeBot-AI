@@ -36,9 +36,9 @@ module.exports = {
      * rather than silent.
      *
      * WHAT ENFORCES THAT NAMED IMPORT, precisely, because this comment used to name the wrong
-     * thing. It said CI greps for it. NO SUCH GREP HAS EVER EXISTED — the only `expo/fetch` under
-     * `.github/workflows/` is prose at `ci.yml:691`, and there is none in `gates.yml`, none in
-     * `eslint.base.mjs`, none anywhere. It is enforced by `eslint.config.mjs`, in the
+     * thing. It said CI greps for it. NO SUCH GREP EVER EXISTED, in any workflow, in
+     * `eslint.base.mjs`, or anywhere else — and there is no CI at all now, so the claim cannot even
+     * be revived. It is enforced by `eslint.config.mjs`, in the
      * `src/features/chat/**` block, which bans the global `fetch`, `globalThis.fetch`, and a
      * `fetch` imported by name from any other module. That runs under `pnpm lint`, which CI does
      * run. What still enforces NOTHING is the runtime half: no test in this repo can observe

@@ -46,7 +46,7 @@ import MarkdownIt, {
  * appear", and the control is a reviewer. docs/17 §22.5 is a list of security tests to write, one
  * bullet of which is "XSS in source content"; the corpus itself does not exist, the two services'
  * security-test READMEs name it as planned work, apps/widget/tests holds no renderer case, and
- * gates.yml runs nothing under apps/. Once that corpus exists it becomes the control here — and
+ * there is no CI to run it. Once that corpus exists it becomes the control here — and
  * every renderer has to be wired into it, because a second renderer the corpus never calls is
  * invisible to the corpus. Even then it is partial: a grep can find a second `DOMPurify.sanitize`,
  * but nothing can compare two sanitizer configs for equivalent strictness, which is why the

@@ -43,6 +43,28 @@ return [
         'X-XSRF-TOKEN',        // the URL-decoded XSRF-TOKEN cookie, echoed on every mutation
         'X-KB-Request-Id',
         'X-KB-Session-Token',  // the opaque origin-bound widget/hosted-chat session token
+
+        /*
+         * W3C Trace Context, sent by the BROWSER — not by a server.
+         *
+         * apps/web's instrumentation-client.ts registers FetchInstrumentation with
+         * `propagateTraceHeaderCorsUrls` scoped to this API's origin, so every admin-console fetch
+         * carries `traceparent`. That is what joins the browser span to the Laravel span to the
+         * FastAPI span in one trace; without it the client leg is an orphan.
+         *
+         * OMITTING THEM DOES NOT DEGRADE TRACING — IT BREAKS THE APPLICATION. A request header the
+         * preflight does not list makes the browser refuse the request entirely, before this service
+         * is reached: `Request header field traceparent is not allowed by Access-Control-Allow-Headers`.
+         * Measured on the deployed stack, where it blocked `GET /sanctum/csrf-cookie` and therefore
+         * every login, reset and invite — with nothing in any server log, because Laravel answered the
+         * preflight 204 and considered itself correct. A CORS refusal is invisible server-side.
+         *
+         * `tracestate` accompanies `traceparent` whenever a vendor has added state to it. It is listed
+         * because the pair is one propagator's output, and a preflight that allows half of it fails
+         * exactly as completely as one that allows neither.
+         */
+        'traceparent',
+        'tracestate',
     ],
 
     // Nothing sensitive: no X-KB-* internal metadata, no signature, no cost data.

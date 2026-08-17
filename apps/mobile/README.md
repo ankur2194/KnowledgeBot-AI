@@ -23,7 +23,7 @@ plugins/             config plugins (ATS / network-security posture)
   does; `src/features/chat/stream-answer.ts:6` imports it **by name**, and asserts
   `res.body !== null` at runtime so the degradation is visible on the device rather than silent.
   *`jest.config.js:35` says the by-name import is "what CI greps for". **It is not** — no grep in
-  either workflow enforces it, verified 2026-08-11 (`grep -rn 'expo/fetch' .github/workflows/`
+  any workflow enforced it, verified 2026-08-11, and there are no workflows now (`grep -rn 'expo/fetch' .`
   returns one comment and no check). Recorded in
   [`docs/22`](../../docs/22-spec-findings-and-decisions.md) § F6; do not cite the claim as a
   control until a check exists.*

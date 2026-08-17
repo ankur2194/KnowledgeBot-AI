@@ -59,6 +59,16 @@ pest()->extend(\Tests\TestCase::class)
 */
 require_once __DIR__.'/Support/tenancy.php';
 
+/*
+| spaHeaders(). Autoloaded for the same reason tenancy() is: a Sanctum SPA session does not exist in
+| the suite unless the request carries an Origin that matches config('sanctum.stateful'), and the
+| symptom of forgetting it is a 500 reading "Session store not set on request." rather than a 401.
+| A helper every suite can reach without a use statement is what stops a Feature test failing that
+| way silently. The file records the other half of the trap (phpunit.xml's SANCTUM_STATEFUL_DOMAINS)
+| and why CSRF cannot be tested by sending a bad token.
+*/
+require_once __DIR__.'/Support/spa.php';
+
 /**
  * The running test case.
  *

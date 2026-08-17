@@ -55,6 +55,14 @@ cross-tenant read, silently?* If yes, it belongs in a service with the invariant
 
 ```
 scripts/
+  lib/
+    env-drift.sh          SOURCED, never executed. The template-vs-rendered NAME-SET comparison,
+                          in ONE place, used by bootstrap.sh (which refuses to `up` on drift) and
+                          preflight.sh §2b (which fails the deploy). It deliberately offers no
+                          repair function: the header records the per-key measurement showing that
+                          "present but empty" and "absent" differ in BOTH directions across the
+                          keys this actually broke, so no single automatic filler is safe. A second
+                          copy of its name enumerator used to fail a CI gate; nothing catches it now
   dev/
     bootstrap.sh          first run: generate secrets, start the stack, verify the S3 gateway is closed
     reset.sh              destroy local state and start clean (DESTRUCTIVE, and it says so)
@@ -62,6 +70,17 @@ scripts/
   ops/
     backup.sh             pgdata + the SeaweedFS volume. Nothing else — the scope IS the invariant
     restore-drill.md      the drill. An untested backup is an assumption
+    postgres-roles.sh     the D21 role split, applied to a RUNNING cluster, plus --verify-only.
+                          A WRAPPER: the SQL lives once, in
+                          infrastructure/docker/postgres/roles/apply-roles.sh, which the
+                          `postgres-roles` one-shot Compose service runs on every `up`. This file
+                          exists for the two things the one-shot cannot do — reach an already-running
+                          cluster without bringing the stack up, and assert the PROPERTIES (roles
+                          exist, neither is a superuser, the app role holds no UPDATE/DELETE/TRUNCATE
+                          on audit_logs or any partition) rather than the statements.
+                          RUN IT BEFORE recreating the containers, never after: roles-then-containers
+                          leaves the superuser working in between, containers-then-roles is
+                          `FATAL: role "kb_app" does not exist` from every service at once
   security/
     license_gate.py       the only check that may block a build on licence
     rule_count_check.sh   asserts a NON-ZERO rule count before any scan runs
@@ -95,8 +114,10 @@ Every script here:
 - resolves paths from the repository root, not from `$PWD`, so it behaves the same from anywhere.
 
 Every script here is written to be invoked identically by a human and by a job, and its exit code is
-the contract. `security/rule_count_check.sh` is wired — `gates.yml` runs it.
-`security/license_gate.py` is **not yet wired to any workflow**.
+the contract. **That property is now the only thing keeping them useful: there are no jobs.**
+`.github/` was deleted on 2026-08-17, so `security/rule_count_check.sh` — which a gate used to run —
+is orphaned alongside `security/license_gate.py`, which never had a caller. Both still work; both
+now depend on somebody choosing to run them.
 
 `security/credential-file-scan.sh` **is wired now**, and how it got there is the interesting part.
 On a GitHub runner `actions/checkout` never materialises a gitignored file, so the credential files
@@ -108,9 +129,9 @@ value-extraction arm* or *run the whole thing where the credentials exist*. **Bo
 (#110):
 
 - `KB_SCAN_MODE=structural` runs only the arms decidable from git alone, and every one of them
-  answers for a **path** rather than a file — which is why they survive a runner. `ci.yml`'s
-  `secret-scan` job runs this, right after the two gitleaks invocations that structurally cannot see
-  these files. Check 2 is skipped **and printed as skipped**; a mode typo exits 2 rather than
+  answers for a **path** rather than a file — which is why they were safe to run on a runner. A
+  `secret-scan` job used to run this right after the two gitleaks invocations that structurally
+  cannot see these files; that job is gone, so this is a manual companion to a manual gitleaks run. Check 2 is skipped **and printed as skipped**; a mode typo exits 2 rather than
   falling back to the weaker scan.
 - `KB_SCAN_MODE=full` (the default) is unchanged and is what a developer machine, a deploy host and
   `scripts/ops/preflight.sh` run. It is the only mode that answers the value-leak question.

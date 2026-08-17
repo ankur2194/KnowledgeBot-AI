@@ -27,7 +27,7 @@ import { API_ORIGIN } from '@/lib/env';
  * in. It is a test seam: set it in application code and a chat send goes to an origin the session
  * cookie was never scoped to, which fails as a 401 in production and passes everywhere else.
  *
- * Nothing enforces the "declared here, set nowhere" half — no lint rule, and gates.yml has no step
+ * Nothing enforces the "declared here, set nowhere" half — no lint rule, and no CI step
  * over apps/. Reviewer check; the plain `rg apiOrigin src/` returns mostly this prose, so drop
  * comment lines:
  *

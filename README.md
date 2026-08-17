@@ -41,7 +41,7 @@ What is still owed:
   whether retrieval keeps a sparse arm; **ADR-032** restored it with locally computed BM25, and what
   remains open under C2 is the tokenizer, which is a reindex to change (ADR-034) and therefore worth
   settling before the first large ingest.
-- **The `ALLOWED_TABLES` gate.** `gates.yml` still asserts the write allow-list holds four names; it
+- **The `ALLOWED_TABLES` rule.** A deleted CI gate asserted the write allow-list held four names; it
   holds six ([ADR-033](docs/19-repo-structure-adrs.md)), so that assertion is red against the tree
   until it is rewritten as a membership check.
 
@@ -108,11 +108,26 @@ what to do about certificates.
 make up        # development stack
 make ps        # what is running, and whether it is healthy
 make logs      # follow everything
-make down      # stop, keeping volumes
+make down      # remove the containers of EVERY profile, keeping volumes
 ```
 
 `make help` lists every target. `make up` deliberately runs a bare `docker compose up -d`, which
 auto-loads `compose.override.yaml` — correct in development and only in development. See below.
+
+**Stopped stays stopped in development, and that is a deliberate difference from production.** The
+dev overlay sets `restart: "no"` on every service, so `docker compose stop`, `make down` and the stop
+button in Docker Desktop are final: nothing comes back when Docker Desktop, WSL or the host next
+restarts. Production keeps `restart: unless-stopped` from `compose.yaml`, because there self-healing
+beats a human noticing. The trade in dev is that a container killed by a transient failure stays
+dead until the next `make up` — which is idempotent and starts only what is missing. The reasoning,
+and the measurements behind it, are in `compose.override.yaml` under **SHUTDOWN DETERMINISM**;
+A `compose-invariants` CI job used to fail the build if either half drifted; it was deleted on
+2026-08-17, so the two measuring greps in `compose.override.yaml`'s footer are what remain.
+
+`make down` passes `--profile '*'` for a measured reason: a plain `docker compose down` leaves the
+containers of profiled services (`test`, `observability`, `dev-tools`) **running**, and
+`--remove-orphans` does not remove them either — a profiled service is not an orphan. That is why
+`postgres-test` and `valkey-test` used to outlive a shutdown.
 
 ---
 

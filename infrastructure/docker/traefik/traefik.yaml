@@ -156,6 +156,18 @@ entryPoints:
       # the internet. Behind an existing reverse proxy, omitting this makes Traefik rewrite
       # X-Forwarded-Proto to http, Laravel builds http:// URLs, Secure cookies are refused, and the
       # admin login loops with no error message.
+      #
+      # THIS EMPTY LIST IS HALF OF A TWO-SIDED CONTRACT, AND THE OTHER HALF IS IN COMPOSE.
+      # Traefik is the only thing that may write X-Forwarded-For here; Laravel is configured to
+      # believe X-Forwarded-For only from the `edge` subnet (compose.yaml `x-edge-subnet` ->
+      # TRUSTED_PROXIES on laravel-api and laravel-api-stream). Both halves are required:
+      #   * this list non-empty (or `insecure: true`) would let an internet client seed the chain
+      #     Traefik hands on;
+      #   * Laravel trusting nothing makes $request->ip() Traefik's own address for every request
+      #     on earth, which collapses five per-IP rate limiters into one global bucket.
+      # If you ever DO run a CDN or an L7 load balancer in front of this, both sides change
+      # together — this list gains the upstream's CIDR, and TRUSTED_PROXIES gains it too, because
+      # X-Forwarded-For then carries one more hop that Laravel must also discount.
       trustedIPs: []
 
 providers:

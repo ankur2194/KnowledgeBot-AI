@@ -165,5 +165,5 @@ policy is enforced by review against `scripts/security/policy/licences.toml` and
 `scripts/security/policy/vuln-ignores.toml`, which is weaker and is meant to read that way. The one
 security check that _is_ wired is the vendored SAST rule-count floor
 (`scripts/security/rule_count_check.sh`, run by the `repo-artifact-consistency` job in
-`.github/workflows/gates.yml`), which guarantees a scanner's ruleset is non-empty — not that any
+a deleted CI gate), which guaranteed a scanner's ruleset is non-empty — not that any
 scanner has run.

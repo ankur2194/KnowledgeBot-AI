@@ -34,8 +34,8 @@ export const publicEnv = publicSchema.parse({
  * override only the SSE fixture server may pass — so a stray lowercase `apiOrigin` anywhere else is
  * a test seam leaking into application code.
  *
- * No CI asserts that, and no lint rule does either. gates.yml's `boundary-greps` job DOES run over
- * apps/web — it bans `'use server'` there — but nothing in it looks at `apiOrigin`. Reviewer check,
+ * Nothing asserts that: no lint rule, and no CI. A grep job used to run over apps/web — it banned
+ * `'use server'` there and never looked at `apiOrigin` — and it no longer exists. Reviewer check,
  * sharing the grep documented on StreamAnswerOptions in features/chat/stream-answer.ts:
  *
  *   grep -rn 'apiOrigin' apps/web/src | grep -vE ':[0-9]+:[[:space:]]*(\*|//)'

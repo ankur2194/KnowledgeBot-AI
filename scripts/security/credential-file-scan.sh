@@ -45,9 +45,9 @@
 #
 # TWO MODES, BECAUSE ONE OF THE CHECKS ABOVE IS STRUCTURALLY IMPOSSIBLE ON A RUNNER (#110).
 #
-# `gitleaks dir .` in ci.yml's `secret-scan` is green on every run, and it is green because the
-# BYTES ARE ABSENT, not because they are safe: `actions/checkout` never materialises an ignored,
-# untracked file. `gitleaks git --log-opts=--all` is blind for a different reason — these files have
+# `gitleaks dir .` was green on every CI run, and it was green because the BYTES WERE ABSENT, not
+# because they are safe: a fresh checkout never materialises an ignored, untracked file. (That job
+# no longer exists; the reasoning is why THIS script exists, so it is kept.) `gitleaks git --log-opts=--all` is blind for a different reason — these files have
 # never been committed. So CI has no coverage of the credential files at all, and the green check
 # says otherwise.
 #
@@ -87,7 +87,7 @@
 # scripts/README.md's conventions. Every check below is a grep or a git query whose non-match is a
 # normal result; under `set -e` the first one aborts the run and the remaining checks never execute,
 # so a single early finding would hide every later one. Failures ACCUMULATE into `$fail` instead —
-# the same discipline gates.yml states as "ACCUMULATE, never `! grep`". The preconditions above the
+# the same discipline the deleted gate suite stated as "ACCUMULATE, never `! grep`". The preconditions above the
 # accumulator still exit immediately, because they make the whole scan dishonest rather than
 # incomplete.
 set -uo pipefail
@@ -448,8 +448,8 @@ for t in "${TEMPLATES[@]}"; do
   fi
   # NOT `git ls-files --error-unmatch`. The whole working tree is untracked pending the first
   # commit, so a tracked-ness assertion fails on every template today for a reason that has nothing
-  # to do with credentials — the same shape as gates.yml's `repo-artifact-consistency`, which
-  # cannot go green before the first commit either (docs/22 finding F3). The durable property is
+  # to do with credentials — the same shape as the `repo-artifact-consistency` gate, which could not
+  # go green before the first commit either (docs/22 finding F3; that gate is now deleted). The durable property is
   # that the template is COMMITTABLE: not ignored, so it reaches a fresh clone. That is true now
   # and stays true after the first commit.
   if git check-ignore -q -- "$t"; then
@@ -487,7 +487,7 @@ else
   note "check 2 DID NOT RUN and is not claimed: structural mode has no credential bytes to extract. The value-leak question is answered on a developer machine or by scripts/ops/preflight.sh, never here."
 fi
 note "check 3 compares each template against its live sibling and asserts a placeholder in the credential FIELD; the users.acl arm also asserts a placeholder exists, so it cannot pass on an empty file. In structural mode the live sibling is absent, so the byte-identity arm is inert and only the placeholder arm reports."
-note "NOT covered here, deliberately: env/*.env and .env values (pointers by design — the re-measuring command is in the header), and git HISTORY (that is gitleaks' job in ci.yml's secret-scan; these files have never been committed, and \`git ls-files infrastructure/\` returning 0 is why)."
+note "NOT covered here, deliberately: env/*.env and .env values (pointers by design — the re-measuring command is in the header), and git HISTORY (that is gitleaks' job, which nothing runs automatically any more; these files have never been committed, and \`git ls-files infrastructure/\` returning 0 is why)."
 
 if [ "$fail" -eq 0 ]; then
   echo "== credential-file-scan: PASS =="

@@ -8,7 +8,8 @@ byte-stable — keys ksort-ed, JSON flags pinned, rule ORDER inside a field left
 `bail|required|string` is semantic — and was verified by two independent runs producing identical
 sha256 sums.
 
-DO NOT HAND-EDIT A FILE IN HERE. ci.yml runs `php artisan kb:dump-form-rules --check`, which
+DO NOT HAND-EDIT A FILE IN HERE. `php artisan kb:dump-form-rules --check` is what regenerates and
+compares it — a CI step ran it until 2026-08-17, and now only a human does. That command
 rewrites nothing and exits non-zero if any file WOULD change (`--check` rather than
 `dump && git diff --exit-code`, because git diff cannot see an untracked file and would have
 compared nothing on the tree these files first landed in).

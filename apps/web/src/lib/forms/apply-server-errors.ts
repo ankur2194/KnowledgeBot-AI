@@ -1,4 +1,4 @@
-import type { ClientErrorClass } from '@kb/contracts';
+import type { ClientErrorClass, ErrorClass, StreamLost } from '@kb/contracts';
 import type { FieldValues, Path, UseFormReturn } from 'react-hook-form';
 
 /**
@@ -102,8 +102,24 @@ function hasFocusableRef<TFieldValues extends FieldValues, TOutput>(
  *
  * Validation MESSAGES are different — Laravel translates those, and they are end-user copy. This
  * map is for everything that is not a per-field validation message.
+ *
+ * ── TOTAL OVER THE TAXONOMY, AND THAT IS WHAT THE KEY TYPE IS FOR ────────────────────────────────
+ * `Record<ErrorClass | StreamLost | 'unknown', string>` rather than `Record<string, string>`. The
+ * difference is the whole point: this map was keyed by bare `string`, so a 19th class added to
+ * `ERROR_CLASSES` in `@kb/contracts` would have compiled here, typechecked, passed review, and then
+ * fallen through `endUserCopy`'s `?? 'Something went wrong.'` — a user-visible regression with both
+ * halves silent. Now it is a typecheck failure in this file, naming the missing key.
+ *
+ * `Record` is TOTAL AND CLOSED in both directions: a missing class is an error and so is a key that is
+ * not a class, which also catches a typo'd class name that would otherwise sit here matching nothing
+ * for ever. The two non-class keys are deliberate and are in the union explicitly — `stream_lost` is a
+ * client-local sentinel that nothing serializes, and `unknown` is the no-envelope-parsed case.
+ *
+ * The coverage TEST (tests/unit/auth-error.test.ts) derives its cases from this table rather than from
+ * a hand-written list, so the two checks catch different things: the type catches a class with no copy,
+ * the test catches copy that is never exercised.
  */
-export const ERROR_COPY: Readonly<Record<string, string>> = {
+export const ERROR_COPY: Readonly<Record<ErrorClass | StreamLost | 'unknown', string>> = {
   validation: 'Some details need fixing before this can be saved.',
   authentication: 'Your session has ended. Sign in again to continue.',
   authorization: 'You do not have access to this.',

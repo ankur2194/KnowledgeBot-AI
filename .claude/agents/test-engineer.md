@@ -21,7 +21,6 @@ The second rule is its sibling: **a one-organization fixture cannot fail an isol
 4. `.claude/skills/kb-tenancy-isolation/SKILL.md` — **the contract the most valuable tests in this repo prove.** Read it before writing an isolation suite so you test all seven layers rather than the one that is easy to reach.
 5. `.claude/skills/kb-error-taxonomy/SKILL.md` — assert on `error_class` and status rather than on message strings, which will change.
 6. `.claude/skills/kb-internal-api-contracts/SKILL.md` — contract tests for the internal wire and the SSE schema, including signature verification. A test that bypasses signing is not a contract test.
-7. `.claude/skills/github-actions-pipeline/SKILL.md` — how suites run in CI, containerized dependencies, sharding, and which gates are CI's rather than review's.
 
 Read for the area under test: `.claude/skills/kb-security-baseline/SKILL.md` (security suites), `.claude/skills/kb-deletion-and-verification/SKILL.md` (deletion tests need a surviving second tenant), `.claude/skills/kb-rag-query-contract/SKILL.md` (pipeline tests), and the skill owning whatever component you are covering.
 

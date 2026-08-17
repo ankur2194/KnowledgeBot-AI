@@ -641,8 +641,9 @@ makes "seven jobs" wrong. The recommendation's own examples are what settle it, 
 the decision: *"seven jobs"* and *"eighteen error classes"* are named as orientation that **stays**.
 The question the test is actually asking is whether the number **is** the invariant — whether a
 reader would act on the count itself as the rule. `ALLOWED_TABLES` has four names *is* the rule a
-reviewer applies, so it is banned; `gates.yml` has six jobs is a description of a file that names
-itself, so it stays. When the two readings disagree, write the rule and the command both: that
+reviewer applies, so it is banned; *the gate suite has six jobs* was a description of a file that
+named itself, so it stayed (that file has since been deleted, which is the cleanest possible
+illustration of why the count was never the rule). When the two readings disagree, write the rule and the command both: that
 outcome is never wrong, only longer.
 
 **Consequences, including the ones that hurt.**
@@ -719,3 +720,393 @@ exposure and a 403 does not prove the keys are the right ones; it is a probe, no
 `valkey:9.1.1` and on nothing either vendor documents, so a tag bump re-opens both halves and the check
 is to re-run the four states (file absent, directory, zero-byte, well-formed) against each image rather
 than to re-read this entry.
+
+---
+
+ADR-038…043 come from one effort — building user authentication and session management across
+`services/core-api` and `apps/web` — which made forty-four numbered decisions. They are **six** ADRs, not
+forty-four, because most of those forty-four are implementation rulings that record no architectural
+choice: which file a helper lives in, which parameter is untyped to avoid an LSP fatal, which Vitest
+project needs a `define`. The six below are the ones a future change can *violate*. As with ADR-011…037,
+**the full argument, the options actually considered, the rejected alternatives and the reversals are in
+[`docs/22`](22-spec-findings-and-decisions.md)** § *The auth-and-session decisions — ADR-038…043*; the
+entries here are the decisions and what each one costs. That section also carries the reversals, which
+are the part most likely to be re-litigated: six of the forty-four overturned an earlier decision in the
+same effort, and one of those overturned a formula whose author had published it as measured.
+
+Two of these carry a numbering hazard worth stating once. The effort's own decisions are cited as
+**plan D1…D44**; `docs/22` § G6 already uses the bare label `D7` for an unrelated tracker item, so the
+`plan D<n>` form is used everywhere below rather than the bare number.
+
+### ADR-038: One Authentication Mechanism on the Admin Surface, Enforced by Three Negatives
+
+**Decision:** the admin surface (`api/*`) has exactly one credential — the Sanctum SPA cookie session,
+`HttpOnly`, `Secure`, `SameSite=Lax`, with the CSRF token echoed as `X-XSRF-TOKEN` — and it is enforced
+by **removal**, not by convention. `App\Http\Middleware\RejectBearerToken` is *prepended* to the `api`
+middleware group, so any request carrying an `Authorization: Bearer` header throws
+`AuthenticationException` → 401 before any guard runs (plan D10). `Laravel\Sanctum\HasApiTokens` is
+deliberately **not** on `App\Models\User`; no migration creates `personal_access_tokens`;
+`sanctum:prune-expired` stays commented out in `routes/console.php` as a **permanent** omission under
+this ADR rather than a pending entry; and `abilities:`/`ability:` middleware appears on no route (plan
+D11). `config/auth.php` keeps **both** `guards.web` and `guards.sanctum`, and that is one mechanism
+rather than two: `config/sanctum.php` sets `guard => ['web']`, so `auth:sanctum` *delegates* to the
+session guard, and deleting `guards.sanctum` would break every admin route that already existed.
+
+**Reason:** two mechanisms on one endpoint means two authorization paths and one of them drifts. The
+trait was going to be added *solely* so that `tokenCan()` existed for one Definition-of-done test, and
+it is not needed for authentication — measured in vendor: `Guard::__invoke()` checks
+`supportsTokens($user)` and returns the session user **unchanged** when the trait is absent, so cookie
+auth works without it. Rejected alternatives: **create `personal_access_tokens` in the framework's
+shape** so `findToken()` returns `null` → 401 — it makes the wrong credential merely *fail* instead of
+stating the invariant, and it plants a table for a credential nothing mints; **leave the bearer branch
+live** — it is a pre-existing unauthenticated **500** reachable by anyone (any `Authorization: Bearer`
+on an `auth:sanctum` route reaches `PersonalAccessToken::findToken()` against a table no migration
+creates → `42P01`), and this ADR fixes it as a side effect; **add the trait for the test** — that grants
+the admin surface a second credential type in order to make one assertion writable.
+
+**Trade-off, and it is a real loss:** the `laravel-sanctum-auth` Definition-of-done test —
+*"`tokenCan()` returns `true` under a session while the same route still 403s"* — becomes
+**unwritable**, because `tokenCan()` does not exist. That test proved abilities are not the gate. The
+property is now enforced structurally by three negatives in
+`services/core-api/tests/Security/SingleCredentialMechanismTest.php`: a bearer header on any `api/v1`
+route is 401 and never 500; nothing calls `createToken()` on a *user*; and `User` does not use the
+trait, asserted by reflection with a failure message citing this ADR so a future "just add the trait"
+is a red build that explains itself. That is stronger, and it is also **not the same claim** — nobody
+has demonstrated on this codebase that a `TransientToken`'s `can()` returns `true` for every string,
+because no code path can construct one, so the gotcha survives as doctrine rather than as evidence.
+A future mobile-PAT effort must deliberately re-add **four** things together, on its own surface: the
+trait, the published `personal_access_tokens` migration, `Sanctum::authenticateAccessTokensUsing()` so
+a revoked membership stops an already-minted token on its next request, and the prune schedule.
+**Revisit when** a second client class needs a credential on `api/*` — the answer is a new surface with
+its own route group and its own mechanism, never a second mechanism on this one.
+
+### ADR-039: Emailed Capabilities Are Opaque Hashed Database Rows, Never Signed URLs, and Never a Path Segment
+
+**Decision:** all three emailed flows — password reset, email verification, organization invitation —
+carry a 32-random-byte token minted by one helper (`App\Support\Kb\OpaqueToken`), hex-encoded in the
+emailed URL and stored **only as its digest**: `token_hash bytea` behind a unique index for the two new
+tables, and the framework's bcrypt `token text` for `password_reset_tokens`, whose shape
+`DatabaseTokenRepository` dictates. **No token is ever a path segment** (plan D2): invitation preview
+and accept are POSTs carrying the token in the body, and the three SPA landing routes take it in the
+query string. The field is named `token` in **every** FormRequest that accepts one (plan D13).
+
+**Reason:** the decisive argument is mechanical rather than aesthetic. `URL::hasValidSignature()`
+validates against `$request->url()` — the **API** URL — while the URL the recipient clicked is the
+**SPA** URL, so a `temporarySignedRoute` cannot be validated after the SPA echoes its parameters back
+without reconstructing and re-verifying the signed SPA URL by hand, where any difference in
+query-parameter order or percent-encoding silently fails `hash_equals`: a bug that reproduces on some
+mail clients and not others. Four further reasons, each independently sufficient: a signed URL is a
+bearer capability that *additionally* carries the user id and `sha1(email)`; single use is expressible
+on a row and not on a signature, so a leaked link in an archived mailbox keeps working until `expires`;
+a row is revocable, which is what lets a resend kill the previous link; and password reset was already
+an opaque hashed DB token, so matching it is the *smaller* design — one table shape, one expiry story,
+one prune command, one test harness. Rejected: **a signed URL plus a consumed-token denylist**, which
+is a table anyway, with two mechanisms instead of one. The `{token}` **path segment** was rejected
+because a capability in a path lands in Traefik access logs, in `Referer` and in browser history; it
+also deletes the `/invitations-<anything>` prefix hazard, since all three routes are exact paths.
+
+**Trade-off:** one extra table and one prune-schedule entry, and the REST shape is awkward — reading a
+preview is a POST. The token is still in a URL *in the email*, which is unavoidable, and it is in the
+address bar for one page load, mitigated rather than removed by `Referrer-Policy: no-referrer` and a
+`history.replaceState` that strips `?token=` after reading it. **Accepted residual, written down rather
+than argued away:** a queued notification puts the **plaintext** token in the Valkey job body for the
+life of the job. Not queueing re-opens the timing oracle ADR-040 closes, and re-minting inside the job
+changes the token after the row was written — so the Security suite asserts the plaintext is absent
+from `storage/logs`, from every log line and from the response body, and deliberately **not** from
+Valkey. **Revisit when** a flow needs a capability that is not single-use; a signature is the right
+shape for that and this ADR would be the wrong one to stretch.
+
+### ADR-040: Account Non-Enumeration Is a Response-Shape Rule, and It Is Not the Deny-Oracle Property
+
+**Decision:** on the admin auth surface, the N ways of failing one endpoint produce **one** response —
+same status, same body bytes. Bad login credentials are **422 `validation` with the message on `email`
+only** — never on `password`, never 401 (plan D7). Forgot-password collapses all three broker outcomes
+(sent, unknown user, broker-throttled) into one 200. Invitation preview and register collapse **five**
+invalid-token cases into one refusal: unknown, expired, accepted, revoked, and a pending invitation
+into a *suspended organization* (plan D33, the fifth, which the design had not enumerated). The
+property is asserted in `tests/Security/AccountEnumerationTest.php` by comparing failures **pairwise
+against each other**, never against a missing route, plus a forbidden-fragment scan of the bodies.
+
+**Reason:** a 401 *from* `/login` is a redirect loop in any SPA with a global 401 interceptor, and a
+message on `password` says *"the address exists, the secret is wrong"*, which is the oracle itself.
+The broker-throttle collapse is the subtle one: returning 429 on throttled and 200 on unknown **is** an
+oracle, because probing twice proves the first probe created a token, which proves the account exists.
+**This is a different property from the 403-admin / 404-public deny split** that
+`tests/Security/DenyOracleTest.php` and `expect()->toDenyAsNotFound()` own, whose reference is always a
+*live control* on the same surface, and conflating them produces the wrong test in both directions:
+`toDenyAsNotFound()` on an admin auth route would **pass while asserting the wrong property**, and
+turning an admin auth denial into a 404 "to be safe" would fail `DenyOracleTest`'s admin arm and make
+its public arm vacuous. Rejected: **401 for bad credentials** (above); **429 on a broker-throttled
+forgot-password** (above); **`unique:users,email` on register**, which turns `/register` into a live
+account-existence oracle for anyone who can POST; and **distinguishing unknown-address from
+wrong-password in the audit `reason`** (plan D27), because it costs a second `retrieveByCredentials()`
+probe *outside* `SessionGuard::attempt()`'s 200 ms timebox, reintroducing in our own code the exact
+differential the framework spends a timebox closing — and an investigator can ask the same question of
+the same database later.
+
+**Trade-off:** three costs, and the third is the one that will break. **(1)** 422 for a credential
+failure is taxonomy-adjacent rather than taxonomy-clean; any future client that wants 401 must
+special-case `/auth/login` in its interceptor. **(2)** The collapse costs the caller information they
+may legitimately want: a recipient whose invitation genuinely expired is told only that it is no longer
+valid, so support cannot distinguish that from a typo without reading the database. **(3)** It is a
+**timing** property as much as a shape property, and the timing half rests on something outside these
+endpoints — `PasswordBroker::sendResetLink()` sends the mail *inside* its 200 ms timebox, so a
+synchronous SMTP send blows the floor on the exists-branch and re-opens the oracle. That is why every
+auth notification is `ShouldQueue`: a **security** requirement, not a throughput one, and one that a
+well-meaning "send it inline, it's just one email" would silently undo. **Revisit when** a flow needs a
+distinguishable failure for support; the answer is an authenticated read surface, not a richer public
+error body.
+
+### ADR-041: `audit_logs` Is Append-Only and Monthly Range-Partitioned, and the Write-Failure Policy Is Per Operation
+
+**Decision:** `audit_logs` is built in its final shape now — **range-partitioned monthly on
+`created_at`**, primary key `(id, created_at)`, no outbound foreign key, `REVOKE UPDATE, DELETE`, and an
+**allow-listed** `details` writer (plan D9). `subject_type` holds a **fully-qualified class name**, not
+a table-ish name (plan D32). And the write-failure policy is **per operation**, declared in
+`AuditLogger::OPERATIONS`: `ON_FAILURE_ABORT` where the audited change can still be rolled back, which
+rethrows unwrapped so the render closure classifies the SQLSTATE, and `ON_FAILURE_LOG` where it cannot,
+which records an ERROR and lets the response stand (plan D20). **Read the constant for the membership of
+each policy** — do not restate it or its cardinality here or anywhere (ADR-036; plan D29 applied the same
+rule to the test that pins the operation names, and `docs/22` § **H14** is what happens when a count is
+restated in prose beside the constant it describes).
+
+**Reason:** the per-operation split resolved a **genuine contradiction between two skills**.
+`kb-observability-conventions` and its Definition of done say an audit write failure aborts the
+operation; the brief said it must not turn a successful login into a 500. Both are right in their own
+domain, and the domain is the *operation*: for a **state change** the row belongs in the same
+transaction and must block the commit, so a role change that is not recorded did not happen; for a
+**session act** the cookie has already been issued or destroyed, so aborting would return 500 to a
+caller who *is* logged in **and** still lose the row — the worst of both. Putting the policy in one
+constant rather than in a per-call-site argument means a caller cannot accidentally pick the lenient
+policy for a role change. Rejected: **one policy for the whole logger** (either choice is wrong for half
+the operations); **`'user'`-style `subject_type` values**, which the migration had documented while
+every writer in the tree passed `::class` — two spellings of one fact in a free-text column means a
+query for a subject finds half its rows, and the FQCN wins because it is what the code already
+produces, because `::class` is compiler-checked where a literal is not, and because it matches
+Laravel's morph convention; **converting to a partitioned table later**, which is a full rewrite.
+
+**Trade-off, and the first one is that the headline guarantee is not enforced.** Measured on live
+PostgreSQL 18.4: the ACL is correct — `pg_class.relacl` shows no UPDATE and no DELETE on the parent or
+on any partition — but `rolsuper` is **true** for the only login role, so
+`UPDATE audit_logs SET operation='tampered'` returned `UPDATE 1`. `TRUNCATE` is not revoked either,
+because the Integration suite's `DatabaseTruncation` needs it. Append-only therefore rests on the ACL as
+an *audit artifact*, on `AuditLog`'s PHP-level refusals, and on no code path issuing the statement; that
+is written into the migration rather than papered over, and it is open as `docs/22` § **H3** (plan D21).
+Second: partitioning buys a runway, and a runway runs out — **`kb:create-audit-partitions` must stay
+scheduled**, because at 00:00 on the first of a month past the last partition every audit insert fails
+with `23514` and every ABORT-policy action returns 500, total and instant, on a clock. Third:
+`AuditLog::organizationId()` **throws** for platform-scope rows rather than returning `''` (plan D22),
+because `OrgOwned::organizationId(): string` is non-nullable and an empty string would be a lie the
+policy layer compares against a real org id — so platform-scope rows are not authorizable through any
+org policy. Harmless while no read surface exists; it must be decided when the audit-log viewer lands.
+**Revisit when** a non-superuser application role exists in `infrastructure/docker/` — that is the
+change that converts the REVOKE from a record into a control, and it is also the moment `TRUNCATE`
+should be revoked and the test that currently `markTestSkipped`s should assert.
+
+### ADR-042: Registration Is Invitation-Gated, and the Session Wire Is Flat, Enveloped and Total
+
+**Decision:** **no HTTP route creates an organization.** The first organization and its owner come from
+`kb:bootstrap-organization`, which refuses to run when any organization exists, has no `--force`, and
+**never accepts a password in any form** — it mints a password-reset link instead. Every other user
+arrives through an invitation, and `RegisterRequest` validates **no `email`** (plan D3): the invitation
+token is the sole authority for the address. The session wire is one flat resource, `SessionResource`
+(plan D5) — every field in `required`, every nullable typed `["string","null"]` — over the role catalog
+`owner | admin | knowledge_manager | analyst` (plan D6). Every success body is wrapped in `data` (plan
+D23) and the web client unwraps once at the fetch boundary, never at a render site. A collection
+response is `{"data":{"invitations":[…]}}` rather than `{"data":[…]}`, and `resend` is a single-action
+controller (plan D26).
+
+**Reason:** invite-only onboarding is what makes tenancy the *first* fact about a user rather than a
+later one — there is no moment where an authenticated identity exists with no organization and no
+inviter. The bootstrap command's four properties are each independently sufficient to keep it from being
+a production backdoor: refusal when any org exists (an upsert would silently **change** an existing
+owner, which is precisely the backdoor); no password anywhere, so the secret never reaches shell
+history, an env file, or `docker compose config` output — which `make prod-config` runs before every
+deploy and which renders every interpolated value in full; `--print-link` off by default with help text
+saying it writes a credential to the terminal; and interactive by default while fully non-interactive
+when every option is supplied. The wire decisions are mostly **forced by tooling**, and recording which
+is which matters because the aesthetic reading of each differs from the real one: flat *and* total
+because `tests/Contract/OpenApiDocumentTest.php` requires every resource component be **closed**
+(`additionalProperties: false`) *and* **total** (declared ⊆ required), so there are no optional fields
+to have; `data` because `ResponseShape::$properties` maps a response *key* to a schema class, making an
+unwrapped body literally unpublishable by `kb:dump-openapi` — and both endpoints that predate all auth
+work already wrapped, which is how a set of MSW fixtures written unwrapped against an assumption was
+caught as a real cross-plane break; `{"invitations":[…]}` because `DumpOpenApiCommand` **cannot express
+"an array of"** for a response key while the contract test requires `additionalProperties: false`, which
+an array schema cannot carry; `resend` as `__invoke` because `arch()->preset()->laravel()` limits a
+controller's public methods to the seven resource verbs plus `__construct`/`__invoke`/`middleware`.
+Rejected: **HTTP self-service signup** (no invitation, no tenant, no bound on abuse); **409 for the
+already-registered address and for a suspended organization**, because the render closure maps 409 to
+`internal_dependency`, which a client reads as *"something on our side is unavailable, retry shortly"* —
+false twice over for a suspended org, since nothing is unavailable and retrying never works while it is
+suspended (plan D36, which removed the stale `409`s from the published error lists so the document stops
+advertising a status that cannot occur).
+
+**Trade-off:** the register path **does** disclose one thing — "an account already exists for this
+address" — to a caller who has already proven possession of an invitation token bound to that exact
+address, which an org admin deliberately sent there. That is a deliberate exception to ADR-040 and is
+the only one. Second: because an invitation creates no membership row, `MembershipStatus::Invited`
+loses its producer and is retained with a comment naming `organization_invitations` as the new owner —
+a dead enum case, kept because removing it is a three-step CHECK-constraint migration for no functional
+benefit (`docs/22` § **H11**). Third: there is no self-service path at all, so onboarding a new customer
+is an operator action, and the command that does it is one whose safety rests entirely on the
+refuse-if-any-exists check. **Revisit when** a second organization can be created through the API —
+that refusal is the property which then has to move, and it is the only thing keeping the command out of
+production reach.
+
+### ADR-043: Two Org-Owned Models Deliberately Carry No `#[ScopedBy]`, Because `OrganizationScope` Fails Closed
+
+**Decision:** `OrganizationInvitation` and `EmailVerificationToken` both `implements OrgOwned` and
+**neither carries `#[ScopedBy(OrganizationScope::class)]`**, matching the pre-existing decision on
+`OrganizationUser`. Isolation for these tables comes from the other direction: the guest read is by
+`token_hash` — a 256-bit random behind a unique index — and every admin read goes through a repository
+method that takes `organization_id` as a **required positional argument**.
+
+**Reason:** `OrganizationScope::apply()` **fails closed**: with no bound `TenantContext` it appends
+`whereRaw('1 = 0')`. The guest paths — preview, register, accept, verify — read these tables *before*
+any organization is known, so with the scope attached every lookup would return nothing, **always**, and
+that failure renders as a perfectly plausible *"this invitation is no longer valid."* Registration would
+be silently and totally broken with green-looking code, no exception and no log line. Rejected
+alternative, and the reason it loses is the important half: **keep `#[ScopedBy]` and call
+`withoutGlobalScope(OrganizationScope::class)` on the guest read.** That is *worse* than not scoping,
+because the tenancy gate greps the **plural** `withoutGlobalScopes(` and cannot see the singular form —
+so the bypass would be invisible to CI while the model looked correctly scoped in review. Recorded as
+`docs/22` § **H1**; widening the pattern is a one-line follow-up.
+
+**Trade-off:** the reflection arch rule *"every org-owned model carries `#[ScopedBy]`"* cannot be
+enabled unqualified, because three models now claim the exemption — enabling it needs an annotated
+exception list carrying each model's reason, in the `// tenancy-exempt: <reason>` style the tenancy
+skill's Definition of done already establishes. Until that list exists the rule stays off, and a
+**new** org-owned model can ship unscoped with nothing complaining: that is the direction that hurts,
+because the models here are exempt for a stated reason and the next one might be exempt by accident.
+And the substitute protection is a convention rather than a mechanism — a repository method that grows
+an `organization_id`-optional overload silently loses the whole guard, and no test would notice.
+**Revisit when** H1 is closed (the rejected alternative becomes merely worse rather than invisible), or
+when a **fourth** model wants the exemption — at which point the annotated exception list must be
+written *before* that model lands, not after.
+
+### ADR-044: In Development Nothing Self-Restarts; `unless-stopped` Is Production-Only
+
+**Decision:** `compose.override.yaml` — the overlay production never loads — overrides **every** service
+to `restart: "no"` through one `&dev-no-restart` anchor, and `compose.yaml` keeps `unless-stopped` for
+production. `make down` runs `docker compose --profile '*' down`. Both directions were asserted by
+`compose-invariants` checks **(9)** and **(9b)** — nothing in the dev render may self-restart, *and*
+the base file must still name `unless-stopped` on five services by name. **Those checks were deleted
+with `.github/` on 2026-08-17**, so the decision stands with no enforcement behind it; the two
+measuring greps in `compose.override.yaml`'s footer are what a reviewer has instead.
+
+**Reason:** `unless-stopped` exempts only containers the operator stopped **before** the daemon went
+away. Anything still running — or still flapping — when the daemon stops comes back when it next starts,
+and on Docker Desktop the daemon stops constantly: a Desktop restart, `wsl --shutdown`, an auto-update, a
+host reboot. That is the reported symptom ("I stopped them and they came back by themselves"), and Docker
+Desktop's own `AutoStart=False` does not touch it, because the revival is the daemon's restart manager
+rather than Desktop's launcher. A second, separate cost was measured on Engine 29.6.2 with two containers
+that exit 255 immediately: `unless-stopped` reached `RestartCount` 9 in 30 s while `no` stayed exited at
+0 — but `docker stop` settled **both**, so a crash loop does *not* defeat the stop button and only the
+daemon-restart mechanism explains the symptom. The `--profile '*'` half is its own measured finding: a
+plain `down` leaves a **profiled** service's container running and `--remove-orphans` does not remove it
+either (a profiled service is not an orphan), which is why `postgres-test` and `valkey-test` outlived
+every shutdown; see `docs/22` § **I1**.
+
+**Rejected:** a `profiles:` key in the base file. This is the same rule that moved mailpit's *definition*
+into the dev overlay: a profile is one forgotten flag away from applying in production, whereas a service
+— or a policy — that exists only in the file production never loads has nothing to remember in either
+direction. Measured while making that earlier change and worth keeping: `profiles: []` in an overlay does
+**not** clear a profile set in the base file, so the overlay could never have fixed it. Also rejected: documenting the policy in prose. Compose merges `restart:`
+by **replacement**, so a service the overlay does not name silently keeps `unless-stopped` in dev
+(measured with a two-service probe: `a -> no`, `b -> unless-stopped` from one render), there is no
+file-wide restart setting to lean on, and the next service added to `compose.yaml` will be forgotten.
+Hence a gate rather than a paragraph.
+
+**Trade-off:** in development a container killed by a transient failure — a dependency restarting, an
+OOM, a laptop resuming from sleep — now stays dead until the next `docker compose up -d`, which is
+idempotent. That is the intended half: a crash you must notice is a crash you fix, and the alternative is
+what `laravel-worker-long` did on this host, logging `RedisException` connection-refused for 98 minutes
+after `valkey-core` was stopped. The overlay's service list is a maintenance burden by construction and
+its only real defence is check (9). **Revisit when** Compose grows a file-scoped restart setting, at
+which point the per-service list — and half of that check — can go.
+
+### ADR-045: The Stop Signal Must Be One PID 1 Actually Handles, and It Is Set Per Service
+
+**Decision:** `stop_signal: SIGTERM` on the four core-api services whose PID 1 is not php-fpm —
+`laravel-api`, `laravel-api-stream`, `laravel-worker`, `laravel-worker-long`. It is **not** a `STOPSIGNAL`
+in the Dockerfile. `laravel-scheduler` is exempt (`schedule:work` traps `INT TERM QUIT` through Laravel's
+`$this->trap()` helper, so the inherited SIGQUIT is already graceful) and so is `laravel-migrate`
+(`MigrateCommand` traps nothing, so no signal helps it). A `compose-invariants` check **(9d)** asserted
+the rule with both exemptions named rather than counted; it was deleted with `.github/` on 2026-08-17.
+
+**Reason:** the image inherits `STOPSIGNAL SIGQUIT` from its `php:*-fpm*` base, which is correct only when
+PID 1 *is* php-fpm. Here PID 1 is `kb-serve` (bash, `trap shutdown TERM INT`) or `php artisan horizon`
+(`ListensForSignals` traps `TERM USR1 USR2 CONT`, plus `INT`). **A signal PID 1 has no handler for is
+discarded** — the kernel ignores default-disposition signals for PID 1, SIGKILL and SIGSTOP excepted — so
+`docker stop` did nothing, Docker waited out the full `stop_grace_period` and SIGKILLed: **26 minutes and
+exit 137** for `laravel-worker-long`. Measured with the image alone, two arms: a PID 1 trapping only TERM
+survives SIGQUIT indefinitely, while one trapping SIGQUIT exits on it — so delivery was never the gap.
+After the change the five php services stop in **15 s, every one exit 0**. The consequence worth stating
+is what the grace periods were doing: every drain they are priced for — a worker finishing a job
+mid-`UPDATE`, a stream finalizing the usage row the tenant is billed from — **never ran**, and the number
+bought delay instead of safety.
+
+**Rejected:** `STOPSIGNAL SIGTERM` in the Dockerfile. The same image serves php-fpm for `laravel-api`'s
+fpm child, where SIGQUIT *is* the graceful stop and SIGTERM cuts a stream mid-answer, so a
+per-image default would fix four services by breaking the one case the base image got right.
+
+**Amended 2026-08-17 — the follow-up this ADR deferred has landed, and the deferral was the right call
+made for a reason that has now expired.** `kb-serve`'s trap is `TERM INT QUIT`
+(`services/core-api/Dockerfile`). It was recorded here as a follow-up rather than smuggled in because it
+needs an image rebuild; the rebuild has since happened for other reasons, so the cost that justified
+deferring it is gone. **Measured on the image, both directions:** with `trap shutdown TERM INT`, a bare
+`docker run` + `docker stop -t 30` took **31 s and exited 137**; with `QUIT` added, **0 s, exit 0**. Note
+what that measurement is *not* — it is not a second finding about compose. The compose path was already
+correct, because `stop_signal: SIGTERM` is what this ADR decided. What the trap fixes is **every path that
+does not read compose.yaml**: an operator debugging one container by hand, and any bare `docker run` of this
+image directly. There the inherited `STOPSIGNAL SIGQUIT` is what Docker actually delivers. The two
+mechanisms are now deliberately belt-and-braces and **both stay** — the per-service `stop_signal:` is not
+made redundant by the trap, because a future core-api service whose PID 1 is neither `kb-serve` nor Horizon
+would inherit SIGQUIT with no trap of its own, which is what check (9d) keeps enforcing.
+
+**Trade-off:** the requirement now lives in Compose, invisible from the image, so a **new** core-api
+service inherits SIGQUIT and nothing about the container says so — which is precisely what check (9d)
+exists for, and why its exemptions are names rather than a count. `laravel-migrate` keeps a 300 s grace
+that is now documented as a **deadline rather than a promise**: nothing there handles a signal, so a stop
+during a migration still ends in SIGKILL mid-DDL. ~~**Revisit when** `kb-serve` gains a `QUIT` arm~~ —
+**that happened on 2026-08-17; see the amendment above**, and the per-service settings are now the
+belt-and-braces half rather than the only half. Still **revisit when** a core-api service runs php-fpm as
+PID 1 (it would need the exemption, with its reason), or when one runs a PID 1 that traps neither signal —
+the trap protects `kb-serve` and Horizon specifically, not the image in general.
+
+### ADR-046: The `edge` Subnet Is Pinned Outside Docker's Dynamic Address Pool
+
+**Decision:** `x-edge-subnet: &edge-subnet "${KB_EDGE_SUBNET:-10.207.0.0/16}"`. The other three networks
+stay unpinned. This changes the default **value** only; the reasoning for *why* the range is pinned at
+all — one anchor feeding the `edge` ipam block and `TRUSTED_PROXIES` on both routed Laravel services, so
+the CIDR Laravel trusts an `X-Forwarded-For` from cannot drift by half an edit — is unchanged and lives in
+`compose.yaml`'s `x-edge-subnet` block beside `config/trustedproxy.php`. No document may retype the CIDR
+a second time.
+
+**Reason:** the old default, `172.24.0.0/16`, sat **inside** the daemon's built-in address pools
+(172.17.0.0/12 in /16 chunks, plus 192.168.0.0/16; this host configures none of its own). A pinned range
+inside the pool can be handed to an **unpinned** network, and it was handed to one of ours: after a `down`
+freed all four project networks, the next `up` failed with *"failed to create network knowledgebot_edge:
+invalid pool request: Pool overlaps with other one on this address space"* because `knowledgebot_data`
+was created first and took 172.24 — the allocator hands out the lowest free /16, other projects on this
+host hold 172.17–172.23, and Compose does not create `edge` first. It reproduces on **every** down/up
+cycle, and it is the worst kind of intermittent: a hard stop whose apparent fixes (retry,
+`docker network prune`) work at random. `10.0.0.0/8` is in neither built-in pool, so no dynamically
+allocated network — ours or another project's — can ever be given the range. Verified before the edit
+(`docker network create --subnet 10.207.0.0/16` succeeds; `ip route get 10.207.0.1` resolves via the
+default gateway) and after, across two full cycles.
+
+**Rejected:** pinning the other three networks "for symmetry" — that puts three more ranges at risk to
+fix what one line fixes, and the base file's existing instruction not to pin them stands for that reason.
+Rejected too: unpinning `edge` and letting Docker choose, which is the defect the pin exists to close —
+a trusted-proxy CIDR Docker may reassign stops matching, `$request->ip()` reverts to Traefik's address,
+and all five per-IP limiters collapse into one global bucket with nothing red anywhere.
+
+**Trade-off:** changing the pin **recreates the network once**, restarting the six containers on `edge`,
+and `preflight.sh` §3b reports the live network's range against the declared one until that happens. The
+residual risk is now the only one: a host route or VPN that really uses 10.207/16, which `KB_EDGE_SUBNET`
+exists for. And the change had a documentation cost that is itself an ADR-036 episode — four files kept
+naming the old CIDR afterwards, one of them a commented example that would have re-pinned the very range
+the move escapes (`docs/22` § **I5**). **Revisit when** the daemon's `default-address-pools` are
+configured on a deployment host, which changes which ranges are safe to pin.

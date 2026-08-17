@@ -222,9 +222,9 @@ def celery_routes(celery_queues: Mapping[str, str]) -> Mapping[str, dict[str, st
 # ─────────────────────────────────────────────────────────────────────────────
 #
 # THE `KB_TEST_*` SHORT-CIRCUITS BELOW ARE NOT A SUPPORTED PATH, AND THIS COMMENT USED TO SAY
-# THEY WERE THE CI ONE. There is no merge-queue job and no workflow `services:` block:
-# `ci.yml`'s second ai-service step runs `-m integration` against the runner's own Docker
-# daemon, so every fixture here starts its own container in CI exactly as it does locally.
+# THEY WERE THE CI ONE. There was never a merge-queue job or a workflow `services:` block, and
+# since 2026-08-17 there is no workflow at all: every fixture here starts its own container,
+# wherever the suite runs, which is now only a developer's machine.
 #
 # Worse than stale — the path it pointed at detonates. `KB_TEST_PG_DSN`, `KB_TEST_QDRANT_URL`
 # and `KB_TEST_VALKEY_URL` carry the `KB_` prefix, so `check_environment` rejects them as

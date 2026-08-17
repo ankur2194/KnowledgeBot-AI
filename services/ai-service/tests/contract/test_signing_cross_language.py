@@ -26,8 +26,9 @@ whole tree goes in, read-only.
 
 SKIPPING, AND HOW TO STOP IT SKIPPING
 --------------------------------------
-The image `knowledgebot/core-api:dev` is built by `docker compose build` locally and, in CI, by
-the `core-api` step of `ci.yml`'s `images` job. That step used to be `push: false, load: false`
+The image `knowledgebot/core-api:dev` is built by `docker compose build` locally, and that is now
+the ONLY way it gets built — the CI job that also built it was deleted on 2026-08-17. That job's
+`core-api` step used to be `push: false, load: false`
 with no `tags:` — the layers went to the build cache and nothing reached the runner's Docker
 daemon — so this file skipped on every pull request and its whole matrix, controls included,
 reported as one `1 skipped` line (finding B1; the older wording here, "no workflow builds an
@@ -180,10 +181,9 @@ def _docker_can_run_the_php_signer() -> str | None:
     )
     if probe.returncode != 0:
         return (
-            f"{IMAGE} is not built locally. `ci.yml`'s `images` job builds it with "
-            "`load: true` and this tag, and runs this file in that same job with "
-            "KB_TEST_REQUIRE_PHP=1 — so a skip here means a local tree without the image, or "
-            "a job that lost the `load:`/`tags:` pair. Build it with `docker compose build "
+            f"{IMAGE} is not built locally, and there is no CI that builds it either — so this "
+            "matrix is skipped unless you build the image yourself. Set KB_TEST_REQUIRE_PHP=1 to "
+            "turn the skip into a failure. Build it with `docker compose build "
             "core-api`."
         )
     return None

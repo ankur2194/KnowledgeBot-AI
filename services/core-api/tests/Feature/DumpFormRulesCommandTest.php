@@ -255,8 +255,10 @@ it('passes --check against its own output and fails on a single changed byte', f
     expect(Artisan::call('kb:dump-form-rules', ['--path' => $dir, '--check' => true]))->toBe(1);
 });
 
-it('is registered under the name CI invokes', function (): void {
-    // .github/workflows/ci.yml runs `php artisan kb:dump-form-rules --check` by literal name. A
-    // rename that compiles is a red build nobody edited.
+it('is registered under the name the documented workflow invokes', function (): void {
+    // `php artisan kb:dump-form-rules --check` is named by literal string in packages/contracts/
+    // rules/.gitkeep and in the release checklist, and it used to be a CI step as well. That step is
+    // gone, so this test is now the ONLY thing standing between a rename that compiles and a
+    // generated artifact nobody regenerates.
     expect(array_keys(app(Kernel::class)->all()))->toContain('kb:dump-form-rules');
 });

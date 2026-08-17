@@ -36,3 +36,34 @@ export type {
 } from './sse/events.js';
 
 export type { ChatSendBody } from './chat.js';
+
+/**
+ * `export type` ONLY, and the two halves of that are both load-bearing:
+ *
+ *   1. `tsconfig.base.json:12` sets `verbatimModuleSyntax: true`, so a type-only re-export is
+ *      ERASED — it emits nothing into dist/index.js and the <=1 kB brotli budget above is provably
+ *      untouched. A bare `export { … }` would be a real re-export and would drag the module in.
+ *   2. every module under `src/resources/` contains no runtime value at all, so there is nothing here
+ *      that COULD be emitted. That is why `Role` is a union and not a `ROLES` tuple, and why
+ *      `InvitationStatus` is a union rather than a status tuple.
+ *
+ * test/resource-drift.test.ts asserts the built entry's export list, so this stays a property
+ * rather than a comment.
+ */
+export type {
+  InvitationPreview,
+  MembershipStatus,
+  Role,
+  SessionMembership,
+  SessionResource,
+  SessionUser,
+} from './resources/session.js';
+
+export type {
+  AcknowledgementResource,
+  InvitationCollectionResource,
+  InvitationResource,
+  InvitationStatus,
+  MemberCollectionResource,
+  MemberResource,
+} from './resources/members.js';

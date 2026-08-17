@@ -91,6 +91,21 @@ final class Organization extends Model implements OrgOwned
     }
 
     /**
+     * REQUIRED BY ROUTE BINDING, not merely convenient. Every admin invitation route is mounted
+     * under `organizations/{organization}` with `->scopeBindings()`, which resolves `{invitation}`
+     * through *this relation* rather than through a global query. Without it the nested binding has
+     * nothing to scope by and every one of those routes 404s — including for the org that owns the
+     * row. With it, an invitation id belonging to another organization 404s at binding time, before
+     * any policy runs, which is the enumeration-safe order.
+     *
+     * @return HasMany<OrganizationInvitation, $this>
+     */
+    public function invitations(): HasMany
+    {
+        return $this->hasMany(OrganizationInvitation::class);
+    }
+
+    /**
      * @return array<string, string>
      */
     protected function casts(): array

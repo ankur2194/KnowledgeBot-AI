@@ -1,6 +1,6 @@
 import { defineConfig } from 'tsup';
 
-// A real build is mandatory, not a convenience: github-actions-pipeline typechecks apps/mobile
+// A real build is mandatory, not a convenience: the typecheck of apps/mobile
 // against the BUILT output of this package (Jest there, Vitest here), and dist/ is gitignored —
 // so `pnpm contracts:build` runs before the mobile job or it fails on missing types.
 export default defineConfig({

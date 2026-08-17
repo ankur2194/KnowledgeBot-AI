@@ -162,10 +162,10 @@ RUN rm -f /usr/local/etc/php-fpm.d/www.conf /usr/local/etc/php-fpm.d/zz-docker.c
 # ------------------------------------------------------------------------------------------------
 # kb-serve — the role selector, and the reason two processes in one container is safe here.
 # ------------------------------------------------------------------------------------------------
-# php-fpm runs in the background and nginx in the foreground, with an explicit trap forwarding
-# SIGTERM to BOTH. Without the trap, `docker compose down` signals only PID 1 (nginx) and php-fpm
-# is SIGKILLed when the grace period expires — which on laravel-api-stream means a live answer is
-# cut with its usage row unwritten, and the tenant is not billed for tokens that were spent.
+# php-fpm runs in the background and nginx in the foreground, with an explicit trap forwarding the
+# stop signal to BOTH. Without the trap, `docker compose down` signals only PID 1 (nginx) and
+# php-fpm is SIGKILLed when the grace period expires — which on laravel-api-stream means a live
+# answer is cut with its usage row unwritten, and the tenant is not billed for tokens spent.
 RUN set -eux; cat > /usr/local/bin/kb-serve <<'SH' && chmod +x /usr/local/bin/kb-serve
 #!/bin/bash
 # BASH, not sh. `wait -n` below is a bash builtin and does not exist in dash, which is /bin/sh on
@@ -198,7 +198,17 @@ shutdown() {
   wait "$NGINX_PID" 2>/dev/null || true
   exit 0
 }
-trap shutdown TERM INT
+# QUIT IS LOAD-BEARING AND IS NOT REDUNDANT WITH THE COMPOSE `stop_signal:`. This image inherits
+# `STOPSIGNAL SIGQUIT` from its `php:*-fpm*` base, so a plain `docker run` + `docker stop` — no
+# compose file, which is how an operator debugs one container and how any bare `docker run` of it
+# behaves —
+# delivers QUIT, not TERM. PID 1 DISCARDS ANY SIGNAL WHOSE DISPOSITION IS STILL THE DEFAULT, so an
+# untrapped QUIT here is not "terminate", it is IGNORED: the container sits until the grace period
+# expires and is then SIGKILLed. MEASURED against this image on 2026-08-17 — `docker stop -t 30`
+# took 31s and exited 137 with `trap shutdown TERM INT`, and 0s exiting 0 once QUIT was added.
+# The per-service `stop_signal: SIGTERM` in compose.yaml (ADR-045) covers the compose path and
+# stays; this covers every other path, and the two are deliberately belt-and-braces.
+trap shutdown TERM INT QUIT
 
 nginx -c "$NGINX" &
 NGINX_PID=$!

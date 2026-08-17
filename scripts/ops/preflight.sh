@@ -73,6 +73,11 @@ warn() { printf '\033[33m    %s\033[0m\n' "$*"; }
 ok()   { printf '    %s\n' "$*"; }
 die()  { printf '\033[31mFATAL %s\033[0m\n' "$*" >&2; exit 1; }
 
+# The template-vs-rendered name-set comparison used by §2b, shared with scripts/dev/bootstrap.sh.
+# ONE implementation: a drift checker that exists in two copies is the drift it was written to catch.
+# shellcheck source=../lib/env-drift.sh
+. "$REPO_ROOT/scripts/lib/env-drift.sh"
+
 # fail <one-line title> <explanation…>
 #
 # Prints a marker in context so the operator sees WHERE it broke, and stores the full explanation
@@ -268,12 +273,12 @@ if [[ ! -d "$ENV_DIR" ]]; then
     "  $ENV_DIR does not exist, so every \`env_file:\` target is absent and Compose will refuse" \
     "  to start the services that reference one. Run scripts/dev/bootstrap.sh."
 else
-  # Assignment NAMES only: strip comments and blank lines, take the identifier left of the first
-  # `=`. `export FOO=` is accepted for the same reason env_value accepts it.
-  env_names() {
-    sed -nE 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.*/\2/p' "$1" | sort -u
-  }
-
+  # The comparison itself lives in scripts/lib/env-drift.sh, sourced at the top of this script and
+  # by scripts/dev/bootstrap.sh. IT USED TO BE INLINE HERE, and that was the bug shape this
+  # repository keeps finding: the checker existed in one script, the script that renders the files
+  # had no checker at all, and the five-key core-api gap sat in a live deployment for two days
+  # because the only thing that would have caught it is run at deploy time and not at setup time.
+  # kb_env_names / kb_env_missing / kb_env_extra are that primitive. Do not re-implement them here.
   shopt -s nullglob
   EXAMPLES=("$ENV_DIR"/*.env.example)
   shopt -u nullglob
@@ -299,8 +304,8 @@ else
       continue
     fi
 
-    missing="$(comm -23 <(env_names "$example") <(env_names "$target") | tr '\n' ' ')"
-    extra="$(comm -13 <(env_names "$example") <(env_names "$target") | tr '\n' ' ')"
+    missing="$(kb_env_missing "$example" "$target")"
+    extra="$(kb_env_extra "$example" "$target")"
 
     if [[ -z "$missing" && -z "$extra" ]]; then
       ok "$base matches its template (variable names)"
@@ -418,6 +423,169 @@ else
       "  Expiry warnings go to a mailbox nobody reads, on a domain nobody owns."
   else
     ok "ACME_EMAIL set"
+  fi
+fi
+
+# ================================================================================================
+# 3b. THE TRUSTED-PROXY CHAIN. Three files have to agree or every per-IP rate limit is fiction.
+# ================================================================================================
+# Traefik is the direct TCP peer of every request from the internet. Laravel therefore learns the
+# caller's address from X-Forwarded-For or not at all, and it believes that header only from a CIDR
+# it is told to trust. Told nothing, `$request->ip()` is Traefik's container address for EVERY
+# request on earth: AppServiceProvider's five auth limiters each carry an `ip:` arm, so login
+# becomes 20 attempts per minute for the whole internet and `password-request` becomes 10 — one
+# host can hold password reset unavailable for every tenant, indefinitely. The same value is what
+# AuditLogger::ipFrom() writes to audit_logs.ip_address, so `auth.login.failed` — null org, null
+# actor, by design — would record the reverse proxy and locate nothing.
+#
+# FOUR THINGS MUST HOLD, AND THE FAILURE OF ANY ONE IS SILENT:
+#   a. compose.yaml pins `edge`'s ipam subnet. Unpinned, Docker allocates it from its address pool
+#      in creation order, interleaved with every other project on the host, and the CIDR Laravel
+#      trusts stops matching the network it is supposed to describe.
+#   b. Both routed Laravel services carry TRUSTED_PROXIES, and it is the SAME scalar as (a) — the
+#      YAML alias, not a retyped literal.
+#   c. It is not a wildcard. '*' expands to 0.0.0.0/0 and makes X-Forwarded-For attacker-supplied,
+#      which is strictly worse than trusting nothing: a forged address per request evades every
+#      per-IP limiter instead of merely sharing one bucket.
+#   d. Traefik does not trust a client's own X-Forwarded-For (`insecure: true` / a non-empty
+#      trustedIPs), which would let an internet caller seed the chain Traefik hands on.
+#
+# PARSED TEXTUALLY, NOT VIA `docker compose config`, for this script's standing reason: that
+# command renders every interpolated value in full and its output is not safe to print.
+say "Trusted-proxy chain (edge subnet -> TRUSTED_PROXIES -> Traefik)"
+
+COMPOSE_BASE="$DOCKER_DIR/compose.yaml"
+TRAEFIK_STATIC="$DOCKER_DIR/traefik/traefik.yaml"
+
+# The anchor definition: `x-edge-subnet: &edge-subnet "..."`. One line, or this check fails closed.
+EDGE_ANCHOR_LINES="$(grep -cE '^x-edge-subnet:[[:space:]]*&edge-subnet[[:space:]]' "$COMPOSE_BASE" || true)"
+EDGE_SUBNET_DECL="$(sed -nE 's/^x-edge-subnet:[[:space:]]*&edge-subnet[[:space:]]*"?\$\{KB_EDGE_SUBNET:-([^}"]+)\}"?.*/\1/p' "$COMPOSE_BASE" | head -1)"
+
+if [[ "$EDGE_ANCHOR_LINES" != "1" ]]; then
+  fail "compose.yaml does not define exactly one x-edge-subnet anchor (found $EDGE_ANCHOR_LINES)" \
+    "  The anchor is what keeps the edge network's subnet and TRUSTED_PROXIES the SAME scalar." \
+    "  Two definitions, or none, means this check cannot tell which value Laravel will trust —" \
+    "  and a second literal is a value Docker is free to invalidate on one side only."
+elif [[ -z "$EDGE_SUBNET_DECL" ]]; then
+  fail "x-edge-subnet exists but its default CIDR could not be parsed" \
+    "  Expected the form:  x-edge-subnet: &edge-subnet \"\${KB_EDGE_SUBNET:-<cidr>}\"" \
+    "  (the CIDR is deliberately not spelled out here — the default has moved once already, and a" \
+    "  hint that names a stale range sends the reader to fix the wrong half.)" \
+    "  Failing closed rather than assuming a range: this value is what Laravel believes an" \
+    "  X-Forwarded-For from, and a check that guesses it proves nothing."
+else
+  # The EFFECTIVE value: .env may override the compose default with one variable.
+  EDGE_SUBNET_EFF="$EDGE_SUBNET_DECL"
+  if [[ "$ENV_OK" -eq 1 ]]; then
+    _env_override="$(env_value "$ENV_FILE" KB_EDGE_SUBNET)"
+    [[ -n "$_env_override" ]] && EDGE_SUBNET_EFF="$_env_override"
+  fi
+
+  # (a) the network must actually be pinned, and pinned to the alias.
+  if grep -qE '^[[:space:]]+- subnet:[[:space:]]*\*edge-subnet[[:space:]]*$' "$COMPOSE_BASE"; then
+    ok "edge network ipam subnet is pinned to the anchor (effective: $EDGE_SUBNET_EFF)"
+  else
+    fail "the edge network's ipam subnet is not pinned to *edge-subnet" \
+      "  networks.edge has no \`ipam.config[].subnet: *edge-subnet\`, so Docker assigns the range" \
+      "  from its address pool in creation order — interleaved with every other Compose project on" \
+      "  this host. MEASURED on the development host: edge=172.24, application=172.25, data=172.26," \
+      "  observability=172.28, with the gap at .27 taken by an unrelated network BETWEEN two of" \
+      "  ours. Prune the networks or start another project first and every value moves, while" \
+      "  TRUSTED_PROXIES keeps naming the old one. Nothing errors; the per-IP limiters just stop" \
+      "  being per-IP."
+  fi
+
+  # (b) both routed services must carry it, via the alias.
+  _tp_alias="$(grep -cE '^[[:space:]]+TRUSTED_PROXIES:[[:space:]]*\*edge-subnet[[:space:]]*$' "$COMPOSE_BASE" || true)"
+  _tp_any="$(grep -cE '^[[:space:]]+TRUSTED_PROXIES:' "$COMPOSE_BASE" || true)"
+  if [[ "$_tp_alias" == "2" && "$_tp_any" == "2" ]]; then
+    ok "TRUSTED_PROXIES set on both routed Laravel services, via the anchor"
+  elif [[ "$_tp_any" != "$_tp_alias" ]]; then
+    fail "a TRUSTED_PROXIES value in compose.yaml is a literal rather than *edge-subnet" \
+      "  $_tp_any occurrences, $_tp_alias of them aliased. A retyped CIDR is a second copy of a" \
+      "  value Docker owns: pin the network to one range, type another into an environment key," \
+      "  and the mismatch is invisible until you notice every login attempt sharing one bucket." \
+      "  Use \`TRUSTED_PROXIES: *edge-subnet\`."
+  else
+    fail "TRUSTED_PROXIES is set on $_tp_any of the 2 routed Laravel services" \
+      "  Both laravel-api and laravel-api-stream serve requests through Traefik and both boot the" \
+      "  same framework, so both need it. The stream service is the public chat surface and has" \
+      "  rate limiting of its own." \
+      "" \
+      "  Note it belongs in \`environment:\` in compose.yaml, NOT in env/core-api.env: that file is" \
+      "  rendered once from its template and never updated, so a security value placed there" \
+      "  reaches new deployments and silently misses every existing one (see §2b above)."
+  fi
+
+  # (c) never a wildcard, never all-of-IPv4, never empty.
+  case "$EDGE_SUBNET_EFF" in
+    '*' | '**' | 0.0.0.0/0 | ::/0 | '')
+      fail "the effective trusted-proxy range is '$EDGE_SUBNET_EFF' — that is a wildcard" \
+        "  TrustProxies expands '*' to 0.0.0.0/0, and Symfony then reads the CLIENT-SUPPLIED" \
+        "  X-Forwarded-For verbatim. That is strictly WORSE than trusting nothing: instead of" \
+        "  sharing one global bucket, an attacker picks a fresh address per request and evades" \
+        "  every per-IP limiter completely, while audit_logs records whatever it was told." \
+        "  Pin KB_EDGE_SUBNET to the edge network's own range."
+      ;;
+    */*)
+      ok "trusted-proxy range is a bounded CIDR, not a wildcard"
+      ;;
+    *)
+      fail "the effective trusted-proxy range '$EDGE_SUBNET_EFF' is not a CIDR" \
+        "  A bare address would work but pins Traefik to one container IP, which Docker allocates" \
+        "  sequentially and does not reserve — the next container on \`edge\` takes it and Traefik" \
+        "  fails to start. Use the network's CIDR."
+      ;;
+  esac
+
+  # (a'), the one a config review cannot perform: what the LIVE network actually holds.
+  #
+  # AND THE PART THAT IS EASY TO GET WRONG: a matching subnet does NOT mean the next `up` leaves
+  # the network alone. Compose decides by the `com.docker.compose.config-hash` LABEL it stamps on
+  # the network, not by comparing subnets, and that hash changes when the declaration changes.
+  # MEASURED against Compose v5.3.1 on a throwaway project 2026-08-13: a network created with no
+  # `ipam:` and then re-upped with an ipam block naming THE VERY SUBNET DOCKER HAD ALREADY ASSIGNED
+  # was stopped, removed, recreated, and its container restarted. The second `up` after that was a
+  # clean no-op. So the cost is one ordinary restart of everything on `edge`, once — reported here
+  # rather than failed, because it is a scheduling fact and not a misconfiguration.
+  if docker network inspect knowledgebot_edge >/dev/null 2>&1; then
+    _live_subnet="$(docker network inspect knowledgebot_edge \
+      --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null | tr -d ' ')"
+    if [[ "$_live_subnet" == "$EDGE_SUBNET_EFF" ]]; then
+      warn "live knowledgebot_edge already holds $_live_subnet, which equals the declared range —"
+      warn "  but that does NOT mean the next \`up\` is a no-op. Compose compares the network's"
+      warn "  com.docker.compose.config-hash label, so if this network predates the ipam pin it will"
+      warn "  still be removed and recreated once, restarting traefik, web, sdk, laravel-api,"
+      warn "  laravel-api-stream and otel-collector. Idempotent from then on. Do it in a window."
+    else
+      fail "live knowledgebot_edge is $_live_subnet but the declared range is $EDGE_SUBNET_EFF" \
+        "  Until Compose reconciles this, TRUSTED_PROXIES names a range that does not contain" \
+        "  Traefik: X-Forwarded-For is ignored, \$request->ip() is the proxy for every caller, and" \
+        "  all five per-IP auth limiters are one global bucket. Reconciling REMOVES and recreates" \
+        "  the network, restarting every container on it. Plan the window, then re-run this." \
+        "" \
+        "  If the two ranges disagree because you set KB_EDGE_SUBNET after the network existed," \
+        "  that is exactly this case; there is no way to move a live network's subnet in place."
+    fi
+  fi
+
+  # (d) Traefik must not adopt a client's own forwarded headers.
+  if [[ ! -f "$TRAEFIK_STATIC" ]]; then
+    fail "traefik/traefik.yaml is missing" \
+      "  It is a committed file and a MOUNTED one; Docker turns a missing bind source into a" \
+      "  directory, which Traefik reports as a fatal config load. Restore it from git."
+  elif grep -qE '^[[:space:]]*insecure:[[:space:]]*true' "$TRAEFIK_STATIC"; then
+    fail "traefik.yaml sets forwardedHeaders.insecure: true" \
+      "  Traefik would then preserve a client-supplied X-Forwarded-For from anyone on the" \
+      "  internet. Combined with Laravel trusting the edge subnet, an attacker chooses the address" \
+      "  every rate limiter and every audit row records. The two halves are one control."
+  elif grep -qE '^[[:space:]]*trustedIPs:[[:space:]]*\[\][[:space:]]*$' "$TRAEFIK_STATIC"; then
+    ok "traefik forwardedHeaders.trustedIPs is empty — no client-supplied X-Forwarded-* is adopted"
+  else
+    warn "traefik.yaml's forwardedHeaders.trustedIPs is neither the empty list nor absent."
+    warn "  That is legitimate ONLY if you genuinely run a CDN or L7 balancer in front of Traefik."
+    warn "  If you do, TRUSTED_PROXIES must gain that upstream's range too: X-Forwarded-For then"
+    warn "  carries one more hop, and Laravel discounts only the hops it is told to trust."
   fi
 fi
 
@@ -842,7 +1010,297 @@ else
 fi
 
 # ================================================================================================
-# 8. THE POSITIVE CONTROL. Config files being individually correct is not the same as the stack
+# 8. THE POSTGRES ROLE SPLIT (D21). The check that makes append-only an enforced control.
+# ================================================================================================
+# WHAT IT GUARDS. `POSTGRES_USER` creates exactly one role and makes it a SUPERUSER, and a superuser
+# BYPASSES EVERY ACL CHECK. Measured on PostgreSQL 18.4 before this split: audit_logs' `REVOKE
+# UPDATE, DELETE` landed correctly — `pg_class.relacl` showed no UPDATE and no DELETE on the parent
+# or on any partition — and `UPDATE audit_logs SET operation='tampered'` returned `UPDATE 1` anyway.
+# The ACL was an audit artifact. Everything below is about keeping it a control instead.
+#
+# THIS SECTION IS SPLIT IN TWO ON PURPOSE:
+#   (a) FILE CHECKS, which run always. Do the compose files and the env templates agree on which
+#       role each service connects as, and is the least-privileged one the shared default?
+#   (b) LIVE CHECKS, which run only when the postgres container is up. Do the roles exist, is
+#       neither a superuser, and does the app role hold no write privilege on any audit relation?
+#
+# (b) is the assertion that matters and it is the one that cannot always run. It DEGRADES to a
+# warning rather than a failure when postgres is down, because `make preflight` must be runnable
+# before the first `up` — and it is a FAILURE, not a warning, when postgres IS up and the answer is
+# wrong. A check that silently skips is a check that can be made green by stopping a container, so
+# the skip prints the reason and the ledger counts it.
+say "PostgreSQL role split (D21)"
+
+PG_MIGRATE_ROLE="kb_migrate"
+PG_APP_ROLE="kb_app"
+PG_CONTAINER_NAME="${PG_CONTAINER:-knowledgebot-postgres-1}"
+AUDIT_PARENT="audit_logs"
+
+# ── (a) FILE CHECKS ──────────────────────────────────────────────────────────────────────────────
+# The shared env template must carry the LEAST-PRIVILEGED role. It is read by all six core-api
+# containers, so a service that declares no override inherits whatever is here — and the only
+# acceptable direction for a shared default to be wrong in is "less access".
+tpl_core="$DOCKER_DIR/env/core-api.env.example"
+tpl_ai="$DOCKER_DIR/env/ai-service.env.example"
+if [[ -r "$tpl_core" ]]; then
+  db_user="$(sed -nE 's/^[[:space:]]*DB_USERNAME=(.*)$/\1/p' "$tpl_core" | tail -1)"
+  if [[ "$db_user" == "$PG_APP_ROLE" ]]; then
+    ok "env/core-api.env.example: DB_USERNAME=$PG_APP_ROLE (the least-privileged role is the shared default)"
+  else
+    fail "env/core-api.env.example has DB_USERNAME=${db_user:-<unset>}, not $PG_APP_ROLE" \
+      "  This file is shared by all six core-api containers, so it is the value a service gets when" \
+      "  it declares no override. If it names the POSTGRES_USER superuser, every container connects" \
+      "  as a superuser, and a superuser bypasses every ACL check — audit_logs' REVOKE becomes an" \
+      "  audit artifact again while every ACL assertion in the Pest suite still passes. Measured:" \
+      "  \`UPDATE audit_logs SET operation='tampered'\` returned \`UPDATE 1\`." \
+      "  The two legitimate overrides (laravel-migrate, laravel-scheduler) live in compose.yaml," \
+      "  because which role a container uses is a PER-SERVICE fact and this is one shared file."
+  fi
+fi
+if [[ -r "$tpl_ai" ]]; then
+  ai_user="$(sed -nE 's/^[[:space:]]*KB_PG_USER=(.*)$/\1/p' "$tpl_ai" | tail -1)"
+  [[ "$ai_user" == "$PG_APP_ROLE" ]] \
+    && ok "env/ai-service.env.example: KB_PG_USER=$PG_APP_ROLE (the data plane issues no DDL and owns no migration)" \
+    || fail "env/ai-service.env.example has KB_PG_USER=${ai_user:-<unset>}, not $PG_APP_ROLE" \
+         "  The data plane owns no migration (ADR-012) and has no reason to hold the owner" \
+         "  credential. Its four-table write restriction is enforced only by ALLOWED_TABLES in" \
+         "  app/db/writes.py; a superuser connection removes the database's own last word on it."
+fi
+
+# The one-shot must exist, must be un-profiled, and laravel-migrate must gate on it. A profiled
+# one-shot is only enabled when that profile is active, and a `depends_on` into an inactive profile
+# is an invalid model — Compose errors rather than enabling it.
+if grep -qE '^  postgres-roles:' "$DOCKER_DIR/compose.yaml"; then
+  if awk '/^  postgres-roles:/{f=1;next} f&&/^  [a-z]/{exit} f&&/^    profiles:/{print "yes"}' \
+       "$DOCKER_DIR/compose.yaml" | grep -q yes; then
+    fail "the postgres-roles one-shot carries a \`profiles:\` key" \
+      "  A profiled service is only enabled when that profile is active, so a bare" \
+      "  \`docker compose up\` would skip it — and laravel-migrate's depends_on would then be a" \
+      "  dependency on a disabled service, which Compose reports as an invalid model rather than" \
+      "  auto-enabling. Required services carry no profiles key."
+  else
+    ok "postgres-roles one-shot is declared and carries no profiles key"
+  fi
+  awk '/^  laravel-migrate:/{f=1} f&&/postgres-roles:[[:space:]]*\{condition: service_completed_successfully\}/{print "gated"} f&&/^  [a-z].*:$/&&!/laravel-migrate/{exit}' \
+      "$DOCKER_DIR/compose.yaml" | grep -q gated \
+    && ok "laravel-migrate gates on postgres-roles: service_completed_successfully" \
+    || fail "laravel-migrate does not gate on postgres-roles with service_completed_successfully" \
+         "  \`postgres: service_healthy\` says the server accepts connections. It says nothing about" \
+         "  the role laravel-migrate authenticates as existing. Without the gate the first" \
+         "  \`docker compose up\` dies with \`FATAL: role \"$PG_MIGRATE_ROLE\" does not exist\`, and" \
+         "  because every Laravel and FastAPI service gates on laravel-migrate's own" \
+         "  service_completed_successfully, the entire stack stops there."
+else
+  fail "compose.yaml declares no postgres-roles service" \
+    "  Nothing creates $PG_MIGRATE_ROLE or $PG_APP_ROLE, so every container connects as the" \
+    "  POSTGRES_USER superuser and audit_logs is not append-only at the database. See" \
+    "  infrastructure/docker/postgres/roles/apply-roles.sh."
+fi
+
+# No runtime service may mount the SUPERUSER password. Two legitimate consumers: `postgres` itself
+# and the `postgres-roles` one-shot. Anything else holding it makes the whole split decorative.
+super_holders="$(awk '
+  /^  [a-z0-9-]+:$/ { svc = $0; sub(/^  /, "", svc); sub(/:$/, "", svc) }
+  /secrets:/,/\]/   { if ($0 ~ /postgres_password[,\]]/ && svc != "") print svc }
+' "$DOCKER_DIR/compose.yaml" | sort -u | grep -vE '^(postgres|postgres-roles)$' || true)"
+if [[ -n "$super_holders" ]]; then
+  fail "these services mount the POSTGRES_USER superuser password: $(echo "$super_holders" | paste -sd' ' -)" \
+    "  A superuser bypasses every ACL check. Any service holding this credential can UPDATE and" \
+    "  DELETE audit rows no matter what the ACL says, which is exactly the state the role split" \
+    "  exists to leave. Runtime services mount postgres_app_password; laravel-migrate and the" \
+    "  scheduler's DDL connection mount postgres_migrate_password."
+else
+  ok "only postgres and postgres-roles mount the superuser password"
+fi
+
+# ── (b) LIVE CHECKS ──────────────────────────────────────────────────────────────────────────────
+PG_LIVE_SKIPPED=0
+if ! docker inspect -f '{{.State.Running}}' "$PG_CONTAINER_NAME" 2>/dev/null | grep -q true; then
+  PG_LIVE_SKIPPED=1
+  warn "$PG_CONTAINER_NAME is not running — the four LIVE assertions below did not run:"
+  warn "  both roles exist / neither is a superuser / the app role has no CREATE on schema public /"
+  warn "  the app role holds no UPDATE, DELETE or TRUNCATE on audit_logs or any partition."
+  warn "  These are the assertions that actually prove append-only. Start postgres and re-run:"
+  warn "    cd $DOCKER_DIR && docker compose up -d postgres && make preflight"
+else
+  pgq() {
+    docker exec -i "$PG_CONTAINER_NAME" psql -tAq --no-password --no-psqlrc \
+      -U "${POSTGRES_USER:-knowledgebot}" -d "${POSTGRES_DB:-knowledgebot}" -c "$1" 2>/dev/null || true
+  }
+  n_roles="$(pgq "SELECT count(*) FROM pg_roles WHERE rolname IN ('$PG_MIGRATE_ROLE','$PG_APP_ROLE')")"
+  if [[ "$n_roles" != "2" ]]; then
+    fail "the split roles do not both exist (found ${n_roles:-?} of 2)" \
+      "  The compose files name $PG_APP_ROLE and $PG_MIGRATE_ROLE; the cluster does not have them." \
+      "  \`docker compose up\` would bring every Laravel and FastAPI container up against" \
+      "  \`FATAL: role \"$PG_APP_ROLE\" does not exist\`. THE ORDER IS NOT SYMMETRIC — run the roles" \
+      "  script FIRST, then recreate the containers:" \
+      "    ./scripts/ops/postgres-roles.sh" \
+      "  (Roles first is safe: in between, containers still connect as the superuser, which works.)"
+  else
+    supers="$(pgq "SELECT coalesce(string_agg(rolname,' '),'') FROM pg_roles
+                    WHERE rolname IN ('$PG_MIGRATE_ROLE','$PG_APP_ROLE') AND rolsuper")"
+    if [[ -n "${supers// /}" ]]; then
+      fail "these split roles are SUPERUSERS: $supers" \
+        "  A superuser bypasses every ACL check, so audit_logs' REVOKE is decoration — and every" \
+        "  ACL assertion in the Pest suite STILL PASSES, because it reads pg_class.relacl rather" \
+        "  than attempting the write. That combination (correct ACL, ineffective control, green" \
+        "  suite) is the precise state this whole change exists to leave." \
+        "  Repair: ALTER ROLE <name> NOSUPERUSER, or re-run ./scripts/ops/postgres-roles.sh"
+    else
+      ok "$PG_MIGRATE_ROLE and $PG_APP_ROLE exist and neither is a superuser"
+    fi
+
+    if [[ "$(pgq "SELECT has_schema_privilege('$PG_APP_ROLE','public','CREATE')")" == "f" ]]; then
+      ok "$PG_APP_ROLE has no CREATE on schema public"
+    else
+      fail "$PG_APP_ROLE holds CREATE on schema public" \
+        "  It could then create a table, OWN it, and an owner may GRANT itself anything on what it" \
+        "  owns. Re-run ./scripts/ops/postgres-roles.sh — it revokes this."
+    fi
+
+    # THE SWEEP. Parent AND every partition, walked from pg_inherits.
+    #
+    # WHY THE PARTITIONS ARE THE POINT: privileges are NOT inherited through the partition
+    # hierarchy. A query routed through the parent checks only the parent, but `UPDATE
+    # audit_logs_2026_08 SET ...` checks the partition. And the app role's default privileges
+    # GRANT UPDATE/DELETE, so EVERY NEW PARTITION ARRIVES WRITABLE — measured: a partition created
+    # after the parent's revoke came out `kb_app=arwd/kb_migrate`. Only the per-partition REVOKE in
+    # EloquentAuditLogPartitionRepository takes it away, which makes this the check that catches the
+    # one failure mode the design genuinely has.
+    if [[ "$(pgq "SELECT to_regclass('public.$AUDIT_PARENT') IS NULL")" == "t" ]]; then
+      warn "$AUDIT_PARENT does not exist in this cluster yet — the write-privilege sweep found"
+      warn "  nothing to check. Re-run after \`artisan migrate\`."
+    else
+      audit_offenders="$(pgq "
+        SELECT coalesce(string_agg(rel || '=' || privs, ' '), '')
+          FROM (
+            SELECT c.oid::regclass::text AS rel,
+                   (SELECT string_agg(DISTINCT a.privilege_type, ',' ORDER BY a.privilege_type)
+                      FROM aclexplode(c.relacl) a
+                     WHERE a.grantee = (SELECT oid FROM pg_roles WHERE rolname='$PG_APP_ROLE')
+                       AND a.privilege_type IN ('UPDATE','DELETE','TRUNCATE')) AS privs
+              FROM pg_class c
+             WHERE c.oid = to_regclass('public.$AUDIT_PARENT')
+                OR c.oid IN (SELECT inhrelid FROM pg_inherits
+                              WHERE inhparent = to_regclass('public.$AUDIT_PARENT'))
+          ) AS s
+         WHERE s.privs IS NOT NULL")"
+      if [[ -n "${audit_offenders// /}" ]]; then
+        fail "$PG_APP_ROLE holds write privileges on audit relations: $audit_offenders" \
+          "  audit_logs is not append-only on those relations. If they are partitions created since" \
+          "  the last run, the cause is a partition-creating path that did not revoke: a" \
+          "  parent-only revoke does NOTHING for a partition, because privileges are not inherited" \
+          "  through the hierarchy, and the app role's default privileges grant UPDATE/DELETE so" \
+          "  every new partition arrives writable." \
+          "  Repair: ./scripts/ops/postgres-roles.sh   (it walks pg_inherits and re-revokes)" \
+          "  Then fix the creating path — App\\Repositories\\Eloquent\\EloquentAuditLogPartitionRepository" \
+          "  must revoke naming the APPLICATION role, not CURRENT_USER."
+      else
+        n_audit="$(pgq "SELECT 1 + count(*) FROM pg_inherits WHERE inhparent = to_regclass('public.$AUDIT_PARENT')")"
+        ok "${n_audit:-?} audit relation(s): $PG_APP_ROLE holds no UPDATE, DELETE or TRUNCATE"
+      fi
+    fi
+  fi
+fi
+
+# ================================================================================================
+# 8b. RUNNING CONTAINERS STILL MATCH THEIR OWN DECLARATION — service-name DNS on every network.
+# ================================================================================================
+# WHY THIS EXISTS, and it is a measured incident rather than a precaution. `otel-collector` declares
+# `networks: [edge, observability]`, which gives it its service name as a DNS alias on BOTH. The
+# RUNNING container had `aliases=[]` on `edge` while `observability` was correct — so from `web`,
+# which is on `edge` only, `otel-collector` did not resolve at all:
+#
+#     fetch failed  code=ENOTFOUND        (from inside knowledgebot-web-1)
+#
+# Every browser span was therefore dropped: apps/web's telemetry route handler answered `502` for
+# ~3.4s (DNS failure) or 5.0s (its own AbortSignal), the browser exporter retried forever, and the
+# ONLY visible symptom was `POST /telemetry/v1/traces 502` in the web log — which reads as a broken
+# Collector rather than as a container that stopped matching its own compose file. `docker compose
+# config` was correct throughout, and so was every other check in this script.
+#
+# THE TRIGGER IS AN OPERATION THIS REPO PERFORMS. Recreating a network while containers are attached
+# to it (the `edge` subnet pin does exactly that) reconnects them, and a reconnect can land without
+# the aliases the original attach had. `docker compose up -d` does NOT repair it, because Compose
+# sees a running container whose config hash is unchanged; only `--force-recreate` does. That is the
+# gap this check closes: a declaration-vs-reality comparison nothing else in the pipeline makes.
+# ================================================================================================
+# 8c. THE CERTIFICATE TRAEFIK ACTUALLY SERVES — not the one the config asks for.
+# ================================================================================================
+# `CN = TRAEFIK DEFAULT CERT` is Traefik's self-signed fallback, served whenever no certificate
+# matches. In a dev deployment that is the normal state and it BREAKS THE APP rather than warning:
+# an interstitial is offered only for a top-level navigation, so accepting the warning on
+# `app.<domain>` leaves the console loading while every `fetch` to `api.<domain>` fails with
+# `ERR_CERT_AUTHORITY_INVALID` — no interstitial, no server-side trace, and every auth form showing
+# a generic error. Asserted on the WIRE because that is the only place the answer exists: the config
+# can name a certificate file that failed to load, and Traefik falls back without failing.
+say "TLS certificate served at the edge"
+if ! command -v openssl >/dev/null; then
+  warn "openssl not installed — cannot check what certificate the edge serves."
+elif ! docker inspect -f '{{.State.Running}}' knowledgebot-traefik-1 2>/dev/null | grep -q true; then
+  warn "traefik is not running — cannot check what certificate the edge serves."
+else
+  _served="$(echo | openssl s_client -connect 127.0.0.1:443 -servername "api.${DOMAIN:-knowledgebot.example}" 2>/dev/null \
+    | openssl x509 -noout -subject 2>/dev/null || true)"
+  if [[ -z "$_served" ]]; then
+    warn "no certificate could be read from 127.0.0.1:443 — is the websecure entrypoint published?"
+  elif [[ "$_served" == *"TRAEFIK DEFAULT CERT"* ]]; then
+    fail "the edge is serving Traefik's self-signed fallback certificate" \
+      "  Served for api.${DOMAIN:-knowledgebot.example}: $_served" \
+      "  No browser trusts it, and the failure does NOT present as a certificate warning: the" \
+      "  console is a different ORIGIN from the API, so a fetch to api.<domain> fails with" \
+      "  ERR_CERT_AUTHORITY_INVALID and never offers an interstitial. Every auth form then shows a" \
+      "  generic error with nothing in any server log." \
+      "  In DEVELOPMENT, issue a locally-trusted certificate and trust its CA on the machine" \
+      "  running the browser (Windows, not WSL):" \
+      "    scripts/dev/tls-dev-cert.sh" \
+      "    cd $DOCKER_DIR && docker compose up -d --force-recreate traefik" \
+      "  In PRODUCTION this means ACME has not issued: check that DOMAIN resolves publicly, that" \
+      "  80/tcp is reachable for HTTP-01, and that CERT_RESOLVER is 'le' rather than 'le-staging'."
+  else
+    ok "edge serves: $_served"
+  fi
+fi
+
+say "Container DNS aliases (service name resolvable on every attached network)"
+if ! ALIAS_IDS="$(cd "$DOCKER_DIR" && docker compose ps -q 2>/dev/null)" || [[ -z "$ALIAS_IDS" ]]; then
+  warn "no containers of this project are running — this check did not run."
+  warn "  It compares each RUNNING container's DNS aliases against the networks it declares, which"
+  warn "  is only answerable about a live container. Re-run after \`docker compose up -d\`."
+else
+  ALIAS_DRIFT=()
+  while read -r _cid; do
+    [[ -n "$_cid" ]] || continue
+    _svc="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$_cid" 2>/dev/null || true)"
+    [[ -n "$_svc" ]] || continue
+    # One line per attached network: "<network> <alias> <alias> ...".
+    while read -r _net _aliases; do
+      [[ -n "$_net" ]] || continue
+      # A one-shot container that has exited keeps its networks; only running ones serve DNS.
+      case " $_aliases " in
+        *" $_svc "*) ;;
+        *) ALIAS_DRIFT+=("$_svc has no \`$_svc\` alias on $_net (aliases: ${_aliases:-none})") ;;
+      esac
+    done < <(docker inspect -f \
+      '{{range $n,$v := .NetworkSettings.Networks}}{{$n}} {{range $v.Aliases}}{{.}} {{end}}{{"\n"}}{{end}}' \
+      "$_cid" 2>/dev/null || true)
+  done <<< "$ALIAS_IDS"
+
+  if ((${#ALIAS_DRIFT[@]} > 0)); then
+    fail "these running containers cannot be resolved by service name on a network they are attached to:" \
+      "$(printf '    - %s\n' "${ALIAS_DRIFT[@]}")" \
+      "  Any service that dials one of these by name gets ENOTFOUND, and the caller's own error is" \
+      "  all you see — the dialled service logs NOTHING, because the connection never reached it." \
+      "  compose.yaml is not wrong; the container drifted from it. Repair, per service:" \
+      "    cd $DOCKER_DIR && docker compose up -d --no-deps --force-recreate <service>" \
+      "  \`up -d\` alone will NOT fix it: the config hash is unchanged, so Compose leaves it running."
+  else
+    ok "every running container answers to its service name on each network it is attached to"
+  fi
+fi
+
+# ================================================================================================
+# 9. THE POSITIVE CONTROL. Config files being individually correct is not the same as the stack
 #    rendering.
 # ================================================================================================
 # Everything above is an assertion about a file. This is the assertion that the thing `make deploy`

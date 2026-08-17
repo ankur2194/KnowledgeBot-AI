@@ -32,6 +32,35 @@ say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m    %s\033[0m\n' "$*"; }
 die()  { printf '\033[31mFATAL %s\033[0m\n' "$*" >&2; exit 1; }
 
+# The template-vs-rendered name-set comparison. ONE implementation, shared with
+# scripts/ops/preflight.sh §2b — a drift checker that exists twice is the drift it was written to
+# catch. The library prints nothing and exits nothing; see its header for why, and for why it
+# deliberately offers no "repair" function.
+# shellcheck source=../lib/env-drift.sh
+. "$REPO_ROOT/scripts/lib/env-drift.sh"
+
+# ------------------------------------------------------------------------------------------------
+# DRIFT IS COLLECTED, REPORTED IN FULL AT THE END, AND EXITS NON-ZERO — BUT NOT EARLY.
+# ------------------------------------------------------------------------------------------------
+# The obvious implementation is `die` at the first missing key. It is wrong, and dangerously so:
+# sections 3 and 4 below are what generate the secrets and render valkey/users.acl, and an ABSENT or
+# zero-byte users.acl does not stop Valkey — it starts as `user default on nopass ~* &* +@all` and
+# takes unauthenticated writes (ADR-037). Exiting at section 2 would therefore turn a reported
+# configuration gap into a wide-open datastore. Every step whose omission is DANGEROUS runs first.
+#
+# What is withheld is `docker compose up`. A stack started with a known-missing key comes up green
+# and 500s on login, which is the exact shape of failure this repository keeps filing findings
+# about; and on a first run there is never drift (the files are created from the templates), so this
+# only ever fires on a re-run against an existing deployment, where the stack is already whatever it
+# already was. KB_BOOTSTRAP_IGNORE_ENV_DRIFT=1 is the documented escape hatch for an operator who
+# has read the report and wants the stack anyway; it announces itself.
+DRIFT_REPORT=()
+DRIFT_FOUND=0
+drift() {
+  DRIFT_FOUND=1
+  DRIFT_REPORT+=("$1")
+}
+
 # ------------------------------------------------------------------------------------------------
 # 0. Preflight
 # ------------------------------------------------------------------------------------------------
@@ -51,6 +80,27 @@ cd "$DOCKER_DIR"
 say "Compose interpolation file (.env)"
 if [[ -f .env ]]; then
   echo "    .env exists — leaving it alone"
+  # …and then CHECK it, which "leaving it alone" used to be a substitute for. Same gap as env/*.env
+  # below: .env is rendered once and never updated, so a key added to .env.example afterwards never
+  # reaches it. This file is Compose INTERPOLATION, so a missing key does not read as a default —
+  # `${FOO}` renders as the empty string and the failure is downstream and shapeless (DOMAIN unset
+  # makes the Traefik rule Host(`api.`), which is valid, healthy, and matches nothing).
+  #
+  # A COMMENTED-OUT KEY IN THE TEMPLATE IS NOT DRIFT: kb_env_names anchors to the start of the line,
+  # so `# KB_EDGE_SUBNET=...` — an override whose absence is the supported state — does not count.
+  _missing="$(kb_env_missing .env.example .env)"
+  _extra="$(kb_env_extra .env.example .env)"
+  if [[ -n "$_missing" || -n "$_extra" ]]; then
+    warn ".env has DRIFTED from .env.example (names only; no value is compared or printed):"
+    [[ -n "$_missing" ]] && warn "  in the template, ABSENT from .env:  $_missing"
+    [[ -n "$_extra" ]]   && warn "  in .env, ABSENT from the template:  $_extra"
+    drift ".env  <-  .env.example
+    IN THE TEMPLATE, ABSENT FROM .env: ${_missing:-(none)}
+    IN .env, ABSENT FROM THE TEMPLATE: ${_extra:-(none)}
+    This file is read by Compose for \${...} interpolation. An absent key does NOT fall back to a
+    default: it interpolates to the empty string, and the damage lands somewhere else entirely.
+    Reconcile by hand — .env carries this deployment's real DOMAIN, ACME_EMAIL and UID/GID."
+  fi
 else
   cp .env.example .env
   # Match the host user so bind-mounted files are not root-owned.
@@ -63,15 +113,71 @@ fi
 # ------------------------------------------------------------------------------------------------
 # 2. env/*.env — CONTAINER environment, via env_file:. A different directory, on purpose.
 # ------------------------------------------------------------------------------------------------
+# "EXISTS — LEAVING IT ALONE" WAS TRUE AND INSUFFICIENT, AND THAT SENTENCE IS THE DEFECT.
+# Not overwriting is right: the rendered file is where an operator's per-deployment values live.
+# But it was also the ONLY thing this section said, so a template that gained a key delivered it to
+# new deployments and to nobody else, silently, forever. Measured on the development deployment
+# 2026-08-13: env/core-api.env was missing FRONTEND_URL, MAIL_EHLO_DOMAIN, MAIL_FROM_ADDRESS,
+# MAIL_FROM_NAME and SANCTUM_STATEFUL_DOMAINS — an entire deliverable's worth of configuration —
+# while both files looked fine and the stack came up green.
+#
+# So: still never overwrite, but never stay quiet either. Names are compared, values are not.
 say "Container environment files (env/*.env)"
-for example in env/*.env.example; do
+shopt -s nullglob
+EXAMPLES=(env/*.env.example)
+shopt -u nullglob
+
+# FAIL CLOSED on finding no templates. A check that silently checks nothing is worse than no check,
+# because it is believed — and here it would also mean every `env_file:` target is about to be
+# absent, which Compose refuses to start on.
+(( ${#EXAMPLES[@]} > 0 )) || die "no *.env.example templates found in $DOCKER_DIR/env/.
+      They are COMMITTED files. Either the layout moved or they were deleted; restore them with
+      git checkout -- infrastructure/docker/env/"
+
+for example in "${EXAMPLES[@]}"; do
   target="${example%.example}"
-  if [[ -f "$target" ]]; then
-    echo "    $(basename "$target") exists — leaving it alone"
-  else
+  base="$(basename "$target")"
+
+  if [[ ! -f "$target" ]]; then
     cp "$example" "$target"
-    echo "    created $(basename "$target")"
+    echo "    created $base"
+    continue
   fi
+
+  missing="$(kb_env_missing "$example" "$target")"
+  extra="$(kb_env_extra "$example" "$target")"
+
+  if [[ -z "$missing" && -z "$extra" ]]; then
+    echo "    $base exists and matches its template (variable names)"
+    continue
+  fi
+
+  echo "    $base exists — leaving it alone, BUT IT HAS DRIFTED:"
+  # Itemised one key per line, not a comma-run. A five-name list on one wrapped line is exactly
+  # what an operator's eye slides over, and the whole point of this section is that it cannot be.
+  if [[ -n "$missing" ]]; then
+    warn "  MISSING — in $(basename "$example"), absent from $base:"
+    for k in $missing; do warn "      $k"; done
+  fi
+  if [[ -n "$extra" ]]; then
+    warn "  EXTRA — in $base, absent from $(basename "$example"):"
+    for k in $extra; do warn "      $k"; done
+  fi
+
+  detail="$target  <-  $example"
+  [[ -n "$missing" ]] && detail+="
+    MISSING FROM THE DEPLOYMENT (the container never receives these):
+$(for k in $missing; do printf '      %s\n' "$k"; done)"
+  [[ -n "$extra" ]] && detail+="
+    PRESENT ONLY IN THE DEPLOYMENT (a local addition, or the OLD SPELLING of a renamed key —
+    indistinguishable from here, so decide by reading the template's history):
+$(for k in $extra; do printf '      %s\n' "$k"; done)"
+  detail+="
+    Add the missing names by hand and CHOOSE each value. This script deliberately does not write
+    them: see scripts/lib/env-drift.sh for the measurement of why there is no safe filler — for
+    these keys 'present but empty' and 'absent' behave differently, in both directions, and the
+    templates' own values are placeholders on a domain you do not own."
+  drift "$detail"
 done
 
 # ------------------------------------------------------------------------------------------------
@@ -184,7 +290,25 @@ for stale in hmac_key_current hmac_key_previous; do
   fi
 done
 
+# THREE PostgreSQL passwords, one per role (D21). postgres_password is the POSTGRES_USER superuser —
+# after the role split it is no longer a RUNTIME credential; only `postgres` itself and the
+# `postgres-roles` one-shot mount it. The other two are the roles every container actually connects
+# as: kb_migrate (NOSUPERUSER owner, laravel-migrate and the scheduler's DDL connection) and kb_app
+# (NOSUPERUSER, owns nothing, everything else).
+#
+# WHY THE SPLIT AT ALL: `POSTGRES_USER` creates ONE role and makes it a SUPERUSER, and a superuser
+# bypasses every ACL check. Measured on PostgreSQL 18.4 while everything connected as that one role:
+# audit_logs' `REVOKE UPDATE, DELETE` landed correctly in `pg_class.relacl` on the parent and every
+# partition, and `UPDATE audit_logs SET operation='tampered'` returned `UPDATE 1` anyway.
+#
+# `gen_secret` NEVER REGENERATES AN EXISTING FILE, and that guard is load-bearing here too: these two
+# are the passwords of roles that already exist in the cluster, and this script cannot ALTER them.
+# Rewriting the file would split disk from server — the container would then be handed a password the
+# server has never been told, and the failure appears at the next recreate as `password
+# authentication failed for user "kb_app"` from every service at once.
 gen_secret postgres_password 24
+gen_secret postgres_migrate_password 24
+gen_secret postgres_app_password 24
 gen_secret s3_secret_key 32
 gen_secret qdrant_api_key 32
 
@@ -261,6 +385,91 @@ render_credential_file() {
 
 render_credential_file seaweedfs/identities.json.example 600
 render_credential_file valkey/users.acl.example 644
+
+# ------------------------------------------------------------------------------------------------
+# THE SAME SKIP-IF-EXISTS GAP APPLIES HERE, AND HERE IT IS A GRANT THAT OUTLIVES ITS REMOVAL.
+# ------------------------------------------------------------------------------------------------
+# env/*.env drift means a container misses a variable. Drift in THESE two files means an IDENTITY or
+# an ACL USER exists on one side and not the other — and the dangerous direction is the reverse of
+# the env case. A principal DELETED from the template stays live in the rendered file forever,
+# because nothing here removes anything.
+#
+# MEASURED on the development deployment 2026-08-13: identities.json still declares `kb-backup`,
+# which was deliberately removed from the template on 2026-08-11 (see the comment above the python
+# block below). It grants Read+List over the whole bucket, it has no consumer in compose.yaml,
+# preflight.sh or backup.sh, and — this is the part that matters — its secretKey was only ever
+# written into the rendered file, with no secrets/ twin, so a credential sweep over secrets/ cannot
+# see it. Removing it from the template did not remove it from the deployment and nothing said so.
+#
+# NAMES ONLY, and reported rather than repaired: this script is not entitled to delete a credential
+# a running gateway may be authenticating.
+say "Credential-file principals vs their templates"
+
+# Names of the JSON identities, one per line. python3 is already a hard dependency of this script.
+ident_names() {
+  python3 -c 'import json,sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+for i in d.get("identities", []):
+    n = i.get("name")
+    if n:
+        print(n)' "$1" | sort -u
+}
+
+# `user <name> ...` lines. `default` is included on purpose — `user default off` is a load-bearing
+# line and its disappearance from the rendered file is exactly the fail-open ADR-037 measured.
+acl_user_names() {
+  sed -nE 's/^user[[:space:]]+([^[:space:]]+).*/\1/p' "$1" | sort -u
+}
+
+check_principals() {
+  local label="$1" target="$2" example="$3" lister="$4"
+  [[ -f "$target" && -f "$example" ]] || return 0
+
+  local gone new
+  gone="$("$lister" "$example" | comm -23 - <("$lister" "$target") | tr '\n' ' ')"
+  new="$("$lister" "$target" | comm -13 <("$lister" "$example") - | tr '\n' ' ')"
+  gone="${gone% }"; new="${new% }"
+
+  if [[ -z "$gone" && -z "$new" ]]; then
+    echo "    $label: principals match the template"
+    return 0
+  fi
+
+  # Paths relative to DOCKER_DIR: the report is read next to `cd infrastructure/docker`, and an
+  # absolute path here wraps the heading line and hides the filename it exists to name.
+  local detail="${target#"$DOCKER_DIR"/}  <-  ${example#"$DOCKER_DIR"/}"
+  if [[ -n "$new" ]]; then
+    warn "$label declares principals the template does NOT: $new"
+    detail+="
+    PRESENT IN THE DEPLOYMENT, ABSENT FROM THE TEMPLATE: $new
+      A principal removed from the template is still LIVE here — a grant that outlived its own
+      deletion. Verify it against the template's history before removing it, then remove it with
+      the stack DOWN. Do NOT hand-edit the rendered file if you can avoid it: for identities.json
+      the supported repair is to delete the file and re-run this script, which re-renders from the
+      template and rewrites the placeholder secretKey from secrets/s3_secret_key — the SAME value
+      the running gateway already holds, so the credential does not change."
+  fi
+  if [[ -n "$gone" ]]; then
+    warn "$label is MISSING principals its template declares: $gone"
+    detail+="
+    IN THE TEMPLATE, ABSENT FROM THE DEPLOYMENT: $gone
+      For valkey/users.acl a missing user line is NOT a startup error: the server comes up without
+      that user and whichever service holds its password gets WRONGPASS, with no degraded mode
+      because \`user default off\`. For identities.json it means a consumer's credential simply does
+      not exist and every request it makes is refused."
+  fi
+  drift "$detail"
+}
+
+check_principals "seaweedfs/identities.json" \
+  "$DOCKER_DIR/seaweedfs/identities.json" \
+  "$DOCKER_DIR/seaweedfs/identities.json.example" ident_names
+check_principals "valkey/users.acl" \
+  "$DOCKER_DIR/valkey/users.acl" \
+  "$DOCKER_DIR/valkey/users.acl.example" acl_user_names
 
 say "Rewriting placeholder development credentials"
 
@@ -407,6 +616,76 @@ fi
 # A bare `docker compose up` — no -f — is CORRECT here and only here: it auto-loads
 # compose.override.yaml, which is what dev wants. `make deploy` is the production path and passes
 # explicit files precisely so it cannot land on this one.
+# THE GATE. Everything above this line has run: the secrets exist, users.acl is rendered so Valkey
+# cannot come up as `nopass`, and identities.json is rendered so the S3 gateway is not Allow-All.
+# What is withheld is only the `up`.
+if [[ "$DRIFT_FOUND" -eq 1 ]]; then
+  if [[ "${KB_BOOTSTRAP_IGNORE_ENV_DRIFT:-0}" == "1" ]]; then
+    warn "KB_BOOTSTRAP_IGNORE_ENV_DRIFT=1 — starting the stack DESPITE the drift reported above."
+    warn "  The full report is repeated at the end of this run. If SANCTUM_STATEFUL_DOMAINS is one"
+    warn "  of the missing names, every login will answer 500 and no cookie will authenticate"
+    warn "  anything; that is not a bug you will find by reading logs."
+  else
+    printf '\n\033[31m%s\033[0m\n' "==> NOT STARTING THE STACK — rendered configuration has drifted from its templates."
+    for entry in "${DRIFT_REPORT[@]}"; do
+      printf '\n\033[31m  %s\033[0m\n' "${entry%%$'\n'*}"
+      printf '%s\n' "${entry#*$'\n'}"
+    done
+    cat >&2 <<'EOF'
+
+  WHY THIS IS A REFUSAL AND NOT A WARNING
+  ---------------------------------------
+  Every step whose omission is dangerous has already run: the secrets are generated, valkey/users.acl
+  is rendered (an absent one starts Valkey as `user default on nopass` and takes unauthenticated
+  writes), and seaweedfs/identities.json is rendered. Only `docker compose up` is withheld, and a
+  stack started with a key missing is the failure this refusal exists to prevent — it comes up
+  green. SANCTUM_STATEFUL_DOMAINS absent is the worst case and it is not subtle in effect, only in
+  appearance: config/sanctum.php fails closed to [], EnsureFrontendRequestsAreStateful classifies
+  every request third-party, EncryptCookies / StartSession / PreventRequestForgery /
+  AuthenticateSession never run, and login reaches session()->regenerate() with no session bound —
+  an unauthenticated 500, with no CSRF check and no way to invalidate sibling sessions.
+
+  On a FIRST run this cannot fire: the files are created from the templates and match by
+  construction. It fires only on a re-run against an existing deployment, which is the case the
+  skip-if-exists guard was leaving unreported.
+
+  WHAT TO DO
+  ----------
+    1. Add each MISSING name to the rendered file by hand and choose its value. Do not paste the
+       template's — those are placeholders on a domain you do not own, and for FRONTEND_URL that
+       means emailing password-reset links there.
+    2. For each EXTRA name, decide whether it is a local addition or the old spelling of something
+       the template renamed, and delete it if it is the latter.
+    3. Re-run this script.
+
+  If you have read the report and want the stack anyway:
+       KB_BOOTSTRAP_IGNORE_ENV_DRIFT=1 scripts/dev/bootstrap.sh
+EOF
+    exit 1
+  fi
+fi
+
+# ------------------------------------------------------------------------------------------------
+# 5b. LOCALLY-TRUSTED TLS. Before the stack starts, because compose.override.yaml MOUNTS the output.
+# ------------------------------------------------------------------------------------------------
+# Run here rather than left to the operator because the dev overlay bind-mounts
+# `traefik/certs/dev-tls.yaml`, and Docker's behaviour for a bind-mount whose source is missing is to
+# CREATE IT AS A DIRECTORY — after which Traefik cannot parse its own dynamic configuration. Running
+# the generator first means the file always exists as a file.
+#
+# It is idempotent and cheap: the CA is reused whenever it already exists (regenerating it would
+# silently invalidate the trust the operator established in their OS store), and only the leaf is
+# reissued. It prints the host-trust instructions every time, which is deliberate — that step is
+# manual, per-machine, and the one people forget.
+say "Development TLS certificate"
+if ! "$REPO_ROOT/scripts/dev/tls-dev-cert.sh"; then
+  warn "Could not issue the development certificate. The stack will still start, but Traefik will"
+  warn "  serve 'CN = TRAEFIK DEFAULT CERT' and every browser fetch from app.<domain> to"
+  warn "  api.<domain> will fail with ERR_CERT_AUTHORITY_INVALID — with no interstitial to click"
+  warn "  through, because a subresource request never gets one. Fix it before using the console:"
+  warn "    scripts/dev/tls-dev-cert.sh"
+fi
+
 say "Starting the stack (dev overlay auto-loaded)"
 # 900s is NOT sized against ai-api any more. That container loads no model (ADR-030) and its dev
 # start_period is 90s. What the budget actually covers on a first boot is the serial dependency
@@ -458,6 +737,20 @@ case "$status" in
     ;;
 esac
 
+if [[ "$DRIFT_FOUND" -eq 1 ]]; then
+  # Reached only under KB_BOOTSTRAP_IGNORE_ENV_DRIFT=1, or when the drift is credential-principal
+  # drift that this script reports without blocking on. Repeated at the very END on purpose: the
+  # `docker compose up --wait` above emits a hundred lines, and a warning printed before them has
+  # been scrolled off the screen by the time the operator looks.
+  printf '\n\033[31m%s\033[0m\n' "==> THE STACK IS UP AND ITS CONFIGURATION HAS DRIFTED FROM ITS TEMPLATES."
+  for entry in "${DRIFT_REPORT[@]}"; do
+    printf '\n\033[31m  %s\033[0m\n' "${entry%%$'\n'*}"
+    printf '%s\n' "${entry#*$'\n'}"
+  done
+  printf '\n\033[31m%s\033[0m\n' "    Exiting 1. Nothing was written on your behalf; reconcile the files listed above."
+  exit 1
+fi
+
 say "Done"
 cat <<'EOF'
     Next:
@@ -465,8 +758,11 @@ cat <<'EOF'
       make logs               follow everything
       cat scripts/dev/hosts.md    resolve the four hostnames locally
 
+    Mailpit IS started by default and catches every outgoing mail: http://127.0.0.1:8025/
+      Every password-reset, verification and invitation link lands there, not in a real inbox.
+
     NOT started by default (each is a profile):
       make obs-up             Prometheus/Alertmanager/Loki/Tempo/Grafana
-      docker compose --profile dev-tools up -d     mailpit + adminer
+      docker compose --profile dev-tools up -d adminer     database UI
       make test-up            ephemeral test databases + the crawl fixture origin
 EOF

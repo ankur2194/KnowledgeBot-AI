@@ -1,0 +1,11 @@
+{
+    "class": "App\\Http\\Requests\\SwitchOrganizationRequest",
+    "rules": {
+        "organization_id": [
+            "bail",
+            "required",
+            "string",
+            "ulid"
+        ]
+    }
+}

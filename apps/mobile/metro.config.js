@@ -20,11 +20,10 @@ const { getDefaultConfig } = require('expo/metro-config');
  * makes every undeclared transitive dependency resolve everywhere, in every workspace, forever.
  *
  * Be precise about what that costs, because right now it costs nothing measurable: no ecosystem in
- * this repo has a lockfile yet, and `.github/workflows/gates.yml` says so in its own header: every
- * job in it is a pure text pass, with no `pnpm install`, no typecheck, no Jest and no build. It
- * enforces nothing at all under `apps/`; the dependency-installing jobs land in a later `ci.yml`.
- * So an undeclared transitive dependency is caught by NOTHING automated today — strict layout or
- * hoisted, the CI result is the same green. What the strict layout preserves is the ABILITY to
+ * this repo has no CI at all. There was once a gate tier of pure text passes — no `pnpm install`,
+ * no typecheck, no Jest, no build — which enforced nothing under `apps/` anyway, and a later tier
+ * that did install; both were deleted with `.github/` on 2026-08-17. So an undeclared transitive
+ * dependency is caught by NOTHING automated — strict layout or hoisted, nothing objects. What the strict layout preserves is the ABILITY to
  * catch it: under it, `pnpm install && pnpm web:build` fails on an undeclared import — on a
  * developer's machine today, and in CI once that job exists. Hoisting removes that ability. So the
  * cost is in the future tense: it converts a class of bug that CI WILL catch, as soon as the apps/
@@ -48,8 +47,8 @@ const { getDefaultConfig } = require('expo/metro-config');
  * item that depends on it (`@tanstack/react-store` DECLARED, not transitive).
  *
  * Note what does and does not enforce that. The DoD item is a review checklist line in
- * `.claude/skills/tanstack-query-table/SKILL.md`; there is no grep behind it, and nothing in
- * `.github/workflows/` inspects the node_modules layout. The one control here that IS automatable
+ * `.claude/skills/tanstack-query-table/SKILL.md`; there is no grep behind it, and no automation of
+ * any kind inspects the node_modules layout. The one control here that IS automatable
  * is the setting itself, because a hoisted workspace cannot exist without writing the word down:
  *
  *     grep -rn --include='.npmrc' 'node-linker' . --exclude-dir=node_modules

@@ -12,6 +12,879 @@
         }
     ],
     "paths": {
+        "/api/v1/auth/email/verification-notification": {
+            "post": {
+                "operationId": "auth.verification.send",
+                "parameters": [],
+                "responses": {
+                    "200": {
+                        "description": "Acknowledged. IDENTICAL whether mail was queued or the user was already verified — one shape, one fewer branch for the SPA.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/AcknowledgementResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            }
+        },
+        "/api/v1/auth/email/verify": {
+            "post": {
+                "operationId": "auth.verification.verify",
+                "parameters": [],
+                "responses": {
+                    "200": {
+                        "description": "The address is verified. IDENTICAL for a token consumed just now and for a user who was already verified — a link preview must not produce an error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/AcknowledgementResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [],
+                "x-kb-request-rules": "../rules/VerifyEmailRequest.json"
+            }
+        },
+        "/api/v1/auth/forgot-password": {
+            "post": {
+                "operationId": "auth.password.email",
+                "parameters": [],
+                "responses": {
+                    "200": {
+                        "description": "Acknowledged. IDENTICAL for an address that exists, one that does not, and one the framework's broker throttled — the collapse is the account-enumeration defence, so do not add a field that distinguishes them.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/AcknowledgementResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [],
+                "x-kb-request-rules": "../rules/ForgotPasswordRequest.json"
+            }
+        },
+        "/api/v1/auth/invitations/accept": {
+            "post": {
+                "operationId": "auth.invitations.accept",
+                "parameters": [],
+                "responses": {
+                    "200": {
+                        "description": "The membership was created and the session now points at the new organization. Wrapped in `data`; identical in shape to the login response, so the SPA re-renders from one payload.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/SessionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/AcceptInvitationRequest.json"
+            }
+        },
+        "/api/v1/auth/invitations/preview": {
+            "post": {
+                "operationId": "auth.invitations.preview",
+                "parameters": [],
+                "responses": {
+                    "200": {
+                        "description": "The pending invitation the token names, so the SPA can prefill the register form. Wrapped in `data` because the action returns the Resource itself and Laravel wraps it. Every invalid token answers 404 with the one shared deny body instead.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/InvitationPreviewResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [],
+                "x-kb-request-rules": "../rules/PreviewInvitationRequest.json"
+            }
+        },
+        "/api/v1/auth/login": {
+            "post": {
+                "operationId": "auth.login",
+                "parameters": [],
+                "responses": {
+                    "200": {
+                        "description": "The established session: the user, the resolved current organization (which may be null) and every membership. Wrapped in `data` because the action returns the Resource itself and Laravel wraps it. Byte-for-byte the same shape GET /me returns, so the SPA has one reducer.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/SessionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [],
+                "x-kb-request-rules": "../rules/LoginRequest.json"
+            }
+        },
+        "/api/v1/auth/logout": {
+            "post": {
+                "operationId": "auth.logout",
+                "parameters": [],
+                "responses": {
+                    "200": {
+                        "description": "The session is gone. A body rather than a 204 (decision D8): an empty #[ResponseShape] publishes `properties: []`, which is not valid JSON Schema.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/AcknowledgementResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            }
+        },
+        "/api/v1/auth/register": {
+            "post": {
+                "operationId": "auth.register",
+                "parameters": [],
+                "responses": {
+                    "201": {
+                        "description": "The account was created, the invitation consumed, and a session established. Wrapped in `data`; identical in shape to the login response, and `user.email_verified` is FALSE — verification is not a precondition of registration.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/SessionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [],
+                "x-kb-request-rules": "../rules/RegisterRequest.json"
+            }
+        },
+        "/api/v1/auth/reset-password": {
+            "post": {
+                "operationId": "auth.password.update",
+                "parameters": [],
+                "responses": {
+                    "200": {
+                        "description": "The password was changed, and every other session for that user dies on its next request. No session is established here: the SPA sends the user to the login form.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/AcknowledgementResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [],
+                "x-kb-request-rules": "../rules/ResetPasswordRequest.json"
+            }
+        },
+        "/api/v1/me": {
+            "get": {
+                "operationId": "auth.me",
+                "parameters": [],
+                "responses": {
+                    "200": {
+                        "description": "The current session state, re-read from PostgreSQL on every call and with a stale `current_organization_id` repaired. Wrapped in `data` because the action returns the Resource itself and Laravel wraps it. Identical in shape to the login response.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/SessionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            }
+        },
         "/api/v1/organizations/{organization}/embedding-configuration": {
             "get": {
                 "operationId": "admin.embedding-configuration.show",
@@ -231,6 +1104,603 @@
                 "x-kb-request-rules": "../rules/DesignateEmbeddingConnectionRequest.json"
             }
         },
+        "/api/v1/organizations/{organization}/invitations": {
+            "get": {
+                "operationId": "admin.invitations.index",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Every invitation belonging to this organization, including accepted, revoked and expired ones — `status` is derived, and hiding the terminal rows makes \"why can I not re-invite this address\" unanswerable. The array is nested inside an object; see InvitationCollectionResource for why the document cannot express a bare array here.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/InvitationCollectionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            },
+            "post": {
+                "operationId": "admin.invitations.store",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "The invitation was created and its mail queued. 422 when the organization is not active; 422 when a live invitation already exists for the address or the person is already a member — both of which an administrator may read from `index` anyway.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/InvitationResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/StoreInvitationRequest.json"
+            }
+        },
+        "/api/v1/organizations/{organization}/invitations/{invitation}": {
+            "delete": {
+                "operationId": "admin.invitations.destroy",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "invitation",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {invitation} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The invitation is revoked and its link dead. A foreign or unknown `{invitation}` 404s at binding time, before this action runs.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/AcknowledgementResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            }
+        },
+        "/api/v1/organizations/{organization}/invitations/{invitation}/resend": {
+            "post": {
+                "operationId": "admin.invitations.resend",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "invitation",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {invitation} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "A NEW token was minted and its mail queued; the previously mailed link stops working. The token itself is never in this body. 422 when the organization is not active; 422 when the invitation has already been accepted or revoked.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/AcknowledgementResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            }
+        },
+        "/api/v1/organizations/{organization}/members": {
+            "get": {
+                "operationId": "admin.members.index",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Every membership of this organization, active and suspended, each with the member's name, address, role and join date. The array is nested inside an object; see InvitationCollectionResource for why the document cannot express a bare array here.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/MemberCollectionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            }
+        },
         "/api/v1/organizations/{organization}/provider-connections": {
             "post": {
                 "operationId": "admin.provider-connections.store",
@@ -355,6 +1825,107 @@
                 ],
                 "x-kb-request-rules": "../rules/StoreProviderConnectionRequest.json"
             }
+        },
+        "/api/v1/session/organization": {
+            "post": {
+                "operationId": "auth.session.organization",
+                "parameters": [],
+                "responses": {
+                    "200": {
+                        "description": "The session state AFTER the switch, with `current_organization_id` set to the requested organization. Wrapped in `data` because the action returns the Resource itself and Laravel wraps it. The full snapshot rather than an acknowledgement, so the SPA re-renders from one payload instead of firing a follow-up GET /me.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/SessionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/SwitchOrganizationRequest.json"
+            }
         }
     },
     "components": {
@@ -367,6 +1938,20 @@
             }
         },
         "schemas": {
+            "AcknowledgementResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "A success with nothing to report. Always exactly `{\"acknowledged\": true}` — there is no `false` and no outcome field, because every failure on these endpoints is the error envelope. Several endpoints return this body for SEVERAL DIFFERENT internal outcomes on purpose (an unknown address and a real one both get it from forgot-password); the bodies are byte-identical and that is the account-enumeration defence, so do not treat a difference in latency or length as signal.",
+                "required": [
+                    "acknowledged"
+                ],
+                "properties": {
+                    "acknowledged": {
+                        "type": "boolean",
+                        "description": "Always true. Present so the success response has a body at all — a 204 would publish `properties: []`, which is not valid JSON Schema."
+                    }
+                }
+            },
             "EmbeddingCandidate": {
                 "type": "object",
                 "additionalProperties": false,
@@ -480,7 +2065,7 @@
             "ErrorEnvelope": {
                 "type": "object",
                 "additionalProperties": false,
-                "description": "The single error envelope. Identical in the non-streaming body and in the SSE `error` frame, and identical across both services — a consumer cannot tell which plane produced one, so any divergence is a bug. packages/contracts/src/errors.ts is the hand-maintained TypeScript carrier (class KbError, declared exactly once); do not generate a second copy of it from this component.",
+                "description": "The single error envelope, as it appears in a NON-STREAMING response body. Identical across both services — a consumer cannot tell which plane produced one, so any divergence between them is a bug. The SSE `error` frame carries the same fields with ONE documented difference: it omits `request_id`, which this schema requires, so a client cannot validate a frame against this component unmodified. That is why packages/contracts/src/envelope.ts types `request_id` as OPTIONAL while this schema requires it — the TypeScript interface is the union of both surfaces (src/sse/events.ts reuses it for the `error` frame) and this component is the HTTP one; the widening is deliberate and is the safe direction. packages/contracts/src/errors.ts is the hand-maintained TypeScript carrier (class KbError, declared exactly once); do not generate a second copy of it from this component.",
                 "required": [
                     "error_class",
                     "message",
@@ -525,7 +2110,7 @@
                             "string",
                             "null"
                         ],
-                        "description": "Echoes `X-KB-Request-Id`, so one failure is greppable across both services. The one identifier a user is ever shown. Null only on a data-plane authentication failure, which is rejected before the id is stamped."
+                        "description": "Echoes `X-KB-Request-Id`, so one failure is greppable across both services. The one identifier a user is ever shown. Null only on a data-plane authentication failure, which is rejected before the id is stamped. ABSENT ENTIRELY — not null — from the SSE `error` frame, which this component does not describe."
                     },
                     "errors": {
                         "type": "object",
@@ -536,6 +2121,189 @@
                             }
                         },
                         "description": "Per-field messages, keyed by the field path the FormRequest validated. A SUPERSET present only on `validation`, and only when a FormRequest produced it — never null, never {} on another class. Declared here rather than only on ValidationErrorEnvelope because `additionalProperties: false` in an allOf branch cannot see a sibling branch's properties, so a real 422 body would not validate."
+                    }
+                }
+            },
+            "InvitationCollectionResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "The organization's invitations. An OBJECT wrapping the array rather than the array itself, so pagination fields can join it later without moving the list — and because the generated document cannot express a top-level array for a response key.",
+                "required": [
+                    "invitations"
+                ],
+                "properties": {
+                    "invitations": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/InvitationResource"
+                        },
+                        "description": "Every invitation belonging to this organization, in whatever order the endpoint documents. Includes accepted, revoked and expired rows: their `status` is derived, and hiding them would make \"why can I not re-invite this address\" unanswerable from the UI."
+                    }
+                }
+            },
+            "InvitationPreviewResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "A pending invitation, as shown to the holder of its token before registration. Carries no organization ULID and no inviter identity: the reader is not a member yet. Every invalid token — unknown, expired, accepted, revoked — answers 404 with one shared body instead, so this shape is only ever produced for a pending invitation.",
+                "required": [
+                    "organization_name",
+                    "email",
+                    "role",
+                    "expires_at"
+                ],
+                "properties": {
+                    "organization_name": {
+                        "type": "string",
+                        "description": "Display name of the inviting organization. The name, never the ULID."
+                    },
+                    "email": {
+                        "type": "string",
+                        "description": "The address the invitation was issued to. Registration requires the submitted address to match it, so the form prefills from here rather than asking."
+                    },
+                    "role": {
+                        "type": "string",
+                        "enum": [
+                            "owner",
+                            "admin",
+                            "knowledge_manager",
+                            "analyst"
+                        ],
+                        "description": "The role the invitation grants on acceptance. Fixed at invitation time by an administrator; it is not negotiable at registration and is published for display only."
+                    },
+                    "expires_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "When the token stops working, RFC 3339. Always in the future for a body that renders at all."
+                    }
+                }
+            },
+            "InvitationResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One organization invitation as an administrator sees it. Carries no token and no token digest in any form — an invitation is a bearer capability, and re-delivering a link is done by re-sending it, which mints a new token and kills the old one.",
+                "required": [
+                    "id",
+                    "email",
+                    "role",
+                    "status",
+                    "expires_at",
+                    "created_at",
+                    "invited_by_name"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "ULID of the invitation. Addressable only under its own organization's path, where a foreign id 404s at binding time."
+                    },
+                    "email": {
+                        "type": "string",
+                        "description": "The invited address, always lower-case — a database CHECK enforces `email = lower(email)`, because the lookup that has to find the row is normalised."
+                    },
+                    "role": {
+                        "type": "string",
+                        "enum": [
+                            "owner",
+                            "admin",
+                            "knowledge_manager",
+                            "analyst"
+                        ],
+                        "description": "The role this invitation grants on acceptance."
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "pending",
+                            "expired",
+                            "accepted",
+                            "revoked"
+                        ],
+                        "description": "DERIVED from `revoked_at`, `accepted_at` and `expires_at` — never stored. Precedence is revoked, then accepted, then expired: an invitation accepted after its expiry is `accepted`, not `expired`. Only `pending` can be resent or revoked."
+                    },
+                    "expires_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "When the token stops working, RFC 3339. In the past for a row whose `status` is `expired`."
+                    },
+                    "created_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "When the invitation was created, RFC 3339. Nullable only because an unsaved model has no timestamp; every persisted row has one (the column is NOT NULL DEFAULT now())."
+                    },
+                    "invited_by_name": {
+                        "type": "string",
+                        "description": "Display name of the member who created the invitation. The name only — the accountable actor's ULID and address are not part of a list screen."
+                    }
+                }
+            },
+            "MemberCollectionResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "The organization's members. An OBJECT wrapping the array so pagination fields can join it later without moving the list.",
+                "required": [
+                    "members"
+                ],
+                "properties": {
+                    "members": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/MemberResource"
+                        },
+                        "description": "Every membership of this organization, active or suspended. Suspended rows are included because an administrator restoring access has to be able to find the person."
+                    }
+                }
+            },
+            "MemberResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One membership of one organization. The subject is the MEMBERSHIP row, not the user: `role` and `status` are per organization, and the same person can be an owner in one tenant and an analyst in another.",
+                "required": [
+                    "user_id",
+                    "name",
+                    "email",
+                    "role",
+                    "status",
+                    "joined_at"
+                ],
+                "properties": {
+                    "user_id": {
+                        "type": "string",
+                        "description": "ULID of the user. Named `user_id` rather than `id` because a membership has no single-column identity — its primary key is (organization_id, user_id) — and member routes are keyed by user within an organization."
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Display name."
+                    },
+                    "email": {
+                        "type": "string",
+                        "description": "The member's login identifier, globally unique on `lower(email)`."
+                    },
+                    "role": {
+                        "type": "string",
+                        "enum": [
+                            "owner",
+                            "admin",
+                            "knowledge_manager",
+                            "analyst"
+                        ],
+                        "description": "The role held IN THIS ORGANIZATION. One role per user per organization; the catalog is fixed and there is no per-tenant role CRUD."
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "active",
+                            "invited",
+                            "suspended"
+                        ],
+                        "description": "Whether the membership currently confers anything. Only `active` does; `suspended` authorizes no read at all."
+                    },
+                    "joined_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "When the membership row was created, RFC 3339. Nullable only because an unsaved model has no timestamp; every persisted row has one."
                     }
                 }
             },
@@ -591,6 +2359,114 @@
                         ],
                         "format": "date-time",
                         "description": "ISO 8601 with offset. Null only for a record whose timestamp was never set."
+                    }
+                }
+            },
+            "SessionMembership": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One organization this user belongs to, and how. Present even when `status` is not `active`, so a suspended member sees why their organization is greyed out rather than an empty list.",
+                "required": [
+                    "id",
+                    "name",
+                    "slug",
+                    "role",
+                    "status"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "ULID of the organization — the value to send to POST /session/organization and the value that appears as the `{organization}` path segment on every tenant-owned route."
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Display name."
+                    },
+                    "slug": {
+                        "type": "string",
+                        "description": "URL-safe short name."
+                    },
+                    "role": {
+                        "type": "string",
+                        "enum": [
+                            "owner",
+                            "admin",
+                            "knowledge_manager",
+                            "analyst"
+                        ],
+                        "description": "The FIXED role catalog. One role per user per organization; there is no per-tenant role CRUD. Published closed because it comes off a PHP backed enum this service validates and a CHECK constraint enforces."
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "active",
+                            "invited",
+                            "suspended"
+                        ],
+                        "description": "Whether the membership currently confers anything. Only `active` does. `invited` has no producer today — pending state lives in `organization_invitations` — and is published because the column's CHECK constraint still admits it."
+                    }
+                }
+            },
+            "SessionResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "The whole client-visible session state, returned identically by login, register, invitation acceptance, GET /me and the organization switcher. FLAT AND TOTAL: every field is required, so the SPA has one reducer rather than one per endpoint.",
+                "required": [
+                    "user",
+                    "current_organization_id",
+                    "organizations"
+                ],
+                "properties": {
+                    "user": {
+                        "$ref": "#/components/schemas/SessionUser"
+                    },
+                    "current_organization_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "A UI PREFERENCE THAT AUTHORIZES NOTHING. Only ever an ACTIVE membership or null; every tenant-owned route carries the organization in its path and re-reads the membership row from PostgreSQL regardless of this value. Null is normal and is not an error: a user with no active membership still has a valid session, which is what makes the resend-verification endpoint reachable. GET /me repairs a value whose membership has since been revoked."
+                    },
+                    "organizations": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/SessionMembership"
+                        },
+                        "description": "EVERY membership, oldest first, active or not. Empty for a user who belongs to nothing."
+                    }
+                }
+            },
+            "SessionUser": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "The authenticated user. Deliberately narrow: no password hash, no remember token, no session identifier, and no permission list — UI hiding is not authorization, so the role capability matrix stays server-side.",
+                "required": [
+                    "id",
+                    "name",
+                    "email",
+                    "email_verified",
+                    "is_platform_owner"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "ULID of the user."
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Display name."
+                    },
+                    "email": {
+                        "type": "string",
+                        "description": "The login identifier. Globally unique on `lower(email)`, not per organization — the login form has no tenant yet."
+                    },
+                    "email_verified": {
+                        "type": "boolean",
+                        "description": "A BOOLEAN, not a timestamp. False does not block login; it blocks the org-scoped write routes, which answer 403 with a message the closed error envelope deliberately does not distinguish from a role denial — so THIS FIELD is the SPA's only channel for explaining that 403."
+                    },
+                    "is_platform_owner": {
+                        "type": "boolean",
+                        "description": "A PLATFORM flag, not an organization role. It reaches no tenant data; it gates platform surfaces such as /horizon."
                     }
                 }
             },

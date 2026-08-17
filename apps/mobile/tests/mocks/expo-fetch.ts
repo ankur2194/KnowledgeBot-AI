@@ -45,8 +45,8 @@ import { request as httpRequest, type ClientRequest, type IncomingMessage } from
  * `res.body !== null` at runtime, so the degradation stays loud on the device even though it is
  * unreachable here.
  *
- * THIS COMMENT USED TO SAY THAT NAMED IMPORT IS "WHAT CI GREPS FOR". It never was. There is no such
- * grep in `ci.yml`, in `gates.yml`, or in any ESLint config as of the day that claim was written.
+ * THIS COMMENT USED TO SAY THAT NAMED IMPORT IS "WHAT CI GREPS FOR". It never was — no such grep
+ * existed in any workflow or ESLint config on the day that claim was written, and there is no CI now.
  * The import is now enforced by `eslint.config.mjs`'s `src/features/chat/**` block, which bans the
  * global `fetch`, `globalThis.fetch`, and a by-name `fetch` from any other module — proven by
  * mutation, and running under `pnpm lint`. Note what that does NOT buy: deleting the import today

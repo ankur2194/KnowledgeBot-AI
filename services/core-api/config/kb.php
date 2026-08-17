@@ -141,4 +141,66 @@ return [
      */
     'heartbeat_seconds' => 15,
 
+    /*
+     * THE ADMIN SPA'S PUBLIC BASE URL — the base of every emailed link.
+     *
+     * Password reset, email verification and organization invitation all point at the Next.js
+     * console, never at a Laravel route: this application serves no HTML pages at all, so the SPA
+     * reads the token out of its own query string and POSTs it back to the API.
+     *
+     * IT IS NOT `app.url`. config('app.url') is THIS service's own host (`api.<domain>` in Compose);
+     * this is `app.<domain>`. Confusing the two mails every recipient a link to a JSON 404, and the
+     * symptom is "the link doesn't work" rather than anything an operator would grep for.
+     *
+     * A plain env() read is correct here: FRONTEND_URL contains none of SECRET_NAME_FRAGMENTS
+     * (tests/Arch/SecretsResolverTest.php), and a public base URL is not key material.
+     *
+     * RTRIMMED HERE, VALIDATED ELSEWHERE. Configuration must never throw — config/ is rebuilt by
+     * `php artisan config:cache`, so an exception here takes down the very commands an operator
+     * would run to fix it. So the trailing slash is normalised here and the "is this actually a
+     * URL" question is asked by App\Support\Kb\FrontendUrl at the moment a link is built. That
+     * split is load-bearing: the failure mode of an unset value is not an error, it is
+     * `https:///verify-email?token=…` — mail that sends, arrives, and does nothing.
+     */
+    'frontend_url' => rtrim((string) env('FRONTEND_URL', 'http://localhost:3000'), '/'),
+
+    /*
+     * OPAQUE-TOKEN LIFETIMES, IN HOURS.
+     *
+     * These two are ours; the password-reset lifetime is NOT here. That one is
+     * config/auth.php's `passwords.users.expire` (60 MINUTES) because the framework's
+     * DatabaseTokenRepository reads it, and it is deliberately not an env var:
+     * AUTH_PASSWORD_RESET_EXPIRE contains "PASSWORD", so it would need allow-listing in
+     * tests/Arch/SecretsResolverTest.php for a value that is a duration, not a secret.
+     *
+     * An invitation week is long because it crosses a weekend and a holiday; a verification day is
+     * short because the recipient just typed the address and a resend costs one click. Both are read
+     * by the service that mints the row AND quoted into the email body, so neither number appears
+     * twice.
+     */
+    /**
+     * The role the REQUEST-SERVING containers authenticate as — the grantee whose privileges decide
+     * whether `audit_logs` is really append-only (D21).
+     *
+     * ── WHY THIS IS NOT `database.connections.pgsql.username` ────────────────────────────────────
+     * It was, and that was a live bug caught by the acceptance test rather than by review. The
+     * `audit_logs` migration and `EloquentAuditLogPartitionRepository` both have to REVOKE write
+     * privileges from the application role — but the migration runs in the `laravel-migrate`
+     * container, where `DB_USERNAME` is deliberately `kb_migrate` so it can create tables. So
+     * `pgsql.username` resolved to the MIGRATION role and the migration revoked from itself:
+     * measured on the live cluster, `audit_logs` came out
+     * `{kb_migrate=arxtm/kb_migrate,kb_app=ar/kb_migrate}` — correct only because the separate
+     * `apply-roles.sh` had already revoked from `kb_app`. Without that script the table would have
+     * been writable by the application for the whole session.
+     *
+     * The application role is a DEPLOYMENT fact, not a property of whichever connection is open, so
+     * it is named once here and read from both places. The fallback chain keeps every environment
+     * that has no split working unchanged: explicit `DB_APP_USERNAME`, else whatever this process
+     * connects as, else the least-privileged name.
+     */
+    'db_app_role' => (string) env('DB_APP_USERNAME', env('DB_USERNAME', 'kb_app')),
+
+    'invitation_ttl_hours' => (int) env('KB_INVITATION_TTL_HOURS', 168),
+    'email_verification_ttl_hours' => (int) env('KB_EMAIL_VERIFICATION_TTL_HOURS', 24),
+
 ];

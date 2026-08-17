@@ -683,12 +683,225 @@ it('is byte-identical across two runs and --check is a real gate', function (): 
 // NOTE: "keeps the committed document current" used to sit here. It called
 // `Artisan::call('kb:dump-openapi', ['--check' => true])` with the DEFAULT path — against the real
 // committed artifact — and its own comment said it existed "because ci.yml has no step for this
-// command yet". That premise is false: `.github/workflows/ci.yml:347` now runs
-// `php artisan kb:dump-openapi --check`, before the Pest step, where it is the only reachable copy
-// of that assertion (a step after Pest could never report — the suite would go red first). The
-// test above stays, and is not a duplicate of it: `--path` a temp dir proves the GENERATOR is
-// deterministic and that `--check` can fail, which no CI step covers. Suite proves the generator;
-// ci.yml proves the artifact.
+// command yet". That premise became false when a CI step took the assertion over, and it is TRUE
+// AGAIN as of 2026-08-17: `.github/` was deleted, and with it the only thing that ran
+// `php artisan kb:dump-openapi --check` against the real committed artifact.
+//
+// SO THERE IS NOW A REAL GAP, AND IT IS NAMED HERE RATHER THAN LEFT TO BE REDISCOVERED. The test
+// above proves the GENERATOR is deterministic and that `--check` CAN fail, using `--path` into a
+// temp dir. Nothing proves the COMMITTED document is current. A stale packages/contracts/openapi/
+// artifact is therefore invisible until someone runs the command by hand. Restoring the deleted
+// default-path variant of this test is the cheapest way to close it, and it is deliberately not
+// done here: it would have to be a decision about what the suite guarantees, not a drive-by edit.
+
+// ── security: which routes require the session cookie, and which are reachable by a stranger ──────
+
+it('states a security requirement on every operation, and the guest set is pinned by name', function (): void {
+    // WHAT THIS IS THE ABSENCE OF. `securitySchemes.sanctumSession` was declared and the split
+    // reached the document only as the PRESENCE OR ABSENCE of an operation-level `security` key.
+    // Under OpenAPI an absent one inherits the document-level requirement, and with none declared
+    // that resolves to "no credential required" — the right answer for a guest route, arrived at by
+    // silence, and indistinguishable from a generator that never asked. Now it is emitted always,
+    // `[]` included, so this test can assert the split instead of the reader inferring it.
+    //
+    // THE GUEST SET IS PINNED BY NAME, not counted (D29). A count says "expected 6, got 7" and a
+    // deliberate new guest route fails identically to `auth:sanctum` being dropped from GET /me by
+    // accident — which is the failure that matters, since the document would then describe the whole
+    // session surface as public and nothing else in the tree would notice.
+    $document = dumpDocument()['document'];
+
+    $paths = $document['paths'] ?? null;
+    $schemes = $document['components']['securitySchemes'] ?? null;
+
+    assert(is_array($paths) && is_array($schemes));
+
+    $guest = [];
+    $authenticated = [];
+
+    foreach ($paths as $path => $operations) {
+        assert(is_array($operations));
+
+        foreach ($operations as $method => $operation) {
+            assert(is_array($operation));
+
+            $label = strtoupper((string) $method).' '.$path;
+
+            expect(array_key_exists('security', $operation))
+                ->toBeTrue("{$label} publishes no `security` key, so whether it needs a session is not stated");
+
+            $requirement = $operation['security'];
+
+            assert(is_array($requirement));
+
+            if ($requirement === []) {
+                $guest[] = $label;
+
+                continue;
+            }
+
+            $authenticated[] = $label;
+
+            foreach ($requirement as $alternative) {
+                assert(is_array($alternative));
+
+                foreach (array_keys($alternative) as $scheme) {
+                    // A requirement naming a scheme the document does not declare is a dangling
+                    // reference — and it is the shape a rename of `sanctumSession` would take, which
+                    // is the constant apps/web/src/proxy.ts pins the session cookie name through.
+                    //
+                    // array_key_exists rather than ->toHaveKey(): that expectation's SECOND
+                    // parameter is an expected VALUE, so a message passed there is silently asserted
+                    // as the value of the key. Same family of trap as the toContain() note at the
+                    // head of this file.
+                    expect(array_key_exists($scheme, $schemes))
+                        ->toBeTrue("{$label} requires the security scheme '{$scheme}', which the document does not declare");
+                }
+            }
+        }
+    }
+
+    // routes/api_auth.php GROUP A, and nothing else anywhere. Each of the six is guest-reachable for
+    // a reason written at its route: the credential does not exist yet (login, register), it is being
+    // re-established (forgot-password, reset-password), or the link is opened from a mail client in
+    // another browser (email/verify, invitations/preview).
+    expect($guest)->toEqualCanonicalizing([
+        'POST /api/v1/auth/login',
+        'POST /api/v1/auth/register',
+        'POST /api/v1/auth/forgot-password',
+        'POST /api/v1/auth/reset-password',
+        'POST /api/v1/auth/email/verify',
+        'POST /api/v1/auth/invitations/preview',
+    ], 'the guest-reachable set changed — a route gained or LOST `auth:sanctum`');
+
+    // The positive control. Without it a document in which every operation lost its requirement
+    // would satisfy "every operation states one" and fail only the set above, and a future edit that
+    // moved a route out of the pinned list could make the whole file vacuous.
+    expect($authenticated)->toContain(
+        'GET /api/v1/me',
+        'POST /api/v1/auth/logout',
+        'POST /api/v1/session/organization',
+        'GET /api/v1/organizations/{organization}/members',
+    );
+});
+
+it('derives the requirement from the middleware, so a route that loses auth:sanctum loses it here', function (): void {
+    // The half the pinned set above cannot prove: that the published requirement follows the
+    // ENFORCING middleware rather than a declaration beside it. Two probe routes, identical but for
+    // `auth:sanctum`, both pointed at the same action.
+    app('router')->post('api/v1/_probe/guest', [\Tests\Support\ResponseShapeProbe::class, '__invoke']);
+    app('router')->post('api/v1/_probe/session', [\Tests\Support\ResponseShapeProbe::class, '__invoke'])
+        ->middleware('auth:sanctum');
+    app('router')->getRoutes()->refreshNameLookups();
+
+    $paths = dumpDocument()['document']['paths'] ?? null;
+
+    assert(is_array($paths));
+
+    expect($paths['/api/v1/_probe/guest']['post']['security'] ?? null)->toBe([])
+        ->and($paths['/api/v1/_probe/session']['post']['security'] ?? null)->toBe([['sanctumSession' => []]]);
+});
+
+it('refuses to publish a route authenticated by anything other than the one mechanism', function (): void {
+    // D10/D11: the admin surface has exactly one credential, the Sanctum SPA session. A route on a
+    // second guard is a finding, not a document change — and answering `[]` for it would publish an
+    // authenticated endpoint as public, which is the one direction of this field that is dangerous.
+    app('router')->post('api/v1/_probe/second-mechanism', [\Tests\Support\ResponseShapeProbe::class, '__invoke'])
+        ->middleware('auth:web');
+    app('router')->getRoutes()->refreshNameLookups();
+
+    $path = sys_get_temp_dir().'/kb-openapi-'.getmypid().'-mechanism/core-api.openapi.json';
+
+    expect(Artisan::call('kb:dump-openapi', ['--path' => $path]))->toBe(1);
+
+    expect(Artisan::output())->toContain('auth:web')
+        ->and(File::exists($path))->toBeFalse();
+});
+
+it('refuses to publish a surface it has no security scheme for, rather than calling it public', function (): void {
+    // `rt/` and `sdk/` are in DumpOpenApiCommand::SURFACES and their route files are empty. Their
+    // credentials are a resolved chat session and a validated embed origin — both still TODOs in
+    // bootstrap/app.php's `runtime` and `sdk` groups — so neither has a scheme to name. Answering
+    // `security: []` for the first route added there would publish an endpoint as PUBLIC, which is
+    // the one direction of this field that is dangerous. Inert today by construction; it is a
+    // forcing function for whoever writes the first hosted-chat route.
+    app('router')->post('rt/v1/_probe/chat', [\Tests\Support\ResponseShapeProbe::class, '__invoke']);
+    app('router')->getRoutes()->refreshNameLookups();
+
+    $path = sys_get_temp_dir().'/kb-openapi-'.getmypid().'-surface/core-api.openapi.json';
+
+    expect(Artisan::call('kb:dump-openapi', ['--path' => $path]))->toBe(1);
+
+    expect(Artisan::output())->toContain('rt/v1/_probe/chat')
+        ->and(File::exists($path))->toBeFalse();
+});
+
+// ── the two remaining DumpOpenApiCommand gaps ────────────────────────────────────────────────────
+
+it('refuses an empty #[ResponseShape], naming the action, rather than publishing invalid JSON Schema',
+    function (): void {
+        // D8 ("no bodyless success anywhere") was a CONVENTION with nothing enforcing it: the first
+        // 204 written here would have published `"properties": []` — a JSON array where JSON Schema
+        // requires an object — and the finder would have been a downstream generator, days later,
+        // with nothing naming the action responsible. The refusal is what teaches the rule.
+        app('router')->post('api/v1/_probe/bodyless', [\Tests\Support\ResponseShapeProbe::class, 'store']);
+        app('router')->getRoutes()->refreshNameLookups();
+
+        $path = sys_get_temp_dir().'/kb-openapi-'.getmypid().'-bodyless/core-api.openapi.json';
+
+        expect(Artisan::call('kb:dump-openapi', ['--path' => $path]))->toBe(1);
+
+        // The message must name the OFFENDING ACTION. "invalid schema somewhere" is the failure this
+        // guard replaces, so a guard that does not say where is barely better than the invalid file.
+        expect(Artisan::output())->toContain('ResponseShapeProbe::store')
+            ->and(File::exists($path))->toBeFalse();
+    });
+
+it('publishes a single-action controller registered as a bare class string', function (): void {
+    // `Route::post($uri, SomeController::class)` stores `controller` with no `@method`, and
+    // Route::getActionMethod() — `Arr::last(explode('@', …))` — therefore answered with the CLASS
+    // NAME. method_exists() then failed and the dump aborted with "is not a controller action",
+    // taking the whole document with it, for a route the router dispatches perfectly well.
+    // routes/api_admin.php worked around it by spelling `'__invoke'` out; the workaround is now
+    // belt-and-braces rather than load-bearing, and this is what says so.
+    app('router')->post('api/v1/_probe/invokable', \Tests\Support\ResponseShapeProbe::class);
+    app('router')->getRoutes()->refreshNameLookups();
+
+    $paths = dumpDocument()['document']['paths'] ?? null;
+
+    assert(is_array($paths));
+
+    $properties = $paths['/api/v1/_probe/invokable']['post']['responses']['200']['content']['application/json']['schema']['properties'] ?? null;
+
+    expect($properties)->toBe(['data' => ['$ref' => '#/components/schemas/AcknowledgementResource']]);
+});
+
+it('does not claim the error envelope is identical to the SSE frame while requiring request_id', function (): void {
+    // A PUBLISHED DOCUMENT THAT CONTRADICTED ITSELF. The component's description said it was
+    // "identical in the non-streaming body and in the SSE `error` frame" while its `required` list
+    // carried `request_id` — and the client-facing SSE `error` frame does not carry that field
+    // (kb-internal-api-contracts). packages/contracts/src/envelope.ts types `request_id?` as
+    // OPTIONAL precisely so one interface covers both surfaces, and src/sse/events.ts reuses it, so
+    // the TypeScript was the safe half and the PROSE was the wrong one.
+    //
+    // The invariant, not the wording: whichever half moves, the two must keep agreeing. `required`
+    // is asserted because it describes what this service really sends and must not be relaxed to
+    // match a frame this component does not describe.
+    $envelope = dumpDocument()['document']['components']['schemas']['ErrorEnvelope'] ?? null;
+
+    assert(is_array($envelope));
+
+    $description = (string) ($envelope['description'] ?? '');
+
+    expect($envelope['required'] ?? [])->toContain('request_id');
+
+    expect(str_contains($description, 'NON-STREAMING') && str_contains($description, 'omits `request_id`'))
+        ->toBeTrue(
+            'ErrorEnvelope requires `request_id`, so its description must scope itself to the '
+            .'non-streaming body and say the SSE `error` frame omits the field. Either state the '
+            .'exception or drop `request_id` from `required` — but a description claiming the two '
+            .'are identical is false against this schema.',
+        );
+});
 
 it('refuses to publish a client route with no declared response shape', function (): void {
     // The rule that keeps the document from silently missing an endpoint. A new route under

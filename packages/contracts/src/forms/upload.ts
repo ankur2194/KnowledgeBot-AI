@@ -8,8 +8,8 @@ import { z } from 'zod';
  * organization it is rendering for, which reads as a rejected upload nobody can explain.
  *
  * NOTHING ASSERTS THIS. test/form-drift.test.ts does not import `uploadSchema` at all (it covers
- * the manifest count and the ownership keys). gates.yml's `repo-artifact-consistency` job does run
- * over packages/, but only over packages/design-tokens/generated — nothing there reads this file.
+ * the manifest count and the ownership keys). A CI job used to run over packages/, and only over
+ * packages/design-tokens/generated — nothing in it read this file — and it is gone regardless.
  * It is a reviewer check until the drift suite gains an upload case that parses the same File
  * against two different `OrgUploadLimits` and expects opposite results.
  */

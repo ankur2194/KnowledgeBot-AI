@@ -8,6 +8,41 @@
 export { OWNERSHIP_KEYS, isOwnershipPath } from './ownership.js';
 export type { OwnershipKey } from './ownership.js';
 
+/**
+ * `ORG_ROLES` is the ONE runtime value in this barrel that is not a schema or a defaults factory, and
+ * this subpath is the only place in the package it may live: `src/resources/session.ts` declares
+ * `Role` as a union with zero runtime values because it is re-exported from the ROOT entry, budgeted
+ * at <=1 kB brotli inside apps/widget's app shell. `test/resource-drift.test.ts` asserts the root
+ * entry's export list, so re-exporting it from there would go red.
+ */
+export {
+  forgotPasswordFormDefaults,
+  forgotPasswordSchema,
+  inviteMemberFormDefaults,
+  inviteMemberSchema,
+  loginFormDefaults,
+  loginSchema,
+  ORG_ROLES,
+  registerFormDefaults,
+  registerSchema,
+  resetPasswordFormDefaults,
+  resetPasswordSchema,
+} from './auth.js';
+export type {
+  ForgotPasswordIn,
+  ForgotPasswordOut,
+  InvitationPreviewSource,
+  InviteMemberIn,
+  InviteMemberOut,
+  LoginIn,
+  LoginOut,
+  RegisterIn,
+  RegisterOut,
+  ResetPasswordIn,
+  ResetPasswordLink,
+  ResetPasswordOut,
+} from './auth.js';
+
 export { botFormDefaults, botSettingsSchema } from './bot.js';
 export type { BotFormSource, BotSettingsIn, BotSettingsOut } from './bot.js';
 

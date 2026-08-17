@@ -538,7 +538,17 @@ def test_a_container_boots_from_the_real_env_template(
             user=settings.pg_user,
             password_path=settings.pg_password_path,
         ).get_secret_value()
-        assert dsn == "postgresql://knowledgebot:from-the-mount@postgres:5432/knowledgebot"
+        # THE ROLE IS READ FROM THE TEMPLATE RATHER THAN RETYPED HERE, and that is not a
+        # weakening. This literal said `knowledgebot` and went stale the moment the PostgreSQL
+        # role split set `KB_PG_USER=kb_app` in the template — a failure about a hardcoded
+        # expectation, in the one test whose stated purpose is that the five `KB_PG_*` variables
+        # from the environment are NOT discarded. Deriving the user proves exactly that: the
+        # value in the environment reached the DSN. The value itself is pinned by
+        # test_the_defaults_match_the_deployment_template above, which compares the template
+        # against Settings' own default — so nothing is left unasserted, and host, port,
+        # database and the mounted password all stay literal here.
+        expected_user = values[f"{ENV_PREFIX}PG_USER"]
+        assert dsn == f"postgresql://{expected_user}:from-the-mount@postgres:5432/knowledgebot"
     finally:
         get_settings.cache_clear()
 

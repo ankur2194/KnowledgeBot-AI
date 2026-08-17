@@ -4,5 +4,9 @@ playwright/.auth/
 # Next's generated ambient types.
 next-env.d.ts
 
-# Vitest browser-mode artifacts.
+# Vitest browser-mode artifacts. TWO directories, not one: `__screenshots__/` holds the failure
+# screenshots and `.vitest-attachments/` holds the copies the reporter links from its output. The
+# second only appears once a spec in tests/components/ has actually failed, which is why it was
+# missing from this list until the first component spec landed — an empty project writes neither.
 __screenshots__/
+.vitest-attachments/

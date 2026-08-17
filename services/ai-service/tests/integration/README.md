@@ -1,7 +1,8 @@
 # `integration/` — real containers, real sockets
 
 Marked `@pytest.mark.integration`. **Testcontainers is the only supported path**, in CI and
-locally alike: `ci.yml`'s second ai-service step runs `-m integration` against the runner's own
+locally alike — though "CI" is now hypothetical, since `.github/` was deleted on 2026-08-17. The
+step that ran `-m integration` used the runner's own
 Docker daemon, and the fixtures in `tests/conftest.py` start Postgres, Qdrant and Valkey
 themselves. There is no workflow-`services:` tier, and this file used to say there was.
 

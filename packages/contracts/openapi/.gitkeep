@@ -3,10 +3,11 @@ and the public Laravel API document (kb-internal-api-contracts DoD). Both are in
 generate-and-COMMIT targets, which is why this directory is outside every gitignored path.
 
 NEITHER EXISTS YET, and nothing generates or validates them: this directory holds only .gitkeep,
-there is no export command on either side, and gates.yml has no step over packages/. Treat the
+there is no export command on either side, and there is no CI to add a step to. Treat the
 paragraph below as the contract to build, not as a description of a running pipeline.
 
 Nothing in here is hand-edited. Laravel's internal client is to be generated or validated from the
 FastAPI document; src/resources/ from the public one. The commit-and-diff check that makes that
-real (re-generate in CI, fail on `git diff --exit-code`) belongs in ci.yml, which has not been
-authored — until it is, a document that drifts from the code it describes drifts silently.
+real (re-generate, then fail on `git diff --exit-code`) has nowhere to live: `.github/` was deleted
+on 2026-08-17 and nothing replaced it. So a document that drifts from the code it describes drifts
+silently, and that is now a permanent property rather than a gap awaiting a workflow.

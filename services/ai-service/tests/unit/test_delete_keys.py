@@ -31,9 +31,12 @@ from app.retrieval.tenancy import MANDATORY_FILTER_KEYS
 #: Spelled out here independently of the module under test, in the order CI's allow-list
 #: names them. Deriving this from `DELETE_KEYS` would make the test agree with any edit.
 #:
-#: This one stays a literal on purpose, and it is the only one that may be. CI's allow-list
-#: is a shell variable in `.github/workflows/gates.yml`, not a Python constant — there is no
-#: object to import, so restating it here is the only way to compare against it at all.
+#: This one stays a literal on purpose, and it is the only one that may be. The allow-list it
+#: mirrors was a shell variable in a CI grep job, never a Python constant, so there was
+#: no object to import and restating it was the only way to compare at all. THAT JOB WAS DELETED
+#: WITH `.github/` ON 2026-08-17, so this tuple no longer mirrors anything executable — it is now
+#: the primary statement of the delete-key allow-list rather than a transcription of one, and
+#: `.claude/skills/kb-deletion-and-verification/references/delete-key-allow-list.md` is its prose.
 CI_ALLOW_LIST = (
     "org_id",
     "bot_ids",

@@ -79,6 +79,13 @@ use UnitEnum;
  * `trace_id` of a line are exactly what an incident is reconstructed from, and a forged one is
  * worse than an absent one.
  *
+ * THERE ARE TWO REDACTION ENTRY POINTS AND THEY ARE NOT INTERCHANGEABLE. :self::redact() is for a
+ * free-form MESSAGE, where a key name and its value sit side by side in prose. :self::redactValue()
+ * is for ONE ALREADY-NAMED VALUE — an `audit_logs.details` entry, whose field name is the caller's
+ * map key and never part of the string — and it therefore omits the `key=value` rule, which for a
+ * value has no discriminating power beyond the key name the caller already holds. Each has its own
+ * published limits constant; the argument for every rule in and out is on :self::redactValue().
+ *
  * :self::redact() IS THE BACKSTOP, NEVER THE DEFENCE — see :self::REDACTION_LIMITS. It is a
  * port of the Python function, INCLUDING the two bugs that were found there by proving the
  * redaction rather than reading it: the optional auth-scheme group (without it,
@@ -221,6 +228,11 @@ final class KbJsonFormatter implements FormatterInterface
     /**
      * Stated plainly, because a redactor that gives false confidence is worse than none.
      *
+     * TWO FUNCTIONS, TWO COVERAGES, TWO CONSTANTS. This one describes :self::redact(), the rule set
+     * for a free-form MESSAGE. :self::VALUE_REDACTION_LIMITS describes :self::redactValue(), the
+     * rule set for ONE ALREADY-NAMED VALUE, which is a strict subset. Publishing one string for
+     * both is how a caller ends up confident about the coverage of the other one.
+     *
      * What :self::redact() DOES catch, in the message and in a rendered exception:
      *   * `key: value` / `key=value` for a credential-shaped key name;
      *   * `Bearer …` / `Basic …` and our own `KB1 <key_id>:<signature>` scheme;
@@ -239,7 +251,20 @@ final class KbJsonFormatter implements FormatterInterface
      */
     public const REDACTION_LIMITS = 'catches credential-shaped tokens, Authorization/X-KB-Signature/KB1 values and URL query '
         .'strings in the message and in a rendered exception; does NOT catch tenant content, model '
-        .'output or an unshaped credential interpolated into a message string';
+        .'output or an unshaped credential interpolated into a message string. This is the MESSAGE '
+        .'rule set: a caller sanitising one already-named value uses redactValue(), whose narrower '
+        .'coverage is VALUE_REDACTION_LIMITS';
+
+    /**
+     * The same statement for :self::redactValue(), which is :self::redact() MINUS the `key=value`
+     * rule — so its coverage is strictly smaller and saying so is the whole point of a second
+     * constant. The reasoning for each inclusion and the one exclusion is on :self::redactValue().
+     */
+    public const VALUE_REDACTION_LIMITS = 'catches an Authorization/Basic scheme value, our KB1 '
+        .'<key_id>:<signature>, the five pinned vendor key shapes and the query string of an absolute '
+        .'http(s) URL, anywhere inside ONE already-named value; does NOT catch tenant content, model '
+        .'output, an unshaped credential, or a `key=value` pair — the field name is the caller\'s map '
+        .'key, so a key=value inside the value is incidental text and that rule stays in redact()';
 
     /**
      * How deep a context value is walked before it is rendered as its type name. A log line is not
@@ -329,17 +354,137 @@ final class KbJsonFormatter implements FormatterInterface
             return $text;
         }
 
+        // `?? $text`: preg_replace returns null on a backtrack-limit blow-up, and a null here would
+        // turn a log line into an empty string. Keeping the previous value keeps the earlier
+        // substitutions and never loses the line.
+        //
+        // THE ONE MESSAGE-ONLY RULE, THEN THE VALUE-SHAPED ONES. Delegating the tail to
+        // :self::redactValue() is what makes "the message rule set is a SUPERSET of the value rule
+        // set" a property of the code instead of a claim in a comment: a rule added there applies
+        // here for free, and the two can never disagree about a shape they both recognise. The
+        // ORDER is unchanged from when this was one flat sequence — key/value first, so
+        // `Authorization: Bearer <tok>` is consumed by the rule that keeps its scheme.
+        $text = preg_replace(self::CREDENTIAL_KEY_VALUE, '$1$2$3'.self::REDACTION_MARKER, $text) ?? $text;
+
+        return self::redactValue($text);
+    }
+
+    /**
+     * Strip credential-shaped material from ONE ALREADY-NAMED VALUE. The value-shaped subset of
+     * :self::redact() — see :self::VALUE_REDACTION_LIMITS for what that costs.
+     *
+     * WHO CALLS THIS, AND WHY IT IS NOT :self::redact()
+     * =================================================
+     * `App\Services\Audit\AuditLogger::sanitize()` uses a redaction pass as a SHAPE BACKSTOP under
+     * its per-operation `details` allow-list: an `ECHOED` value that redaction alters is not echoed.
+     * That caller's input is not a message. It is one value whose FIELD NAME the caller already
+     * holds as the map key, and the two are never in the same string. :self::redact() assumes the
+     * opposite — that a key name and its value sit side by side in prose — and one of its rules is
+     * built entirely on that assumption.
+     *
+     * MEASURED IN THE PROJECT IMAGE, against this repo's `egulias/email-validator` under the exact
+     * pair `email:rfc,strict` builds (`RFCValidation` + `NoRFCWarningsValidation`), showing which
+     * rule fires on each address:
+     *
+     *     token=abc@example.com          rfc,strict VALID   CREDENTIAL_KEY_VALUE   -> not echoed
+     *     my.token=x@example.com         rfc,strict VALID   CREDENTIAL_KEY_VALUE   -> not echoed
+     *     secret=1@example.com           rfc,strict VALID   CREDENTIAL_KEY_VALUE   -> not echoed
+     *     password=hunter2@example.com   rfc,strict VALID   CREDENTIAL_KEY_VALUE   -> not echoed
+     *     x-api-key=q@example.com        rfc,strict VALID   CREDENTIAL_KEY_VALUE   -> not echoed
+     *     sk-abcdefghijkl@example.com    rfc,strict VALID   VENDOR_KEYS            -> not echoed
+     *     bob@example.com                rfc,strict VALID   (none)                 -> echoed
+     *
+     * `=` is legal `atext` in a dot-atom, so every one of those is an address a person can register
+     * and log in with. `AuditLogger::OPERATIONS` documents `auth.login.failed.email` as
+     * attacker-controlled free text from a login form, and that row carries `organization_id = NULL`
+     * and `actor_id = NULL` by design, so a caller choosing such a username used to produce an
+     * audit row identifying nothing. THE FALSE POSITIVE IS THE `key=value` RULE, and it is a false
+     * positive only for a value — in a log line `... password=hunter2 ...` it is exactly right,
+     * which is why :self::redact() keeps it.
+     *
+     * EVERY RULE, IN OR OUT, WITH THE ARGUMENT
+     * ========================================
+     * The dividing question is: **does the rule recognise the credential's own shape, or does it
+     * recognise a SENTENCE about a credential?** A value has no sentence around it.
+     *
+     *   * CREDENTIAL_KEY_VALUE — **EXCLUDED.** It recognises a sentence: fifteen credential-ish key
+     *     names followed by `:` or `=` and then whatever comes next. The value it captures has NO
+     *     shape of its own, so the rule's entire discriminating power is the key name — the one
+     *     thing the caller already supplies out of band. Measured against the whole `ECHOED`
+     *     vocabulary in `AuditLogger::OPERATIONS` (`email`, `mechanism`, `reason`, `role`,
+     *     `from_role`, `to_role`, `expires_at`), it can only ever fire on free text, and the one
+     *     free-text field there is documented as hostile input. What excluding it COSTS is a
+     *     credential with no recognisable shape sitting behind a credential-ish word inside a
+     *     value — `email: "password=hunter2"`. That is a real loss, and it is smaller than it
+     *     looks: the scheme-prefixed forms (`Authorization: Bearer …`, `KB1 …`) are caught by BEARER
+     *     and KB1_SIGNATURE regardless of the key name in front of them, so what remains is
+     *     precisely the class :self::REDACTION_LIMITS already declares uncatchable (an unshaped
+     *     credential), reached through a key name that is not this map's key. The allow-list, not
+     *     redaction, is what keeps a credential out of `details`: no operation admits a
+     *     credential-bearing field, and `token` is `FINGERPRINTED` so its plaintext never reaches
+     *     the echo path at all.
+     *   * BEARER — **KEPT.** `bearer|basic` plus 8+ base64/`._-+/=` characters is the credential's
+     *     own shape, not a sentence: the scheme word is part of the value a real `Authorization`
+     *     header carries. It fires on `Bearer <tok>` with no key name in front, which is what makes
+     *     it independent of the excluded rule. No rfc,strict-valid address can reach it — the
+     *     scheme needs a literal space, and a space is not `atext` (probed: `bearer.abcdefghij@…`
+     *     and `basic+abcdefghij@…` are valid addresses and neither matches).
+     *   * KB1_SIGNATURE — **KEPT.** Our own `KB1 <key_id>:<signature>` scheme
+     *     (`kb-internal-api-contracts`). Same argument as BEARER and the same space requirement
+     *     (probed: `KB1.abcdefghij@…` and `KB1abcdefghijkl@…` are valid addresses, neither matches).
+     *     An internal signature in an append-only table is a replay primitive for as long as
+     *     retention lasts.
+     *   * VENDOR_KEYS — **KEPT, with a known and accepted residual.** The five prefixes are the
+     *     credential's own shape and the reason `sk-ant-…` is still caught. The residual is in the
+     *     table above: `sk-abcdefghijkl@example.com` is a registrable address that matches
+     *     `sk-[A-Za-z0-9_\-]{12,}`, so narrowing does NOT rescue it. IT IS DELIBERATELY NOT FIXED.
+     *     The only available fix is a lookahead refusing a match followed by `@domain`, and that
+     *     drops a credential in URL userinfo position (`https://sk-ant-…@host/`), which is a real
+     *     leak shape — trading a rare false positive for a class of true negatives. The residual is
+     *     also no longer destructive: `AuditLogger` writes `<key>_fingerprint` for a value that
+     *     fails this backstop, so such a user's rows stay correlatable and the WARNING still fires.
+     *   * URL_QUERY — **KEPT, and this was the close call.** Argument against: an audit detail could
+     *     legitimately carry a URL, and `https://example.test/docs?page=2` has no capability in it,
+     *     so redaction there costs a reader the one part of the URL that said WHICH page. Argument
+     *     for, which wins: a query string is a VALUE shape (it needs a literal `https?://`, which no
+     *     rfc,strict address can contain — the only email that reaches it needs a quoted local part,
+     *     `"https://x/?a=b"@example.com`, and that is REJECTED by NoRFCWarningsValidation, measured),
+     *     so unlike the excluded rule it has no reachable false positive here; and it is now the
+     *     ONLY rule left that catches a capability in a query string, because dropping
+     *     CREDENTIAL_KEY_VALUE gave up `?token=…`. That is not hypothetical in this codebase — this
+     *     application's own password-reset and invitation links are
+     *     `FrontendUrl::for('/reset-password', ['token' => …, 'email' => …])`
+     *     (`app/Notifications/ResetPassword.php`), i.e. `https://…/reset-password?token=<live bearer
+     *     capability>`, exactly the string a future `details` field naming a generated link would
+     *     hold. The harm is asymmetric: a false positive costs one field's plaintext and leaves a
+     *     fingerprint plus a WARNING, while a false negative writes a working account-takeover
+     *     primitive into an append-only store for the whole retention window. It keeps the URL up to
+     *     the `?`, so the row still says which endpoint was involved.
+     *
+     * NO PYTHON COUNTERPART, ON PURPOSE. `audit_logs` is Laravel-owned (`kb-architecture-map`), so
+     * the data plane has no caller for this and `services/ai-service/app/observability/logging.py`
+     * keeps one `redact()` for its messages. The cross-plane parity pinned by
+     * `tests/Contract/LogFieldContractTest.php` is about the FIELD vocabulary and the message
+     * treatment, neither of which moves here. If the data plane ever writes audit rows, port this
+     * function and its argument together — a second narrowing decided independently is how the two
+     * planes come to disagree about what a credential looks like.
+     */
+    public static function redactValue(string $value): string
+    {
+        if ($value === '') {
+            return $value;
+        }
+
         $marker = self::REDACTION_MARKER;
 
-        // `?? $text` on every step: preg_replace returns null on a backtrack-limit blow-up, and a
-        // null here would turn a log line into an empty string. Keeping the previous value keeps
-        // the earlier substitutions and never loses the line.
-        $text = preg_replace(self::CREDENTIAL_KEY_VALUE, '$1$2$3'.$marker, $text) ?? $text;
-        $text = preg_replace(self::BEARER, '$1 '.$marker, $text) ?? $text;
-        $text = preg_replace(self::KB1_SIGNATURE, 'KB1 '.$marker, $text) ?? $text;
-        $text = preg_replace(self::VENDOR_KEYS, $marker, $text) ?? $text;
+        // `?? $value` for the reason :self::redact() states: a backtrack-limit null must not empty
+        // the value. Here it matters twice over — the caller compares input to output, and an empty
+        // string would read as "redaction fired" on a value nothing recognised.
+        $value = preg_replace(self::BEARER, '$1 '.$marker, $value) ?? $value;
+        $value = preg_replace(self::KB1_SIGNATURE, 'KB1 '.$marker, $value) ?? $value;
+        $value = preg_replace(self::VENDOR_KEYS, $marker, $value) ?? $value;
 
-        return preg_replace(self::URL_QUERY, '$1?'.$marker, $text) ?? $text;
+        return preg_replace(self::URL_QUERY, '$1?'.$marker, $value) ?? $value;
     }
 
     public function format(LogRecord $record): string

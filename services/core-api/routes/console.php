@@ -16,10 +16,10 @@ use Illuminate\Support\Facades\Schedule;
 |
 | THAT ASSERTION EXISTS, AND IT IS NOT `schedule:list`. tests/Feature/ScheduleTest.php reads the
 | Schedule object after booting the console kernel and pins the entry set, the ->name(), the
-| non-default overlap TTL and ->onOneServer(). It runs inside `php artisan test --parallel`, which
-| ci.yml already runs, so it needs no CI job of its own. This paragraph promised a CI assertion for
-| a while and there was none: measured 2026-08-11, `schedule:list` appeared in ZERO lines of
-| .github/, tests/, Makefile and scripts/ (control: `artisan` in ci.yml -> 7).
+| non-default overlap TTL and ->onOneServer(). It runs inside `php artisan test --parallel`, so it
+| needs no job of its own — which is now the only arrangement available, since this repo has no CI.
+| This paragraph promised a CI assertion for a while and there never was one; that promise is now
+| unkeepable rather than merely unkept, and the Pest test is the whole of the enforcement.
 |
 | Do not "improve" it into a `schedule:list` diff. `schedule:list` renders next-due and overlap
 | state, so it needs the mutex store — Valkey — reachable, for a fact the Schedule object already
@@ -98,9 +98,86 @@ Schedule::onOneServer()->group(function (): void {
         ->withoutOverlapping(5);
 
     /*
+     * ════════════════════════════════════════════════════════════════════════════════════════════
+     * THE ENTRY THIS FILE CANNOT BE WITHOUT.
+     * ════════════════════════════════════════════════════════════════════════════════════════════
+     *
+     * `audit_logs` is PARTITION BY RANGE (created_at), monthly, and it has NO DEFAULT PARTITION —
+     * deliberately, because a default partition forces every later `CREATE TABLE … PARTITION OF` to
+     * scan it under ACCESS EXCLUSIVE. The migration created two months of runway. So at 00:00 on the
+     * first of the month after that runway ends, EVERY audit insert fails with SQLSTATE 23514 ("no
+     * partition of relation \"audit_logs\" found for row") and EVERY ON_FAILURE_ABORT audited action —
+     * email verification, password reset completion, every invitation transition, every role change —
+     * returns 500. The failure is total, instant, and on a clock; nothing degrades first and no
+     * dependency is down to blame.
+     *
+     * DAILY, not monthly. The command is idempotent by construction (it reads the catalogue, then
+     * `CREATE TABLE IF NOT EXISTS`) and costs one catalogue query on the 30 days out of 31 when there
+     * is nothing to do. A monthly entry has one firing per month to lose — to a stranded
+     * withoutOverlapping lock, a maintenance-mode deploy, or a scheduler container that died in
+     * September — and losing it is the outage above. Twenty-nine cheap no-ops are the premium on that.
+     * The command keeps three months of runway ahead of the current month, so any single day's run
+     * repairs any single missed month.
+     *
+     * withoutOverlapping(10): the work is a handful of DDL statements against an empty table, p99 well
+     * under a second, and a stranded lock costs ten minutes against a three-month runway.
+     *
+     * `->daily()` AND NOT `->dailyAt('04:07')`, even though 00:00 UTC is the busiest tick in this file.
+     * The header bans ->dailyAt() (and ->timezone(), which is the one that actually skips and repeats
+     * around DST), and there is nothing to gain by breaking it here: with three months of runway no
+     * single run is load-bearing, so this firing landing at a month boundary — or being lost to one —
+     * changes nothing. If the runway were ever cut to one month this entry would need a stagger AND a
+     * reason, in that order.
+     */
+    Schedule::command('kb:create-audit-partitions')
+        ->name('kb:create-audit-partitions')
+        ->daily()
+        ->withoutOverlapping(10);
+
+    /*
+     * AND NOT ITS SIBLING. `kb:prune-audit-partitions` EXISTS AND IS DELIBERATELY NOT SCHEDULED: it
+     * DETACHes and DROPs whole months of the compliance record, and no retention decision stands
+     * behind it yet. An unattended DROP of audit data is not a maintenance task, it is a deletion
+     * policy, and it needs a stated retention window (and the operator-facing dry run the command
+     * already has) before a cron entry. Adding it here would fail tests/Feature/ScheduleTest.php,
+     * which is the intended speed bump.
+     */
+
+    // The framework's own reset-token sweep, and it is scheduled — unlike `sanctum:prune-expired`
+    // below — because it has BOTH halves: the command class ships with the framework AND
+    // `password_reset_tokens` now exists (2026_08_13_000700). It deletes rows past
+    // `config('auth.passwords.users.expire')` minutes old, using the BROKER's definition of expired,
+    // which is why kb:prune-auth-tokens deliberately does not touch that table: two definitions of
+    // "expired" on one table, both scheduled, is how they drift.
+    //
+    // hourlyAt(17) rather than hourly(): `schedule:run` executes due events SEQUENTIALLY in one
+    // process, so staggering keeps one tick to one task.
+    Schedule::command('auth:clear-resets')
+        ->name('auth:clear-resets')
+        ->hourlyAt(17)
+        ->withoutOverlapping(10);
+
+    // The other two auth capabilities, which have no framework command: expired-and-never-used rows in
+    // `organization_invitations` and `email_verification_tokens`. The invitation half is not mere
+    // hygiene — `organization_invitations_one_pending_per_email` is partial on
+    // `accepted_at IS NULL AND revoked_at IS NULL` and expiry is NOT one of its predicates, so an
+    // expired invitation holds that (organization, email) slot forever and re-inviting the same person
+    // fails with a 23505. See the command's docblock.
+    //
+    // hourlyAt(29) staggers it off both the hour and auth:clear-resets. withoutOverlapping(10) is
+    // ~far above the p99 of two indexed DELETEs and costs ten minutes if a SIGKILL strands the lock.
+    Schedule::command('kb:prune-auth-tokens')
+        ->name('kb:prune-auth-tokens')
+        ->hourlyAt(29)
+        ->withoutOverlapping(10);
+
+    /*
      * PENDING ENTRIES — uncomment each one together with whatever it is still missing: its command
-     * class for the kb:* entries, its TABLE for the two framework commands at the bottom.
-     * The cadence beside each is the intended schedule, not a suggestion (laravel-scheduler).
+     * class for the kb:* entries, its TABLE for `queue:prune-failed`. The cadence beside each is the
+     * intended schedule, not a suggestion (laravel-scheduler).
+     *
+     * `sanctum:prune-expired` at the bottom is NOT one of these: it is a PERMANENT omission under
+     * decision D11, not a pending entry. Read its comment before adding it back.
      */
 
     // Recrawl dispatcher. Claims due sources with FOR UPDATE SKIP LOCKED, advances
@@ -129,21 +206,34 @@ Schedule::onOneServer()->group(function (): void {
     // Schedule::command('queue:prune-failed --hours=336')
     //     ->name('queue:prune-failed')->hourlyAt(41)->withoutOverlapping(30);
 
-    // Token hygiene, and the same shape as queue:prune-failed above: the command class ships, the
-    // TABLE does not. sanctum.expiration is null on purpose (lowering it retro-expires every issued
-    // token), so every token would carry its own expires_at and this would be the only thing
-    // reaping the rows — but nothing mints a token yet. No migration creates personal_access_tokens
-    // and App\Models\User does not use Laravel\Sanctum\HasApiTokens. Installing the package is not
-    // enough: Sanctum 4.3's provider only publishesMigrations(..., 'sanctum-migrations') and never
-    // loadMigrationsFrom(), so the table appears only when someone publishes that tag.
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    // PERMANENTLY OMITTED UNDER DECISION D11 — NOT PENDING, NOT WAITING FOR A TABLE.
+    // ════════════════════════════════════════════════════════════════════════════════════════════
     //
-    // MEASURED before commenting this out, against the six migrations applied to PostgreSQL 18:
-    // `php artisan sanctum:prune-expired --hours=24` exits 1 with SQLSTATE[42P01] Undefined table
-    // relation "personal_access_tokens" does not exist. It does not prune nothing; it fails, once
-    // an hour, forever. Uncomment together with the published
-    // database/migrations/*_create_personal_access_tokens_table.php AND the HasApiTokens trait on
-    // the User model — the PAT lifecycle is rt/v1 control-plane work, out of scope today.
-    // hourlyAt(23) staggers it off the top of the hour so one tick runs one task.
+    // The reason this comment used to give was "the command class ships, the TABLE does not", filed
+    // beside queue:prune-failed as though both were waiting for a migration. That framing is now
+    // WRONG, and the correction matters because it changes what a future reader should do about it.
+    //
+    // Decision D11: the admin surface has EXACTLY ONE authentication mechanism, the Sanctum SPA cookie
+    // session. NO TOKEN IS EVER MINTED here — App\Models\User deliberately does not use
+    // Laravel\Sanctum\HasApiTokens (its docblock states that as a decision, with the measurement that
+    // cookie authentication works without the trait because Guard::__invoke() returns the session user
+    // unchanged when supportsTokens() is false). A pruner for a table nothing ever writes is not a
+    // pending entry; it is a no-op with a cron slot, and scheduling it would suggest a second
+    // credential exists on this surface. `sanctum.expiration` staying null is part of the same
+    // decision, not an argument for this entry.
+    //
+    // MEASURED, and left here because it is the shape of what a premature entry costs: against the
+    // migrations applied to PostgreSQL 18, `php artisan sanctum:prune-expired --hours=24` exits 1 with
+    // SQLSTATE[42P01] Undefined table relation "personal_access_tokens" does not exist. It does not
+    // prune nothing; it FAILS, once an hour, forever, dispatching ScheduledTaskFailed to the
+    // AppServiceProvider listener while `schedule:list` displays the entry as though it were handled.
+    //
+    // WHAT WOULD MAKE IT LEGITIMATE is not a migration. It is a future mobile personal-access-token
+    // surface — its own surface, its own decision — landing FOUR things in one change: the trait, the
+    // published personal_access_tokens migration, Sanctum::authenticateAccessTokensUsing() so a revoked
+    // membership stops an already-minted token on its next request, and this entry. Uncommenting it
+    // alone, at any point before that, is wrong for a reason that has nothing to do with the table.
     // Schedule::command('sanctum:prune-expired --hours=24')
     //     ->name('sanctum:prune-expired')->hourlyAt(23)->withoutOverlapping(30);
 });

@@ -94,8 +94,8 @@ rules:
   # restate it in a docstring elsewhere." A regex cannot import a Python tuple, so this rule has to
   # carry the names. Two things keep that from becoming the drift the module forbids:
   #
-  #   * `gates.yml` `enforcement-greps` (b5) extracts the names out of the lookaheads below and
-  #     compares them to the imported `ALLOWED_TABLES`. Divergence fails that job on the next run.
+  #   * a CI gate used to extract the names out of the lookaheads below and compare them to the
+  #     imported `ALLOWED_TABLES`. It was deleted on 2026-08-17, so divergence is now silent.
   #   * the names appear in the lookaheads and NOWHERE ELSE in this rule — not in the id, not in the
   #     message, not in the metadata. That is the correction of record: until 2026-08-11 this rule
   #     was `kb-py-write-outside-four-derived-tables`, its message named "exactly four tables", and
@@ -131,7 +131,7 @@ rules:
     metadata:
       kb-invariant: "ADR-033 / kb-architecture-map — FastAPI's PostgreSQL write allow-list"
       allow-list-source: "services/ai-service/app/db/writes.py::ALLOWED_TABLES"
-      allow-list-sync: "gates.yml enforcement-greps (b5) fails if the lookaheads below drift from that tuple"
+      allow-list-sync: "UNENFORCED since 2026-08-17 — a CI gate compared the lookaheads below to that tuple and was deleted with .github/"
       exemption: "# table-write-exempt: <reason>"
     patterns:
       - pattern-either:
@@ -148,7 +148,7 @@ rules:
           # across api/deps.py:220, core/idempotency.py:75, ingestion/model_pins.py:12,
           # observability/logging.py:290, providers/capabilities.py:171, providers/contract.py:775,
           # providers/errors.py:141, rag/evidence.py:325 and four sites in rag/rerank.py. That is
-          # exactly the defect class CLAUDE.md names for gates.yml:709, one tier down, and a
+          # exactly the defect class CLAUDE.md names for the deleted table-write gate, one tier down, and a
           # ruleset whose findings are all false is a ruleset people learn to skip.
           # `UPDATE x SET` and `COPY x FROM|TO|(` are how the real statements are written; neither
           # anchor can drop a valid write, because SQL requires the token.

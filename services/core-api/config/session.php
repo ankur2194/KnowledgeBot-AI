@@ -24,6 +24,38 @@ return [
     'path' => '/',
 
     /*
+     * ── SUPERSEDED 2026-08-13. READ THIS FIRST, THEN THE ORIGINAL REASONING BELOW IT. ──────────────
+     *
+     * The block below forbids '.<domain>' and the deployment now USES it, by Ankur's ruling of
+     * 2026-08-13. What follows is kept rather than rewritten, because its argument is sound and is the
+     * cost being paid — a reader who only saw the new value would not know what it bought.
+     *
+     * WHY IT CHANGED, MEASURED. This file's own heading said "SCOPED TO THE ADMIN AND API HOSTS ONLY",
+     * and a host-only cookie cannot be scoped to two hosts — the sentence asked for something the value
+     * could not express. The consequence was not theoretical: the SPA on app.<domain> must READ the
+     * JS-readable XSRF-TOKEN cookie that api.<domain> sets, and a host-only cookie is invisible to
+     * script on a different host. Measured on the deployed stack: `GET /sanctum/csrf-cookie` returned
+     * 204 and set both cookies on api.<domain>, `document.cookie` on the SPA's origin was EMPTY, and
+     * apps/web/src/lib/api/browser.ts threw "XSRF-TOKEN cookie absent after GET /sanctum/csrf-cookie
+     * — check SESSION_DOMAIN". No mutation could be sent, so login, password reset and invitation
+     * acceptance all failed with a generic banner and nothing in any server log.
+     *
+     * WHAT IS NOW ACCEPTED, AND IT IS THE HAZARD THE BLOCK BELOW NAMES. chat.<domain> receives both
+     * cookies. kb_session stays HttpOnly, so an XSS there cannot read it — but it CAN read XSRF-TOKEN,
+     * and a same-site request already carries kb_session, so a compromised public subdomain can forge
+     * admin mutations. Before this change it could not. The widget is unaffected: it is served from a
+     * separate registrable domain, which is what the block below correctly relies on.
+     *
+     * THE TWO UPGRADES THAT WOULD LET THIS GO BACK TO HOST-ONLY, both recorded as open: serve the API
+     * under the SPA's own origin at a path prefix, so nothing is cross-origin and no cookie needs
+     * widening; or return the CSRF token in a response BODY, which is strictly stronger than this
+     * because CORS then stops a sibling subdomain from reading it at all.
+     *
+     * The legal shapes of this value, the coupling to FRONTEND_URL, and the config-to-wire agreement
+     * are asserted by tests/Security/SessionCookieScopeTest.php, which carries the full record.
+     *
+     * ── ORIGINAL REASONING, SUPERSEDED BUT NOT WRONG ───────────────────────────────────────────────
+     *
      * SCOPED TO THE ADMIN AND API HOSTS ONLY — never '.<domain>'.
      *
      * The Sanctum SPA guide suggests a leading-dot parent domain. Do not follow it. A cookie scoped

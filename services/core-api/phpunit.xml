@@ -149,6 +149,42 @@
         <env name="BCRYPT_ROUNDS" value="4"/>
 
         <!--
+            THE ARRAY TRANSPORT. config/mail.php's `default` is `smtp` pointing at `mailpit`, which
+            the `test` Compose profile does not run — so without this line every notification test
+            opens a socket to a host that is not there and the suite fails on a connection error that
+            reads as an infrastructure flake rather than as a missing config value.
+
+            `array` is one of exactly two mailers config/mail.php defines, and the other omission is
+            deliberate: there is no `log` mailer anywhere, because MAIL_MAILER=log writes the full
+            password-reset URL (a live credential) into storage/logs.
+        -->
+        <env name="MAIL_MAILER" value="array"/>
+
+        <!--
+            THE SINGLE BIGGEST TEST-HARNESS TRAP IN THE AUTH SURFACE, and it fails as a 500 rather
+            than as a 401.
+
+            config/sanctum.php's `stateful` list has no default and fails CLOSED to [], so
+            EnsureFrontendRequestsAreStateful::fromFrontend() returns false for EVERY request in the
+            suite. The whole stateful pipeline — EncryptCookies, AddQueuedCookiesToResponse,
+            StartSession, PreventRequestForgery, AuthenticateSession — therefore never runs, and
+            Auth::login() then throws "Session store not set on request." which renders as a 500. The
+            symptom points at the controller, never at this file.
+
+            This value is NECESSARY BUT NOT SUFFICIENT: fromFrontend() also needs a Referer or an
+            Origin header and Laravel's test client sends neither. tests/Support/spa.php's
+            spaHeaders() supplies the Origin, which is why it exists as a helper rather than as a
+            line every test remembers.
+
+            `localhost` and not `app.localhost:3000` — the value shipped in .env.example — because it
+            has to match the Origin spaHeaders() sends. fromFrontend() strips only the SCHEME, appends
+            a trailing slash, and Str::is-matches each entry as `<entry>/*`, so the PORT is part of
+            the comparison: `localhost` matches `http://localhost` and does NOT match
+            `http://localhost:3000`. Change one of these two and the other must change with it.
+        -->
+        <env name="SANCTUM_STATEFUL_DOMAINS" value="localhost"/>
+
+        <!--
             Telemetry off in the suite: the PHP SDK has no background thread, so the batch processor
             flushes inline at shutdown and a missing Collector adds its full timeout to every test.
             OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT is absent here for the same reason

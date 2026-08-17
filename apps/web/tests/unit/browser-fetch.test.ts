@@ -110,7 +110,7 @@ describe('refreshCsrfToken', () => {
   });
 
   it('URL-DECODES the cookie, because Laravel percent-encodes the base64 padding', async () => {
-    withCookies('laravel_session=abc; XSRF-TOKEN=eyJpdiI6InQ%3D%3D');
+    withCookies('kb_session=abc; XSRF-TOKEN=eyJpdiI6InQ%3D%3D');
 
     // The single character that matters. Echoing `%3D` verbatim as X-XSRF-TOKEN 419s every mutation
     // while the cookie is perfectly valid — and it reproduces nowhere, because a token whose base64
@@ -141,7 +141,7 @@ describe('refreshCsrfToken', () => {
   it('rejects with error_class null when the cookie is absent — never an invented class', async () => {
     // A third-party-cookie block or a misconfigured SESSION_DOMAIN. Neither is one of the 18, so the
     // slot stays null: unknown, and unknown is permanently non-retryable.
-    withCookies('laravel_session=abc; XSRF-TOKEN_backup=nope');
+    withCookies('kb_session=abc; XSRF-TOKEN_backup=nope');
 
     const error = await refreshCsrfToken().then(
       () => null,
@@ -319,11 +319,23 @@ describe('browserFetch error mapping', () => {
 
 // ── the 419 path (B3 x B2) ───────────────────────────────────────────────────────────────────────
 
-describe('the 419 session-expiry path', () => {
+describe('the CSRF-failure path, which arrives as 401 and is NOT retried', () => {
   /**
-   * A session-authenticated mutation fails CSRF BEFORE it fails auth, so an idle admin gets
-   * `419 CSRF token mismatch` and never sees a 401. Nobody writes this path because nobody hits it
-   * during a working day.
+   * THIS SUITE USED TO ASSERT A PATH THE SERVER CANNOT PRODUCE, and the docblock here was where the
+   * mistake lived: "a session-authenticated mutation fails CSRF BEFORE it fails auth, so an idle admin
+   * gets `419 CSRF token mismatch` and never sees a 401". The middleware ordering in that sentence is
+   * right and the conclusion is wrong. Laravel's `Handler::render()` runs `prepareException()` — which
+   * turns `TokenMismatchException` into `HttpException(419)` — BEFORE `renderViaCallbacks()`, and our
+   * render closure maps `$httpStatus === 419` onto `['authentication', 401]`. The client sees 401.
+   *
+   * The specs passed because they FABRICATED 419 responses through MSW, so the harness proved the branch
+   * handled a status the API never sends. That is the failure mode a fixture-driven suite is most prone
+   * to: it tests the code against the author's belief about the server rather than against the server.
+   *
+   * `browserFetch` now has no 419 branch at all, and deliberately does NOT move the retry onto 401 — the
+   * envelope carries the error CLASS, not the status, so the client cannot tell a CSRF rejection (safe to
+   * repeat, the action never ran) from an authentication failure (not necessarily safe). Retrying a
+   * mutation on that guess is a double-submit on a surface where no endpoint takes an `Idempotency-Key`.
    */
   function csrfRoutes(options: { readonly failures: number }): void {
     let posts = 0;
@@ -347,36 +359,51 @@ describe('the 419 session-expiry path', () => {
     );
   }
 
-  it('refreshes the token, retries EXACTLY once, and sends the new token on the retry', async () => {
-    withCookies('XSRF-TOKEN=stale');
-    withLocation();
-    csrfRoutes({ failures: 1 });
-
-    const result = await browserFetch<{ id: string }>({
-      path: '/api/v1/bots',
-      method: 'POST',
-      body: { name: 'Support' },
-      credential: { kind: 'session', xsrf_token: 'stale' },
-    });
-
-    expect(result).toEqual({ id: '01JBOT' });
-    expect(recorded.map((entry) => `${entry.method} ${new URL(entry.url).pathname}`)).toEqual([
-      'POST /api/v1/bots',
-      'GET /sanctum/csrf-cookie',
-      'POST /api/v1/bots',
-    ]);
-    // The retry carries the REFRESHED, decoded token. Replaying the stale one would 419 again and
-    // bounce a signed-in admin to the login page over a token they could have refreshed.
-    expect(recorded[0]?.headers.get('x-xsrf-token')).toBe('stale');
-    expect(recorded[2]?.headers.get('x-xsrf-token')).toBe('fresh=');
-    // The body survives the retry: losing what the user just typed is the part people notice.
-    expect(recorded[2]?.body).toBe(JSON.stringify({ name: 'Support' }));
-  });
-
-  it('performs a FULL DOCUMENT navigation to /login when the retry 419s too', async () => {
+  it('throws on a 401 without refreshing the token or retrying the request', async () => {
     withCookies('XSRF-TOKEN=stale');
     const location = withLocation();
-    csrfRoutes({ failures: 2 });
+
+    let posts = 0;
+    server.use(
+      http.post(`${ORIGIN}/api/v1/bots`, async ({ request }) => {
+        await record(request);
+        posts += 1;
+        return HttpResponse.json(
+          { error_class: 'authentication', message: 'Unauthenticated.', retryable: false },
+          { status: 401 },
+        );
+      }),
+    );
+
+    await expect(
+      browserFetch({
+        path: '/api/v1/bots',
+        method: 'POST',
+        body: { name: 'Support' },
+        credential: { kind: 'session', xsrf_token: 'stale' },
+      }),
+    ).rejects.toBeInstanceOf(KbError);
+
+    // EXACTLY ONE ATTEMPT. This is the assertion that matters: the endpoint has no `Idempotency-Key`,
+    // so a second POST is a second invitation, a second bot, a second email. `posts` is read rather
+    // than only the recorded list so a handler that stopped recording cannot hide a retry.
+    expect(posts).toBe(1);
+    expect(recorded.filter((entry) => entry.method === 'POST')).toHaveLength(1);
+    // No token refresh was attempted, because there is nothing here to recover from safely.
+    expect(recorded.map((entry) => new URL(entry.url).pathname)).not.toContain('/sanctum/csrf-cookie');
+    // And no navigation from THIS layer. Signing the user out is `features/auth/session.ts`'s job: it
+    // maps `authentication` onto `{status:'anonymous'}` and the SPA renders the signed-out tree. A
+    // navigation here as well would race that render.
+    expect(location.assigned).toEqual([]);
+  });
+
+  it('treats a 419 as an ordinary failure if one ever arrives, with no special handling', async () => {
+    // A REGRESSION PIN ON THE DELETION, not a claim that 419 is reachable. If somebody re-adds a 419
+    // branch, the retry it performs shows up here as a second POST. The fabricated status is fine in
+    // this one spec precisely because the assertion is "nothing special happens".
+    withCookies('XSRF-TOKEN=stale');
+    const location = withLocation();
+    csrfRoutes({ failures: 1 });
 
     await expect(
       browserFetch({
@@ -387,13 +414,9 @@ describe('the 419 session-expiry path', () => {
       }),
     ).rejects.toBeInstanceOf(KbError);
 
-    // `window.location.assign`, never `router.push`. The Router Cache lives in the tab and is keyed
-    // by path, so a client-side push leaves prefetched authenticated RSC payloads that the back
-    // button renders after the session is gone.
-    expect(location.assigned).toEqual(['/login']);
-    // Exactly two attempts. A loop here is a signed-out client hammering the endpoint that is
-    // throttled per account AND per IP.
-    expect(recorded.filter((entry) => entry.method === 'POST')).toHaveLength(2);
+    expect(recorded.filter((entry) => entry.method === 'POST')).toHaveLength(1);
+    expect(recorded.map((entry) => new URL(entry.url).pathname)).not.toContain('/sanctum/csrf-cookie');
+    expect(location.assigned).toEqual([]);
   });
 
   it('does not refresh or navigate for a chat_session credential', async () => {

@@ -1,6 +1,6 @@
 ---
 name: docker-compose-stack
-description: The Compose topology in infrastructure/docker/ — four networks, profiles, volumes, healthchecks, resource limits and stop grace periods, the layer where the other skills' invariants become enforceable. Use whenever adding a service, network, volume, profile, healthcheck or depends_on condition, or when a worker is SIGKILLed mid-job, a container is unexpectedly reachable, or `docker compose up` starts nothing. Edge routing is traefik-routing; CI is github-actions-pipeline. Pairs with kb-architecture-map (the boundaries these networks encode).
+description: The Compose topology in infrastructure/docker/ — four networks, profiles, volumes, healthchecks, resource limits and stop grace periods, the layer where the other skills' invariants become enforceable. Use whenever adding a service, network, volume, profile, healthcheck or depends_on condition, or when a worker is SIGKILLed mid-job, a container is unexpectedly reachable, or `docker compose up` starts nothing. Edge routing is traefik-routing; there is no CI in this repo. Pairs with kb-architecture-map (the boundaries these networks encode).
 ---
 
 # Docker Compose Stack — `infrastructure/docker/`
@@ -54,13 +54,13 @@ that actually matters — `edge ∩ application == {laravel-api, laravel-api-str
 gate written on *`edge` membership* instead of on that **intersection** false-positives on exactly
 this service, which is why `compose-invariants` asserts both facts about it by name.
 
-**Membership of `application` and `data` is pinned exhaustively in CI, by name.** `gates.yml`'s
+**Membership of `application` and `data` was pinned exhaustively in CI, by name, until the workflows were deleted on 2026-08-17.** `gates.yml`'s
 `compose-invariants` check (5b) carries the full list for both, and check (5c) carries
 `laravel-migrate`'s set on its own. Joining either network therefore costs an explicit edit to the
 workflow — that is the review a trust boundary is supposed to get, and it is deliberately a
 maintenance cost, because the alternative admits new members silently. Read the lists out of the
 workflow rather than out of this table:
-`grep -n 'eqset "application members"\|eqset "data members"\|eqset "laravel-migrate networks"' .github/workflows/gates.yml`.
+That check no longer exists, so membership is read straight off the compose files — `infrastructure/docker/README.md` § *The invariants this directory enforces* lists all twelve and marks each as a review property.
 
 `laravel-api-stream` is a second container from the same image running an FPM pool sized for concurrent **streams**: one streamed answer pins one FPM child for its entire life, so a shared pool means a burst of chats takes the admin dashboard down (`laravel-control-plane`, `kb-architecture-map` gotcha 9). Traefik routes the stream paths to it (`traefik-routing`). `laravel-worker` runs Horizon, which gets no `kb.edge=true` label and never joins `edge` — its dashboard renders every tenant's job payloads (`laravel-queues-valkey`).
 
@@ -88,7 +88,8 @@ volumes:
 services:
   # ALL FOUR data-store tags live here and nowhere else — the versions `postgresql-patterns`,
   # `qdrant-hybrid-search`, `seaweedfs-s3` and `valkey-keyspaces` agreed. CI copies three and a drift check
-  # diffs the two files (`github-actions-pipeline`): a tag written only in a workflow is how CI and prod drift.
+  # a tag written only in a workflow was how CI and prod drifted. There are no workflows now, so
+  # this file is the single copy — which is what the deleted drift check existed to protect.
   postgres:  {image: postgres:18-alpine,       networks: [data], volumes: [pgdata:/var/lib/postgresql/data],
               healthcheck: {test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER"], interval: 10s, retries: 5}}
   qdrant:    {image: qdrant/qdrant:v1.18.3,    networks: [data], volumes: [qdrant:/qdrant/storage]}   # minor tracks qdrant-client==1.18.0
@@ -201,8 +202,8 @@ Limits are `deploy.resources.limits.{memory,cpus,pids}` and `deploy.resources.re
 
 ## Gotchas
 
-- **A production deploy silently comes up with dev bind mounts and a published Postgres port.** `compose.override.yaml` is loaded automatically whenever no `-f` is passed, and a deploy script that drifted to `docker compose up -d` in the repo directory gets it. Nothing warns. Always pass explicit `-f compose.yaml -f compose.prod.yaml`, and let CI assert the port and network invariants (`github-actions-pipeline`).
-- **The CI assertion cannot be `docker compose config`, and this used to say it should be.** Three independent reasons, all measured on 2026-08-12. (i) **It does not run on a checkout.** The four `infrastructure/docker/env/*.env` files are gitignored — only their `.example` twins are committed — so `docker compose -f compose.yaml -f compose.prod.yaml config` exits **1** with `env file …/env/core-api.env not found` before rendering a byte. The same is true of `secrets/*`. The "fix" that suggests itself, running `bootstrap.sh` on the runner first, materialises real generated credentials into the CI workspace, which is precisely what `ci.yml`'s secret-scan job refuses to do. (ii) **It renders interpolated values in full**, which is the leak the Gotcha five lines down warns about — an assertion whose output must not be logged is a bad assertion. (iii) **It merges the three files into one document**, and *which file* introduced a network or a port is the finding: `compose.override.yaml` deliberately publishes five data-service ports for local dev while `compose.yaml` and `compose.prod.yaml` must have none outside `traefik`, and an overlay quietly adding `data` to a worker is the failure mode the union across files exists to catch. What CI actually does — `gates.yml`'s `compose-invariants` — is `yq -o=json` each of the three files separately and compare sets with `jq`, needing no `.env`, no secret, and no daemon.
+- **A production deploy silently comes up with dev bind mounts and a published Postgres port.** `compose.override.yaml` is loaded automatically whenever no `-f` is passed, and a deploy script that drifted to `docker compose up -d` in the repo directory gets it. Nothing warns. Always pass explicit `-f compose.yaml -f compose.prod.yaml`, and let CI assert the port and network invariants.
+- **Any re-automation of this must not use `docker compose config`, and this used to say it should.** Three independent reasons, all measured on 2026-08-12. (i) **It does not run on a checkout.** The four `infrastructure/docker/env/*.env` files are gitignored — only their `.example` twins are committed — so `docker compose -f compose.yaml -f compose.prod.yaml config` exits **1** with `env file …/env/core-api.env not found` before rendering a byte. The same is true of `secrets/*`. The "fix" that suggests itself, running `bootstrap.sh` on the runner first, materialises real generated credentials into the CI workspace, which is precisely what the deleted secret-scan job refused to do. (ii) **It renders interpolated values in full**, which is the leak the Gotcha five lines down warns about — an assertion whose output must not be logged is a bad assertion. (iii) **It merges the three files into one document**, and *which file* introduced a network or a port is the finding: `compose.override.yaml` deliberately publishes five data-service ports for local dev while `compose.yaml` and `compose.prod.yaml` must have none outside `traefik`, and an overlay quietly adding `data` to a worker is the failure mode the union across files exists to catch. What the deleted `compose-invariants` gate did was `yq -o=json` each of the three files separately and compare sets with `jq`, needing no `.env`, no secret, and no daemon.
 - **A `networks:` gate passes while checking nothing, because the key has two shapes.** `networks:` is a **list** for most services and a **map** (names → `aliases:`) for `seaweedfs` and `corpus-www`. A naive `contains(["edge"])` is false for every map-form service, so the intersection comes out empty and the gate goes green having compared nothing. Normalise both shapes (`if type=="object" then keys elif type=="array" then . else [] end`), and carry the control that proves the normaliser still works: at least one map-form block must still exist, and no service may resolve to zero networks.
 - **Every provider call fails with a DNS or connect error that reads exactly like a provider outage, minutes after a network cleanup.** Someone added `internal: true` to `application`. An internal network gives its members no route off the host, and `ai-api` plus `ai-worker-crawl` are the two services that must reach the internet. `data` is the internal one; `application` never is.
 - **`depends_on: service_healthy` waits forever on a container that is running fine.** The healthcheck is `["CMD", "curl", …]` and the runtime image has no curl — a distroless or `-slim` base usually does not. The probe exits 127, is counted as unhealthy, and after `start_period` ends nothing ever flips it. Probe with the language runtime (`python -c`, `php -r`) or with the server's own client binary (`valkey-cli ping`, `pg_isready`).
@@ -227,7 +228,7 @@ Limits are `deploy.resources.limits.{memory,cpus,pids}` and `deploy.resources.re
 
 ## Definition of done
 
-- [ ] No `ports:` and no `kb.edge=true` on `ai-api`, any `ai-worker-*`, or `laravel-worker`, in base or any overlay; `laravel-api*` are the only services on both `edge` and `application`; `web` is on `edge` only; `otel-collector` is on `edge` and **not** on `application`. Asserted by parsing the three files individually (`gates.yml` `compose-invariants`), **never** by `docker compose config` — see Gotchas for the three measured reasons.
+- [ ] No `ports:` and no `kb.edge=true` on `ai-api`, any `ai-worker-*`, or `laravel-worker`, in base or any overlay; `laravel-api*` are the only services on both `edge` and `application`; `web` is on `edge` only; `otel-collector` is on `edge` and **not** on `application`. Verified by parsing the three files individually — a `compose-invariants` gate did this until 2026-08-17, and it is a review step now — **never** by `docker compose config` — see Gotchas for the three measured reasons.
 - [ ] Two Valkey services exist; `valkey-cache` has no `volumes:` key, runs `--save ""` and `--appendonly no`, and appears in no backup job. A test asserts both instances' `maxmemory-policy` via `CONFIG GET` against the running containers.
 - [ ] Every worker service sets `stop_grace_period` greater than its own timeout; a test parses the compose file and the worker command lines and compares them.
 - [ ] Every container memory limit exceeds that service's `worker_max_memory_per_child` / model footprint; `WEB_CONCURRENCY` is `1` on `ai-api`.

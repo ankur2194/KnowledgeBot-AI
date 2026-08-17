@@ -220,7 +220,14 @@ class Settings(BaseSettings):
     pg_host: str = "postgres"
     pg_port: int = 5432
     pg_database: str = "knowledgebot"
-    pg_user: str = "knowledgebot"
+    # `kb_app`, NOT `knowledgebot` — the PostgreSQL role split moved every runtime service onto
+    # the non-superuser application role, and `env/ai-service.env.example` was updated to
+    # `KB_PG_USER=kb_app` while this default was not. That is precisely the drift the comment
+    # above promises does not exist, and test_the_defaults_match_the_deployment_template in
+    # tests/unit/test_settings_dsn.py exists to catch it: `assert 'kb_app' == 'knowledgebot'`.
+    # The database name is unchanged — the split renamed the ROLE, not the database, which is
+    # why only this one line moves.
+    pg_user: str = "kb_app"
     pg_password_path: Path | None = None
 
     postgres_pool_min: int = 2

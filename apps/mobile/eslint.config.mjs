@@ -66,11 +66,10 @@ const retryPolicyRestrictedSyntax = {
  * `res.body` is null. It does not throw and does not warn — Hermes fails by SUCCEEDING — so no
  * assertion about the final text can see it, and this suite runs on NODE, where the global streams.
  *
- * Three comments in this package used to say CI greps for the by-name import. It does not, and it
- * never did — the only `expo/fetch` under `.github/workflows/` is prose at `ci.yml:691`, and there
- * is nothing in `gates.yml` or in either ESLint config. Those three comments now say what is true;
- * this array is the enforcement they described, written where the constraint actually lives, so it
- * runs under `pnpm lint` in this workspace rather than depending on a workflow file owned elsewhere.
+ * Three comments in this package used to say CI greps for the by-name import. It never did, and
+ * there is no CI now in any case. Those three comments say what is true; this array is the
+ * enforcement they described, written where the constraint actually lives, so it runs under
+ * `pnpm lint` in this workspace — which is the only tier that exists.
  *
  * WHY NOT JUST LEAN ON JEST, WHICH ALSO GOES RED. Measured, do not re-derive: deleting the import
  * and calling the global fails 20 of the 69 tests — and every one of them reads `KbError: HTTP
@@ -92,7 +91,7 @@ const retryPolicyRestrictedSyntax = {
  * Hermes, it does not defend the `response.body === null` throw at `stream-answer.ts:133`, and it
  * would not see a `fetch` destructured out of a variable that aliases the global. It is a cheap
  * mechanical guard against the realistic edit, not a substitute for the device run — which remains
- * UNPERFORMED (`docs/23`, and `ci.yml:680-689` says so at length).
+ * UNPERFORMED (`docs/23` says so at length; a workflow comment used to as well).
  */
 const streamingFetchRestrictedSyntax = [
   {

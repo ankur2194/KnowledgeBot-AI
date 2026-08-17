@@ -53,26 +53,40 @@ export interface BrowserRequest {
  * permanently non-retryable. Never invent a class name to fill the slot.
  */
 export async function browserFetch<T>(request: BrowserRequest): Promise<T> {
-  let credential = request.credential;
-  let response = await send(request, credential);
+  // `const`, not `let`: there is exactly one attempt now. These were reassignable because the deleted
+  // 419 branch refreshed the credential and re-sent — see the note below for why nothing replaces it.
+  const credential = request.credential;
+  const response = await send(request, credential);
 
-  // 419 is CSRF, and CSRF is a SESSION-ONLY concept. A bearer-authenticated chat_session request
-  // that somehow produced a 419 has no XSRF-TOKEN cookie to refresh — retrying it would send the
-  // same request twice and then bounce an anonymous visitor to an admin login page they have no
-  // business seeing.
-  if (response.status === 419 && credential.kind === 'session') {
-    credential = { kind: 'session', xsrf_token: await refreshCsrfToken() };
-    response = await send(request, credential);
-
-    // Still 419 after a fresh token means the SESSION is gone, not the token. A FULL DOCUMENT
-    // navigation, never router.push: the Router Cache lives in the tab and is keyed by path, so a
-    // soft navigation leaves authenticated RSC payloads that the back button will render.
-    if (response.status === 419) {
-      window.location.assign('/login');
-      throw await toKbError(response);
-    }
-  }
-
+  // ── THERE IS NO 419 BRANCH HERE, AND ITS ABSENCE IS THE CORRECTION ─────────────────────────────
+  //
+  // This function used to open with `if (response.status === 419 && credential.kind === 'session')`,
+  // refresh the CSRF token, retry once, and bounce to /login on a second 419. **That code could never
+  // run against this API.** Laravel's `Handler::render()` calls `prepareException()` — which converts
+  // `TokenMismatchException` into `HttpException(419)` — BEFORE `renderViaCallbacks()`, and our render
+  // closure in `bootstrap/app.php` maps `$httpStatus === 419` onto `['authentication', 401]`. So a CSRF
+  // failure reaches this client as a **401**, and `response.status === 419` is dead for every path.
+  //
+  // The specs did not catch it because they fabricated 419 responses through MSW and asserted the
+  // branch handled them; the premise in their own docblock — "an idle admin gets 419 and never sees a
+  // 401" — had the middleware ordering right and the rendered status wrong.
+  //
+  // ── WHY THE FIX IS DELETION AND NOT THE SAME LOGIC MOVED ONTO 401 ──────────────────────────────
+  //
+  // Because a 401 CANNOT BE SAFELY RETRIED HERE. The envelope carries the error CLASS, not the status,
+  // so the client cannot tell a CSRF rejection (which happens before the action runs, so a retry is
+  // free) from an authentication failure (which may not). Retrying a mutation on that guess is a
+  // double-submit on every endpoint without an `Idempotency-Key` — which is all of them on this
+  // surface, and includes inviting a stranger and mailing them a live capability.
+  //
+  // So a 401 is thrown, `features/auth/session.ts` turns `authentication` into `{status:'anonymous'}`,
+  // and the SPA signs the user out. The cost is the narrow case of a live session whose XSRF-TOKEN
+  // cookie went stale on its own: that user is signed out rather than silently recovered. Two things
+  // keep the window small — `sessionCredential()` re-reads the cookie on every request rather than
+  // caching it, and the login form calls `refreshCsrfToken()` unconditionally before its POST, so the
+  // recovery path a user actually takes works. Closing it properly needs a safe-to-repeat signal from
+  // the server (a distinct error class for CSRF, or an idempotency key), which is a contract change and
+  // is recorded as open rather than guessed at here.
   if (!response.ok) throw await toKbError(response);
 
   // 204/205 carry no body by definition and `json()` on one rejects with a SyntaxError that would
@@ -148,6 +162,30 @@ export async function refreshCsrfToken(): Promise<string> {
     );
   }
   return xsrfToken;
+}
+
+/**
+ * The `Credential` for a session-authenticated call, with no round trip on the common path.
+ *
+ * The union above demands `xsrf_token` for `kind: 'session'` even on a GET, and `readCookie` is
+ * module-private for the reason its own docblock gives — so this lives HERE, reusing that parse,
+ * rather than in `features/auth/` re-implementing it. A second `readCookie` is the exact fork the
+ * next docblock warns about: two parses, one of them eventually missing the `decodeURIComponent`,
+ * and a 419 on every mutation while the cookie is perfectly valid.
+ *
+ * Laravel has already set `XSRF-TOKEN` on any document that has talked to it, so the usual path is
+ * zero requests. A cold document (first paint after a deploy, a hard reload with cleared storage)
+ * pays exactly one `GET /sanctum/csrf-cookie`.
+ *
+ * NOT for the login POST. Login is the one mutation guaranteed to run on a document that may never
+ * have had the cookie, and `refreshCsrfToken()` is the only thing that turns the realistic
+ * misconfiguration (blocked third-party cookie, wrong SESSION_DOMAIN, host missing from
+ * `sanctum.stateful`) into a diagnosable error BEFORE the POST instead of an opaque 419 after it. So
+ * that call site refreshes unconditionally; see src/features/auth/login-form.tsx.
+ */
+export async function sessionCredential(): Promise<Credential> {
+  const existing = readCookie('XSRF-TOKEN');
+  return { kind: 'session', xsrf_token: existing ?? (await refreshCsrfToken()) };
 }
 
 /**

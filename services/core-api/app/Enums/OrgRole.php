@@ -29,7 +29,12 @@ enum OrgRole: string
     public function grants(Permission $permission): bool
     {
         return match ($this) {
-            self::Owner, self::Admin => true,
+            self::Owner => true,
+            // Admin holds everything EXCEPT owner promotion and demotion. §6.3 excludes destructive
+            // org-level actions, and creating a second owner is the one action the role that
+            // performed it cannot undo: the new owner may immediately demote or remove them. An
+            // admin who needs another owner asks an owner.
+            self::Admin => $permission !== Permission::MembersManageOwner,
             self::KnowledgeManager => $permission === Permission::ProvidersView,
             self::Analyst => false,
         };

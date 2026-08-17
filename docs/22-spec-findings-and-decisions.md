@@ -1,5 +1,12 @@
 # Spec Findings and Open Decisions
 
+> **⚠ EVERY MENTION OF A CI GATE BELOW IS HISTORICAL.** `.github/` was deleted on 2026-08-17 and
+> nothing replaced it — the record is § *Removing CI/CD* at the foot of this file. The gate references
+> throughout were deliberately **not** rewritten: this document describes what was true when each
+> finding was written, and erasing the gates from it would make it less accurate rather than more. So
+> read "the gate asserts X" as "a gate asserted X until 2026-08-17, and nothing does now", and take
+> `CONTRIBUTING.md` § *The invariants that used to be enforced, and now are not* as the live list.
+>
 > Not part of the original specification. This records defects, ambiguities, and decisions surfaced while authoring the skill library — the places where implementing `KnowledgeBot-AI.md` literally would produce a bug, and the places where it leaves a real choice open.
 >
 > Items marked **DECIDED** were resolved during authoring and should be ratified as ADRs. The eight
@@ -3199,6 +3206,20 @@ defect one layer down: **a scheduled command is a claim that something is being 
 operator reading `console.php` concludes token hygiene is handled. `console.php`'s own convention is
 to comment out commands that cannot run yet, which is the fix. **Owner:** `control-plane-engineer`.
 
+**(b) CLOSED 2026-08-13, and the framing above was wrong in a way that changes the fix.** The entry is
+commented out, so the false claim is gone. But *"the command class ships, the table does not"* filed it
+beside `queue:prune-failed` as though both were waiting for a migration, and under
+[ADR-038](19-repo-structure-adrs.md#adr-038-one-authentication-mechanism-on-the-admin-surface-enforced-by-three-negatives)
+it is **permanently** moot on this surface rather than pending: nothing mints, so a pruner is not an
+entry waiting for a table but a no-op with a cron slot, and scheduling it would suggest a second
+credential exists where the whole point is that one does not. A migration would therefore **not** make
+it legitimate; a future mobile personal-access-token surface landing four things at once would. The
+banner in `routes/console.php` now says exactly that, and it records the measurement the original
+finding did not have — against the applied migrations the command **exits 1** with `SQLSTATE[42P01] …
+relation "personal_access_tokens" does not exist`, so it would not prune nothing, it would fail once an
+hour forever, dispatching `ScheduledTaskFailed` while `schedule:list` displayed the entry as handled.
+Full entry at § **H4**, which also records what the owning skill still owes.
+
 **One count in this entry is inherited and is worth flagging rather than repeating.** These are
 referred to elsewhere in this effort as the *eighteenth and nineteenth* false enforcement claims,
 continuing from F6's *seventeenth*. That sequence is built on a conflation: the enforcement-claim
@@ -4319,3 +4340,1193 @@ larger radius — the sweep already went to 12.0 and found the other failure mod
 **The signal itself is unaffected and stays.** It is five unit tests, no tunable, `ocr_cfg_version()`
 unmoved, and it costs nothing when the state never arises — which the sweep also just demonstrated
 across seven parses.
+
+## The auth-and-session decisions — ADR-038…043
+
+One effort, six batches, `services/core-api` and `apps/web`: login, logout, `GET /me`, org switch,
+password reset, email verification, invitation-gated registration, org invitations, and a real
+`audit_logs` table. It made **forty-four numbered decisions** and produced **six** ADRs, and the ratio is
+the first thing worth recording. Most of the forty-four record no architectural choice — which file a
+helper lives in, which inherited parameter must stay untyped to avoid an LSP fatal, which Vitest project
+needs a `define` for a `process.env` read. The six below are the ones a future change can *violate*, and
+each one names alternatives that were genuinely on the table.
+
+**Numbering, stated once.** The effort's decisions are cited as **plan D1…D44** throughout, because
+§ *The rulings of 2026-08-12* § G6 already uses the bare label `D7` for an unrelated tracker item and the
+two would otherwise collide on the page. The plan file is
+`~/.claude/plans/let-s-build-user-auth-refactored-avalanche.md`; it is the authoritative record of the
+effort and is not in this repository.
+
+**What is deliberately *not* an ADR, and why.** Plan D1 (the route table, and the fact that `/me` and the
+session routes cannot carry `org.member` because `TenantContext::handle()` throws when the
+`{organization}` segment is absent) is a *consequence* of ADR-038's placement, not a separate decision —
+it is recorded inside it. Plan D4 (`remember` dropped), D12 (FormRequests flat rather than under an
+`Auth\` subnamespace), D14…D19, D29…D31, D35, D37, D38, D41, D43 and D44 are implementation rulings, and
+those of them that a future reader could re-open are recorded as findings below or in the code comment
+that carries the measurement. Two are recorded as **reversals** rather than as decisions, because their
+value is the refutation and not the outcome — see § *The six reversals* at the end of this section.
+
+### ADR-038 — one mechanism on the admin surface, and the option that made a test unwritable
+
+Full decision and consequences: [ADR-038](19-repo-structure-adrs.md#adr-038-one-authentication-mechanism-on-the-admin-surface-enforced-by-three-negatives).
+The option set, with what each costs:
+
+**(a) Reject the bearer credential at the group boundary.** `RejectBearerToken` prepended to the `api`
+group; no trait, no table, no prune schedule. *Costs:* the `laravel-sanctum-auth` Definition-of-done test
+becomes unwritable, because `tokenCan()` will not exist to call; and a future PAT surface starts from
+nothing rather than from a half-built mechanism.
+
+**(b) Create `personal_access_tokens` in the framework's shape** so `PersonalAccessToken::findToken()`
+returns `null` and the bearer branch answers 401 honestly. *Costs:* it makes the wrong credential merely
+*fail* rather than stating the invariant, and it plants a table — with its own index growth, its own
+prune-schedule question and its own `sanctum.expiration` interaction — for a credential nothing mints.
+It also leaves the second authentication path live in code, so the drift the rule exists to prevent
+remains one `createToken()` call away.
+
+**(c) Add `HasApiTokens` to `User` for the test.** *Costs:* this was the original plan and it is the one
+that was overturned. It grants the admin surface a second credential type in order to make one assertion
+writable. The measurement that killed it is in vendor: `Guard::__invoke()` checks
+`supportsTokens($user)` and returns the session user **unchanged** when the trait is absent — so the
+trait buys authentication nothing, and its only effect is that `tokenCan()`, `createToken()` and
+`currentAccessToken()` begin to exist.
+
+**Ruled (a).** The property the lost DoD test protected — *abilities are never the gate* — is now three
+negatives in `tests/Security/SingleCredentialMechanismTest.php`. **The honest limitation:** that is a
+stronger property and a *different claim*. The original test would have demonstrated that a
+`TransientToken`'s `can()` returns `true` for every string; nothing here demonstrates it, because no code
+path can construct one. The gotcha survives as doctrine, and the next person to add ability middleware to
+this codebase will not be stopped by a measurement — they will be stopped by a grep.
+
+**One consequence found while writing it.** The pre-existing unauthenticated **500** that (b) was
+partly proposed to fix is fixed by (a) as a side effect: any request to an `auth:sanctum` route carrying
+a non-empty `Authorization: Bearer` and no valid session reached `findToken()` against a table no
+migration creates → `42P01` → 500 `internal_dependency`, from anyone, with no credential at all. It
+predates this work and is not caused by it.
+
+### ADR-039 — opaque hashed rows, and the signed-URL option that cannot be validated at all
+
+Full decision: [ADR-039](19-repo-structure-adrs.md#adr-039-emailed-capabilities-are-opaque-hashed-database-rows-never-signed-urls-and-never-a-path-segment).
+
+**(a) `URL::temporarySignedRoute()` for all three flows.** *Costs:* it does not work here, and that is a
+mechanism rather than a preference. `URL::hasValidSignature($request)` validates against
+`$request->url()`, which is the **API** URL, while the URL the recipient clicked is the **SPA** URL — so
+validating after the SPA echoes the parameters back means reconstructing and re-verifying the signed SPA
+URL by hand, and any difference in query-parameter order or percent-encoding between what Laravel signed
+and what the SPA echoes fails `hash_equals` silently. That is a bug that reproduces on some mail clients
+and not others. Three further costs, each of which would decide it alone: a signed URL additionally
+carries the user id and `sha1(email)`; it is replayable until `expires`, so single use is inexpressible;
+and it is not revocable without a denylist, which is a table anyway.
+
+**(b) One opaque 32-byte token per flow, stored as a digest.** *Costs:* one extra table and one prune
+entry. `password_reset_tokens` keeps the framework's bcrypt `token text` because
+`DatabaseTokenRepository` writes it, so the *shape* is not uniform even though the *doctrine* is —
+`bytea` digests for the two new tables, a bcrypt string for the framework's.
+
+**(c) (b), but with the token as a path segment** so the routes read as REST. *Costs:* a capability in a
+path lands in Traefik access logs, in `Referer` and in browser history, and it re-opens a prefix hazard
+where `/invitations-<anything>` can be mistaken for a route in the group.
+
+**Ruled (b), with plan D2's no-path-segment rule.** Two things worth carrying forward. First, `email`
+appears in the reset URL and only there, because `PasswordBroker::reset()` needs it to find the user and
+the token row is keyed by it — it is the framework's own shape, and the address is in the recipient's own
+mailbox. The verification and invitation URLs carry no id, no email and no hash. Second, plan D13 made
+the field name `token` in **every** FormRequest that accepts one; the design had used
+`invitation_token` in one of five, and `form-drift.test.ts` asserts path-set equality against the Zod
+schema, so one name is not tidiness — two names is a red suite or a silently unmirrored field.
+
+**The accepted residual is the interesting one.** A queued notification puts the **plaintext** token in
+the Valkey job body for the life of the job. Every alternative is worse: not queueing re-opens the
+timing oracle ADR-040 closes, and re-minting inside the job changes the token after the row was written.
+So the Security suite asserts the plaintext is absent from `storage/logs`, from every log line and from
+the response body, and **deliberately not** from Valkey — an assertion that would fail on correct code.
+
+### ADR-040 — account non-enumeration, and why it is not the deny-oracle property
+
+Full decision: [ADR-040](19-repo-structure-adrs.md#adr-040-account-non-enumeration-is-a-response-shape-rule-and-it-is-not-the-deny-oracle-property).
+
+The two properties are distinct and the documents must not let them be confused, because the *tests* for
+them are different in kind:
+
+| | Deny oracle (`DenyOracleTest`, `toDenyAsNotFound()`) | Account non-enumeration (`AccountEnumerationTest`) |
+|---|---|---|
+| Claim | a **denial** is byte-identical to a **record that never existed** | the **N ways of failing one endpoint** are byte-identical to **each other** |
+| Surface | `rt/*` and `sdk/*` — the public ones | `api/*` — the admin one, which *deliberately* admits record existence with a 403 |
+| Reference | a **live control**: a real request to a path on the same surface with certainly no route | the sibling failures themselves; **never** a literal and never a missing route |
+| Wrong test it invites | using it on an admin route, where it **passes while asserting the wrong property** | turning an admin denial into a 404 "to be safe", which fails the deny test's admin arm and makes its public arm vacuous |
+
+**The options that lost.** **401 for bad credentials** — rejected because a 401 *from* `/login` is a
+redirect loop in the SPA's global handler, and because the taxonomy argument cuts the other way anyway:
+the login request carries no session or token to be invalid, it carries a form, and the form failed
+business validation. **A message on `password`** — that is the oracle in one sentence. **429 on a
+broker-throttled forgot-password** — probing twice turns the throttle itself into the oracle, because a
+throttle proves the first probe created a token, which proves the account exists; all three broker
+outcomes collapse to one 200. Our own `password-request` limiter still returns a real 429, and discloses
+nothing because it keys on `acct:` **and** `ip:` and fires identically for existing and non-existing
+addresses. **`unique:users,email` on register** — that makes `/register` a live account-existence oracle
+for anyone who can POST. **Distinguishing unknown-address from wrong-password in the audit `reason`**
+(plan D27) — it costs a second `retrieveByCredentials()` probe *outside* `SessionGuard::attempt()`'s
+200 ms timebox, which reintroduces in our own code the differential the framework spends a timebox
+closing; an investigator can ask the same question of the same database later.
+
+**The fifth invalid-invitation case was found during implementation, not design** (plan D33): a pending
+invitation into a **suspended organization**. The design enumerated four. A 409 there would prove both
+that the token was real *and* a fact about a tenant the caller is not in, so it folds into the same
+byte-identical refusal.
+
+**The cost nobody likes.** A recipient whose invitation genuinely expired is told only that it is no
+longer valid, and support cannot distinguish that from a typo without reading the database. That is the
+price of the property, it is paid every time, and the answer when it becomes intolerable is an
+authenticated read surface — not a richer public error body.
+
+### ADR-041 — the audit table, and the two-skill contradiction it resolved
+
+Full decision: [ADR-041](19-repo-structure-adrs.md#adr-041-audit_logs-is-append-only-and-monthly-range-partitioned-and-the-write-failure-policy-is-per-operation).
+
+**The contradiction was real, and both sides were right.**
+`.claude/skills/kb-observability-conventions/SKILL.md` and its Definition of done state that *an audit
+write failure aborts the operation*. The brief for this work stated that an audit write failure *must not
+turn a successful login into a 500*. Neither is wrong; they describe different operations. The options:
+
+**The line between the two, stated as a rule rather than as a list** — see **H14** for why that
+matters: `ON_FAILURE_ABORT` where the audited change can still be rolled back, `ON_FAILURE_LOG` where it
+cannot. For a session act the cookie has already been issued or destroyed and there is no transaction
+left; for the forgot-password request the mail is already dispatched and the row is written *inside* the
+broker's 200 ms timebox, where an extra failure branch would be a timing differential. The options:
+
+**(a) Abort always.** *Costs:* a failed audit INSERT on the login path returns 500 to a caller whose
+session cookie has already been issued — the caller **is** logged in, the response says otherwise, and
+the row is lost as well. There is no transaction left to roll back at that point, so "abort" does not
+even restore consistency.
+
+**(b) Log always.** *Costs:* a role change can succeed with no record of who made it. That is the exact
+failure the audit table exists to prevent, and it fails silently.
+
+**(c) Per operation, in one constant.** *Costs:* two behaviours to understand instead of one, and a new
+operation has to choose. Chosen, because the choice is *forced* — the constant is the only place a
+policy can be set, so a caller cannot accidentally pick the lenient policy for a state change, which a
+per-call-site argument would invite.
+
+**(d) Per operation, chosen by the caller.** Rejected outright for the reason (c) is chosen.
+
+**Two constraints (c) puts on every caller, and they are easy to violate by accident.** Every
+ABORT-policy audit call must sit in **one transaction with the state change it records** — `AuditLogger`
+deliberately opens none, because a service that transacts around a single INSERT gives the appearance of
+atomicity without the fact. And `kb:create-audit-partitions` must **stay scheduled**: at 00:00 on the
+first of a month past the partition runway, every audit insert fails with `23514` and every ABORT-policy
+action returns 500 — total, instant, on a clock. Its sibling `kb:prune-audit-partitions` is deliberately
+**not** scheduled, because an unattended DROP of whole months of the compliance record is a retention
+policy rather than a maintenance task.
+
+**What the append-only guarantee actually rests on, measured rather than assumed.** On live PostgreSQL
+18.4 the ACL is correct — `pg_class.relacl` shows no UPDATE and no DELETE on the parent or any partition
+— and `UPDATE audit_logs SET operation='tampered'` still returned **`UPDATE 1`**, because `rolsuper` is
+true for the only login role. The test asserts the ACL through `pg_class.relacl` and **never** through
+`has_table_privilege()`, which answers "yes" for a superuser and would therefore pass for the wrong
+reason; it `markTestSkipped`s the enforcement half with the reason stated. Open as **H3**.
+
+**And the column spelling was a two-writer bug in waiting** (plan D32): the migration documented
+`'user'`-style `subject_type` values while every writer in the tree passed `::class`. Two spellings of
+one fact in a free-text column means a query for a subject finds half its rows. FQCN wins on three
+counts — it is what the code already produces, `::class` is compiler-checked where a literal is not, and
+it matches Laravel's morph convention so a future `morphTo()` needs no map.
+
+### ADR-042 — invitation-gated registration, and the four decisions tooling made for us
+
+Full decision: [ADR-042](19-repo-structure-adrs.md#adr-042-registration-is-invitation-gated-and-the-session-wire-is-flat-enveloped-and-total).
+
+**Onboarding options.** **(a) HTTP self-service signup** — rejected: no invitation, no tenant, and no
+bound on abuse, and it would need an organization-creating route, which is the one thing this scope
+refuses. **(b) A seeder** — rejected: `DatabaseSeeder` stays empty per its own docblock, and a seeder is
+not an operator-facing artifact. **(c) An artisan command that refuses to run when any organization
+exists.** Chosen. Its four safety properties are each independently sufficient, and the one worth
+re-reading is *idempotent by refusal, not by upsert*: an upsert would let the command silently **change**
+an existing owner, which is precisely the backdoor a bootstrap command is suspected of being.
+`--print-link` exists because bootstrapping an environment with no working mailbox is a real situation
+and gating it produces a lockout; it is off by default and its help text says it writes a credential to
+the terminal.
+
+**Four wire decisions were forced by tooling rather than chosen, and the distinction matters** because
+each has an aesthetic reading that is wrong:
+
+- **Flat and total** (plan D5): `tests/Contract/OpenApiDocumentTest.php` requires every resource
+  component be **closed** (`additionalProperties: false`) *and* **total** (declared ⊆ required). There
+  are no optional fields available, so "make `current_organization_id` optional" is not a choice.
+  `organizations` lists **all** memberships with `status`, not only active ones, so a suspended user can
+  see why their list is greyed out; `current_organization_id` is only ever an active membership or
+  `null`.
+- **The `data` envelope** (plan D23): `ResponseShape::$properties` maps a response *key* to a
+  `ProvidesOpenApiSchema` class, so an unwrapped body is literally unpublishable by `kb:dump-openapi` —
+  and both endpoints that predate all auth work already wrap. This is how a **real cross-plane break**
+  was caught: the MSW fixtures had been written unwrapped against an assumption rather than against the
+  controllers. It was fixed on the **fixture** side, because a fixture that disagrees with the server is
+  exactly the bug the MSW layer exists to catch.
+- **`{"data":{"invitations":[…]}}` rather than `{"data":[…]}`** (plan D26): `DumpOpenApiCommand` cannot
+  express "an array of" for a response key, while the contract test requires `additionalProperties:
+  false`, which an array schema cannot carry. Recorded as a dumper gap (**H2**), not as a style.
+- **`resend` as a single-action controller** (plan D26): `arch()->preset()->laravel()` restricts a
+  controller's public methods to the seven resource verbs plus `__construct`/`__invoke`/`middleware`, so
+  `InvitationController@resend` failed the Arch suite — which was the preset working.
+
+**`RegisterRequest` validates no `email`** (plan D3) for two independent reasons: it removes a disclosure
+branch, and the drift suite's path-set equality would otherwise force `email` into the Zod schema for a
+field the server does not read. **The one deliberate disclosure in the whole surface** is register's
+already-registered case, and it is acceptable precisely because the caller has already proven possession
+of an invitation token bound to that exact address, which an org admin deliberately sent there.
+
+### ADR-043 — the `#[ScopedBy]` omission, and why the obvious escape hatch is the worst option
+
+Full decision: [ADR-043](19-repo-structure-adrs.md#adr-043-two-org-owned-models-deliberately-carry-no-scopedby-because-organizationscope-fails-closed).
+**This is the ADR that is not in the effort's own suggested grouping**, and it is here because it is a
+decision a future change can violate with a one-line edit that looks like a correction. It also has the
+sharpest option set of the six.
+
+**(a) Attach `#[ScopedBy(OrganizationScope::class)]` like every other org-owned model.** *Costs:* the
+guest read paths — invitation preview, register, accept, email verify — run **before** any organization
+is known, `OrganizationScope::apply()` fails closed with `whereRaw('1 = 0')`, and every lookup returns
+nothing **always**. The failure renders as *"this invitation is no longer valid."* — a plausible,
+correct-looking message. Registration would be totally broken with green-looking code, no exception and
+no log line. Not viable.
+
+**(b) Attach it, and call `withoutGlobalScope(OrganizationScope::class)` on the guest reads.** *Costs:*
+this is the option someone will reach for, and it is **worse than (c)**, which is the part worth
+recording. The tenancy gate greps `withoutGlobalScopes\(` — **plural** — so the singular call is
+invisible to CI while the model reads as correctly scoped in review. The result is a real bypass with a
+green gate, which is strictly worse than a stated exemption with no gate. Both models name this rejection
+in their docblocks so the next reader finds the reasoning at the call site.
+
+**(c) Omit the attribute, and carry isolation in the read path instead** — guest reads by `token_hash`
+(256-bit random, unique index), admin reads through a repository method taking `organization_id` as a
+required positional argument. **Chosen**, matching the pre-existing decision on `OrganizationUser`.
+*Costs:* it is a convention rather than a mechanism, and it does not fail closed. A repository method
+that later grows an `organization_id`-optional overload silently loses the entire guard, and no test
+would notice.
+
+**The consequence that hurts is about the models that come next, not these two.** The reflection arch rule
+*"every org-owned model carries `#[ScopedBy]`"* stays disabled, because three models now claim the
+exemption and enabling it needs an annotated exception list carrying each model's reason (the
+`// tenancy-exempt: <reason>` form the tenancy skill's Definition of done already establishes). Until that
+list exists a **new** org-owned model can ship unscoped with nothing complaining. These two are exempt for
+a stated reason; the fourth might be exempt by accident, and that is the direction the missing rule fails
+in. Recorded as the ADR's revisit condition, and as **H1** for the grep half.
+
+### The six reversals
+
+Recorded because a ruling kept only as its outcome invites the same question next quarter — ADR-036's
+spirit applied to this effort's own history. Four of these overturned an earlier decision *by the same
+author*, and two refuted a premise that had been published as measured.
+
+**1. Plan D16 → D25 — the framework's `verified` middleware would have 500ed a `curl`.** D16 created
+`EmailVerificationService` as a throwing placeholder so PHPStan would not be red for a known reason
+across two batches. D25 then replaced Illuminate's `EnsureEmailIsVerified` with our own, because
+Illuminate's redirects a non-JSON caller to a route named `verification.notice` — which does not exist
+here and never will, since no HTML is served and the notice is a Next.js page on another host. That
+branch is reachable with a plain `curl` carrying a valid session cookie and no `Accept` header, and
+renders as an unauthenticated-adjacent **500**. Ours throws `AuthorizationException` and has no redirect
+branch, so the render closure applies the surface-aware 403-admin / 404-public split.
+
+**2. Plan D24 — the design's own rate limiter was a global choke.** As written, `throttle:verification`
+keyed on the literal `'anon'` when there was no authenticated user, so **every anonymous caller on the
+internet shared one bucket of six verification attempts per hour**. `POST /auth/email/verify` is
+necessarily a guest route, because mail links open in another browser. The implementing agent shipped
+the design verbatim and documented the hazard rather than silently diverging; the repair keys on the
+token digest instead. Worth preserving because the defect is invisible in review — the limiter *looks*
+per-caller.
+
+**3. Plan D28 — an audit gap the implementer refused to paper over.** Resend **mints a new bearer
+capability** and kills the old one, and wrote no audit row: an admin could mail an unbounded number of
+live invitation links to a third party's mailbox and the trail would show one `created` from months
+earlier. The implementer declined to reuse the `created` operation, correctly — that would make the
+table assert one invitation was created twice and break the "count creations to count invitees" reading
+— and added `organization.invitation.resent` as a new ABORT-policy operation inside `rotateToken()`'s
+transaction, plus a new `invitation-resend` limiter keyed on the **invitation** rather than the actor.
+The existing `throttle:admin` keys on the actor at 120/min and therefore cannot bound per-recipient
+volume at all.
+
+**4. Plan D34 and D36 — the implementation forced two copy-and-status decisions the design got wrong.**
+D34: the shared error handler produced *"You do not have access to this."* for an unusable
+verification link — taxonomy-correct (`authorization`/404, since the capability addresses nothing the
+caller may act on) and **wrong user-facing copy**, telling someone who clicked a link in their own inbox
+that they lack a permission, and contradicting the explanation rendered beneath it. The fix is a
+per-screen `copyFor` override used in exactly one place, asserted by what it **replaces** so deleting it
+goes red. D36: a suspended organization answered 409, which the client rendered as *"Something on our
+side is unavailable. Try again shortly."* — false twice over, and unrepairable client-side because the
+envelope carries the **class**, not the status, so a suspended org is indistinguishable from a real 503.
+The 409 → `internal_dependency` mapping is deliberate and has a live tripwire test, so the fix was to
+stop emitting 409.
+
+**5. Plan D39 → D40 — a schema that was correctly refused, then correctly shipped.** D39 shipped the
+invite form with **no Zod resolver**, on the rule that a schema ships *with* its manifest and a drift
+test or it does not ship. D40 closed it in the order the rule requires, once the manifest existed. What
+the move bought is a check neither copy could have had: the drift suite probes `in:` **member by
+member** against `Rule::in(OrgRole::values())`, where a local `readonly Role[]` annotation caught only a
+role the server **dropped** and was blind to one the server **added** — the direction that actually
+happens, whose symptom is a select silently missing an option with nothing red. Mutation-verified both
+ways.
+
+**6. Plan D42 — an agent measured its predecessor's formula and found it wrong.** The drift harness was
+predicted to need blanket suppression of email size probes, with `'a'.repeat(242) + '@example.com'` given
+as the sized generator. Measured against `egulias/email-validator 4.0.4` under
+`RFCValidation + NoRFCWarningsValidation` — what `ValidatesAttributes.php` builds for `rfc,strict` — that
+address is **invalid** (`LocalTooLong`, 242 > 64), so the harness would have asserted a server
+acceptance that does not happen. The replacement synthesizer (local ≤ 64 plus a dot-atom domain) is
+measured valid at **every** length 6…254 and invalid at 255, pointing the same way `max:254` does.
+Suppression was made the last resort deliberately, because `min:12` on a password and `max:254` on an
+address are precisely the numbers most likely to drift and the client-side spec asserts them against
+hard-coded constants that cannot notice the **server** moving. This is the entry to read first: the
+predecessor's figure was stated with a specific number and a specific rule, which is what made it
+checkable — and it was wrong.
+
+**A seventh, adjacent, worth one line because it is an ordering lesson rather than a reversal:** plan
+D44 found `pnpm contracts:typecheck` red while Vitest was green, on a `test/**` file fixed in an earlier
+batch. Vitest does not typecheck, and CI runs both. **A `test/**` change is not verified by running the
+tests.**
+
+## Found while building auth and session — 2026-08-13
+
+Numbered **H1…H14**, a namespace of its own, appended and never inserted. The detector is a fifth one
+again: not a document that went false (R1–R8), not an unsatisfiable requirement (F11–F12), not an inert
+knob (F13) — these are **things the effort chose not to fix, each with a named owner**, plus the traps
+in the test harness that make a correct assertion report the opposite of the truth. That last group is
+the one to read: a harness fact that inverts an assertion is worse than a missing test, because the
+missing test is visible and the inverted one is green.
+
+**H14 is the odd one out and was found by writing this section rather than by the effort**, which is
+recorded rather than smoothed over: the ADR-041 entry could not be written without stating the
+ABORT-versus-LOG rule, and stating it surfaced a count in the implementation's own docblock that the
+implementation had already made wrong.
+
+Every claim below was verified against the tree on 2026-08-13, and per ADR-036 each one leads with the
+command that re-measures it rather than with a line number.
+
+### H1 — the tenancy gate greps the plural `withoutGlobalScopes(` only
+
+```bash
+grep -n 'withoutGlobalScopes\?\\(' .github/workflows/gates.yml
+```
+
+The pattern in the *Tenant scoping* job is `withoutGlobalScopes\(` — **plural**. The singular
+`withoutGlobalScope(` is a per-scope bypass the gate cannot see, and it is exactly the escape hatch
+someone reaches for when `OrganizationScope`'s fail-closed branch breaks a guest read. That is not
+hypothetical: it is the **rejected alternative in [ADR-043](19-repo-structure-adrs.md#adr-043-two-org-owned-models-deliberately-carry-no-scopedby-because-organizationscope-fails-closed)**,
+and the reason the ADR rejects it is that the bypass would be invisible while the model looked correctly
+scoped in review. Both `OrganizationInvitation` and `EmailVerificationToken` name the rejection in their
+docblocks, so a grep for `withoutGlobalScope(` in `app/Models/` currently returns those two comments and
+no call.
+
+**The fix is one character:** widen to `withoutGlobalScopes?\(`. **Owner:** `platform-devops-engineer`
+(the file is `scripts/`-adjacent CI and not `docs/`'s to edit). Note the gate already has the
+`tenancy-exempt:` escape and the `$KB_PHP_COMMENT_LINE` comment filter, so widening it does not make the
+two docblocks red.
+
+### H2 — three `DumpOpenApiCommand` gaps, one of which shaped a published wire format
+
+> **Status, 2026-08-13:** (a) and (c) are **closed**, each by a different fix from the one recorded below;
+> both disagreements are preserved in place. (b) remains open and is the one that matters, because it is
+> already visible on the public wire.
+
+```bash
+grep -n 'getActionMethod\|properties. => .properties' services/core-api/app/Console/Commands/DumpOpenApiCommand.php
+```
+
+**(a) An empty `#[ResponseShape]` publishes invalid JSON Schema.** `operation()` emitted
+`'required' => array_keys($properties)` and `'properties' => $properties` unconditionally, so a bodyless
+success (`properties: []`) json-encoded `properties` as `[]` — a JSON array where the schema requires an
+object.
+
+**CLOSED, and NOT by the fix this finding recommended.** The paragraph above proposed `(object) $properties`;
+`responseShapeFor()` now **refuses at dump time** instead, with a message naming the action
+(`Controller::method`) and pointing at `AcknowledgementResource::ok()`. The disagreement is recorded rather
+than overwritten, because the reasoning is the interesting part: casting makes the dumper *accept* the shape
+the convention forbids, and the convention is not stylistic. Under plan D23 the SPA unwraps `data` once at
+the fetch boundary (`browserFetch<{data: T}>` then `.data`), so a 204 hands that boundary `undefined` at a
+call site with no branch for it — an emitted-but-valid empty schema would have published that as supported.
+Refusing keeps D8 enforced rather than merely observed, and if a bodyless success is ever wanted, this guard
+is what must be deleted **deliberately**, together with the `content` omission and the client's unwrap.
+
+**(b) It cannot express "an array of" for a response key.** This is the gap that **forced a wire
+format**: `{"data":{"invitations":[…]}}` rather than `{"data":[…]}` (plan D26), because
+`tests/Contract/OpenApiDocumentTest.php` also requires every component be `additionalProperties: false`,
+which an array schema cannot carry. So a tooling limitation is now visible on the public wire, and
+closing it later would be a breaking change to two endpoints rather than a dumper fix.
+
+**(c) `getActionMethod()` returns the class name for a single-action controller.** Register a route as
+`Route::post($uri, SomeController::class)` and `getActionMethod()` yields the **class name**,
+`method_exists()` fails, and the dump aborts with *"is not a controller action"* — taking the whole
+generated OpenAPI document with it.
+
+**CLOSED**, by an `actionMethod()` helper that reads `$route->getAction('uses')` — what the router actually
+dispatches — through `Str::parseCallback($uses, '__invoke')`. Closure routes still fall through to the
+existing "is not a controller action" refusal. No document change: `routes/api_admin.php` already spelled
+`'__invoke'` out, and that explicit form is kept as belt-and-braces with its comment rewritten to say it is
+no longer load-bearing.
+
+**AND THE MECHANISM ABOVE WAS STATED SLIGHTLY WRONG HERE**, which is worth correcting rather than deleting,
+because the wrong version is the one somebody would reason from. This finding said `RouteAction::parse()`
+"only appends `@__invoke` when the action is a bare string". It appends to `uses` whenever there is no `@`.
+The actual failure is an ORDERING one: `Router::convertToControllerAction()` writes the `controller` key
+**first**, `RouteAction::makeInvokable()` appends `@__invoke` to `uses` afterwards, and
+`getActionName()` reads `controller` — so the two keys disagree and the older one wins.
+
+**Owner:** `control-plane-engineer`. (a) and (c) are closed. **(b) is the one that remains**, it is a design
+question rather than a small fix, and the honest statement is unchanged: the public wire now depends on the
+answer, so closing it later is a breaking change to two endpoints rather than a dumper fix.
+
+### H3 — the `audit_logs` REVOKE is an audit artifact, not an enforced control
+
+```bash
+grep -rn 'POSTGRES_USER' infrastructure/docker/
+```
+
+Plan D21, and it is written into the migration rather than papered over. Measured on live PostgreSQL
+18.4: `pg_class.relacl` shows no UPDATE and no DELETE on the parent or on any partition — the ACL is
+exactly right — and `UPDATE audit_logs SET operation='tampered'` still returned **`UPDATE 1`**, because
+`rolsuper` is **true** for the only login role. Compose's `POSTGRES_USER` creates a superuser, and a
+`REVOKE` from a superuser is decoration. Two further limits, both stated in the migration because a
+security control *believed* to be stronger than it is, is worse than a missing one: **`TRUNCATE` is not
+revoked**, deliberately, because the Integration suite's `DatabaseTruncation` needs it on every table and
+it erases evidence as thoroughly as a `DELETE`; and **a table owner can `GRANT` the privilege back to
+itself** — PostgreSQL owners hold no *implicit* privileges, so the REVOKE does bite a non-superuser
+owner, but they retain the right to re-grant. Real append-only therefore needs the application role **not
+to own the table**, which is the same role split.
+
+**One non-obvious thing the migration gets right and a naive version would not:** privileges on a
+partition are **not** inherited from the parent. Access routed *through* the parent checks only the
+parent, but `UPDATE audit_logs_2026_08 SET …` checks the partition, and a partition created by this role
+is owned by it with the owner's default privileges — so revoking only on the parent leaves every
+partition writable by name. The REVOKE covers the parent and every existing partition, and
+`kb:create-audit-partitions` re-issues it for each new one
+(`grep -n REVOKE services/core-api/app/Repositories/Eloquent/EloquentAuditLogPartitionRepository.php`) —
+which is the line to check if a future partition creator is written anywhere else.
+
+Append-only therefore currently rests on three things and not on the database: the ACL as a record of
+intent, `AuditLog`'s PHP-level refusals, and no code path issuing the statement. The test asserts the ACL
+via `pg_class.relacl` and **never** via `has_table_privilege()`, which answers "yes" for a superuser and
+would pass for the wrong reason; the enforcement half `markTestSkipped`s with the reason stated.
+
+**Closing it needs a non-superuser application role in `infrastructure/docker/`**, which is also the
+moment to revoke `TRUNCATE` and to turn the skip into an assertion. **Owner:**
+`platform-devops-engineer`. Note the ordering trap the migration itself records: if the role is
+introduced later, a `REVOKE … FROM PUBLIC, CURRENT_USER` written today hits the **owner** and the new
+app role keeps its UPDATE/DELETE, so the migration and the role have to be reasoned about together.
+
+### H4 — `sanctum:prune-expired` is now *permanently* moot rather than pending — F7(b) updated in place
+
+F7(b) recorded a scheduled command against a table no migration creates. Its framing — *"the command
+class ships, the table does not"*, filed beside `queue:prune-failed` as though both were waiting for a
+migration — is now **wrong in a way that changes what a reader should do about it**, and F7(b) has been
+corrected rather than duplicated here. Under
+[ADR-038](19-repo-structure-adrs.md#adr-038-one-authentication-mechanism-on-the-admin-surface-enforced-by-three-negatives)
+the omission is **permanent on this surface**: nothing mints, so a pruner is not a pending entry but a
+no-op with a cron slot, and scheduling it would suggest a second credential exists.
+
+```bash
+grep -n 'sanctum:prune-expired' services/core-api/routes/console.php
+```
+
+The entry is commented out under a `PERMANENTLY OMITTED UNDER DECISION D11` banner that states the
+measurement (against the applied migrations, `php artisan sanctum:prune-expired --hours=24` exits 1 with
+`SQLSTATE[42P01] … relation "personal_access_tokens" does not exist` — so it would not prune nothing, it
+would **fail once an hour forever**, dispatching `ScheduledTaskFailed` while `schedule:list` displayed
+the entry as handled) and names the four things a future PAT surface must land together. **Owner:**
+`control-plane-engineer`; the console-file half is **done**.
+
+**Still owed to a skill, in E4's form:** `.claude/skills/laravel-sanctum-auth/SKILL.md`'s Definition of
+done asks that `sanctum:prune-expired` **be scheduled**, which is now false for this surface, and asks
+for a test that `tokenCan()` returns `true` under a session, which is **unwritable** under ADR-038.
+`.claude/skills/**` is not `docs/`'s to edit; recorded so the correction is a small edit against a stated
+finding. **Owner:** the skill's owning agent.
+
+### H5 — two stale CI comments, both describing a mechanism that no longer exists
+
+```bash
+grep -n 'src/resources/ is generated\|five data services' .github/workflows/ci.yml .github/workflows/gates.yml
+```
+
+**(a) `ci.yml`'s *OpenAPI document is current* step** says `packages/contracts/src/resources/` is
+**generated from** the OpenAPI document. It is hand-written, and it is *mechanically checked* against the
+document by `packages/contracts/test/resource-drift.test.ts` — which is what replaces a generator, and
+which earned its place immediately: it caught both a wire-component rename (`SessionOrganization` in TS
+against `SessionMembership` in PHP) and its own wrong assumption that enums are published as named
+components, when `DumpOpenApiCommand` **inlines** them into the property that carries them (plan D37).
+The comment's *failure mode* is still right; its *mechanism* is wrong, and a reader who believes it will
+go looking for the generator.
+
+**(b) `gates.yml`'s port-publishing gate** explains why it is not asserted over
+`compose.override.yaml` by naming five data services that file publishes — postgres, qdrant, both
+valkeys, seaweedfs. Measured: `compose.override.yaml` now publishes **two**, and neither list is what the
+comment says. The *exclusion* is still correct and the assertion is unaffected; the justification names a
+list that was deleted.
+
+**Owners:** `platform-devops-engineer` for both files. (a) is also worth a cross-check by
+`admin-web-engineer`, since `src/resources/` is theirs and the comment is a claim about their directory.
+
+### H6 — the sanctum skill's own Definition-of-done grep is red on correct code
+
+```bash
+grep -rn 'createToken(' services/core-api/app
+```
+
+`.claude/skills/laravel-sanctum-auth/SKILL.md`'s Definition of done asks for
+`rg -n "createToken\(" services/core-api/app`. That pattern matches
+`Password::broker()->createToken($owner)` in `BootstrapOrganizationCommand` — the framework's
+**password-reset** token, minted on purpose so the first operator sets their own password through the
+ordinary flow rather than having one handed to them on a terminal. It is single-use, 60 minutes, hashed
+in the database, and it is not a bearer credential for this API.
+
+**So if that grep is added to `gates.yml` verbatim, the gate is red on correct code**, and the fix
+someone reaches for under time pressure is an exclusion by *file* — which would then let a genuine
+`$user->createToken(...)` through in the same file. The replacement in
+`tests/Security/SingleCredentialMechanismTest.php` narrows by **receiver** instead
+(`/(Password::|->broker\(\)|PasswordBroker)/`), so a real mint in that same file still fails. **Owner:**
+whoever lands the gate — the test is the specification for the pattern, not the skill line.
+
+### H7 — two Pest-harness facts that silently invert assertions
+
+Both are documented at length in `services/core-api/tests/Support/SpaSession.php`'s class docblock, and
+both are recorded here because the next person writing a multi-request session test will hit them and
+the symptom is a **passing test that asserts the opposite of the truth**.
+
+**(a) Guards are cached per process, so logout and password-change tests report the reassuring
+direction.** `AuthManager` caches every resolved guard for the life of the process, and Sanctum's
+`RequestGuard` caches the resolved user in `$this->user` and never clears it on a new request —
+`app()->refresh('request', $guard, 'setRequest')` swaps the request and leaves the user alone. In
+production one process serves one request, so this is invisible. In the suite one process serves every
+request of a test. Measured 2026-08-13, both directions wrong the same way: after `POST /auth/logout` a
+re-sent cookie gets **200** from `GET /me` with the cache and **401** without it; and after a password
+change, a sibling session gets **200** with the cache and **401** without — so a *"reset logs the
+siblings out"* test written the obvious way reports **the opposite of the truth**, because
+`AuthenticateSession` compares `$request->user()->getAuthPassword()` and the cached model still holds the
+old hash. `Auth::forgetGuards()` is what a new PHP-FPM request does for free; `SpaSession::freshProcess()`
+is that call, and it must follow any request that changes authentication state. It is not a bypass — it
+removes a test-only cache and weakens no check.
+
+**(b) `RefreshDatabase` rolls back the database and nothing else, so rate-limiter buckets outlive the
+run.** `phpunit.xml` pins `CACHE_STORE=valkey`, so every bucket survives the test that filled it, the
+next test in the file, **and the next run of the whole suite**. The `login` limiter allows 20/min per IP
+and every request in the suite arrives from `127.0.0.1`. **Reported by the batch that built the harness**
+(and not re-measured here, because the stack is down): consecutive runs against the persistent store
+produced **28 then 48** failures, and `CACHE_STORE=array` produced **0** — the rising figure is the
+tell, since a bucket that survives the run makes the *second* run worse than the first. The fix is not flushing
+the cache — under `--parallel` that wipes the sibling workers' locks, which `pest-testing` bars outright
+— it is making the key unique, which is also the honest model, since these *are* different clients.
+**Anyone adding a Feature test that logs in for real must call `SpaSession::isolateRateLimits()`**, which
+assigns the test its own address in `2001:db8::/32` (the IPv6 documentation range, so it can never be
+real and still passes the `FILTER_VALIDATE_IP` the audit logger applies). A test that wants to *exercise*
+a limiter still can: the bucket is unique to it, not absent. **Owner:** `test-engineer`.
+
+### H8 — `session.domain` is the empty string, not `null`, so adding a default is a no-op
+
+```bash
+grep -n 'SESSION_DOMAIN' services/core-api/.env services/core-api/.env.example services/core-api/config/session.php
+```
+
+`config/session.php` reads `env('SESSION_DOMAIN')` and `.env` ships `SESSION_DOMAIN=` — a **present**
+key with an empty value, which Dotenv supplies as `''`. So `env('SESSION_DOMAIN', '.localhost')` returns
+`''`, not `'.localhost'`: **the default never applies**, because a default only fires when the key is
+absent.
+
+**Behaviour today is correct** — an empty domain produces a **host-only** cookie, which is what a
+cross-origin SPA using `credentials: 'include'` needs, and `tests/Security/SessionCookieScopeTest.php`
+asserts that `kb_session`'s `Set-Cookie` carries no `Domain=` attribute and that `config('session.domain')`
+neither starts with `.` nor contains `*`. The finding is that the *safety of a default is illusory*:
+someone adding `env('SESSION_DOMAIN', '.localhost')` as a belt-and-braces measure would believe they had
+set a floor and would have changed nothing, and the same reasoning applied in the other direction — "the
+default protects us" — would be wrong. **A trap to know, not a bug to fix.** The hazard the wildcard
+would create is live for a reason the skill's gotcha does not state for this topology: the widget is
+correctly on a separate registrable domain, but hosted chat is a **public** surface on the *same*
+registrable domain as the admin console, so a `.${DOMAIN}` cookie would reach it. **Owner:**
+`control-plane-engineer`, as a docblock, not a change.
+
+### H9 — `tenantPair()` still throws, and the two-org fixtures are inline with a pointer
+
+```bash
+grep -n 'not implemented' services/core-api/tests/Support/tenancy.php
+```
+
+Unchanged and still blocked on the `bots`/`knowledge_sources` migrations, which this scope does not
+touch. Every two-org test in this effort builds its pair inline from `OrganizationFactory` +
+`UserFactory::orgRole()` with a `TODO(fixtures)` pointing at `tenantPair()`. **No second helper was
+added**, deliberately: `pest-testing`'s "no single-organization helper" rule is about not making leaky
+tests easy, and inline two-org fixtures honour it while a second helper would be the thing everyone
+imports and then never migrates off. **Owner:** `test-engineer`, blocked.
+
+### H10 — `ON_FAILURE_LOG` atomicity cannot be proved with a real database failure under `RefreshDatabase`
+
+```bash
+grep -n '25P02\|AuditLogRepositorySpy' services/core-api/tests/Feature/AuditAtomicityTest.php
+```
+
+The ABORT cases are proved the honest way: dropping the current month's audit partition makes every
+INSERT fail at the database with `23514`, inside the real transaction, on the real connection — a mocked
+repository would prove the PHP branch and nothing about whether the audit INSERT and the state change
+share a transaction at all, which is the entire property.
+
+**The LOG cases cannot use that technique, and the reason is PostgreSQL rather than Laravel.**
+`RefreshDatabase` holds one transaction around each test. An unwrapped failing INSERT **aborts that
+ambient transaction**, so every later statement in the request dies with `25P02
+current transaction is aborted` — the login 500s, and the test reports that `ON_FAILURE_LOG` does not
+work. In production there is no ambient transaction and the swallowed failure is genuinely local to the
+audit write. So those cases break the write at the **repository boundary** with a spy instead, and the
+spec carries a **positive control that the double was reached** (`expect($spy->writes)->toBe([])`), because
+a container binding that silently did not take would otherwise produce a green test proving nothing.
+
+Recorded because the substitution looks like a weaker test chosen for convenience, and it is not: the
+stronger technique measures a *harness* property here rather than the property under test. **Owner:**
+`test-engineer`. The way to close it is an Integration-suite case outside `RefreshDatabase`, not a
+larger mock.
+
+### H11 — four things the schema and the surface owe, recorded rather than built
+
+- **No global user suspension.** §8.1 asks for user activation and suspension; the schema has only
+  per-membership `MembershipStatus::Suspended`, so a user suspended in their only organization can still
+  log in and see an empty list. `users.status` is an `ALTER` on a populated table needing the
+  `SET lock_timeout` + `retry()` form, which is its own unit. **Owner:** `control-plane-engineer`.
+- **`MembershipStatus::Invited` has no producer.** An invitation creates no membership row — the row is
+  created `Active` on acceptance, so `organization_invitations` is the single owner of pending state.
+  Retained with a comment naming the new owner, because removing it is a
+  `DROP CONSTRAINT` / `ADD CONSTRAINT … NOT VALID` / `VALIDATE CONSTRAINT` migration on a live CHECK for
+  zero functional benefit. This is the dead-enum-case smell `Permission.php` warns about, kept
+  knowingly. **Owner:** `control-plane-engineer`.
+- **`AuditLog::organizationId()` throws for platform-scope rows** (plan D22), so those rows are not
+  authorizable through any org policy. `audit_logs.organization_id` is nullable because a failed login
+  for an unknown address has no tenant, and `OrgOwned::organizationId(): string` is not — an empty
+  string would be a lie the policy layer compares against a real org id and denies, reading as a
+  permission bug. Harmless while no read surface exists; **must be decided when the audit-log viewer
+  lands**. **Owner:** `control-plane-engineer`.
+- **No `organization.bootstrapped` audit operation.** `kb:bootstrap-organization` creates the first
+  organization, the first owner and the first membership, and writes one structured **log** line rather
+  than an audit row. That is telemetry, which `kb-observability-conventions` explicitly separates from
+  audit — different retention, different access control, no append-only guarantee. Now that `audit_logs`
+  exists the gap is closable and was not closed. **Owner:** `control-plane-engineer`.
+
+### H12 — two `apps/web` items owed, one of which can only be caught by the build
+
+- **`features/auth/session.ts` still mixes a client-only React context with pure fetch helpers**, so any
+  *server* module importing anything from it breaks RSC compilation. Found by `pnpm web:build` and **only**
+  by the build — typecheck and the full Vitest suite both passed on the same tree (plan D38). The
+  unblocking fix was to extract `singleToken` into a dependency-free
+  `src/lib/auth/single-token.ts` imported by both server pages, matching the placement argument
+  `safe-next.ts` already makes for `proxy.ts`; **the split of `session.ts` itself is still owed.** The
+  general lesson is the ordering one: a green typecheck and a green suite do not prove a Next.js app
+  compiles. **Owner:** `admin-web-engineer`.
+- **Two `knownPaths` sets still derive from `Object.keys(…FormDefaults())`** rather than from the
+  manifest — `forgot-password-form.tsx` and `reset-password-form.tsx`. **Deliberately not changed:** the
+  chain (`defaults` keys ≡ `z.strictObject` paths ≡ manifest keys) is asserted end to end by the drift
+  suite's set-equality, so both routes catch a server-side field addition and only the *location* of the
+  red differs. Recorded so the next form author follows `known-paths.ts` rather than copying the older
+  shape. **Owner:** `admin-web-engineer`.
+
+### H13 — the org switcher's accessible role is `combobox`, not `button`
+
+```bash
+grep -rn 'getByRole' apps/web/tests/components/org-switcher.test.tsx
+```
+
+A Radix `Select.Trigger` renders with `role="combobox"`, so `getByRole('button', { name: 'Switch
+organization' })` finds nothing. Recorded because `.claude/skills/vitest-playwright/SKILL.md`'s
+two-organization harness sketches the future Playwright selector as `getByRole('button', …)`, and the
+accessible **name** was deliberately kept as exactly `Switch organization` so that harness needs no
+rename — the role is the only part that has to change. A fact for the next spec author, not a defect.
+**Owner:** `test-engineer`, one word in a future spec.
+
+### H14 — `AuditLogger`'s own docblock counts three lenient operations and the constant beside it holds four
+
+Found on 2026-08-13 **while writing ADR-041**, which is why it is here rather than in the effort's own
+report: the ADR could not be written without stating the rule, and stating the rule surfaced the
+mismatch.
+
+```bash
+grep -c 'ON_FAILURE_LOG,' services/core-api/app/Services/Audit/AuditLogger.php
+grep -n 'authentication-outcome events' services/core-api/app/Services/Audit/AuditLogger.php
+```
+
+The class docblock says *"for the **three** authentication-outcome events, the thing being audited has
+ALREADY HAPPENED irreversibly"* and names a session cookie being issued or destroyed. The constant
+assigns `ON_FAILURE_LOG` to a **fourth** operation, `auth.password_reset.requested`, which is neither an
+authentication outcome nor a cookie act — and which *does* leave a durable row, since the broker creates
+a `password_reset_tokens` row before the audit call. Two sentences later the same docblock says
+*"changing **four** rows of one constant is the whole edit"*, so the file already disagrees with itself
+by one.
+
+**Both figures are stale in the same way and for the same reason ADR-036 exists**: plan D20 was written
+about three session operations, a fourth lenient operation was added later, and the prose beside the
+constant was not re-derived. This is the third instance in this repository of a count restated next to
+the list it describes (§ ADR-033, § R5, § G1), and the first inside `services/core-api`.
+
+**The rule the code actually implements is defensible and is not in doubt** — *ABORT where the audited
+change can still be rolled back, LOG where it cannot* covers all four, and
+`PasswordResetService`'s own docblock gives the extra reason specific to that operation: the row is
+written **inside** `PasswordBroker::sendResetLink()`'s 200 ms timebox on the exists-branch only, so an
+extra failure branch there is a timing differential, and the timebox absorbs the INSERT rather than the
+handling of its failure. The defect is that the rule is nowhere stated and a count is stated twice
+instead.
+
+**And nothing would catch a policy flip.** `tests/Unit/AuditLoggerTest.php` pins the operation **names**
+(plan D29, correctly — a count could not say *which* operation appeared) and asserts each `on_failure`
+value is *one of* the two constants, which is a type check rather than a policy check. So moving a role
+change from ABORT to LOG is a green suite: the audited state change would commit with no row, silently,
+which is exactly the failure the ABORT policy exists to prevent. **Recommended fix, and it is small:**
+replace the two counts with the rule, and pin the **policy per operation by name** in the same style D29
+used for the name set. **Owner:** `control-plane-engineer`.
+
+### H15 — every guest operation expressed "no credential" as SILENCE, and silence is unassertable *(CLOSED)*
+
+```bash
+python3 -c "import json;d=json.load(open('packages/contracts/openapi/core-api.openapi.json'));print(sorted((o.get('operationId'),o.get('security')) for p in d['paths'].values() for m,o in p.items() if m in ('get','post','put','patch','delete')))"
+```
+
+The premise this was investigated under was wrong, and finding that out was the useful part.
+`DumpOpenApiCommand::securityFor()` **already existed at the skeleton commit** and already derived the
+requirement from `$route->gatherMiddleware()`, so all 13 `auth:sanctum` operations already carried
+`security: [{"sanctumSession": []}]` — the "derive it from the route rather than a hand-maintained
+attribute argument" approach was the implementation, not a proposal.
+
+What was genuinely missing is the other half. The six guest operations expressed "guest" only as the
+**absence** of the key. Under OpenAPI that resolves to the document-level requirement, and with none
+declared it means "no credential" — the right answer, reached by silence, and therefore indistinguishable
+from a generator that never asked the question. It was also unassertable, which is why nothing noticed.
+
+`security` is now emitted **unconditionally**, `[]` included, and `securityFor()` carries two refusals
+guarding the one dangerous direction of this field — publishing an authenticated route as public:
+
+* an auth-family middleware that is not `auth:sanctum` (`/^auth($|[:.])/`, catching `auth`, `auth:web`,
+  `auth.basic`, `auth.session`) **throws**, citing ADR-038: a second mechanism on this surface is a
+  finding, not a document change;
+* a route on a surface with **no declared scheme** throws. `rt/` and `sdk/` have empty route files and
+  their credentials are still TODOs, so `[]` for the first route added there would publish a public
+  endpoint. Inert today, a forcing function later.
+
+The guest set is pinned **by name** rather than by count, for plan D29's reason: *"expected 6 got 7"*
+cannot tell a deliberate new guest route from `auth:sanctum` being dropped off `GET /me`. There is a
+positive control on the authenticated side too, so an all-guest document cannot pass vacuously.
+
+`securitySchemes` is untouched and `sanctumSession.name` is still `kb_session` — which matters, because
+`apps/web/src/proxy.ts` and its spec pin that exact string as the regression guard for finding F-1, the
+defect that made the whole admin console unreachable.
+
+### H16 — `ErrorEnvelope`'s published description contradicted its own `required` list *(CLOSED)*
+
+```bash
+grep -n 'request_id' services/core-api/app/Console/Commands/DumpOpenApiCommand.php packages/contracts/src/envelope.ts
+```
+
+The component described itself as *"Identical in the non-streaming body and in the SSE `error` frame"*
+while its `required` array included `request_id`, and `packages/contracts/src/envelope.ts` types that
+field as **optional** precisely because SSE frames omit it (`src/sse/events.ts` reuses the same type).
+
+**The description was the wrong half, and `required` was deliberately not touched.** The internal-contract
+skill's client-facing frame is `{"error_class", "message", "retryable"}` with no `request_id`, so the frame
+really does omit it, the TypeScript optionality is the **union of both surfaces**, and `required` describes
+what this service actually sends over HTTP. Weakening `required` to match a frame this component does not
+describe would have made the accurate half wrong. The description now scopes itself to the non-streaming
+body and names the difference; the property description says the field is *absent entirely — not null —*
+from the SSE frame; and a contract arm asserts the coupling as an invariant, with a failure message
+stating both legal resolutions so the next reader does not have to re-derive which half to change.
+
+## The shutdown-determinism decisions — ADR-044…046
+
+Three decisions from 2026-08-14, all of them started by one report: *"despite `down` instructions and the
+manual stop button, the containers keep restarting themselves."* Two of the three are not about restarting
+at all — they were found while measuring the first, and each was a worse defect than the one reported.
+
+**The reported symptom had two candidate mechanisms and only one of them survives measurement.** A crash
+loop under `restart: unless-stopped` looks like the obvious culprit and is not: on Engine 29.6.2, two
+containers that exit 255 immediately reached `RestartCount` 9 (`unless-stopped`) versus 0 (`no`) in 30 s,
+and then `docker stop` settled **both** and they stayed settled. So the stop button is not defeated by a
+loop on this engine. What survives is the daemon's own restart manager: `unless-stopped` exempts only
+containers explicitly stopped **before** the daemon went down, and Docker Desktop's daemon stops and starts
+constantly. Recording the refuted half matters, because "it was a crash loop" is the explanation a reader
+will assume and it would send the next person to fix the wrong thing. → **ADR-044**.
+
+**Then `make down` was reported as *"took too long and yet not down"*, which was a different defect.**
+Not restart policy — signal handling. The core-api image inherits `STOPSIGNAL SIGQUIT` from `php:*-fpm*`,
+PID 1 in four of its six services is `kb-serve` or `php artisan horizon`, neither handles SIGQUIT, and a
+signal PID 1 has no handler for is **discarded**. Docker therefore waited out each service's full
+`stop_grace_period` and SIGKILLed — 26 minutes for `laravel-worker-long`. The premise-checking that
+mattered here went the other way twice: `schedule:work` **does** trap `INT TERM QUIT`, through Laravel's
+`$this->trap()` helper, which a `pcntl_signal|SignalableCommandInterface` grep does not find — so
+`laravel-scheduler` was already correct and is an exemption rather than an omission; and `MigrateCommand`
+traps **nothing**, so its `# never SIGKILL a migration mid-DDL` comment was never a promise and is now
+written as the deadline it is. → **ADR-045**.
+
+**And the fix to the first decision exposed the third defect, because a working `down` made `up` fail.**
+`down` frees the project's networks; the next `up` allocates the lowest free /16 from the daemon's built-in
+pool; the pinned `edge` CIDR was **inside** that pool, so our own unpinned `data` network took it and
+`edge` could not be created. Deterministic on every cycle, and it had been latent for as long as the pin
+existed — nothing exercised a full `down` before. → **ADR-046**.
+
+## Found while making the stack stop — 2026-08-14
+
+Five findings. Two are Compose behaviours that make a documented shutdown incomplete; two are **green
+suites that were hiding a red build**, in two different runtimes, by two different mechanisms; and the
+last is ADR-036 catching this effort's own prose one day after it was written.
+
+### I1 — `docker compose down` leaves profiled containers running, and `--remove-orphans` is not the fix
+
+```bash
+cd infrastructure/docker && docker compose config --profiles
+```
+
+Measured on Compose v5.3.1 with a two-service scratch project, one service behind `profiles: [test]`:
+
+| Command | Result |
+|---|---|
+| `docker compose down` | removed the unprofiled service; the profiled container **kept running**, and the network then failed to remove with *"Resource is still in use"* |
+| `docker compose down --remove-orphans` | left it running too |
+| `docker compose --profile '*' down` | removed the container **and** the network |
+
+**A profiled service is not an orphan.** Compose can see it in the file; it is merely outside the active
+profile set, so `--remove-orphans` never looks at it — which is why `deploy` already carrying that flag
+said nothing about this case. This is the whole explanation for `postgres-test` and `valkey-test` sitting
+in `docker ps -a` for days after every shutdown, and for the "Resource is still in use" network error that
+looks like a Docker bug. **CLOSED:** `make down` is `docker compose --profile '*' down` (needs Compose
+≥ 2.24; `COMPOSE_PROFILES='*'` for an older client), with the measurement written above the target.
+
+### I2 — the PHP suite exited **1** with 490 tests passing and zero failures *(CLOSED)*
+
+```bash
+grep -rn '^use [A-Z][A-Za-z]*;' services/core-api/tests --include=*.php | while IFS=: read -r f _ _; do
+  [ "$(grep -c '^namespace ' "$f")" -eq 0 ] && echo "$f"; done | sort -u
+```
+
+`php artisan test` reported `Tests: 2 skipped, 490 passed (3167 assertions)` with **no FAILED line
+anywhere** and exited 1 — a red build whose own report says it is green. Cause:
+`tests/Security/SingleCredentialMechanismTest.php` declares **no namespace**, so its
+`use RecursiveDirectoryIterator;` / `use RecursiveIteratorIterator;` were non-compound imports of a global
+name *into* the global namespace, which PHP reports as `Warning: The use statement with non-compound name
+'...' has no effect` — and `phpunit.xml` sets `failOnWarning="true"`.
+
+**Why nothing surfaced it, which is the reusable half.** PHPUnit's exit calculator counts risky, warning
+and deprecation **events**; the JUnit logger records none of them (`<testsuite tests="56" errors="0"
+failures="0" skipped="0">`), and Pest's printer shows none either, even with `--display-warnings`.
+`--log-events-text` is the only thing that names them, and it took bisecting suite → file to get there.
+This is the same defect as the `use RuntimeException;` in a migration recorded during the auth effort, and
+the discriminator is the same: `grep -c '^namespace '`, not the presence of a short import — the four files
+under `tests/Support/` carry the identical shape legitimately because each declares a namespace.
+
+**CLOSED** by deleting both lines; Pint then rewrote the call site to `\RecursiveIteratorIterator(new
+\RecursiveDirectoryIterator(...))` and the file pins that shape in a comment, because "tidying" the
+backslashes away is a Pint failure and re-adding the imports to justify the short form brings the warning
+back. ~~**Still open, and small:** nothing prevents the third instance.~~ **The gate landed 2026-08-17**
+as `repo-artifact-consistency` → *"A namespace-less PHP file may not carry a non-compound `use`"*, and it
+catches the third instance in the one place no runtime can: PHP emits a *warning*, `failOnWarning="true"`
+turns it into exit 1, and the Pest report still reads green — the original cost a `--log-events-text` run
+to diagnose at all.
+
+Two design points worth keeping, because both were the difference between a gate and a nuisance. **The
+namespace condition is the rule, not an optimisation:** files under `tests/Support/` carry the identical
+`use` shape *legitimately*, because each declares a namespace and importing a global name there genuinely
+changes resolution — so the file is read for a `namespace` declaration first and skipped when it has one. A
+gate that flagged those would have been deleted within a week. **The pattern is anchored at start-of-line**
+so this file's own prose and the comment in `SingleCredentialMechanismTest.php` pinning the corrected
+`\RecursiveIteratorIterator(...)` shape do not match themselves. Verified by planted probe: namespace-less
+→ exit 1 naming `file:line`; namespaced twin → silent; corpus **76** namespace-less files under
+`services/core-api`, asserted non-zero by the step so it fails rather than passes if the corpus empties.
+**Known narrower than the warning:** `use Foo as Bar;` is not matched — the aliased form is a deliberate act
+rather than a leftover import, and matching it needs a real parser.
+
+### I3 — the ai-service PostgreSQL role default drifted from its own template *(CLOSED)*
+
+```bash
+grep -n 'KB_PG_USER' infrastructure/docker/env/ai-service.env.example services/ai-service/app/core/config.py
+```
+
+Two `pytest` failures, and the drift was in the auth-effort work rather than in anything the shutdown work
+touched: the PostgreSQL role split set `KB_PG_USER=kb_app` in the template while
+`Settings.pg_user` still defaulted to `knowledgebot`. `test_the_defaults_match_the_deployment_template`
+exists for exactly this and said so (`assert 'kb_app' == 'knowledgebot'`); the stake it names is that a
+default which drifts from the template still **starts** the service, pointed at credentials that may not
+be the intended ones.
+
+The second failure pointed the other way and is the more interesting one: a **stale literal** —
+`postgresql://knowledgebot:…` — inside the one test whose stated purpose is that the five `KB_PG_*`
+variables are not discarded. It now derives the user from the template values it already loads, which
+proves that purpose directly, while host, port, database and the mounted password stay literal and the
+value itself stays pinned by the sibling test. Only the **role** moved, not the database name.
+
+**The general shape is worth keeping**, because it is the blind spot of the key-name drift checker added
+during the auth effort: both files *had* the key, only the **value** differed, so a `comm`-style
+template-versus-live comparison comes back empty. ~~A value-aware check … is still owed.~~ **It landed
+2026-08-17** as `config-delivery` → *"Templates and code defaults agree on VALUES, not just key names"*,
+in two arms.
+
+**Arm (a) compares concrete against concrete, and that is what makes it a rule rather than an exemption
+list.** It parses `Settings` in `app/core/config.py` with `ast` and compares each literal default to the
+matching `KB_*` value in `ai-service.env.example`. A field defaulting to `None` is **skipped by the rule,
+not by a name list** — that is the secret-pointer pattern working as designed (`KB_PG_PASSWORD_PATH` and
+three siblings default to `None` so an unset pointer fails loudly rather than reading a stale file). Only
+where *both* sides commit to a concrete value can they disagree. **One exemption exists and is named with
+its reason:** `KB_ENVIRONMENT`, where the code default is the safe local value and the template is the
+production render. Naming it rather than pattern-matching it away is the ratchet — a *second* key that
+starts disagreeing turns the build red and must be justified in a PR.
+
+**Arm (b)** resolves every `/run/secrets/x` pointer in every env template against compose's top-level
+`secrets:`. It deliberately checks **declaration, not per-service mounting**: compose's `secrets:` is
+narrow per service while `env_file:` is shared by all six Laravel services, so those two disagree *by
+construction* and a mount-level assertion would flag that design as a defect.
+
+**Why the two gates already in this job both missed I3, which is the point of adding a third.** The
+name-set checker (check 3) saw the key on both sides. The role-split gate asserts the **template** says
+`KB_PG_USER=kb_app` — which was true; the wrong value was the **code default**, i.e. exactly what applies
+when the variable is unset: every `pytest` run and every `docker run` without an `env_file`. Verified by
+re-introducing the original defect (`pg_user = "knowledgebot"`), which the new gate names explicitly, and
+by a bogus pointer for arm (b); both restored and checksum-confirmed. Live corpora **17** concrete value
+pairs and **12** pointers against **16** declared secrets, each arm failing rather than passing if its
+corpus empties.
+
+### I4 — an exact request count inside `vi.waitFor` is a one-way ratchet, in two specs *(both CLOSED; the stray read's origin unproven)*
+
+```bash
+# every exact-count assertion still sitting inside a retrying waiter — the ratchet detector.
+# The third filter drops COMMENT lines: the two specs below now explain the ratchet in prose, and
+# a detector its own documentation trips is a detector nobody runs twice (the D73 lesson, again).
+# Verified against a planted probe, so the pattern still catches a real one: currently no hits.
+grep -rn -A4 'vi\.waitFor' apps/web/tests --include=*.tsx \
+  | grep -E 'toBe\([0-9]+\)' | grep -vE ':[0-9]+[:-][[:space:]]*//'
+```
+
+`apps/web/tests/components/members-screen.test.tsx` asserted `expect(invitationReads).toBe(2)` inside
+`vi.waitFor` to prove the invitation list is **re-read** after an invite rather than patched optimistically.
+`waitFor` retries until the assertion holds, so a count that **overshoots can never come back**: one stray
+read burns the entire timeout and reports `expected 3 to be 2`. It failed once in ~28 full-suite runs and
+passed 3/3 in isolation.
+
+**Six mechanisms were tested and refuted before anything was changed**, which is why the repair is at the
+assertion rather than at a guessed cause: window-focus refetch (`refetchOnWindowFocus: false`), a remount
+refetch (`staleTime: 30_000` covers it), a cache shared between tests (`Providers` builds a client per
+mount), a cold-Vite page reload (a wiped `node_modules/.vite` run produced **zero** reload warnings, so
+`optimizeDeps.include` is complete), a late response from the previous test (**MSW matches handlers at
+request interception, not at response time**, so a response arriving after the swap cannot reach the next
+test's handler — verified by delaying that read 900 ms), and a third read that normally lands after the
+assertion (there is none: the event list 1500 ms later is `GET members │ GET invitations │ POST │ GET
+invitations` and nothing more).
+
+**The replacement is strictly stronger than the count.** The list handler serves a second pending row on
+every post-invite read — gated on a flag the POST sets, not on a read index — and the test asserts that
+row reaches the screen. The client cannot invent it: the POST reply carries a *different* address, so an
+optimistic update or a `setQueryData` patch would render that one and fail. The count said "a request was
+made"; this says "what is on screen came from the server's answer to it". A monotonic
+`toBeGreaterThan(readsBefore)` keeps the original intent in a form no extra read can invalidate. Three
+teeth-checks: deleting the mutation's `onSettled` invalidation fails it by name; serving the row from the
+start fails a new negative control; and injecting the exact failure trigger (an extra read, 2 → 3) now
+**passes**. The stray read's origin remains **unproven** — recorded in `docs/23` rather than guessed at in
+a comment.
+
+**The detector above then found a second instance, and it is now fixed too.**
+`apps/web/tests/components/org-switcher.test.tsx` held `expect(meCalls).toBe(1)` before the click and
+`expect(meCalls).toBe(2)` after it, both inside `vi.waitFor` — the same shape, and the second guarded the
+same property (an error path invalidates the session query, so the membership list is re-read). It had
+never failed, which is exactly what the members-screen assertion did for weeks first.
+
+**The replacement asserts what the invalidate is *for*, in the words of the hook's own comment** —
+*"otherwise the user keeps picking an option that keeps failing"*. The `/me` handler drops the picked
+membership to `suspended` once the 403 has been served (flag set by the POST, not by a read index), so the
+refetched document no longer offers it: the spec reopens the control and asserts that option is **gone**,
+with the count kept only as a monotonic `toBeGreaterThan`. The status is `suspended` rather than absent
+deliberately — two active memberships must remain, because `OrgSwitcher` returns `null` below two and would
+take the alert down with it, quietly converting this into a test of something else. Nothing in the 403
+envelope names an organization, so no client-side state can produce this result; only the server's fresh
+list can.
+
+The pre-click `toBe(1)` became a result assertion as well — the trigger renders *Acme Research*, which is
+the session having arrived, stated as what the user sees rather than as a request count.
+
+**Three teeth-checks, matching the members-screen fix:** deleting the `invalidateQueries` call in
+`use-switch-organization.ts` fails it (`expected [ <div role="option" …> ] to have a length of +0 but got
+1`); serving the membership as `active` on the refetch — i.e. making the assertion independent of the
+server's fresh list — fails it identically, which is what proves reopening the popover is not what
+satisfies it; and injecting the **exact** failure trigger of the old ratchet, one extra `/me` read before
+the refetch, now **passes**. The fixture rows are typed `SessionMembership` from `@kb/contracts` rather
+than `as const`, so a role or status this test invents is a compile error instead of a green assertion
+about a shape the server cannot send.
+
+### I5 — the edge CIDR moved and four documents kept naming it, one of them dangerously *(CLOSED)*
+
+```bash
+# (a) the one authoritative default…
+sed -nE 's/^x-edge-subnet.*KB_EDGE_SUBNET:-([^}"]+)\}.*/\1/p' infrastructure/docker/compose.yaml
+# (b) …and every other CIDR claim in the tree, to be read against it
+git grep -nE '\b(10|172|192)\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' -- . ':!docs/'
+```
+
+ADR-046 changed one default. Four files went on naming the old value, and they divide neatly by how much
+it matters:
+
+* **`infrastructure/docker/.env.example` — the dangerous one.** It stated the anchor "carries the default
+  (172.24.0.0/16)" and its commented example was `# KB_EDGE_SUBNET=172.24.0.0/16`. Uncommenting that would
+  have re-pinned the exact in-pool range the move exists to escape, *while looking like the documented
+  fix for the collision it causes*. The prose now points at `compose.yaml` instead of restating the CIDR,
+  and the example is deliberately a **different** block with the pool rule beside it. The file's own
+  warning had predicted this ("a copy that goes stale on every existing deployment the day the default
+  changes") about the wrong copy — itself.
+* **`services/core-api/tests/Security/TrustedProxyTest.php`** — a docblock claiming its constant *is* the
+  anchor's value. The test passes either way (any bounded CIDR exercises the inside/outside decision), so
+  this was a false comment rather than a failure; it now states that it is deliberately uncoupled and
+  names `preflight.sh` §3b as what actually asserts the deployed range.
+* **`scripts/ops/preflight.sh`** — an "Expected the form:" hint quoting the old default, i.e. a message
+  that would send a reader to fix the half that is already right. Now `<cidr>`.
+* **`compose.yaml` and `infrastructure/docker/README.md`** — left alone deliberately: both are **dated
+  measurements of the unpinned behaviour**, which is still exactly what was observed.
+
+**And a fifth instance of the same class, in this effort's own new prose:** the `SHUTDOWN DETERMINISM`
+block asserted that `compose.yaml` gives "27 services" `restart: unless-stopped`. Measured: **26** — 27 is
+the number of alias uses in the overlay (26 overrides plus mailpit, which exists only there). One day old,
+already wrong, in the paragraph that introduces a gate whose job is to stop exactly this. Replaced by the
+two measuring commands. ADR-036 keeps earning its place.
+
+### I6 — the only tests that assert a real parse had never run anywhere *(CLOSED 2026-08-17, then **REOPENED** the same day when CI was deleted — see § Removing CI/CD)*
+
+Found by building `knowledgebot/ai-service:dev` on 2026-08-17 in order to clear six skips that had been
+reported, correctly, as skips in every run of this effort — and then asking where they *do* run. The answer
+was nowhere.
+
+```bash
+# (a) the guard, and the constant it reads — hardcoded, not configurable
+grep -n 'ARTIFACTS_PATH' services/ai-service/app/ingestion/parsing/converter.py | head -2
+# (b) every place a workflow could supply /models to a test run
+grep -nE 'docker run.*ai-service|models:/models|ai-service:dev' .github/workflows/*.yml
+# (c) and why the image cannot run its own suite
+grep -nE '^tests/' services/ai-service/.dockerignore
+```
+
+`tests/integration/test_parsing_live_document.py` is the only file in the repo that asserts what the Docling
+layout model and RapidOCR actually produced: that the **OCR quality signal is fed** (finding #23, the signal
+that existed and that nothing read), that the **coverage arm does not misfire** (the G9 ruling, where 74 real
+page-parses showed clean and degraded populations overlapping), and that a **parse is reproducible** — which
+publication depends on, because it verifies an expected chunk total before activating a version. All six
+tests sit behind `_NO_WEIGHTS`, which tests `ARTIFACTS_PATH / "docling-project--docling-layout-heron"`, and
+`ARTIFACTS_PATH` is hardcoded `Path("/models")`.
+
+**Three facts compose into the defect, and each is individually correct.** The weights are baked into the
+runtime image and nowhere else. `ci.yml`'s `ai-service` job runs `uv run --frozen pytest -m integration` **on
+the runner**, where `/models` does not exist. And `tests/` is in `services/ai-service/.dockerignore`, so the
+image that *has* the weights does not carry the suite. Nothing was misconfigured; there was simply no step
+anywhere that put the suite and the weights in the same filesystem. Grep (b) returns only two unrelated
+`python:3.13-slim` helpers in `gates.yml`.
+
+**Why it read as fine for so long.** The skip *reason* is accurate and actively misleading: "they are baked
+into `knowledgebot/ai-service:dev` and mounted from the `models` volume" describes how weights reach a
+**production worker**, which is true, and which a reader scanning a green log parses as "covered elsewhere".
+The `pytest -m integration` step reported **74 passed, 6 skipped** and exited 0. The file's own docstring says
+a green tick from a skipped parser "is the failure this file exists to prevent someone shipping" — it was in
+exactly that state itself, which is the sharpest available argument for `-rs` being on by default.
+
+**CLOSED** — and then reopened. The fix was `services/ai-service/tests/harness/Dockerfile.pytest` plus a new `images`-job step, *"Live
+document parse (real weights, in the image built above)"*. First execution, 2026-08-17: **6 passed in 65 s**,
+a real Docling parse of `samples/corpus/documents/scanned/scanned-po-88214.pdf` and the born-digital
+handbook.
+
+**The `images`-job step was deleted the same day**, with the rest of `.github/` — see § *Removing
+CI/CD*. What survives is the harness and this record, so the tests can be run and are documented;
+what does not survive is anything that runs them without being asked. Read the rest of this finding as
+the design of a harness rather than the closure of a gap.
+
+Four decisions in it are worth keeping, because each was a fork where the obvious choice was wrong:
+
+* **The harness is a file under `tests/`, not a stage in the shipped Dockerfile.** Precedent and reason both
+  come from `apps/widget`, which puts its stream probe in `tests/harness/probe.vite.config.ts` rather than a
+  `--mode` in the shipped `vite.config.ts` so a test-only entry "can never be built into a customer
+  artifact". A `runtime-test` stage carrying pytest would live one `--target` typo from shipping. The shipped
+  Dockerfile stays `uv sync --frozen --no-dev`.
+* **Only the two pinned runners are added** (`pytest==9.1.1`, `pytest-asyncio==1.4.0`, copied from the dev
+  group so the harness cannot drift to a different pytest). Syncing the dev group wholesale would defeat the
+  point — the run must exercise the *shipped* dependency set, and would drag `ruff` and the coverage plugins
+  into an image that asserts its own containment at build time. `pytest-asyncio` is required even though the
+  file is synchronous: `asyncio_mode = "auto"` under `--strict-config` makes an unclaimed ini key an error, so
+  its absence kills the run during *config* with a message naming the ini key rather than the plugin.
+* **The repo root is mounted, not `services/ai-service`.** The corpus resolves as
+  `SERVICE_ROOT.parents[1] / "samples"`. Mount the service directory at `/app` and `SERVICE_ROOT` becomes
+  `/app`, whose `.parents` holds exactly one entry, so `parents[1]` raises `IndexError` **during collection**
+  and all six tests error for a reason that mentions nothing about parsing.
+* **`load: true` and `tags:` were added to the runtime build, as a pair.** Without them the built image stays
+  in the builder cache where the daemon cannot see it, and `docker run` either fails on a missing image or
+  pulls a public one by that name. The `runtime-crawl` and `runtime-evaluation` targets stay build-only,
+  because nothing executes them. The cost is real and is the price of the coverage: ~3.5 GB exported to the
+  daemon.
+
+**The step cannot pass vacuously, and that is the part under test.** A skip is an `::error::` and exits 1,
+because a skip here *is* this finding regressing, and `2 passed, 4 skipped` is indistinguishable from success
+in the summary line. Verified by hiding the scanned fixture: the run reported **2 passed, 4 skipped** and the
+step **exited 1** naming I6; fixture restored and checksum-confirmed. A second arm requires the count to be
+exactly `6 passed`, so a test added without moving the floor — or silently dropped by collection — fails too.
+
+**A side result worth more than the six ticks.** The two upstream advisories that `pyproject.toml` exempts by
+message and module both fired during the real parse — `rapid_ocr_model.py:437` reading its own
+pydantic-deprecated `rec_font_path`, and `docling_core`'s "ListItem parent must be a list group". Both landed
+in the warnings summary and **neither failed the suite**, which is precisely what the `-W default:` narrowing
+claims and what `filterwarnings` entries could not have achieved (ini filters are applied *before*
+command-line `-W`, so they would lose to `-W error`). That narrowing was documented as measured but had never
+been exercised by a real parse in this repo. It has now been, in both directions.
+
+## Removing CI/CD — 2026-08-17
+
+`.github/` was deleted, on Ankur's instruction, with the reference sweep across the tree done in the
+same pass. It had held two files:
+
+* `gates.yml` — seven install-free jobs, 33 steps: `enforcement-greps`, `observability-rules`,
+  `compose-ci-tag-drift`, `compose-invariants`, `repo-artifact-consistency`, `boundary-greps`,
+  `config-delivery`.
+* `ci.yml` — seven jobs that installed every lockfile and ran Pest, pytest, Vitest, Playwright,
+  ESLint, `next build`, `size-limit`, six image builds, and the dependency/secret scans.
+
+**Nothing replaced them.** `CONTRIBUTING.md` § *The invariants that used to be enforced, and now are
+not* is the review checklist that stands in their place, and `CLAUDE.md`'s header states the rule for
+the repo. This section records what the removal actually cost, because the interesting part is not
+the deletion — it is that **every claim of the form "CI asserts X" in this repository became false in
+one commit**, and the tree carried roughly 85 of them across 40 code files.
+
+### The reference sweep, and why it was not a find-and-replace
+
+256 reference lines across 78 files. They divided into three kinds, and only the first is mechanical:
+
+1. **Dead pointers** — `.claude/agents/{platform-devops,test}-engineer.md` listed
+   `.claude/skills/github-actions-pipeline/SKILL.md` as *required reading*, and that skill was deleted
+   too. An agent's must-read list pointing at a missing file is the worst failure in this set, so it
+   went first. Eight more skills carried `(`github-actions-pipeline`)` as an inline cross-reference.
+2. **Claims that inverted.** A comment saying "nothing enforces this — and gates.yml has no step for
+   it either" is *more* true now, and needed only its second clause dropped. A comment saying "CI
+   greps for this" became a lie and needed rewriting.
+3. **Claims whose premise flipped back.** These are the ones worth reading, below.
+
+**Historical records were deliberately NOT rewritten.** This document, `docs/19`'s ADRs, `docs/23` and
+`CHANGELOG.md` describe what was true when written. Erasing the gates from them would make them less
+accurate, not more, so present-tense claims were moved to past tense and the ADRs got dated
+amendments — `docs/19` ADR-044/045 now say their `compose-invariants` checks are gone. The 74 CI
+mentions still in this file are history and are meant to stay.
+
+### Three things that regressed, not merely stopped being enforced
+
+* **`docs/22` § I6 is REOPENED.** It was closed hours earlier by a CI step that ran the six
+  live-parse tests inside `knowledgebot/ai-service:dev`, where the pinned Docling/RapidOCR weights
+  live at `/models`. That step is gone. The harness survives —
+  `services/ai-service/tests/harness/Dockerfile.pytest`, whose header now says so — but running it is
+  a manual act, and the original finding was precisely that *nobody ran these anywhere*. **The
+  difference from before is a documented harness and a named owner; the exposure is identical.**
+* **The committed OpenAPI document is unchecked again.** `services/core-api/tests/Contract/`
+  `OpenApiDocumentTest.php` carried a comment retiring an older test "because `ci.yml` now runs
+  `kb:dump-openapi --check` against the real artifact". That premise is false again, and the file now
+  names the gap: the suite proves the *generator* is deterministic and that `--check` *can* fail;
+  nothing proves the *committed* artifact is current. Restoring the default-path variant of that test
+  is the cheapest fix and was deliberately left as a decision rather than a drive-by edit.
+* **`KB_MIGRATION_PIN_79` is gone, and finding #79 is still a live violation.** The pin self-expired
+  by three independent paths, so whoever landed the `chunks` / `document_elements` migrations would
+  have got a red build until they unpinned the name. Now nothing will remind them. The 2026-08-12
+  ruling stands; only its enforcement left.
+
+### Two smaller consequences worth naming
+
+* **`scripts/security/rule_count_check.sh` is orphaned.** It was written *because* a gate needed a
+  non-vacuous rule count, and it was the only script in `scripts/` with a live caller.
+  `scripts/security/license_gate.py` never had one. Both still work.
+* **`.gitleaks.toml` outlived its reason and is still worth keeping.** It was written hours before the
+  removal to unblock `secret-scan`, whose `dir .` arm exited 1 on eight `generic-api-key` findings —
+  all synthetic password fixtures in auth tests. With no CI the config's job changed rather than
+  ended: without it, anyone running gitleaks by hand gets eight false positives and learns to ignore
+  the tool. Its four positive controls are recorded in the file and still pass.
+
+### What the removal did not touch
+
+Every suite still passes, and the commands are unchanged: Pest **490**, pytest **1470** offline +
+**74** integration (+**6** live-parse via the harness), Vitest **436** web / **160** contracts /
+**31** widget, Playwright **22** widget E2E, Jest **69** mobile. The suites were never the fragile
+part — the gates were, because they asserted the things a passing test cannot see.

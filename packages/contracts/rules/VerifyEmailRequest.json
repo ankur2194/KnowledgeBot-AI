@@ -1,0 +1,11 @@
+{
+    "class": "App\\Http\\Requests\\VerifyEmailRequest",
+    "rules": {
+        "token": [
+            "bail",
+            "required",
+            "string",
+            "size:64"
+        ]
+    }
+}

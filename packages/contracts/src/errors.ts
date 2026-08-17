@@ -6,7 +6,7 @@ import { isKbErrorEnvelope } from './envelope.js';
  * retry predicate in apps/web/src/lib/query/client.ts then treats every error as permanent,
  * silently.
  *
- * NOT enforced by anything today. There is no lint rule for it, and gates.yml — which DOES have
+ * NOT enforced by anything today. There is no lint rule for it, and no CI — the job that DID have
  * steps over apps/ and packages/ (`boundary-greps` bans `'use server'` under apps/web;
  * `repo-artifact-consistency` diffs packages/design-tokens/generated and the two SSE fixture
  * servers) — has no check for a duplicated KbError. Reviewer check, anchored on the DECLARATION so
@@ -16,7 +16,7 @@ import { isKbErrorEnvelope } from './envelope.js';
  *   grep -rnE '^export class KbError' apps/ packages/   # exactly one hit, this file (verified)
  *
  * Field names are the envelope's, verbatim and snake_case, because each is a straight carry of
- * `{error_class, message, retryable, request_id}` plus one response header. There is no rename
+ * `{error_class, message, retryable, request_id, errors}` plus one response header. There is no rename
  * layer for a typo to hide in: `error.errorClass` reads `undefined`, `SET.has(undefined)` is
  * `false`, and every retryable class becomes a dead end with no error anywhere.
  */
@@ -37,6 +37,25 @@ export class KbError extends Error {
     /** Operator-facing: it can carry an internal hostname or raw upstream provider text.
      *  Log it; never render it. Users see a class-mapped sentence plus `request_id`. */
     message?: string,
+    /**
+     * Laravel's 422 `errors` map, present ONLY on `error_class: 'validation'` (envelope.ts:26-31).
+     * Keyed by input field name and already dot-pathed by Laravel ("retrieval.top_k",
+     * "starter_questions.2"), which are valid react-hook-form names as-is.
+     *
+     * IT IS CARRIED HERE BECAUSE `browserFetch` THROWS THIS CLASS, NOT THE ENVELOPE. Without it
+     * `applyServerErrors` has nothing to apply and every 422 renders as a generic banner while the
+     * per-field messages the server took the trouble to compute are dropped on the floor — dead
+     * code with no visible symptom, which is why it survived a review (finding F-2).
+     *
+     * SIXTH POSITION, deliberately, and not beside `error_class` where it reads better: every
+     * existing `new KbError(...)` call site passes five arguments or fewer, so a trailing
+     * defaulted parameter is the one position that breaks none of them. Verified across
+     * apps/web, apps/widget, apps/mobile and this package's own tests.
+     *
+     * Null, never `{}`, when the response was not a validation envelope: an empty map would read
+     * as "the server sent field errors and there were none", which is not a state that exists.
+     */
+    readonly errors: Readonly<Record<string, readonly string[]>> | null = null,
   ) {
     super(message ?? error_class ?? 'unknown');
     this.name = 'KbError';
@@ -131,6 +150,11 @@ export async function toKbError(response: ErrorResponseLike): Promise<KbError> {
       // normalizeRequestId returns null for one rather than letting `??` keep it.
       payload.request_id ?? headerRequestId,
       payload.message,
+      // The 422 field map, straight through and unrenamed like every other field on this class.
+      // `?? null` rather than a `isKbValidationEnvelope` branch: the envelope declares `errors`
+      // as optional on every class and promises it only for `validation` (envelope.ts:26-31), so
+      // absence is the normal case and an absent map is null, not `{}`.
+      payload.errors ?? null,
     );
   }
 

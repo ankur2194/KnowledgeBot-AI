@@ -10,6 +10,7 @@ use App\Support\Kb\ErrorTaxonomy;
 use Illuminate\Console\Command;
 use Illuminate\Routing\Route;
 use Illuminate\Routing\Router;
+use Illuminate\Support\Str;
 use ReflectionClass;
 use ReflectionMethod;
 use ReflectionNamedType;
@@ -29,7 +30,10 @@ use RuntimeException;
  *
  *   paths, methods, path parameters   the real router — Router::getRoutes()
  *   security                          the route's own middleware stack, and the session cookie name
- *                                     from config, not a literal
+ *                                     from config, not a literal. Emitted on EVERY operation,
+ *                                     including as `[]` for a guest route, so "no credential
+ *                                     required" is something this document SAYS rather than
+ *                                     something a reader infers from a missing key
  *   response ENVELOPES                the #[ResponseShape] attribute on the controller action, read
  *                                     by reflection. Declared and not inferred because two actions
  *                                     return JsonResponse and one returns a Resource that Laravel
@@ -226,7 +230,7 @@ final class DumpOpenApiCommand extends Command
     private function responseShapeFor(Route $route): ResponseShape
     {
         $controller = $route->getControllerClass();
-        $method = $route->getActionMethod();
+        $method = $this->actionMethod($route);
         $label = $route->methods()[0].' /'.ltrim($route->uri(), '/');
 
         if ($controller === null || $method === '' || ! method_exists($controller, $method)) {
@@ -243,6 +247,35 @@ final class DumpOpenApiCommand extends Command
 
         $shape = $attributes[0]->newInstance();
 
+        // A BODYLESS SUCCESS IS REFUSED HERE RATHER THAN PUBLISHED, and refusing is the decision.
+        //
+        // operation() composes one object from $shape->properties, so an empty attribute emits
+        // `"properties": []` — a JSON ARRAY where JSON Schema requires an object — and
+        // `"required": []` beside it. The document would be INVALID rather than merely terse, and
+        // the person who found out would be whoever ran a generator against it, days later, with
+        // nothing pointing back at the action that caused it. D8 ("no bodyless success anywhere")
+        // had avoided that by convention alone: the first 204 anybody wrote got the invalid
+        // document, and the convention lived in a resource docblock rather than in executing code.
+        //
+        // The alternative was to emit something valid — `properties: (object) []`, or omit
+        // `content` entirely, which is the correct OpenAPI spelling for a 204. Rejected, because it
+        // makes the dumper silently ACCEPT the shape the convention forbids, and the convention is
+        // not stylistic: every success body on this surface is `{"data": …}` and the SPA unwraps it
+        // once at the fetch boundary (D23, `browserFetch<{data: T}>` then `.data`), so a 204 hands
+        // that boundary `undefined` at a call site with no branch for it. A dump that fails NAMING
+        // THE ACTION teaches the rule at the moment it is broken, which is the only moment anybody
+        // reads it. AcknowledgementResource exists precisely so the fix is one line at the call
+        // site. If a bodyless success is ever genuinely wanted, this guard is what has to be
+        // deleted deliberately, together with the `content` omission and the client's unwrap.
+        if ($shape->properties === []) {
+            throw new RuntimeException(
+                "{$label} ({$controller}::{$method}) declares #[ResponseShape] with no properties. A "
+                .'bodyless success would publish `"properties": []`, which is not a JSON Schema '
+                .'object. Every success body on this surface carries a `data` key (D8) — return '
+                .'AcknowledgementResource::ok() rather than a 204.',
+            );
+        }
+
         foreach ($shape->properties as $key => $resource) {
             if (! is_subclass_of($resource, ProvidesOpenApiSchema::class)) {
                 throw new RuntimeException(
@@ -258,6 +291,33 @@ final class DumpOpenApiCommand extends Command
         }
 
         return $shape;
+    }
+
+    /**
+     * The controller method a route dispatches to.
+     *
+     * NOT `Route::getActionMethod()`, which is wrong for a single-action controller. That method is
+     * `Arr::last(explode('@', $this->getActionName()))`, and `getActionName()` reads the `controller`
+     * key — which Router::convertToControllerAction() writes BEFORE RouteAction::makeInvokable()
+     * appends `@__invoke` to `uses`. So `Route::post($uri, SomeController::class)` answers with the
+     * CLASS NAME as its "method", `method_exists()` then fails, and the dump aborted with
+     * "is not a controller action", taking the whole document with it — for a route the router
+     * itself dispatches perfectly well.
+     *
+     * `uses` is the value the framework actually dispatches, and Str::parseCallback's default is the
+     * same `__invoke` the router falls back to, so this agrees with the dispatcher by construction
+     * rather than by imitation. A Closure route has no string `uses`; it falls through to the
+     * framework's answer, which is `Closure`, which responseShapeFor() then rejects as before.
+     */
+    private function actionMethod(Route $route): string
+    {
+        $uses = $route->getAction('uses');
+
+        if (! is_string($uses)) {
+            return $route->getActionMethod();
+        }
+
+        return (string) (Str::parseCallback($uses, '__invoke')[1] ?? '__invoke');
     }
 
     /**
@@ -296,14 +356,13 @@ final class DumpOpenApiCommand extends Command
         $operation = [
             'operationId' => (string) $route->getName(),
             'parameters' => $this->parameters($route),
+            // ALWAYS PRESENT, including when it is empty — see securityFor(). An omitted `security`
+            // resolves to the document-level one, and with none declared that reads as "no
+            // authentication required" — the same answer as `[]`, arrived at by silence. Silence
+            // cannot be told apart from a generator that never asked the question.
+            'security' => $this->securityFor($route),
             'responses' => $responses,
         ];
-
-        $security = $this->securityFor($route);
-
-        if ($security !== []) {
-            $operation['security'] = $security;
-        }
 
         $manifest = $this->requestRulesManifest($route);
 
@@ -351,7 +410,7 @@ final class DumpOpenApiCommand extends Command
     private function requestRulesManifest(Route $route): ?string
     {
         $controller = $route->getControllerClass();
-        $method = $route->getActionMethod();
+        $method = $this->actionMethod($route);
 
         if ($controller === null || ! method_exists($controller, $method)) {
             return null;
@@ -375,14 +434,74 @@ final class DumpOpenApiCommand extends Command
     }
 
     /**
+     * Which credential an operation requires, derived from the route's OWN middleware stack.
+     *
+     * DERIVED AND NOT DECLARED, deliberately. An argument on #[ResponseShape] would be a second
+     * statement of "does this route need a session", and the middleware is the half that actually
+     * enforces it — so the two could disagree and the document would publish whichever the author
+     * typed. `auth:sanctum` is the single mechanism on this surface (D10/D11: the bearer branch is
+     * rejected by RejectBearerToken and nothing mints a token), so the presence of that one string
+     * IS the answer, and a route that loses the middleware loses the requirement in the document on
+     * the same commit.
+     *
+     * AN EMPTY REQUIREMENT IS EMITTED RATHER THAN OMITTED. Eleven auth routes split six guest / five
+     * authenticated (routes/api_auth.php, GROUP A and GROUP B), and before this the split reached
+     * the document only as the absence of a key — indistinguishable from a generator that had never
+     * considered it, and unassertable. `security: []` is this service SAYING the route is
+     * guest-reachable; tests/Contract/OpenApiDocumentTest.php pins that set by name, so silently
+     * dropping `auth:sanctum` from GET /api/v1/me fails a test that names the operation.
+     *
+     * TWO REFUSALS, both guarding the one direction of this field that is dangerous — publishing
+     * "no authentication required" for a route that has some:
+     *
+     *   1. An auth-family middleware that is NOT `auth:sanctum` (`auth`, `auth:web`, `auth.basic`,
+     *      `auth.session`). Answering `[]` there would under-claim, and answering `sanctumSession`
+     *      would be a lie about which credential. It is also a second mechanism on a surface that
+     *      has exactly one, which is what D10/D11 exist to prevent, so the dump is the right place
+     *      to find out.
+     *   2. A surface with no mechanism described at all. SURFACES carries `rt/` and `sdk/`, whose
+     *      route files are empty today; their credentials are a resolved chat session and a
+     *      validated embed origin, both still TODOs in bootstrap/app.php's `runtime` and `sdk`
+     *      groups. `[]` for the first route added there would publish a public endpoint. Whoever
+     *      adds it teaches this method the mechanism and declares the scheme in securitySchemes();
+     *      until then the dump fails naming the route.
+     *
      * @return list<array<string, list<string>>>
      */
     private function securityFor(Route $route): array
     {
+        $uri = ltrim($route->uri(), '/');
+        $label = $route->methods()[0].' /'.$uri;
+
+        if (! str_starts_with($uri, 'api/')) {
+            throw new RuntimeException(
+                "{$label} is on a surface this command declares no security scheme for. Teach "
+                .'DumpOpenApiCommand::securityFor() and securitySchemes() how its caller '
+                .'authenticates; publishing it with an empty requirement would describe it as '
+                .'public.',
+            );
+        }
+
+        $authenticators = [];
+
         foreach ($route->gatherMiddleware() as $middleware) {
-            if (is_string($middleware) && str_starts_with($middleware, 'auth:sanctum')) {
-                return [['sanctumSession' => []]];
+            // `auth`, `auth:<guard>`, `auth.basic`, `auth.session` — and nothing that merely starts
+            // with those letters, which is why the boundary is anchored rather than a prefix match.
+            if (is_string($middleware) && preg_match('/^auth($|[:.])/', $middleware) === 1) {
+                $authenticators[] = $middleware;
             }
+        }
+
+        if ($authenticators === ['auth:sanctum']) {
+            return [['sanctumSession' => []]];
+        }
+
+        if ($authenticators !== []) {
+            throw new RuntimeException(
+                "{$label} authenticates with ".implode(', ', $authenticators).', which this command '
+                .'cannot describe. The admin surface has exactly one mechanism, the Sanctum SPA '
+                .'session (D10/D11); a second one is a finding, not a document change.',
+            );
         }
 
         return [];
@@ -491,9 +610,16 @@ final class DumpOpenApiCommand extends Command
             'ErrorEnvelope' => [
                 'type' => 'object',
                 'additionalProperties' => false,
-                'description' => 'The single error envelope. Identical in the non-streaming body and '
-                    .'in the SSE `error` frame, and identical across both services — a consumer '
-                    .'cannot tell which plane produced one, so any divergence is a bug. '
+                'description' => 'The single error envelope, as it appears in a NON-STREAMING '
+                    .'response body. Identical across both services — a consumer cannot tell which '
+                    .'plane produced one, so any divergence between them is a bug. The SSE `error` '
+                    .'frame carries the same fields with ONE documented difference: it omits '
+                    .'`request_id`, which this schema requires, so a client cannot validate a frame '
+                    .'against this component unmodified. That is why '
+                    .'packages/contracts/src/envelope.ts types `request_id` as OPTIONAL while this '
+                    .'schema requires it — the TypeScript interface is the union of both surfaces '
+                    .'(src/sse/events.ts reuses it for the `error` frame) and this component is the '
+                    .'HTTP one; the widening is deliberate and is the safe direction. '
                     .'packages/contracts/src/errors.ts is the hand-maintained TypeScript carrier '
                     .'(class KbError, declared exactly once); do not generate a second copy of it '
                     .'from this component.',
@@ -534,11 +660,24 @@ final class DumpOpenApiCommand extends Command
                         // non-null on everything Laravel emits, which is the correct behaviour and
                         // is not being relaxed to match. Narrowing the type back is the data
                         // plane's fix to earn (stamp it inside verify_hmac), not ours to pretend.
+                        //
+                        // AND IT IS `required` ON THE HTTP BODY ONLY, which is the one asymmetry
+                        // this component has. The client-facing SSE `error` frame does not carry the
+                        // field at all (kb-internal-api-contracts, client-facing SSE event schema:
+                        // `data: {"error_class":…,"message":…,"retryable":…}`), so
+                        // packages/contracts/src/envelope.ts declares `request_id?` — optional, so
+                        // one interface covers a frame and a body — and src/sse/events.ts reuses it.
+                        // The component's own description used to claim the two were "identical",
+                        // which contradicted this `required` entry; the DESCRIPTION was the wrong
+                        // half and is now narrowed to the HTTP body. `required` is not touched: it
+                        // describes what this service really sends, and dropping it to match a frame
+                        // this schema does not describe would weaken the half that is accurate.
                         'type' => ['string', 'null'],
                         'description' => 'Echoes `X-KB-Request-Id`, so one failure is greppable '
                             .'across both services. The one identifier a user is ever shown. Null '
                             .'only on a data-plane authentication failure, which is rejected before '
-                            .'the id is stamped.',
+                            .'the id is stamped. ABSENT ENTIRELY — not null — from the SSE `error` '
+                            .'frame, which this component does not describe.',
                     ],
                     'errors' => [
                         'type' => 'object',

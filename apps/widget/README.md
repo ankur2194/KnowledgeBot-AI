@@ -106,7 +106,7 @@ shell's `PATH` — `nvm use` (the repo pins the major in `.nvmrc`) is usually th
 **There is no container fallback for these commands.** The `sdk` Compose service builds this
 package and then serves the static output — its runtime image carries nginx, not pnpm, so
 `docker compose exec sdk pnpm …` does not work. `docker compose build sdk` will produce the
-artifacts without a host toolchain, and `ci.yml`'s `node` job runs the full lint / typecheck /
+artifacts without a host toolchain. A CI `node` job used to run the full lint / typecheck /
 test / `size-limit` set on every push; but iterating locally needs Node on the host.
 
 ```bash

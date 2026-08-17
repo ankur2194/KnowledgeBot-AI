@@ -6,8 +6,8 @@
 //
 // WHAT KEEPS IT THIS FORM: `eslint.config.mjs`, the `src/features/chat/**` block — it bans the
 // global `fetch`, `globalThis.fetch`/`global.fetch`, and a by-name `fetch` imported from any other
-// module, and `ci.yml:654` runs `pnpm lint` here. This line used to claim CI GREPPED for the
-// import; it never did, and the corrected claim is deliberately narrower. Nothing mechanical
+// module. This line used to claim CI GREPPED for the import; it never did — and there is no CI at
+// all now, so `pnpm lint` run by hand is the whole mechanical defence. Nothing mechanical
 // defends the `response.body === null` throw below, and nothing in this repo executes on Hermes.
 import { fetch } from 'expo/fetch';
 // Runtime imports from the shared package. `KbError`, `createFrameBuffer` and `toKbEvent` are real
@@ -43,10 +43,10 @@ import { API_ORIGIN } from '@/lib/env';
  * are not resumable and a resume either re-runs a paid provider call or replays tokens the user
  * already saw. Its name is absent from this package on purpose, and one of the two things that used
  * to be claimed here is real: `eslint.base.mjs`'s `no-restricted-globals` bans `EventSource`, it is
- * spread into this workspace's config, and `ci.yml:654` runs `pnpm lint`. CI does NOT grep for it.
- * There is a vendored semgrep rule (`scripts/security/rules/kb-ts-boundary.yaml`,
- * `kb-ts-eventsource-for-chat`) that would catch it, but no workflow runs the scan — `gates.yml`
- * only asserts the ruleset is non-empty. So ESLint is the whole enforcement.
+ * spread into this workspace's config, so `pnpm lint` catches it. A vendored semgrep rule
+ * (`scripts/security/rules/kb-ts-boundary.yaml`, `kb-ts-eventsource-for-chat`) would catch it too,
+ * and nothing executes that ruleset — the job that once asserted it was merely non-empty is gone
+ * with the rest of CI. So ESLint, run locally, is the whole enforcement.
  */
 
 /**

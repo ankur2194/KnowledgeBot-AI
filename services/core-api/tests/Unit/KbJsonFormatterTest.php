@@ -24,9 +24,11 @@ use Monolog\LogRecord;
 |
 | WHY EVERY CREDENTIAL FIXTURE BELOW IS A REPEATED MARKER AND NOT A RANDOM-LOOKING STRING (#137)
 | ----------------------------------------------------------------------------------------------
-| `secret-scan` in `.github/workflows/ci.yml` runs gitleaks with NO `--exit-code` override, NO
-| allow-list flag and no `.gitleaksignore` — its own comment is "a secret is the one finding with
-| no waiver" — over BOTH the worktree and every ref. Three fixtures in this file were the only
+| A `secret-scan` job used to run gitleaks over BOTH the worktree and every ref with no waiver of any
+| kind. TWO THINGS HAVE CHANGED AND BOTH WEAKEN THIS PARAGRAPH: the job was deleted with `.github/`
+| on 2026-08-17, so nothing scans automatically; and a repo-root `.gitleaks.toml` now exists, whose
+| one allowlist covers password-shaped fixtures under test paths (this file's fixtures are not that
+| shape, so they are still caught by a manual run). Three fixtures in this file were the only
 | findings in the whole repository that survive `actions/checkout`, so they would have turned the
 | first PR after this tree is committed red, and a waiver file would have hollowed out the gate for
 | the next real fixture. They were lowered instead.
@@ -368,6 +370,177 @@ it('states what its redaction cannot do', function (): void {
     // A redactor that gives false confidence is worse than none. The limits are a constant so that
     // deleting the caveat is a diff rather than a forgotten sentence.
     expect(KbJsonFormatter::REDACTION_LIMITS)->toContain('does NOT catch tenant content');
+});
+
+/*
+|--------------------------------------------------------------------------
+| redactValue() — the value-shaped subset, and the false positive it removes
+|--------------------------------------------------------------------------
+|
+| App\Services\Audit\AuditLogger::sanitize() uses a redaction pass as a SHAPE BACKSTOP over
+| `audit_logs.details`: an ECHOED value that redaction alters is not echoed. Its input is not a
+| message — it is one value whose FIELD NAME is the caller's map key and is never in the string —
+| so redact()'s CREDENTIAL_KEY_VALUE rule, whose whole discriminating power is a key name sitting
+| next to a value, fires on ordinary registrable email addresses. `=` is legal `atext` in a
+| dot-atom.
+|
+| THE ROWS BELOW ARE MEASURED, NOT REASONED. Every address marked valid was run through this
+| repo's egulias/email-validator under the exact pair `email:rfc,strict` builds (RFCValidation +
+| NoRFCWarningsValidation) in the project image, and each rule was applied individually to see
+| which one fires. `docker run … php` over app/Logging/KbJsonFormatter.php's private constants by
+| reflection is the measurement; re-run it before changing any expectation here.
+|
+| The assertions come in the two directions that matter, and both are needed: the false positive
+| is GONE from redactValue(), and it is still PRESENT in redact(), because it is correct there.
+| Only asserting the first would go green on a change that deleted the rule outright.
+*/
+
+/**
+ * Addresses a person can really register and really log in with, which redact() alters.
+ *
+ * @return list<string>
+ */
+function kbKeyValueAddresses(): array
+{
+    return [
+        'token=abc@example.com',
+        'my.token=x@example.com',
+        'secret=1@example.com',
+        // Two of this file's own, on the same measurement: the rule's keyword list is 15 names
+        // long, so the false-positive surface is much wider than the three addresses the audit of
+        // AuditLogger reported.
+        'password=hunter2@example.com',
+        'x-api-key=q@example.com',
+    ];
+}
+
+it('leaves a registrable address containing a key=value pair intact', function (string $address): void {
+    // The whole point of the narrowing. An audit row for auth.login.failed carries
+    // organization_id = NULL and actor_id = NULL by design, so before this the caller only had to
+    // choose its own username to produce a row that identified nothing.
+    expect(KbJsonFormatter::redactValue($address))->toBe($address);
+})->with(kbKeyValueAddresses());
+
+it('still applies the key=value rule to a MESSAGE, which is where it is correct', function (string $address): void {
+    // `Log::info("rejected password=hunter2")` is exactly what CREDENTIAL_KEY_VALUE is for. This
+    // assertion is what stops the narrowing being applied to redact() by a later "unification".
+    expect(KbJsonFormatter::redact($address))->not->toBe($address);
+})->with(kbKeyValueAddresses());
+
+it('still catches a genuine credential in a value, one retained rule at a time', function (string $value, string $needle): void {
+    // ABSENCE of the secret, never presence of the mask — the file header explains why. Every
+    // fixture keeps the shape the rule reads (prefix, scheme word, length floor) while the repeated
+    // marker holds Shannon entropy under gitleaks' 3.5 bar; see the header note before editing one.
+    expect(KbJsonFormatter::redactValue($value))->not->toContain($needle);
+})->with([
+    // VENDOR_KEYS — the `sk-ant-` arm, the one an Anthropic credential actually has.
+    ['sk-ant-MUSTNOTAPPEARMUSTNOTAPPEAR', 'MUSTNOTAPPEAR'],
+    // VENDOR_KEYS — a second arm, so deleting one prefix from the alternation is visible.
+    ['nvapi-MUSTNOTAPPEARMUSTNOTAPPEAR', 'MUSTNOTAPPEAR'],
+    // BEARER — with NO key name in front of it, which is what makes this independent of the rule
+    // that was removed. A `key: scheme value` message shape is covered in the redact() specs above.
+    ['Bearer MUSTNOTAPPEARMUSTNOTAPPEAR', 'MUSTNOTAPPEAR'],
+    ['Basic MUSTNOTAPPEARMUSTNOTAPPEAR', 'MUSTNOTAPPEAR'],
+    // KB1_SIGNATURE — our own scheme, colon included. `KB1 k1` alone is under the length floor, so
+    // a pattern that stopped at the colon would leave the signature standing.
+    ['KB1 k1:MUSTNOTAPPEARMUSTNOTAPPEAR', 'MUSTNOTAPPEAR'],
+    // URL_QUERY — and this is the shape this application's own reset link has:
+    // FrontendUrl::for('/reset-password', ['token' => …, 'email' => …]). The capability is in the
+    // query string, it has no shape of its own, and with CREDENTIAL_KEY_VALUE gone this rule is the
+    // only thing left that catches it.
+    ['https://app.example.test/reset-password?token=MUSTNOTAPPEARMUSTNOTAPPEAR', 'MUSTNOTAPPEAR'],
+]);
+
+it('keeps the part of a URL that says which endpoint was involved', function (): void {
+    // The cost of keeping URL_QUERY is that a legitimate query string goes too. It is bounded: the
+    // scheme, host and path survive, so an audit reader still knows what was called.
+    expect(KbJsonFormatter::redactValue('https://app.example.test/reset-password?token=MUSTNOTAPPEARMUSTNOTAPPEAR'))
+        ->toContain('https://app.example.test/reset-password')
+        ->and(KbJsonFormatter::redactValue('https://example.test/docs?page=2'))
+        ->toBe('https://example.test/docs?[REDACTED]');
+});
+
+it('fires on nothing the audit allow-list actually admits', function (string $value): void {
+    // The complete ECHOED vocabulary of AuditLogger::OPERATIONS — email, mechanism, reason, role,
+    // from_role, to_role, expires_at — in the value shapes those fields really take. A rule added
+    // to redactValue() that fires on one of these turns every audited request into a WARNING plus a
+    // fingerprinted row, which is the failure this whole change exists to remove.
+    expect(KbJsonFormatter::redactValue($value))->toBe($value);
+})->with([
+    'bob@example.com',
+    // `mechanism` is literally the string `token` for a personal access token. CREDENTIAL_KEY_VALUE
+    // needs a `:` or `=` after the keyword, so even the message rule spares it — but a sloppier
+    // keyword-only rule would not, and this row is where that would be caught.
+    'token',
+    'session',
+    'admin',
+    'owner',
+    'member',
+    // auth.login.failed.reason — the internal distinction the 422 response must never make.
+    'unknown_email',
+    'invalid_password',
+    'unverified_email',
+    // expires_at
+    '2026-08-20T00:00:00+00:00',
+]);
+
+it('keeps a residual VENDOR_KEYS false positive, measured and deliberately not fixed', function (): void {
+    // MEASURED: `sk-abcdefghijkl@example.com` is rfc,strict VALID and matches
+    // `sk-[A-Za-z0-9_\-]{12,}` — so it is NOT a CREDENTIAL_KEY_VALUE false positive and the
+    // narrowing does not rescue it. Pinned rather than fixed, because the only available fix is a
+    // lookahead refusing a match followed by `@domain`, which would stop catching a credential in
+    // URL userinfo position (`https://sk-ant-…@host/`) — a real leak shape traded away for a rare
+    // false positive. AuditLogger now writes `<key>_fingerprint` for a value that fails the
+    // backstop, so this costs correlatability of the plaintext and not the row.
+    //
+    // If this ever goes red, the fix was attempted: re-read the VENDOR_KEYS paragraph on
+    // KbJsonFormatter::redactValue() before deleting the assertion.
+    $address = 'sk-abcdefghijkl@example.com';
+
+    expect(KbJsonFormatter::redactValue($address))->not->toBe($address)
+        ->and(KbJsonFormatter::redactValue($address))->toContain('@example.com');
+});
+
+it('is a strict subset of the message redactor', function (): void {
+    // The superset property, asserted behaviourally rather than trusted from the delegation in
+    // redact(). Anything the value path catches, the message path must also catch — otherwise a
+    // rule was added to redactValue() alone and a log MESSAGE now leaks a shape an audit row
+    // refuses.
+    $corpus = array_merge(kbKeyValueAddresses(), [
+        'sk-ant-MUSTNOTAPPEARMUSTNOTAPPEAR',
+        'Bearer MUSTNOTAPPEARMUSTNOTAPPEAR',
+        'KB1 k1:MUSTNOTAPPEARMUSTNOTAPPEAR',
+        'https://app.example.test/reset-password?token=MUSTNOTAPPEARMUSTNOTAPPEAR',
+        'bob@example.com',
+        'session',
+        '',
+    ]);
+
+    foreach ($corpus as $value) {
+        if (KbJsonFormatter::redactValue($value) !== $value) {
+            expect(KbJsonFormatter::redact($value))->not->toBe($value, "redact() misses [{$value}]");
+        }
+    }
+
+    // And the subset is PROPER: at least one input the message path alters and the value path does
+    // not. Without this the assertion above is satisfied by two identical functions.
+    expect(KbJsonFormatter::redactValue('token=abc@example.com'))->toBe('token=abc@example.com')
+        ->and(KbJsonFormatter::redact('token=abc@example.com'))->not->toBe('token=abc@example.com');
+});
+
+it('states what its VALUE redaction cannot do, separately', function (): void {
+    // Two functions with different coverage need two published strings: one constant covering both
+    // is how a caller ends up confident about the coverage of the other one.
+    expect(KbJsonFormatter::VALUE_REDACTION_LIMITS)->toContain('does NOT catch tenant content')
+        ->and(KbJsonFormatter::VALUE_REDACTION_LIMITS)->toContain('key=value')
+        ->and(KbJsonFormatter::REDACTION_LIMITS)->toContain('redactValue()')
+        ->and(KbJsonFormatter::VALUE_REDACTION_LIMITS)->not->toBe(KbJsonFormatter::REDACTION_LIMITS);
+});
+
+it('returns an empty value untouched rather than a mask', function (): void {
+    // The caller compares input to output. An empty string coming back as anything else would read
+    // as "redaction fired" on a value nothing recognised.
+    expect(KbJsonFormatter::redactValue(''))->toBe('');
 });
 
 it('renders an exception without PHP argument values', function (): void {

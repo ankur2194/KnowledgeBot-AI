@@ -29,7 +29,13 @@ import { ignores, kbRestrictedSyntax, kbRules } from '../../eslint.base.mjs';
 const nextConfigs = nextCoreWebVitals.filter((config) => config.name !== 'next/typescript');
 
 export default tseslint.config(
-  { ignores: [...ignores, 'next-env.d.ts', '.next/**'] },
+  {
+    // `public/mockServiceWorker.js` is MSW's generated worker script, copied verbatim by
+    // `msw init public` and replaced wholesale on every msw upgrade. It ships its own
+    // `/* eslint-disable */`, which this config then reports as an unused directive — a warning on a
+    // file nobody may edit.
+    ignores: [...ignores, 'next-env.d.ts', '.next/**', 'public/mockServiceWorker.js'],
+  },
   // Next 16 REMOVED `next lint` and `next build` no longer lints. This config is only reached
   // because `pnpm lint` runs ESLint as its own step — a pipeline that relied on the build to lint
   // now passes while checking nothing.
@@ -95,6 +101,41 @@ export default tseslint.config(
         {
           selector: "FunctionDeclaration[id.name='generateStaticParams']",
           message: 'Admin routes are never prerendered: the org is not in the path.',
+        },
+        {
+          selector: "VariableDeclarator[id.name='fetchCache']",
+          message:
+            'fetchCache re-enables caching for fetches issued after a request-time API — the exact window force-dynamic is closing.',
+        },
+      ],
+    },
+  },
+  {
+    // The (auth) group gets the SAME bans as (admin), and for a sharper reason. Nothing here is
+    // org-scoped — a visitor at these routes has no organization yet — but every page reads request
+    // state from `searchParams` (`?next=`, `?token=`, `?status=`), and `force-static` does not error
+    // on that: it makes those reads return EMPTY values and the Full Route Cache then serves one
+    // shell to everybody. A password-reset page that renders with no token, cached, is worse than a
+    // crash.
+    files: ['src/app/(auth)/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        // Spread, never replace: flat config REPLACES a rule's options, so re-declaring this rule
+        // without the base selectors would quietly un-ban the Server Action directive here.
+        ...kbRestrictedSyntax,
+        {
+          selector: "Property[key.name='retry']",
+          message: 'Retry policy lives only in src/lib/query/client.ts.',
+        },
+        {
+          selector: "Literal[value='force-static']",
+          message: 'force-dynamic is the only `dynamic` value under (auth).',
+        },
+        {
+          selector: "FunctionDeclaration[id.name='generateStaticParams']",
+          message:
+            'Auth routes are never prerendered: every one of them reads a token or a redirect target from the request.',
         },
         {
           selector: "VariableDeclarator[id.name='fetchCache']",

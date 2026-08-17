@@ -62,138 +62,122 @@ files found`, shielded by `passWithNoTests: true` at `apps/web/vitest.config.ts:
   the repository root finds nothing — and a passing run of zero tests looks identical to a passing run.
 
 Test databases and the local crawl fixture origin come up with `make test-up` (the `test` Compose
-profile). The image versions there are pinned to match CI, and a drift check diffs the two.
+profile). Those image pins used to be duplicated in a workflow, with a drift check diffing the two;
+the workflow and the check are both gone, so `compose.yaml` is now the single copy — which is the
+arrangement the drift check existed to protect, arrived at by subtraction.
 
 ---
 
-## The enforcement greps
+## The invariants that used to be enforced, and now are not
 
-CI runs a set of checks that are greps rather than tests, because the things they protect fail
-_silently_ and so cannot be asserted from a passing test.
+**There is no CI in this repository.** `.github/` was deleted on 2026-08-17. It had held `gates.yml`
+— seven install-free grep/parse jobs, 33 steps — and `ci.yml`, seven jobs that installed every
+lockfile and ran Pest, pytest, Vitest, Playwright, ESLint, `next build`, `size-limit` and six image
+builds. Nothing replaced either of them.
 
-**The two lists below are not the same claim.** `.github/workflows/gates.yml` is the source of truth
-for what a pull request actually has to survive today; the reasoning behind each check lives in
-`.claude/skills/github-actions-pipeline/references/workflow-jobs.md`, which also specifies checks that
-have not been authored yet. Keep the split honest — when a gate lands, move its bullet up rather than
-letting the second list quietly read as enforcement.
+**Read the consequence literally, because it is the opposite of reassuring.** These checks were
+greps rather than tests for one reason: the things they protect fail *silently*, so they cannot be
+asserted from a passing test. Deleting the greps did not make those failures louder — it removed the
+only thing that was listening. Everything below therefore moved from "what your pull request must
+survive" to "what a reviewer has to look for by hand, every time, with nothing to catch a miss".
 
-### Enforced today — `.github/workflows/gates.yml`
+Two related sections say the same thing from their own side: `docs/22` § *Removing CI/CD* records
+what each gate was worth, and `CLAUDE.md`'s header states the rule for the whole repo.
 
-Six jobs, every one a pure text/file pass: no install, no service containers, no secrets. Keep it that
-way even though every lockfile is now committed and `ci.yml` installs — these run in seconds on a fork
-PR with no secrets available, and a gate that needs an install inherits every reason an install fails.
+### What a reviewer now has to check
 
 - **Tenancy.** `withoutGlobalScopes(`, `DB::table(`, `DB::select(` in `services/core-api`; unfiltered
   `query_points(`, `.search(`, `scroll(`, `count(` in `services/ai-service`, plus a `Prefetch(` with no
-  `query_filter=` on the line. Exempt a line with a `tenancy-exempt:` comment on the same line, and
-  expect that exemption to be read in review. (The `Prefetch(` check has a known defect — qdrant-client
-  spells the _leaf_ parameter `filter=`, so the gate as written passes on a filtered and an unfiltered
-  prefetch alike. `docs/22` § _CI gate defects_, item 4.)
+  `query_filter=` on the line. A line carrying a `tenancy-exempt:` comment was always meant to be read
+  in review — now every line is. (The `Prefetch(` check had a known defect worth remembering if you
+  ever rebuild it: qdrant-client spells the *leaf* parameter `filter=`, so the grep passed on filtered
+  and unfiltered prefetches alike. `docs/22` § *CI gate defects*, item 4.)
 - **Deletion keys.** Every `FieldCondition(key=…)` must name one of the seven allow-listed keys.
-  `MatchText(` and any `text=` / `content=` / `content_hash=` kwarg on a delete or count is a hard
-  failure — deletion targets stable identifiers, never text. Escape hatch: `deletion-key-exempt:`.
+  `MatchText(`, or any `text=` / `content=` / `content_hash=` kwarg on a delete or count, is wrong:
+  deletion targets stable identifiers, never text. The allow-list now lives in
+  `services/ai-service/tests/unit/test_delete_keys.py` and in
+  `.claude/skills/kb-deletion-and-verification/references/delete-key-allow-list.md`, and that test is
+  the only automated check left.
 - **The write allow-list.** `services/ai-service` writes only the tables in
-  `app.db.writes.ALLOWED_TABLES` and nothing else (ADR-012, table list superseded by
+  `app.db.writes.ALLOWED_TABLES` (ADR-012, table list superseded by
   [ADR-033](docs/19-repo-structure-adrs.md)). Migrations, ORMs and any assignment to
-  `current_version_id` are refused there. The gate _imports_ the tuple — do not restate the list, or
-  its length, in a docstring, a config or this file, because a second copy drifts silently.
-  **Admission is three properties, never a count:** the row is derived and rebuildable in the
-  ADR-010 sense; no public API path reads or writes the table; Laravel owns the migration. A name
-  that satisfies all three may join; a name that satisfies two is a review stop.
-- **Cardinalities asserted by import**, in the same job: seven delete keys (six payload filter fields
-  plus `chunk_id`) and eighteen error classes. A nineteenth class is a red build. **The table
-  allow-list is deliberately not on this list any more** — it is asserted by **membership**, not by
-  cardinality: `KB_TABLE_REVIEW_PIN` at `gates.yml:423` names the reviewed set and is compared
-  set-wise against the tuple imported from `app/db/writes.py`. The old `[ "$t" = "4" ]` assertion no
-  longer exists, and the block's own comment states its honest limit — the pin stops a table arriving
-  _unreviewed_; it cannot stop a reviewer approving the pin without checking the three properties.
-  Adding a name means adding it to the pin **in the same pull request** and saying which property
-  justifies it.
+  `current_version_id` are refused there. Do not restate the list, or its length, in a docstring, a
+  config or this file — a second copy drifts silently, and there is no longer a gate that imports the
+  tuple to catch the drift. **Admission is three properties, never a count:** the row is derived and
+  rebuildable in the ADR-010 sense; no public API path reads or writes the table; Laravel owns the
+  migration. A name satisfying all three may join; a name satisfying two is a review stop.
+- **The `KB_TABLE_REVIEW_PIN` membership check is gone with the rest.** It compared a named, reviewed
+  set against the imported tuple, and its own comment stated the honest limit — it stopped a table
+  arriving *unreviewed*, and could never stop a reviewer approving the pin without checking the three
+  properties. Now nothing stops either. Adding a name to `ALLOWED_TABLES` is a review event, and the
+  pull request should say which of the three properties justifies it.
+- **Cardinalities that used to be asserted by import:** seven delete keys (six payload filter fields
+  plus `chunk_id`) and eighteen error classes. A nineteenth error class used to be a red build; today
+  it is a diff nobody is forced to notice.
 - **Telemetry.** Alert label and annotation completeness, Alertmanager route coverage against the
-  deliberately-named `kb-unrouted` receiver, and `promtool check rules` plus `test rules` — with the
-  declared test-case count asserted non-zero, because a passing run of zero tests looks identical to a
-  passing run.
+  deliberately-named `kb-unrouted` receiver, and `promtool check rules` plus `test rules`. `make
+  promtool` still runs the last of these locally, and it is the only one with a surviving command —
+  run it from the rules directory, for the reason under *Running the tests*.
 - **Compose invariants.** Network membership, published host ports, profile names, `depends_on` across
-  profiles, and the no-named-volume rule on `valkey-cache`. Twelve assertions, read live off the four
-  compose files.
-- **Compose/CI image drift.** Every data-service image any workflow uses must equal the `test`-profile
-  pin in `compose.yaml`.
+  profiles, and the no-named-volume rule on `valkey-cache` — twelve assertions read live off the four
+  compose files. `infrastructure/docker/README.md` still lists them; every one is now a review
+  property, and that file says so per item.
+- **Shutdown determinism.** Dev must never self-restart and the base file must never lose
+  `unless-stopped`. `compose.override.yaml`'s footer carries two measuring greps; they are what
+  remains of the gate, and they only help if someone runs them.
 - **Repo artifact consistency.** Regenerated design tokens, the byte-identical SSE fixture twins in
-  `apps/web` and `apps/mobile`, the widget's `__KB_*` constants agreeing across `src/`, `vite.config.ts`
-  and `env.d.ts`, one corpus version across `samples/VERSION` and the two TOMLs, `deploy: preflight` as
-  a Makefile _prerequisite_, a zero-dependency root `package.json` with no fifth lockfile, and a
-  non-zero floor on the vendored SAST rule count.
-- **No Server Actions** in `apps/web` — a `'use server'` directive is a POST endpoint with no route, no
-  middleware and no rate limit.
+  `apps/web` and `apps/mobile`, the widget's `__KB_*` constants agreeing across `src/`,
+  `vite.config.ts` and `env.d.ts`, one corpus version across `samples/VERSION` and the two TOMLs,
+  `deploy: preflight` as a Makefile *prerequisite*, a zero-dependency root `package.json` with no
+  fifth lockfile, and a non-zero floor on the vendored SAST rule count.
+- **No Server Actions** in `apps/web` — a `'use server'` directive is a POST endpoint with no route,
+  no middleware and no rate limit.
 - **The error-rate matcher is never re-derived.** `outcome="error"` outside `kb-recording.yml` omits
-  every timeout. Escape hatch: `outcome-matcher-exempt:`.
+  every timeout.
 - **Laravel's first-party AI APIs** (`Str::toEmbeddings()`, `DB::whereVectorSimilarTo()`, and
-  `laravel/ai` / `laravel/mcp` in `composer.json`) anywhere in `services/core-api` (ADR-017).
+  `laravel/ai` / `laravel/mcp` in `composer.json`) must not appear anywhere in `services/core-api`
+  (ADR-017).
+- **Generated artifacts are no longer diffed.** `php artisan kb:dump-openapi --check` and
+  `php artisan kb:dump-form-rules --check` both regenerate and compare committed artifacts, and both
+  ran as steps until 2026-08-17. Run them by hand after touching a route or a FormRequest; a stale
+  `packages/contracts/openapi/` or `packages/contracts/rules/` artifact is otherwise invisible.
+- **Secrets.** `.gitleaks.toml` at the repo root still configures the scan, and its footer carries the
+  command. Nothing runs it for you. `scripts/security/credential-file-scan.sh` covers the files
+  gitleaks structurally cannot see, and it has no caller either.
 
-**A gate count is not a coverage number.** Roughly a third of the checks above cannot fail on today's
-tree — the corpus they scan is a skeleton, so the banned token has nowhere to appear yet. Each job ends
-with a `vacuous-today:` ledger step that names its own zero-candidate checks in the job output. Delete
-a ledger line when the corpus it names grows a real call site; never delete the ledger.
+### What the removal cost that no checklist recovers
 
-### Also enforced today — `.github/workflows/ci.yml`
+Three things were only ever true because a job did them, and no amount of reviewer diligence
+substitutes:
 
-**`ci.yml` exists.** Seven jobs — `core-api`, `ai-service`, `node`, `images`, `dependency-scan`,
-`dependency-scan-full`, `secret-scan` — and unlike `gates.yml` it installs. Every lockfile is
-committed, so `composer install`, `uv sync --frozen` and `pnpm install --frozen-lockfile` all run,
-and with them Pest, pytest, Vitest, ESLint, `next build` and `size-limit`. The `images` job builds
-**six** images with `docker/build-push-action` (core-api; ai-service `runtime`, `runtime-crawl` and
-`runtime-evaluation`; web; widget), which is what put the `RUN`-line assertions inside those
-Dockerfiles under enforcement for the first time — that was finding **O22**, and it is closed.
+- **The six live-parse assertions.** They need the pinned Docling/RapidOCR weights at `/models`,
+  which exist only inside `knowledgebot/ai-service:dev`. `docs/22` § I6 records the whole story;
+  `services/ai-service/tests/harness/Dockerfile.pytest` is the only way to run them, and running it
+  is now a manual act.
+- **The image builds.** Six images used to be built on every pull request, which is what put the
+  build-time `RUN` assertions inside those Dockerfiles under enforcement at all — finding **O22**.
+  They are unenforced again until somebody builds locally.
+- **`size-limit` on the widget.** It billed `packages/contracts` to the widget's 30 kB brotli shell,
+  so it could fail on a change that touched no widget file. When it does fail locally, the fix is
+  trimming the package — **never raising the limit.**
 
-Two consequences worth knowing before you cite a check as a control:
+### If you reintroduce automation
 
-- **`size-limit` runs in the same step as the widget build and its exit code is the job's.** It can
-  fail on a pull request that touched no widget file, because `packages/contracts` is billed to the
-  widget's 30 kB brotli shell. When it does, the fix is trimming the package — **never raising the
-  limit.**
-- **The RLS tripwire is armed but unobserved.** `database/ci/enable-rls.sql` runs; the suite still
-  connects as the owner role, so the policies are never exercised. The step says so in its own
-  output rather than leaving the absence to be inferred.
+Two hard-won lessons are worth carrying into whatever replaces this, and both are catalogued in
+`docs/22`:
 
-### Still owed — and the list lives in one place
-
-**Do not maintain a second copy of it here.** The authoritative list is the
-`DELIBERATELY NOT HERE — gates that are OWED and cannot pass today` block at the top of
-`.github/workflows/ci.yml`. It names each unwired gate, its owner, and — this is the part a
-duplicate always loses — **the specific artifact whose absence is the blocker**, so you can tell
-whether your change unblocks one. Highlights, for orientation only:
-
-- **The ADR-010 rebuild proof** (merge-queue tier, asserting a reconstructed **payload** rather than
-  a count), the `/metrics` catalog diff, `trivy image`, `pip-audit`, Opengrep SAST, and the
-  eval-corpus regression gate.
-- **The error taxonomy's Page column diffed against the named alert rules.** Held back deliberately:
-  eight error classes are uncovered _by design_ and the `TODO(ADR)` block at the top of
-  `infrastructure/observability/prometheus/rules/kb-alerts.yml` enumerates them, so the gate is red
-  until each uncovered class has a rule or a recorded decision. A required check that cannot pass gets
-  disabled within a week, which is worse than not having it.
-- **The licence gate in `scripts/security/`.** Still blocked, but no longer on the same blocker: all
-  three model revisions resolved on 2026-08-07, and resolving them turned three false reds into one
-  true one — `docling-models` at v2.3.0 is CDLA-Permissive-2.0, not the MIT its row claimed. See
-  [`SECURITY.md`](SECURITY.md) § _Why this is a policy and not a courtesy_.
-- **`osv-scanner` is wired on the schedule tier only**, not as a pull-request gate, because it is red
-  on today's tree for 13 fixable advisories nobody on the team introduced. Promote it in the commit
-  that lands the bumps.
-
-The form-rules diff (`php artisan kb:dump-form-rules --check`) has moved out of this list: it runs in
-the `core-api` job and has two real FormRequests to compare.
-
-Several of the specified greps have known defects — they are unsatisfiable as written, or they pass on
-incorrect code. They are catalogued in `docs/22` § _CI gate defects found by writing code against the
-gates_. **If a gate blocks correct code, fix the gate in the owning skill rather than working around
-it locally**, and add the finding to `docs/22` if it is not already there.
-
-One defect class is worth knowing before you write a gate of your own: **a gate must name the token it
-bans, so the file documenting the ban trips it.** Sixteen claims in this repo have that shape, and in
-every one of them the tripping line is the _explanation_. Mitigate in the same commit as the gate —
-anchored pattern, path scope, or an exempt marker — and never by deleting the sentence that turned the
-build red. See `docs/22` § _Self-tripping enforcement_.
+- **A gate must name the token it bans, so the file documenting the ban trips it.** Sixteen claims in
+  this repo had that shape, and in every one the tripping line was the *explanation*. Mitigate in the
+  same commit as the gate — anchored pattern, path scope, or an exempt marker — never by deleting the
+  sentence that turned the build red. See `docs/22` § *Self-tripping enforcement*.
+- **A check that cannot fail is worse than no check**, because it reads as coverage. Every deleted job
+  ended with a `vacuous-today:` ledger naming its own zero-candidate checks, and roughly a third of
+  the greps above could not fail on this tree at the time. Whatever replaces them should keep that
+  habit, and `docs/22` § *CI gate defects found by writing code against the gates* lists the ones that
+  were unsatisfiable or passed on incorrect code.
 
 ---
+
 
 ## The ADR process
 
@@ -287,10 +271,10 @@ shipping.
   real resolutions, and the root plus `packages/design-tokens` carry a 13-line file with an empty
   `.: {}` importer. **A dependency-free importer produces an _empty_ lockfile, not _no_ lockfile** —
   which is why the invariant is _the root importer resolves nothing_, not _the root has no lockfile_.
-  `gates.yml` asserts it the correct way (it parses the root lockfile and checks the importer is
-  empty); prose that says "four lockfiles, not five" was counting, and counting is what went stale.
-  A root dependency is still a violation: it makes the root a resolution target the security scanners
-  and the CI cache keys were not built for.
+  A deleted gate asserted it the correct way — it parsed the root lockfile and checked the importer
+  was empty — while prose saying "four lockfiles, not five" was counting, and counting is what went
+  stale. Nothing asserts it now. A root dependency is still a violation: it makes the root a
+  resolution target the security scanners were not built for.
 - **Exact pins.** `.npmrc` sets `save-exact=true`. A caret is how two packages that must move together
   drift apart between two installs of the same commit.
 - **Base images are pinned by digest, model revisions by commit sha.** An unpinned `FROM` makes the

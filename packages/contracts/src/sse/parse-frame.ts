@@ -6,7 +6,7 @@ import type { SseFrame } from './frame.js';
  * the drift `contract-steward` exists to catch, and the three clients would diverge on exactly the
  * chunk-boundary case none of their fixtures cover.
  *
- * NOT enforced by anything today. No lint rule covers it, and while gates.yml does grep under
+ * NOT enforced by anything today. No lint rule covers it, and while a deleted CI job did grep under
  * apps/ and packages/, the closest it comes is `repo-artifact-consistency` diffing the two SSE
  * FIXTURE SERVERS (apps/web and apps/mobile) — the test doubles, not this parser. Reviewer check,
  * anchored on a DEFINITION so it does not match prose mentioning the rule (the unanchored

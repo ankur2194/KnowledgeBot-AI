@@ -1,0 +1,67 @@
+# ================================================================================================
+# THE TEST HARNESS IMAGE — pytest on top of the shipped runtime, so a real parse can be asserted.
+# ================================================================================================
+# WHY THIS EXISTS. `tests/integration/test_parsing_live_document.py` is the only file that asserts
+# what the Docling layout model and RapidOCR actually produced: that the OCR quality signal is fed
+# (finding #23), that the coverage arm does not misfire (the G9 ruling), and that a parse is
+# REPRODUCIBLE — which publication depends on, because it verifies an expected chunk total before
+# activating a version. Every one of those assertions is skipped unless the pinned weights are on
+# disk at `ARTIFACTS_PATH`, which is hardcoded `/models` in app/ingestion/parsing/converter.py.
+#
+# The weights are baked into `knowledgebot/ai-service:dev` and nowhere else, so the suite must be
+# mounted INTO that image or those six tests skip. They skipped everywhere until 2026-08-17, which
+# is docs/22 § I6; a CI step then ran them, and that step was deleted hours later when `.github/`
+# was removed. **So this harness is now the ONLY way those assertions ever execute, and running it
+# is a manual act somebody has to remember.** The file's own docstring says a green tick from a
+# skipped parser "is the failure this file exists to prevent someone shipping" — with no CI, that
+# warning applies to whoever last chose not to run this.
+#
+# WHY IT IS NOT A STAGE IN services/ai-service/Dockerfile. Precedent, and the reason behind it:
+# apps/widget puts its stream-probe build in `tests/harness/probe.vite.config.ts` rather than as a
+# `--mode` in the shipped vite.config.ts, so "a test-only entry can never be built into a customer
+# artifact". A `runtime-test` stage carrying pytest would sit in the same file as the shipped
+# stages, one `--target` typo away from being the thing that ships. Here the shipped Dockerfile
+# stays `uv sync --frozen --no-dev` with no test dependency expressible in it at all, and the test
+# runner is added strictly outside, by a file under tests/.
+#
+# WHY IT ADDS ONLY THE RUNNERS, AT THE LOCK'S PINS. `pytest==9.1.1` and `pytest-asyncio==1.4.0` are
+# copied from pyproject.toml's dev group, so this cannot silently test against a different pytest
+# than `uv run` uses. Nothing else is added: the point is to exercise the SHIPPED dependency set,
+# so pulling in the dev group wholesale would defeat it — and would drag `ruff` and the coverage
+# plugins into an image that asserts its own containment at build time.
+#
+# `pytest-asyncio` IS REQUIRED EVEN THOUGH THE TARGET FILE IS SYNCHRONOUS. pyproject.toml sets
+# `asyncio_mode = "auto"` and runs with `--strict-config`, under which an ini key no installed
+# plugin claims is an ERROR rather than a warning — so without it the run dies during config, not
+# during a test, and the message names the ini key rather than the missing plugin.
+#
+# HOW IT IS INVOKED — by hand, since nothing else invokes it:
+#
+#   docker build -t knowledgebot/ai-service:pytest \
+#     -f services/ai-service/tests/harness/Dockerfile.pytest services/ai-service/tests/harness
+#   docker run --rm -v "$PWD":/repo:ro -w /repo/services/ai-service \
+#     -e PYTHONPATH=/repo/services/ai-service -e PYTHONDONTWRITEBYTECODE=1 -e HOME=/tmp \
+#     knowledgebot/ai-service:pytest \
+#     /app/.venv/bin/python -m pytest tests/integration/test_parsing_live_document.py
+#
+# THE REPO ROOT IS MOUNTED, NOT services/ai-service, AND THAT IS NOT A PREFERENCE. The corpus
+# resolves as `SERVICE_ROOT.parents[1] / "samples"`, and `SERVICE_ROOT` is tests/support/tree.py's
+# `parents[2]`. Mount the service directory at /app and SERVICE_ROOT becomes `/app`, whose
+# `.parents` has exactly one entry — so `parents[1]` raises IndexError during COLLECTION and every
+# test in the file errors for a reason that says nothing about parsing. Mounted at /repo, the
+# service sits two levels deep where the arithmetic expects it and `samples/` resolves.
+#
+# `tests/` IS IN .dockerignore, WHICH IS WHY THE SUITE IS MOUNTED RATHER THAN COPIED. That
+# exclusion is correct — the shipped image must not carry tests — and it means this image cannot
+# run its own suite. The mount is read-only, with PYTHONDONTWRITEBYTECODE=1 so the image's uid
+# 10001 never needs write access to a tree owned by someone else.
+#
+# BUILD CONTEXT IS THIS DIRECTORY, deliberately: the build needs no repo file, so the narrowest
+# possible context is the honest one and nothing here can accidentally depend on the service tree.
+FROM knowledgebot/ai-service:dev
+
+# root only to write into /app/.venv, which the runtime stage owns as uid 10001; dropped again below
+# so the tests run as the same unprivileged user the service runs as.
+USER root
+RUN uv pip install --python /app/.venv --no-cache pytest==9.1.1 pytest-asyncio==1.4.0
+USER app

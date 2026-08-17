@@ -53,5 +53,24 @@ tls:
 #   organization + bot + session + IP TOGETHER, in Laravel. A second, weaker limiter here would
 #   also fire first and return a 429 with no error_class for the client to branch on.
 #
-# * No certificate `stores` or manually supplied certificates. Everything is ACME HTTP-01 through
-#   the `le` resolver, and acme.json lives on a NAMED VOLUME.
+# * No certificate `stores` or manually supplied certificates IN THIS FILE, and in a production
+#   render none anywhere: everything is ACME HTTP-01 through the `le` resolver, with acme.json on a
+#   NAMED VOLUME.
+#
+#   DEVELOPMENT IS THE EXCEPTION, and it is not a compromise of the above — it is the only way that
+#   deployment can have TLS at all. ACME requires Let's Encrypt to reach the host at the name being
+#   certified, and a dev `DOMAIN` is `knowledgebot.example`: RFC 2606 reserved, resolvable only
+#   through the operator's hosts file. ACME can never issue for it, so Traefik falls back to
+#   `CN = TRAEFIK DEFAULT CERT` — which breaks the app rather than merely warning, because a
+#   certificate interstitial is offered only for a top-level NAVIGATION. The console (app.<domain>)
+#   and the API (api.<domain>) are two origins, so accepting the warning on one leaves every `fetch`
+#   to the other failing with ERR_CERT_AUTHORITY_INVALID, no interstitial, and nothing in any log.
+#
+#   So `scripts/dev/tls-dev-cert.sh` issues a local CA plus one leaf covering all four hostnames, and
+#   writes a `dev-tls.yaml` carrying `stores.default.defaultCertificate`. It is mounted into this
+#   directory by `compose.override.yaml` — THE DEV OVERLAY — and by nothing else, so a production
+#   render cannot pick it up even if the files exist on disk. Both files are gitignored.
+#
+#   Consequence for anyone editing this file: `/etc/traefik/dynamic` holds TWO files in dev and one
+#   in production, and the `tls:` key here is merged with the one there. Do not add a
+#   `stores.default` block to this file — it would collide with the generated one.

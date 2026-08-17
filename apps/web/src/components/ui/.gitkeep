@@ -2,9 +2,18 @@ shadcn output lands here — VENDORED SOURCE we own and edit, not a dependency. 
 version, no lockfile entry for a component, and no update path.
 
 `shadcn add --overwrite` replaces a file wholesale and discards every local edit, so run
-`shadcn add --diff <component>` before any re-add. Every CI/script invocation passes `-b radix`:
-since July 2026 the CLI's default base is Base UI, and an unflagged `add` quietly installs a Base UI
-component next to Radix ones.
+`shadcn add --diff <component>` before any re-add.
+
+THE BASE IS NOT SELECTED BY A FLAG AT THE PINNED VERSION, and the sentence that used to sit here
+claimed it was. shadcn 4.16.1 (the pin) has no `-b`/`--base` option at all — `shadcn add -b radix`
+exits 1 with `error: unknown option '-b'` — and `base` is not a key its `components.json` schema
+accepts either. What actually decides the base is the STYLE the CLI resolves: it detects Tailwind v4
+and rewrites style `new-york` to `new-york-v4`, whose registry items declare the unified `radix-ui`
+package (already a dependency at an exact pin) rather than the per-primitive `@radix-ui/react-*`
+packages the legacy `new-york` items use. The ten components here were taken from that resolved
+registry and `shadcn add <component> --diff` reports "No changes." for every one of them.
+Re-introduce a `-b` flag or a `base` key only together with a CLI version whose `--help` lists it;
+until then it is a claim nothing enforces.
 
 Nothing in this directory crosses into apps/widget: Radix is React-only, and cva + tailwind-merge +
 lucide-react are runtime dependencies that would eat the widget's 30 kB brotli budget.

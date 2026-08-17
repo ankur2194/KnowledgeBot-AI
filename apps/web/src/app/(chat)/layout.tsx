@@ -32,7 +32,16 @@ export const metadata: Metadata = {
 export default function ChatRootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
-      <body className="bg-background text-foreground min-h-dvh antialiased">{children}</body>
+      {/* <html> deliberately has NO `suppressHydrationWarning` — there is no next-themes here, so
+          nothing writes to it before React runs. <body> needs it for the unrelated reason that browser
+          extensions write to this element and the attribute does not cascade from a parent that has
+          it. Full reasoning in `(auth)/layout.tsx`. */}
+      <body
+        className="bg-background text-foreground min-h-dvh antialiased"
+        suppressHydrationWarning
+      >
+        {children}
+      </body>
     </html>
   );
 }

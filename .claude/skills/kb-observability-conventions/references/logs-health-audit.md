@@ -56,6 +56,18 @@ output interpolated into a message, because nothing in a formatter can tell pros
 promote it to the guarantee: a filter that has to *recognise* a value has already had that value in
 a string, and unwrapping a credential map into a plain `dict[str, str]` before interpolating it is
 exactly the shape that defeats a token-shaped matcher.
+
+**A VALUE is not a message, and the `key=value` rule does not transfer to one.** An
+`audit_logs.details` value is redacted by `KbJsonFormatter::redactValue()`
+(`VALUE_REDACTION_LIMITS`), never by `redact()`: the field name is already the caller's map key, so a
+`key=value` *inside* the value is incidental text, and a rule whose whole discriminating power is a
+key name therefore fires on registrable email addresses — `=` is legal `atext` in a dot-atom, so
+`token=abc@example.com` passes `email:rfc,strict` (measured) and used to strip the only identifier a
+failed-login audit row has, since that row carries `organization_id = NULL` and `actor_id = NULL` by
+design. The message rule set stays a strict **superset** of the value rule set (scheme values, `KB1`,
+the pinned vendor prefixes, URL query strings — the shapes a credential has *itself*), and the
+argument for every rule in and out is on that method rather than in this file.
+
 The `severity` field is what the Collector's `file_log` `severity_parser` reads to derive Loki's
 `level` stream label; a service that spells it `level` or `level_name` produces log lines whose
 `level` label is absent and whose level-faceted panels read zero.

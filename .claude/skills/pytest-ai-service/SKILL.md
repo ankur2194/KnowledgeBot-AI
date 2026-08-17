@@ -5,7 +5,7 @@ description: pytest 9 conventions for the FastAPI data plane in services/ai-serv
 
 # Pytest — AI Data Plane (`services/ai-service`)
 
-pytest **9.1.1** · pytest-asyncio **1.4.0** · anyio **4.14.2** · httpx **0.28.1** · testcontainers **4.15.0** · pytest-xdist **3.8.0** · pytest-cov **7.1.0** · qdrant-client **1.19.0**, on CPython 3.13 (`fastapi-service`), installed with `uv` (`github-actions-pipeline`). Tests live in `services/ai-service/tests/`.
+pytest **9.1.1** · pytest-asyncio **1.4.0** · anyio **4.14.2** · httpx **0.28.1** · testcontainers **4.15.0** · pytest-xdist **3.8.0** · pytest-cov **7.1.0** · qdrant-client **1.19.0**, on CPython 3.13 (`fastapi-service`), installed with `uv`. Tests live in `services/ai-service/tests/`.
 The Laravel half is `pest-testing`, the browser half `vitest-playwright`; this is the third and it does not restate them. RAG **quality** scoring is `ragas-evaluation` — a judged metric is a model result, not an assertion, and it runs in the scheduled CI tier, never here.
 **Authoritative spec:** docs/17-testing-performance.md §22.1–22.6, docs/19-repo-structure-adrs.md §27, docs/18-deployment-backup-cicd.md §26
 
@@ -42,9 +42,9 @@ Both options exist, they default differently, and **the defaults disagree with e
 | `unit/` (no containers, no app) | `tenant_filter()` construction, chunk boundaries, `error_class` classification, cost math, citation validation, URL/SSRF validation, deletion selection, Pydantic model shape (`pydantic-contracts`) | anything about a query *result*; anything about a stream; tenancy — a filter object is not a search |
 | `contract/` (`ASGITransport` + `LifespanManager`, fakes injected) | HMAC verify/replay/skew, missing-header `400`, the one error envelope incl. `RequestValidationError`, the emitted OpenAPI matching `packages/contracts/` | inter-event timing, disconnect, anything the transport buffers away |
 | `integration/` (real containers, real socket) | the four Qdrant filters against a server, atomic version publish, deletion + verification, SSE framing and gaps, **the cancellation path**, a real prefork Celery worker | provider behaviour, browser rendering |
-| `security/` (real containers) | every §22.5 case: cross-tenant API and vector access, SSRF payloads, malicious filenames, oversized files, prompt-injection samples, XSS in source text, secret redaction, rate limits | — this suite runs unconditionally in every CI tier |
+| `security/` (real containers) | every §22.5 case: cross-tenant API and vector access, SSRF payloads, malicious filenames, oversized files, prompt-injection samples, XSS in source text, secret redaction, rate limits | — this suite is never optional, whoever runs it |
 
-`unit/` and `contract/` are the per-push tier; `integration/` and `security/` are the merge-queue tier where Postgres, Qdrant and Valkey are already running as workflow `services:` (`github-actions-pipeline`). Container fixtures therefore read `KB_TEST_QDRANT_URL` and only start a `testcontainers` container when it is absent — and pin the image tag to the Compose `test` profile, because `QdrantContainer`'s own default drifts on every testcontainers release.
+`unit/` and `contract/` need nothing running; `integration/` and `security/` need Postgres, Qdrant and Valkey. Those tiers were once a per-push/merge-queue split with the databases supplied as workflow `services:`; there is no CI now, so every tier runs wherever you run it and the containers come from `testcontainers`. Container fixtures still read `KB_TEST_QDRANT_URL` and only start a container when it is absent — and pin the image tag to the Compose `test` profile, because `QdrantContainer`'s own default drifts on every testcontainers release.
 
 ### The one that matters — cancellation over a real socket
 

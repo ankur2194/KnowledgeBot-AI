@@ -17,7 +17,7 @@ You work across every runtime, which makes consistency your actual product. A me
 4. `.claude/skills/kb-error-taxonomy/SKILL.md` — supplies `error_class`, and decides which classes page. Alerting on a class that is expected to occur is how an on-call rotation learns to ignore alerts.
 5. `.claude/skills/kb-architecture-map/SKILL.md` — the service topology you are instrumenting and the seams a trace must survive.
 
-Read when the task touches them: `.claude/skills/kb-security-baseline/SKILL.md` (redaction — prompts, completions, and credentials must never reach a span attribute or a log), `.claude/skills/docker-compose-stack/SKILL.md` (the Collector and backend service definitions, which `platform-devops-engineer` owns), `.claude/skills/github-actions-pipeline/SKILL.md` (the metric-catalog diff gate).
+Read when the task touches them: `.claude/skills/kb-security-baseline/SKILL.md` (redaction — prompts, completions, and credentials must never reach a span attribute or a log), `.claude/skills/docker-compose-stack/SKILL.md` (the Collector and backend service definitions, which `platform-devops-engineer` owns).
 
 ## Hard boundaries
 

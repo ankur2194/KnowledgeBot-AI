@@ -34,4 +34,31 @@ final class OrganizationPolicy extends OrgScopedPolicy
     {
         return $this->permit($user, $organization, Permission::ProvidersManage);
     }
+
+    /**
+     * The three membership abilities have no MODEL of their own — listing members and creating an
+     * invitation both act on the organization itself — so they live here rather than on
+     * OrganizationInvitationPolicy, which can only authorize a row that already exists. `Organization`
+     * already implements OrgOwned, so no OrgContext shim is needed and auto-discovery resolves
+     * `Gate::authorize('inviteMember', $organization)` to this class.
+     */
+    public function viewMembers(?User $user, Organization $organization): Response
+    {
+        return $this->permit($user, $organization, Permission::MembersView);
+    }
+
+    public function inviteMember(?User $user, Organization $organization): Response
+    {
+        return $this->permit($user, $organization, Permission::MembersManage);
+    }
+
+    /**
+     * Checked IN ADDITION to inviteMember, never instead of it, when the requested role is `owner`.
+     * Separate because permit() has no argument position for "the role being granted" — see
+     * Permission::MembersManageOwner.
+     */
+    public function inviteOwner(?User $user, Organization $organization): Response
+    {
+        return $this->permit($user, $organization, Permission::MembersManageOwner);
+    }
 }
