@@ -33,7 +33,7 @@ export function CurrentOrgBadge() {
   return (
     <Link
       href="/settings"
-      className="text-muted-foreground ml-auto text-sm hover:underline"
+      className="truncate rounded-lg px-2 py-1.5 text-sm text-muted-foreground transition-colors duration-(--dur-1) hover:bg-accent hover:text-foreground active:bg-accent"
       // The role is announced because the name alone ("Acme Research") does not say what the link
       // does. It is not org-scoped chrome in the caching sense: it is rendered in the browser from a
       // browser fetch, and the Next server never produced it.

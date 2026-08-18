@@ -60,7 +60,7 @@ export default async function RegisterPage({
 
   return (
     <section aria-labelledby="register-heading" className="space-y-6">
-      <h1 id="register-heading" className="text-2xl font-semibold">
+      <h1 id="register-heading" className="text-h1">
         Accept your invitation
       </h1>
       <RegisterForm token={token} />

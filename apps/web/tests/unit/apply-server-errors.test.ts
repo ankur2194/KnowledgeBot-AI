@@ -255,7 +255,9 @@ describe('end-user copy', () => {
 
   it('falls back to the unknown sentence for a null class', () => {
     // Null means no envelope parsed. There is no class name to render and none is invented.
-    expect(endUserCopy({ error_class: null, request_id: null })).toBe('Something went wrong.');
+    // Asserted against the CONSTANT rather than against a second copy of the sentence: a wording
+    // change should not break eight tests that were never about the wording.
+    expect(endUserCopy({ error_class: null, request_id: null })).toBe(ERROR_COPY.unknown);
   });
 
   /**

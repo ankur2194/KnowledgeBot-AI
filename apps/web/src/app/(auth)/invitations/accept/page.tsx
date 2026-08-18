@@ -57,7 +57,7 @@ export default async function AcceptInvitationPage({
 
   return (
     <section aria-labelledby="invitation-heading" className="space-y-6">
-      <h1 id="invitation-heading" className="text-2xl font-semibold">
+      <h1 id="invitation-heading" className="text-h1">
         Join the organization
       </h1>
       <AcceptInvitation token={token} />

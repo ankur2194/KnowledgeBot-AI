@@ -2,9 +2,16 @@
 
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { MailPlusIcon } from 'lucide-react';
+
+import { DataTableShell } from '@/components/data-table';
+import { EmptyState, ErrorState } from '@/components/states';
+import { StatusPill } from '@/components/status-pill';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { actionErrorCopy } from '@/features/auth/action-error';
 import { roleLabel } from '@/features/auth/roles';
 import { useCooldown } from '@/features/auth/use-cooldown';
@@ -12,6 +19,7 @@ import { KbError, type InvitationResource } from '@kb/contracts';
 
 import {
   formatTimestamp,
+  invitationStatusKind,
   invitationStatusLabel,
   isLiveInvitation,
   resendInvitation,
@@ -56,56 +64,51 @@ export function InvitationList({
   readonly error: Error | null;
 }) {
   return (
-    <section aria-labelledby="invitations-heading" className="space-y-3">
-      <h2 id="invitations-heading" className="text-lg font-medium">
+    <section aria-labelledby="invitations-heading" className="flex flex-col gap-3">
+      <h2 id="invitations-heading" className="text-h2">
         Invitations
       </h2>
 
+      {/* The skeleton mirrors the loaded table rather than being two bars of an unrelated height. */}
       {isPending ? (
-        <div aria-busy="true" className="space-y-2">
-          <Skeleton className="h-10" />
-          <Skeleton className="h-10" />
-        </div>
+        <DataTableShell>
+          <div aria-busy="true" className="flex flex-col gap-2 p-card-pad-md">
+            <Skeleton className="h-4 w-full" />
+            <Skeleton className="h-4 w-4/5" />
+            <Skeleton className="h-4 w-3/5" />
+          </div>
+        </DataTableShell>
       ) : null}
 
-      {error === null ? null : (
-        <Alert variant="destructive">
-          <AlertTitle>Invitations could not be loaded</AlertTitle>
-          {/* Class-mapped copy plus the `request_id`, never the envelope's `message`. A 403 is the normal
-              answer for a role without `members.view`. */}
-          <AlertDescription>{actionErrorCopy(error)}</AlertDescription>
-        </Alert>
-      )}
+      {/* Class-mapped copy plus the `request_id`, never the envelope's `message`. A 403 is the normal
+          answer for a role without `members.view`, and it is NOT retryable — `ErrorState` reads that
+          off the envelope rather than guessing from the sentence. */}
+      {error === null ? null : <ErrorState title="Invitations could not be loaded" error={error} />}
 
       {invitations === undefined ? null : invitations.length === 0 ? (
-        <p className="text-muted-foreground text-sm">No invitations yet.</p>
+        <EmptyState
+          glyph={MailPlusIcon}
+          title="No invitations yet"
+          body="Invite someone by email and their invitation will be listed here until they accept it."
+        />
       ) : (
-        <div className="overflow-x-auto rounded-md border">
-          <table className="w-full text-sm">
+        <DataTableShell>
+          <Table>
             <caption className="sr-only">Invitations for this organization</caption>
-            <thead className="bg-muted/50">
-              <tr>
-                <th scope="col" className="p-3 text-left font-medium">
-                  Email
-                </th>
-                <th scope="col" className="p-3 text-left font-medium">
-                  Role
-                </th>
-                <th scope="col" className="p-3 text-left font-medium">
-                  Status
-                </th>
-                <th scope="col" className="p-3 text-left font-medium">
-                  Expires
-                </th>
-                <th scope="col" className="p-3 text-left font-medium">
-                  Invited by
-                </th>
-                <th scope="col" className="p-3 text-left font-medium">
+            <TableHeader>
+              <TableRow>
+                <TableHead scope="col">Email</TableHead>
+                <TableHead scope="col">Role</TableHead>
+                <TableHead scope="col">Status</TableHead>
+                <TableHead scope="col">Expires</TableHead>
+                <TableHead scope="col">Invited by</TableHead>
+                {/* The actions column is fixed-width and is never the flexible one (P6). */}
+                <TableHead scope="col" className="w-64">
                   Actions
-                </th>
-              </tr>
-            </thead>
-            <tbody>
+                </TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {invitations.map((invitation) => (
                 <InvitationRow
                   key={invitation.id}
@@ -114,9 +117,9 @@ export function InvitationList({
                   invitation={invitation}
                 />
               ))}
-            </tbody>
-          </table>
-        </div>
+            </TableBody>
+          </Table>
+        </DataTableShell>
       )}
     </section>
   );
@@ -181,13 +184,22 @@ function InvitationRow({
   const actionError = resend.error ?? revoke.error;
 
   return (
-    <tr className="border-t">
-      <td className="p-3 break-all">{invitation.email}</td>
-      <td className="p-3">{roleLabel(invitation.role)}</td>
-      <td className="p-3">{invitationStatusLabel(invitation.status)}</td>
-      <td className="p-3">{formatTimestamp(invitation.expires_at)}</td>
-      <td className="p-3">{invitation.invited_by_name}</td>
-      <td className="p-3">
+    <TableRow>
+      <TableCell className="font-medium break-all">{invitation.email}</TableCell>
+      <TableCell>
+        <Badge>{roleLabel(invitation.role)}</Badge>
+      </TableCell>
+      <TableCell>
+        {/* Colour AND a glyph AND the word. An expired invitation is a warning rather than a failure,
+            because it can still be resent — a different next step from one that was revoked. */}
+        <StatusPill
+          status={invitationStatusKind(invitation.status)}
+          label={invitationStatusLabel(invitation.status)}
+        />
+      </TableCell>
+      <TableCell>{formatTimestamp(invitation.expires_at)}</TableCell>
+      <TableCell className="text-muted-foreground">{invitation.invited_by_name}</TableCell>
+      <TableCell>
         {live ? (
           <div className="space-y-2">
             <div className="flex flex-wrap items-center gap-2">
@@ -232,7 +244,7 @@ function InvitationRow({
 
             {/* polite, not assertive: it updates once a second and must not interrupt a screen reader
                 mid-row. */}
-            <p aria-live="polite" className="text-muted-foreground text-xs">
+            <p aria-live="polite" className="text-muted-foreground text-caption">
               {cooling ? `Try again in ${cooldown.remaining}s.` : ''}
             </p>
           </div>
@@ -252,7 +264,7 @@ function InvitationRow({
             <AlertDescription>{actionErrorCopy(actionError)}</AlertDescription>
           </Alert>
         )}
-      </td>
-    </tr>
+      </TableCell>
+    </TableRow>
   );
 }

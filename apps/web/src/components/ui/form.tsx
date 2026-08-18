@@ -1,6 +1,7 @@
 "use client"
 
 import * as React from "react"
+import { AlertCircleIcon } from "lucide-react"
 import type { Label as LabelPrimitive } from "radix-ui"
 import { Slot } from "radix-ui"
 import {
@@ -135,21 +136,35 @@ function FormDescription({ className, ...props }: React.ComponentProps<"p">) {
   )
 }
 
+/**
+ * The message slot, and it is RENDERED EVEN WHEN EMPTY.
+ *
+ * P10: helper text and the error occupy the SAME slot, and the slot's height is reserved, so
+ * nothing below the field moves when validation fires. Returning `null` — which is what shadcn
+ * ships — makes every form jump by a line the first time a user gets something wrong, on the exact
+ * screen where they are least able to absorb a layout change. Keeping the element also keeps
+ * `formMessageId` resolvable for the `aria-describedby` that points at it.
+ *
+ * COLOUR ALONE IS NOT AN ERROR STATE (kb-ui-accessibility, *Colour independence*). The control
+ * carries `aria-invalid` and this carries the glyph and the words; a red message with no glyph is a
+ * finding, not a style choice.
+ */
 function FormMessage({ className, ...props }: React.ComponentProps<"p">) {
   const { error, formMessageId } = useFormField()
   const body = error ? String(error?.message ?? "") : props.children
-
-  if (!body) {
-    return null
-  }
 
   return (
     <p
       data-slot="form-message"
       id={formMessageId}
-      className={cn("text-sm text-destructive", className)}
+      className={cn(
+        "flex min-h-5 items-start gap-1.5 text-sm",
+        error ? "text-destructive" : "text-muted-foreground",
+        className
+      )}
       {...props}
     >
+      {error && body ? <AlertCircleIcon aria-hidden className="mt-0.5 size-3.5 shrink-0" /> : null}
       {body}
     </p>
   )

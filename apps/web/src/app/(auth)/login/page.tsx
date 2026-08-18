@@ -52,7 +52,7 @@ export default async function LoginPage({
 
   return (
     <section aria-labelledby="login-heading" className="space-y-6">
-      <h1 id="login-heading" className="text-2xl font-semibold">
+      <h1 id="login-heading" className="text-h1">
         Sign in
       </h1>
       <LoginForm next={next} />

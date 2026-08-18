@@ -1,0 +1,162 @@
+/* GENERATED FILE — do not edit.
+ * Source: packages/design-tokens/src/tokens.json
+ * Regenerate: pnpm tokens:build
+ * Committed on purpose: CI runs the build and then `git diff --exit-code`.
+ */
+
+@theme inline {
+  /* ---- colour: the palette is CLOSED. Only the keywords survive the reset. ---- */
+  --color-*: initial;
+  --color-transparent: transparent;
+  --color-current: currentColor;
+  --color-inherit: inherit;
+  --color-canvas: var(--canvas);
+  --color-card: var(--card);
+  --color-card-inset: var(--card-inset);
+  --color-popover: var(--popover);
+  --color-overlay: var(--overlay);
+  --color-foreground: var(--foreground);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-subtle-foreground: var(--subtle-foreground);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-active: var(--primary-active);
+  --color-primary-soft: var(--primary-soft);
+  --color-primary-soft-foreground: var(--primary-soft-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-success-soft-foreground: var(--success-soft-foreground);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-warning-soft-foreground: var(--warning-soft-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-strong: var(--destructive-strong);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-destructive-soft: var(--destructive-soft);
+  --color-destructive-soft-foreground: var(--destructive-soft-foreground);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-info-soft-foreground: var(--info-soft-foreground);
+  --color-tone-amber-surface: var(--tone-amber-surface);
+  --color-tone-amber-border: var(--tone-amber-border);
+  --color-tone-amber-foreground: var(--tone-amber-foreground);
+  --color-tone-sky-surface: var(--tone-sky-surface);
+  --color-tone-sky-border: var(--tone-sky-border);
+  --color-tone-sky-foreground: var(--tone-sky-foreground);
+  --color-tone-violet-surface: var(--tone-violet-surface);
+  --color-tone-violet-border: var(--tone-violet-border);
+  --color-tone-violet-foreground: var(--tone-violet-foreground);
+  --color-tone-mint-surface: var(--tone-mint-surface);
+  --color-tone-mint-border: var(--tone-mint-border);
+  --color-tone-mint-foreground: var(--tone-mint-foreground);
+  --color-tone-rose-surface: var(--tone-rose-surface);
+  --color-tone-rose-border: var(--tone-rose-border);
+  --color-tone-rose-foreground: var(--tone-rose-foreground);
+  --color-tone-slate-surface: var(--tone-slate-surface);
+  --color-tone-slate-border: var(--tone-slate-border);
+  --color-tone-slate-foreground: var(--tone-slate-foreground);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-chart-6: var(--chart-6);
+  --color-chart-grid: var(--chart-grid);
+  --color-chart-axis: var(--chart-axis);
+
+  /* DEPRECATED — apps/widget parity only; nothing in apps/web may use these. */
+  --color-background: var(--background);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+
+  /* ---- radius: derived from the tenant --radius, closed ---- */
+  --radius-*: initial;
+  --radius-xs: var(--radius-xs);
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
+  --radius-2xl: var(--radius-2xl);
+  --radius-3xl: var(--radius-3xl);
+  --radius-full: var(--radius-full);
+
+  /* ---- elevation: pick a step, never blend or invent an offset ---- */
+  --shadow-*: initial;
+  --shadow-hairline: var(--shadow-hairline);
+  --shadow-xs: var(--shadow-xs);
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+  --shadow-xl: var(--shadow-xl);
+
+  /* ---- space: the numeric 4px grid is Tailwind's default and matches --space-*;
+       these are the named composites so `p-card-pad-md` and `px-gutter-lg` exist ---- */
+  --spacing-gutter-sm: var(--gutter-sm);
+  --spacing-gutter-md: var(--gutter-md);
+  --spacing-gutter-lg: var(--gutter-lg);
+  --spacing-card-pad-sm: var(--card-pad-sm);
+  --spacing-card-pad-md: var(--card-pad-md);
+  --spacing-card-pad-lg: var(--card-pad-lg);
+
+  /* ---- type: closed, and each step carries all four values ---- */
+  --text-*: initial;
+  --text-caption: var(--text-caption);
+  --text-caption--line-height: var(--text-caption-lh);
+  --text-caption--font-weight: var(--text-caption-w);
+  --text-caption--letter-spacing: var(--text-caption-ls);
+  --text-sm: var(--text-sm);
+  --text-sm--line-height: var(--text-sm-lh);
+  --text-sm--font-weight: var(--text-sm-w);
+  --text-sm--letter-spacing: var(--text-sm-ls);
+  --text-base: var(--text-base);
+  --text-base--line-height: var(--text-base-lh);
+  --text-base--font-weight: var(--text-base-w);
+  --text-base--letter-spacing: var(--text-base-ls);
+  --text-md: var(--text-md);
+  --text-md--line-height: var(--text-md-lh);
+  --text-md--font-weight: var(--text-md-w);
+  --text-md--letter-spacing: var(--text-md-ls);
+  --text-lg: var(--text-lg);
+  --text-lg--line-height: var(--text-lg-lh);
+  --text-lg--font-weight: var(--text-lg-w);
+  --text-lg--letter-spacing: var(--text-lg-ls);
+  --text-h3: var(--text-h3);
+  --text-h3--line-height: var(--text-h3-lh);
+  --text-h3--font-weight: var(--text-h3-w);
+  --text-h3--letter-spacing: var(--text-h3-ls);
+  --text-h2: var(--text-h2);
+  --text-h2--line-height: var(--text-h2-lh);
+  --text-h2--font-weight: var(--text-h2-w);
+  --text-h2--letter-spacing: var(--text-h2-ls);
+  --text-h1: var(--text-h1);
+  --text-h1--line-height: var(--text-h1-lh);
+  --text-h1--font-weight: var(--text-h1-w);
+  --text-h1--letter-spacing: var(--text-h1-ls);
+  --text-display: var(--text-display);
+  --text-display--line-height: var(--text-display-lh);
+  --text-display--font-weight: var(--text-display-w);
+  --text-display--letter-spacing: var(--text-display-ls);
+  --text-metric: var(--text-metric);
+  --text-metric--line-height: var(--text-metric-lh);
+  --text-metric--font-weight: var(--text-metric-w);
+  --text-metric--letter-spacing: var(--text-metric-ls);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+
+  /* ---- motion: durations have no v4 namespace and are reached as duration-(--dur-2) ---- */
+  --ease-out: var(--ease-out);
+  --ease-in: var(--ease-in);
+  --ease-in-out: var(--ease-in-out);
+  --ease-spring: var(--ease-spring);
+}

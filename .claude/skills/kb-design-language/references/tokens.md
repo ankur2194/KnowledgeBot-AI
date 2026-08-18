@@ -2,9 +2,22 @@
 
 Source of truth is `packages/design-tokens/src/tokens.json`. This file is the **derivation** — why each value is what it is, what floor it must clear, and which are load-bearing. When the two disagree, `tokens.json` wins and this file is stale; say so rather than editing a component around it.
 
-**About the contrast figures.** Every ratio below was derived analytically from the OKLCH lightness and is stated as the floor the pair must clear, not as a measured certificate. The authority is the CI contrast checker (`kb-ui-accessibility` → *The contrast matrix*), which computes real sRGB relative luminance over the actual emitted values. Treat a figure here as "this pair was designed to clear X" and let CI prove it. <!-- UNVERIFIED: no contrast checker has been run in this repo yet; the job does not exist. -->
+**About the contrast figures — THE CHECKER NOW EXISTS AND HAS RUN, and six values moved because of it.** Every ratio below was originally derived analytically from the OKLCH lightness and stated as a floor rather than a measurement. `apps/web/tests/unit/design-system.test.ts` is now the checker `kb-ui-accessibility` → *The contrast matrix* asks for: it computes real sRGB relative luminance, over the emitted token set, in both modes, and over the bounds of the tenant grammar rather than one sample. It is a Vitest spec rather than a CI job because there is no CI in this repository (CLAUDE.md); "enforced by the test suites alone" is the whole enforcement model here.
 
-**About the hex column.** Approximations for eyeballing and for pasting into a design tool only. Nothing reads them; the mobile entry point regenerates its own hex by gamut-mapping the OKLCH, and a hand-copied hex is exactly the drift `pnpm tokens:build && git diff --exit-code` exists to catch.
+On its first run **six pairs missed their floor.** Each was corrected in `tokens.json` by moving LIGHTNESS ONLY, in the smallest step that clears, preserving hue and chroma — and the rows below carry the corrected values:
+
+| Token | Was | Now | Measured before | Floor |
+| --- | --- | --- | --- | --- |
+| `--border-strong` light | `0.660` | `0.628` | 2.649:1 on `--canvas` | 3:1 |
+| `--warning` light | `0.650` | `0.636` | 2.851:1 on `--canvas` | 3:1 |
+| `--chart-2` light | `0.700` | `0.683` | 2.819:1 on `--card` | 3:1 |
+| `--chart-4` light | `0.780` | `0.670` | **2.007:1** on `--card` | 3:1 |
+| `--chart-6` light | `0.680` | `0.663` | 2.815:1 on `--card` | 3:1 |
+| `--primary` dark | `0.585` | `0.568` | 4.202:1 under `--primary-foreground` | 4.5:1 |
+
+The chart series still clear the ≥0.06 adjacent-lightness rule after the change (deltas 0.138, 0.108, 0.095, 0.165, 0.158), which is the property that survives greyscale and CVD and the reason the palette order is not yours to shuffle.
+
+**About the hex column — IT IS APPROXIMATE, AND AT LEAST ONE ROW DISAGREES WITH ITS OWN OKLCH.** `--foreground` is `oklch(0.205 0.014 266)` and is documented as `#1B1D26`, but `#1B1D26` measures L 0.233 and the OKLCH converts to `#14171E`. Nothing reads this column — the mobile entry point regenerates its own hex by gamut-mapping the OKLCH, and a hand-copied hex is exactly the drift `pnpm tokens:build && git diff --exit-code` exists to catch — so the values are kept for eyeballing and are not authoritative. The conversion in `apps/web/src/lib/color.ts` is anchored to the sRGB primaries at full precision instead.
 
 ---
 
@@ -35,7 +48,7 @@ The light-mode canvas/card lightness gap is **0.055 OKLCH**. That number is what
 | Token | Light | ≈ | Dark | ≈ | Note |
 | --- | --- | --- | --- | --- | --- |
 | `--border` | `oklch(0.917 0.006 264)` | #E2E3E8 | `oklch(0.310 0.012 266)` | #2C2D37 | Hairlines, table rules, dividers, chip edges. **Decorative — it does not clear 3:1 and does not need to** |
-| `--border-strong` | `oklch(0.660 0.014 264)` | #909AA5 | `oklch(0.620 0.016 266)` | #838795 | ≥ 3:1 on `--card`. The token for **any boundary that is the sole identifier of a control**, and for error outlines |
+| `--border-strong` | `oklch(0.628 0.014 264)` | #848991 | `oklch(0.620 0.016 266)` | #838795 | ≥ 3:1 on `--card`. The token for **any boundary that is the sole identifier of a control**, and for error outlines |
 | `--input` | `oklch(0.900 0.006 264)` | #DDDFE5 | `oklch(0.330 0.012 266)` | #30313B | The resting outline of a field whose fill already identifies it |
 | `--ring` | `var(--primary)` | — | `var(--primary)` | — | Focus. Geometry and offset are `kb-motion-and-effects` → *Focus* |
 
@@ -45,7 +58,7 @@ The light-mode canvas/card lightness gap is **0.055 OKLCH**. That number is what
 
 | Token | Light | ≈ | Dark | ≈ | Note |
 | --- | --- | --- | --- | --- | --- |
-| `--primary` | `oklch(0.525 0.235 264)` | #3E56E8 | `oklch(0.585 0.215 264)` | #5468F0 | **Tenant-overridable.** Platform default is indigo |
+| `--primary` | `oklch(0.525 0.235 264)` | #3E56E8 | `oklch(0.568 0.215 264)` | #3169F3 | **Tenant-overridable.** Platform default is indigo |
 | `--primary-foreground` | `oklch(0.985 0 0)` | #FAFAFA | `oklch(0.985 0 0)` | #FAFAFA | **Derived server-side** from the supplied `--primary` lightness, never accepted from a form |
 | `--primary-hover` | `oklch(0.470 0.230 264)` | #3547CE | `oklch(0.645 0.200 264)` | #6B7DF5 | Derived: light mode darkens, dark mode lightens |
 | `--primary-active` | `oklch(0.425 0.215 264)` | #2F3EB4 | `oklch(0.700 0.180 264)` | #8291F8 | The pressed state. Required — hover is media-gated (`kb-motion-and-effects`) |
@@ -65,7 +78,7 @@ Semantic outcomes. Rendered as a **tinted pill or a dot plus a label**, never as
 | `--success` | `oklch(0.585 0.145 152)` | #17A45C | `oklch(0.700 0.145 152)` | #37C77C |
 | `--success-soft` | `oklch(0.955 0.040 152)` | #E6F7ED | `oklch(0.300 0.055 155)` | #17392A |
 | `--success-soft-foreground` | `oklch(0.435 0.105 152)` | #14713F | `oklch(0.820 0.130 155)` | #74E3A9 |
-| `--warning` | `oklch(0.650 0.145 66)` | #B26A08 | `oklch(0.780 0.145 78)` | #DCA034 |
+| `--warning` | `oklch(0.636 0.145 66)` | #C47600 | `oklch(0.780 0.145 78)` | #DCA034 |
 | `--warning-soft` | `oklch(0.960 0.050 80)` | #FCF2DE | `oklch(0.310 0.055 70)` | #3B2C15 |
 | `--warning-soft-foreground` | `oklch(0.450 0.100 62)` | #7A4E12 | `oklch(0.850 0.120 82)` | #EDBA5E |
 | `--destructive` | `oklch(0.577 0.245 27.325)` | #E5484D | `oklch(0.704 0.191 22.216)` | #F87171 |
@@ -79,7 +92,7 @@ Semantic outcomes. Rendered as a **tinted pill or a dot plus a label**, never as
 
 Three decisions worth knowing before you change one of these:
 
-- **`--destructive` and `--destructive-strong` are different tokens because the existing pairing does not clear text contrast.** `tokens.json` today pairs `oklch(0.577 0.245 27.325)` with a near-white foreground, which lands near **4.2:1** — under the 4.5:1 floor. `--destructive` is therefore the *icon, dot, outline and text-on-card* colour; a solid destructive button fills with `--destructive-strong`. Do not "simplify" them back together without moving the base value, and log it if you do.
+- **`--destructive` and `--destructive-strong` are different tokens, and the REASON stated here was wrong — the token is still right.** This paragraph claimed the base pairing "lands near 4.2:1" in light mode. Measured against the gamut-mapped value it is **4.657:1**, which clears. What does not clear is DARK mode: `--destructive-foreground` on the dark `--destructive` measures **2.748:1**, against 4.993:1 on `--destructive-strong`. So the `-strong` token is required, for the dark-mode reason rather than the light-mode one. `--destructive` remains the *icon, dot, outline and text-on-card* colour; a solid destructive button fills with `--destructive-strong`. Do not "simplify" them back together, and re-measure if you move either.
 - **`--info` is fixed and does not follow the tenant accent.** A tenant whose brand is red would otherwise render every informational banner in red, next to a `--destructive` that means something else entirely.
 - **There is no solid `--success` or `--warning` button.** The only solid, saturated fill in the product is the primary action. Success and warning appear as soft pills, dots and icons. A green "Confirm" button is the request that breaks rule 3.
 
@@ -105,17 +118,17 @@ Every `-foreground` clears 4.5:1 against its own `-surface`, in both modes. Noth
 | Token | Light | Dark | Reads as |
 | --- | --- | --- | --- |
 | `--chart-1` | `oklch(0.545 0.225 264)` | `oklch(0.640 0.200 264)` | indigo |
-| `--chart-2` | `oklch(0.700 0.150 45)` | `oklch(0.760 0.140 48)` | coral |
+| `--chart-2` | `oklch(0.683 0.150 45)` | `oklch(0.760 0.140 48)` | coral |
 | `--chart-3` | `oklch(0.575 0.125 168)` | `oklch(0.665 0.120 168)` | teal |
-| `--chart-4` | `oklch(0.780 0.135 90)` | `oklch(0.830 0.125 90)` | amber |
+| `--chart-4` | `oklch(0.670 0.135 90)` | `oklch(0.830 0.125 90)` | amber |
 | `--chart-5` | `oklch(0.505 0.180 305)` | `oklch(0.610 0.170 305)` | violet |
-| `--chart-6` | `oklch(0.680 0.085 225)` | `oklch(0.740 0.080 225)` | steel |
+| `--chart-6` | `oklch(0.663 0.085 225)` | `oklch(0.740 0.080 225)` | steel |
 | `--chart-grid` | `oklch(0.930 0.004 264)` | `oklch(0.290 0.010 266)` | horizontal rules only |
 | `--chart-axis` | `oklch(0.520 0.020 264)` | `oklch(0.720 0.018 264)` | axis labels and ticks |
 
 Two properties are load-bearing and get destroyed by a well-meaning re-order:
 
-- **Adjacent series differ by ≥ 0.06 OKLCH lightness** (the deltas here are 0.155, 0.125, 0.205, 0.275, 0.175). That is what keeps a two- or three-series chart readable under deuteranopia and in greyscale print, where hue is gone and only lightness survives.
+- **Adjacent series differ by ≥ 0.06 OKLCH lightness** (after the contrast corrections above the deltas are 0.138, 0.108, 0.095, 0.165, 0.158). That is what keeps a two- or three-series chart readable under deuteranopia and in greyscale print, where hue is gone and only lightness survives. It is asserted in the same spec as the contrast floors, so a re-order cannot pass review by looking fine.
 - **`--chart-1` is fixed indigo and is *not* `var(--primary)`.** If the first series followed the tenant accent, a red-branded tenant would get a red first series sitting beside `--destructive` in the same figure, meaning two different things. The accent still appears in charts — as the highlighted bar, the selected point, the hover state — which is rule 3 applied to data, and is the job `--primary` keeps.
 
 Chart construction, axes, tooltips and the "Other" rule are `kb-ui-patterns` → `references/charts.md`.

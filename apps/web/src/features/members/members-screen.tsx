@@ -3,9 +3,9 @@
 import type { Role } from '@kb/contracts';
 import { useQuery } from '@tanstack/react-query';
 
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { SkeletonLines } from '@/components/states';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Separator } from '@/components/ui/separator';
-import { Skeleton } from '@/components/ui/skeleton';
 import { useCurrentOrgId, useOrgKey, useSession } from '@/features/auth/session-context';
 
 import { fetchInvitations, fetchMembers } from './api';
@@ -42,12 +42,7 @@ export function MembersScreen() {
   const orgId = useCurrentOrgId();
 
   if (session.status === 'loading') {
-    return (
-      <div aria-busy="true" className="space-y-3">
-        <Skeleton className="h-10" />
-        <Skeleton className="h-32" />
-      </div>
-    );
+    return <SkeletonLines lines={3} />;
   }
 
   if (session.status !== 'authenticated') {
@@ -64,7 +59,7 @@ export function MembersScreen() {
     // organization" versus "not a member of any" — different sentences, different next steps), so this one
     // only says why this screen is empty.
     return (
-      <Alert>
+      <Alert variant="info">
         <AlertTitle>No organization selected</AlertTitle>
         <AlertDescription>
           Members are listed per organization. Choose one on the settings page first.
@@ -133,27 +128,34 @@ function MembersForOrganization({
   });
 
   return (
-    <div className="space-y-8">
+    // SECTIONS ARE SEPARATED BY --space-8, NEVER BY A DIVIDER (kb-ui-patterns, the composition law).
+    // The <Separator/>s that used to sit between these three sections were doing the job the spacing
+    // already does, and a rule between two cards reads as a boundary inside one card.
+    <div className="flex flex-col gap-8">
       {/* ── WHY THE INVITE FORM IS GATED ON A SERVER ANSWER RATHER THAN ON A LOCAL ROLE CHECK ──────
-          `invitations.isSuccess` means Laravel authorized `members.view` for this reader. `App\Enums\OrgRole::grants`
-          gives owner and admin both `members.view` and `members.manage`, and gives knowledge_manager and
-          analyst neither — the two permissions are held by the same two roles — so a successful read IS
-          the server's word that this person may also invite. That is strictly better than testing the
-          cached role: a stale session cannot hide the form from somebody who may use it, and it cannot
-          show it to somebody who may not.
+          `invitations.isSuccess` means Laravel authorized `members.view` for this reader.
+          `App\Enums\OrgRole::grants` gives owner and admin both `members.view` and `members.manage`,
+          and gives knowledge_manager and analyst neither — the two permissions are held by the same
+          two roles — so a successful read IS the server's word that this person may also invite. That
+          is strictly better than testing the cached role: a stale session cannot hide the form from
+          somebody who may use it, and it cannot show it to somebody who may not.
 
           It is still a RENDERING decision and not authorization. The POST is authorized by Laravel
           whatever this line does, and the 403 path in the form's `onError` is what handles the race. */}
       {invitations.isSuccess ? (
-        <>
-          <section aria-labelledby="invite-heading" className="space-y-3">
-            <h2 id="invite-heading" className="text-lg font-medium">
-              Invite a member
-            </h2>
+        // A card, because content never floats directly on the canvas (rule 1), and ONE card because
+        // this card has one job.
+        <Card>
+          <CardHeader>
+            <CardTitle as="h2">Invite a member</CardTitle>
+            <CardDescription>
+              They will get an email with a link that expires, and appear below until they accept.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
             <InviteForm orgId={orgId} invitationsKey={invitationsKey} viewerRole={viewerRole} />
-          </section>
-          <Separator />
-        </>
+          </CardContent>
+        </Card>
       ) : null}
 
       <InvitationList
@@ -164,13 +166,7 @@ function MembersForOrganization({
         error={invitations.error}
       />
 
-      <Separator />
-
-      <MemberList
-        members={members.data}
-        isPending={members.isPending}
-        error={members.error}
-      />
+      <MemberList members={members.data} isPending={members.isPending} error={members.error} />
     </div>
   );
 }

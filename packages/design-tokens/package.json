@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Shared visual tokens for apps/web and apps/widget (docs/19 §27). ZERO dependencies and ZERO devDependencies on purpose: with shared-workspace-lockfile=false a single devDependency would write a fifth pnpm-lock.yaml, so the build is a Node-builtins-only script. It ships CSS and JSON, never markup — which is why apps/web's globals.css needs no @source for it.",
   "sideEffects": [
-    "./generated/tokens.css"
+    "./generated/tokens.css",
+    "./generated/theme.css"
   ],
   "main": "./generated/index.js",
   "types": "./generated/index.d.ts",
@@ -15,6 +16,7 @@
       "default": "./generated/index.js"
     },
     "./tokens.css": "./generated/tokens.css",
+    "./theme.css": "./generated/theme.css",
     "./tokens.json": "./src/tokens.json",
     "./package.json": "./package.json"
   },

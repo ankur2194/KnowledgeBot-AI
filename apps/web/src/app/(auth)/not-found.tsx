@@ -1,4 +1,8 @@
+import { LinkIcon } from 'lucide-react';
 import Link from 'next/link';
+
+import { EmptyState } from '@/components/states';
+import { Button } from '@/components/ui/button';
 
 /**
  * Per-group 404. Each of the three route groups has its own root layout, so each needs its own
@@ -12,16 +16,20 @@ import Link from 'next/link';
  */
 export default function AuthNotFound() {
   return (
-    <section aria-labelledby="notfound-heading" className="space-y-4">
-      <h1 id="notfound-heading" className="text-2xl font-semibold">
+    <section aria-labelledby="notfound-heading">
+      <h1 id="notfound-heading" className="sr-only">
         Not found
       </h1>
-      <p className="text-muted-foreground text-sm">
-        That link is not valid. It may have expired or already been used.
-      </p>
-      <Link href="/login" className="text-sm underline">
-        Back to sign in
-      </Link>
+      <EmptyState
+        glyph={LinkIcon}
+        title="That link is not valid"
+        body="It may have expired or already been used."
+        action={
+          <Button variant="outline" asChild>
+            <Link href="/login">Back to sign in</Link>
+          </Button>
+        }
+      />
     </section>
   );
 }

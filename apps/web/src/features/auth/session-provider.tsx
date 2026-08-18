@@ -13,7 +13,7 @@ import {
   toSessionState,
   type SessionState,
 } from './session';
-import { SessionContext } from './session-context';
+import { SessionContext, useSession } from './session-context';
 
 /**
  * The ONE place identity enters the admin tree.
@@ -77,12 +77,24 @@ export function SessionProvider({ children }: { readonly children: ReactNode }) 
     browserNavigation.assign(`/login?next=${encodeURIComponent(here)}`);
   }, [state.status]);
 
-  return (
-    <SessionContext.Provider value={state}>
-      <MembershipNotice state={state} />
-      {children}
-    </SessionContext.Provider>
-  );
+  return <SessionContext.Provider value={state}>{children}</SessionContext.Provider>;
+}
+
+/**
+ * The notice, as a component the SHELL renders rather than one this provider renders beside
+ * `{children}`.
+ *
+ * WHY IT MOVED: mounted here it was a sibling of the children, so it painted OUTSIDE `<AppShell/>` —
+ * a full-bleed red bar sitting above the rounded shell, on the page background, belonging to no
+ * plane. The composition law has one outermost thing and it is the shell (kb-ui-patterns P1).
+ *
+ * The original reason for the placement is unchanged and still honoured: it renders ABOVE the
+ * content rather than INSTEAD of it, because a panel that replaced the tree would leave a suspended
+ * user staring at a dead end with no way to sign out. Sign-out now lives in the sidebar footer,
+ * inside the shell, so a notice in the main column still leaves it reachable.
+ */
+export function SessionNotice() {
+  return <MembershipNotice state={useSession()} />;
 }
 
 /**
@@ -100,7 +112,7 @@ export function SessionProvider({ children }: { readonly children: ReactNode }) 
 function MembershipNotice({ state }: { readonly state: SessionState }) {
   if (state.status === 'unavailable') {
     return (
-      <Alert variant="destructive" className="mx-auto mt-4 max-w-6xl">
+      <Alert variant="destructive" className="mb-6">
         <AlertTitle>Your account could not be loaded</AlertTitle>
         {/* endUserCopy, never the envelope's `message`: that field is operator-facing and can carry an
             internal hostname or raw text from an upstream provider. */}
@@ -114,7 +126,8 @@ function MembershipNotice({ state }: { readonly state: SessionState }) {
 
   const hasInactive = state.organizations.length > 0;
   return (
-    <Alert className="mx-auto mt-4 max-w-6xl">
+    // A condition to correct, not a failure: nothing broke, and the next step is somebody else's.
+    <Alert variant="warning" className="mb-6">
       <AlertTitle>
         {hasInactive ? 'No active organization' : 'You are not a member of any organization'}
       </AlertTitle>

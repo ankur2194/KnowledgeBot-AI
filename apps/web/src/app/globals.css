@@ -7,47 +7,27 @@
 /* shadcn's runtime: the data-open/data-closed variants, keyframes and scroll-fade its components
  * assume exist. Without it the components render, and nothing animates or closes. */
 @import 'shadcn/tailwind.css';
+
 /* The :root and .dark custom-property defaults, shared byte-for-byte with apps/widget so a
- * customer's brand is identical between hosted chat and the embed. */
+ * customer's brand is identical between hosted chat and the embed.
+ *
+ * BOTH IMPORTS BELOW MUST STAY UNLAYERED. theme.css's `@theme inline` body maps several Tailwind
+ * namespace names onto themselves (--shadow-md: var(--shadow-md)) because the design language's
+ * token names ARE those namespace names. Tailwind emits its half inside `@layer theme` while
+ * tokens.css declares the real values in an unlayered `:root`, and unlayered CSS beats layered CSS
+ * regardless of specificity — so the real value wins and the apparent cycle never resolves. Wrap
+ * either import in a layer and every radius, shadow and type size silently disappears. */
 @import '@kb/design-tokens/tokens.css';
+/* GENERATED. The `@theme inline` alias body, emitted from tokens.json by `pnpm tokens:build`. It is
+ * generated rather than hand-written because a token used by a utility but missing from this block
+ * still works everywhere EXCEPT a scoped override — the bot theme preview panel — which is the one
+ * place no unit test looks (tailwind-shadcn Gotcha 1). */
+@import '@kb/design-tokens/theme.css';
 
 /* v4 has no `darkMode: 'class'`. shadcn's docs ship `(&:is(.dark *))`, which matches DESCENDANTS
  * of .dark but not the .dark element itself — so a `dark:` utility on <html> silently does
  * nothing. `:where(.dark, .dark *)` matches both and keeps specificity at zero. */
 @custom-variant dark (&:where(.dark, .dark *));
-
-/* `inline` is LOAD-BEARING. Without it, `var(--primary)` is resolved where this block is defined
- * (:root) and baked into --color-primary, so a subtree override — the bot theme preview panel, the
- * per-bot scope in bot-theme-scope.tsx — is either ignored or leaks upward into the whole console.
- * With it, the utility itself emits `background-color: var(--primary)` and resolves at the element.
- * Both spellings compile and nothing warns. */
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
-  --color-popover: var(--popover);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-muted: var(--muted);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-destructive: var(--destructive);
-  --color-destructive-foreground: var(--destructive-foreground);
-  --color-border: var(--border);
-  --color-input: var(--input);
-  --color-ring: var(--ring);
-
-  --radius-xs: calc(var(--radius) - 6px);
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
-}
 
 /* No @source directives, deliberately. v4's automatic content detection ignores node_modules and
  * pnpm workspace links resolve through it, so a workspace package containing class names would
@@ -61,10 +41,317 @@
    * the app takes the colour of its text, and it reads as a design bug rather than a config
    * change. */
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border;
   }
 
+  /* RULE 1, TWO PLANES: the page is the recessed --canvas and content sits on raised --card. The
+   * body is never --card. A screen where they are the same colour has nothing for the elevation
+   * ladder to stand on, and every card looks flat while the CSS looks correct. */
   body {
-    @apply bg-background text-foreground;
+    background-color: var(--canvas);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    line-height: var(--text-base-lh);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* FOCUS. The one visual system that is not negotiable, and the one v4 changed underneath: `ring`
+   * is 1px currentColor in v4, not 3px blue, so a component pasted from a v3-era source gets an
+   * indicator that technically exists and practically does not. This is the `outline` form because
+   * an outline never participates in layout.
+   *
+   * DELIBERATELY NOT `border-radius: inherit`, which the recipe in kb-motion-and-effects carries:
+   * that declaration sets the FOCUSED ELEMENT's radius to its parent's, which is the opposite of
+   * the intent and visibly deforms a round button inside a square card. Browsers at our baseline
+   * (Safari 16.4 / Chrome 111 / Firefox 128) already round an outline to the element's own radius,
+   * so the intent is met by doing nothing. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  /* `:focus-visible`, not `:focus` — a mouse click on a card must not paint a ring, a Tab onto it
+   * must. Suppressing the UA default without this replacement is a defect, so it is done once here
+   * rather than per component. */
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+
+  /* Every number that can change. Proportional digits make a polling KPI jitter horizontally on
+   * every refresh and it gets debugged as a layout-thrash bug. Applied by TYPE rather than by
+   * opt-in class, because the failure is invisible until someone is watching a live table. */
+  th,
+  td,
+  time,
+  output,
+  [data-numeric] {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* There is no blanket reduced-motion rule here ON PURPOSE. `animation: none` on everything is not
+   * the accommodation — it deletes the streaming caret and the skeleton's only signal, which makes
+   * the app unusable for exactly the user the media query is for. Each effect below states its own
+   * reduced-motion behaviour, and every progress indicator keeps indicating by another channel. */
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+  }
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * The effect recipes that need real keyframes. Everything else in kb-motion-and-effects is a
+ * composition of tokens and lives in the component. Nothing here invents a value.
+ * ------------------------------------------------------------------------------------------- */
+
+@keyframes kb-shimmer {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes kb-caret {
+  0%,
+  45% {
+    opacity: 1;
+  }
+  55%,
+  100% {
+    opacity: 0.15;
+  }
+}
+
+@keyframes kb-row-flash {
+  from {
+    background-color: var(--primary-soft);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+/* E7 · Skeleton shimmer. The sweep is a translateX on a pseudo-element, not an animated
+ * background-position, which would repaint the gradient every frame. */
+@utility kb-skeleton {
+  position: relative;
+  overflow: hidden;
+  background-color: var(--card-inset);
+  border-radius: var(--radius-md);
+
+  &::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image: linear-gradient(
+      90deg,
+      transparent,
+      color-mix(in oklch, var(--card) 55%, transparent),
+      transparent
+    );
+    animation: kb-shimmer 1400ms var(--ease-in-out) infinite;
+  }
+
+  /* The tinted block remains, and so does aria-busy on the container. Removing both is what makes
+   * the app unusable for the user this query is for. */
+  @media (prefers-reduced-motion: reduce) {
+    &::after {
+      display: none;
+    }
+  }
+}
+
+/* E8 · Streaming caret. ONE caret for the whole stream, appended after the last rendered character
+ * and removed on the terminal event. Nothing else in the streaming path animates. */
+@utility kb-caret {
+  display: inline-block;
+  width: 0.5ch;
+  height: 1em;
+  vertical-align: -0.15em;
+  margin-left: 1px;
+  background-color: var(--primary);
+  border-radius: 1px;
+  animation: kb-caret 1000ms steps(1, end) infinite;
+
+  /* Solid, not gone. A caret that vanishes under reduced motion removes the only signal that the
+   * answer is still arriving. */
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+    opacity: 1;
+  }
+}
+
+/* E13 · Row highlight on change. The sanctioned exception to transform-and-opacity-only: one shot,
+ * one row, and there is no other way to say *this one changed*. It must fire ONCE per change — a
+ * row that flashes on every poll is the bug this always turns into. */
+@utility kb-row-updated {
+  animation: kb-row-flash var(--dur-4) var(--ease-out) 1;
+
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+  }
+}
+
+/* E5 · Gradient border ring — the chat composer on focus. A MASKED BACKGROUND, not an animated
+ * border-color, because a border cannot hold a gradient.
+ *
+ * THIS IS DECORATION AND IT IS NOT THE FOCUS INDICATOR. The keyboard focus ring above still applies
+ * to the <textarea> inside. A reviewer who sees the gradient and assumes focus is handled is the
+ * failure this note exists to prevent — and it fails silently for anyone whose browser lacks
+ * mask-composite. The conic gradient does NOT rotate: an animated ring is a loop, which
+ * reduced-motion forbids, and it holds a compositor layer for as long as the composer has focus. */
+@utility kb-focus-mesh {
+  position: relative;
+
+  &::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1.5px;
+    background-image: conic-gradient(
+      from 180deg,
+      var(--chart-5),
+      var(--chart-1),
+      var(--chart-3),
+      var(--chart-4),
+      var(--chart-2),
+      var(--chart-5)
+    );
+    /* The two `#000` below are the ONE documented literal in this file, and they are not a colour:
+     * a mask is a stencil read for its alpha, so any fully opaque value does the same job and no
+     * token could be more correct than another. Verbatim from E5. */
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask-composite: exclude;
+    opacity: 0;
+    transition: opacity var(--dur-2) var(--ease-out);
+    pointer-events: none;
+  }
+
+  &:focus-within::before {
+    opacity: 1;
+  }
+}
+
+/* E6 · Frosted surface. Opaque by DEFAULT and translucent only where the blur will actually happen.
+ * Writing it the other way round — translucent with the filter as an enhancement — produces
+ * unreadable text on every browser that lacks it, because backdrop-filter degrades to nothing
+ * silently. Ships only on a small fixed surface with content genuinely moving behind it. */
+@utility kb-frost {
+  background-color: var(--card);
+  border-bottom: 1px solid var(--border);
+
+  @supports ((backdrop-filter: blur(12px)) or (-webkit-backdrop-filter: blur(12px))) {
+    background-color: color-mix(in oklch, var(--card) 72%, transparent);
+    -webkit-backdrop-filter: blur(12px) saturate(140%);
+    backdrop-filter: blur(12px) saturate(140%);
+  }
+}
+
+/* Model output and source text are UNTRUSTED and are rendered as text through one sanitizer path
+ * (markdown-it -> DOMPurify -> replaceChildren). These styles decorate what that path emits and
+ * never re-open it: no prose plugin that wants raw HTML, no `img` added back to make an avatar
+ * work, and no hooks on [data-*] attributes the model can write. */
+@utility kb-prose {
+  font-size: var(--text-md);
+  line-height: var(--text-md-lh);
+  /* A very wide table or a long unbroken URL from the model must not scroll the page body. */
+  overflow-wrap: anywhere;
+
+  & > * + * {
+    margin-top: var(--space-4);
+  }
+
+  & h1,
+  & h2,
+  & h3 {
+    font-size: var(--text-h3);
+    line-height: var(--text-h3-lh);
+    font-weight: var(--text-h3-w);
+    letter-spacing: var(--text-h3-ls);
+  }
+
+  & ul,
+  & ol {
+    padding-left: var(--space-5);
+  }
+
+  & ul {
+    list-style: disc;
+  }
+
+  & ol {
+    list-style: decimal;
+  }
+
+  & li + li {
+    margin-top: var(--space-1);
+  }
+
+  & a {
+    color: var(--primary);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  & code {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    background-color: var(--card-inset);
+    border-radius: var(--radius-xs);
+    padding: 0 var(--space-1);
+  }
+
+  & pre {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    background-color: var(--card-inset);
+    border-radius: var(--radius-md);
+    padding: var(--space-3);
+    overflow-x: auto;
+  }
+
+  & pre code {
+    background-color: transparent;
+    padding: 0;
+  }
+
+  /* Tables scroll inside their own container; the page body never scrolls horizontally. */
+  & table {
+    display: block;
+    width: 100%;
+    overflow-x: auto;
+    border-collapse: collapse;
+    font-size: var(--text-sm);
+  }
+
+  & th,
+  & td {
+    border-bottom: 1px solid var(--border);
+    padding: var(--space-2) var(--space-3);
+    text-align: left;
+  }
+
+  & th {
+    background-color: var(--card-inset);
+    font-size: var(--text-caption);
+    font-weight: var(--text-caption-w);
+    letter-spacing: var(--text-caption-ls);
+    color: var(--muted-foreground);
+  }
+
+  & blockquote {
+    border-left: 3px solid var(--border);
+    padding-left: var(--space-3);
+    color: var(--muted-foreground);
   }
 }

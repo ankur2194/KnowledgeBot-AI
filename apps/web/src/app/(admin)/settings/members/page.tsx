@@ -35,17 +35,18 @@
  * Laravel is the gate, and it answers 403 whether or not the link was rendered.
  */
 
+import { PageHeader } from '@/components/page-header';
 import { MembersScreen } from '@/features/members/members-screen';
 
 export default function MembersPage() {
   return (
-    <section aria-labelledby="members-page-heading" className="space-y-6">
-      <h1 id="members-page-heading" className="text-2xl font-semibold">
-        Members
-      </h1>
-      <p className="text-muted-foreground text-sm">
-        People in this organization, and invitations that have not been accepted yet.
-      </p>
+    <section aria-labelledby="members-page-heading">
+      <PageHeader
+        title="Members"
+        titleId="members-page-heading"
+        // ONE SENTENCE, and it says what the page is FOR rather than restating the title (P3).
+        description="People in this organization, and invitations that have not been accepted yet."
+      />
       <MembersScreen />
     </section>
   );

@@ -68,7 +68,7 @@ export function UnverifiedBanner() {
     // role="alert" (the <Alert> default) rather than a polite status, and this is the one place that
     // is the right call: the banner is the explanation for refusals the user is about to run into,
     // and a screen-reader user who never hears it has no other route to the information.
-    <Alert className="mx-auto mt-4 max-w-6xl">
+    <Alert variant="warning" className="mb-6">
       <AlertTitle>Confirm your email address to finish setting up</AlertTitle>
       <AlertDescription>
         {/*

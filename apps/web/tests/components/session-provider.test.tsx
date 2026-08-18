@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Providers } from '@/components/providers';
 import { browserNavigation } from '@/features/auth/session';
 import { useCurrentOrgId, useOrgKey, useSession } from '@/features/auth/session-context';
-import { SessionProvider } from '@/features/auth/session-provider';
+import { SessionNotice, SessionProvider } from '@/features/auth/session-provider';
 
 import { envelope, ORIGIN, sessionFixture } from '../msw/handlers';
 import { worker } from '../msw/setup';
@@ -52,10 +52,20 @@ function Probe() {
   );
 }
 
+/**
+ * `<SessionNotice/>` is rendered as a CHILD here, mirroring where the real tree puts it.
+ *
+ * It used to be rendered by `<SessionProvider>` itself, beside `{children}` — which meant it painted
+ * OUTSIDE `<AppShell/>`, as a full-bleed bar on the page background belonging to no plane. The shell
+ * is the outermost thing (kb-ui-patterns P1), so the notice moved into the main column and this
+ * harness follows it. The BEHAVIOUR under test is unchanged: the same three states, the same
+ * sentences, still above the content rather than instead of it.
+ */
 const renderTree = () =>
   render(
     <Providers>
       <SessionProvider>
+        <SessionNotice />
         <Probe />
       </SessionProvider>
     </Providers>,

@@ -49,7 +49,7 @@ export default async function ResetPasswordPage({
   if (token === '' || email === '') {
     return (
       <section aria-labelledby="reset-heading" className="space-y-6">
-        <h1 id="reset-heading" className="text-2xl font-semibold">
+        <h1 id="reset-heading" className="text-h1">
           Choose a new password
         </h1>
         <Alert variant="destructive">
@@ -69,7 +69,7 @@ export default async function ResetPasswordPage({
 
   return (
     <section aria-labelledby="reset-heading" className="space-y-6">
-      <h1 id="reset-heading" className="text-2xl font-semibold">
+      <h1 id="reset-heading" className="text-h1">
         Choose a new password
       </h1>
       <ResetPasswordForm token={token} email={email} />

@@ -7,6 +7,7 @@ import { ForgotPasswordForm } from '@/features/auth/forgot-password-form';
 
 import { envelope, ORIGIN } from '../msw/handlers';
 import { worker } from '../msw/setup';
+import { ERROR_COPY } from '@/lib/forms/apply-server-errors';
 
 /**
  * The forgot-password form.
@@ -187,7 +188,7 @@ describe('a 429 disables submit for the header window and never retries', () => 
   });
 });
 
-describe('a response with no envelope renders "Something went wrong." and invents no class', () => {
+describe('a response with no envelope renders the unknown-class copy and invents no class', () => {
   it('shows the unknown copy and no confirmation', async () => {
     worker.use(
       http.post(
@@ -199,7 +200,7 @@ describe('a response with no envelope renders "Something went wrong." and invent
     const screen = await renderForm(KNOWN_ADDRESS);
     await screen.getByRole('button', { name: 'Email a reset link' }).click();
 
-    await expect.element(screen.getByRole('alert')).toHaveTextContent('Something went wrong.');
+    await expect.element(screen.getByRole('alert')).toHaveTextContent(ERROR_COPY.unknown);
     expect(document.body.textContent).not.toContain('(ref');
     expect(document.body.textContent).not.toContain('502 Bad Gateway');
     expect(screen.container.querySelector('[role="status"]')).toBeNull();

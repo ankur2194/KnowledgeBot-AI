@@ -155,7 +155,7 @@ export function VerifyEmailNotice({ token }: { readonly token: string | null }) 
 
   return (
     <div className="space-y-6">
-      <h1 id="verify-heading" className="text-2xl font-semibold">
+      <h1 id="verify-heading" className="text-h1">
         {headingFor(token !== null, verify.isSuccess, verify.isError)}
       </h1>
 

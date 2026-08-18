@@ -99,7 +99,7 @@ describe('the endpoint paths are the ones the approved route table names', () =>
   });
 
   it('signs in and OUT with POST, not DELETE', () => {
-    // A wrong verb is a 405 with no envelope, which renders as "Something went wrong." and tells
+    // A wrong verb is a 405 with no envelope, which renders as the unknown-class copy and tells
     // nobody anything.
     expect(LOGIN_PATH).toBe('/api/v1/auth/login');
     expect(LOGOUT_PATH).toBe('/api/v1/auth/logout');

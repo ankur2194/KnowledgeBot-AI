@@ -7,11 +7,15 @@
  */
 export default function ChatNotFound() {
   return (
-    <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center gap-3 px-6">
-      <h1 className="text-xl font-semibold">This chat is unavailable</h1>
-      <p className="text-muted-foreground text-sm">
-        The link may be incorrect, or the assistant may no longer be published.
-      </p>
+    <main className="mx-auto flex min-h-dvh max-w-md flex-col justify-center px-gutter-sm">
+      {/* A card, because content never floats directly on the canvas (rule 1) — and no action,
+          because there is nowhere on this surface to send an anonymous visitor. */}
+      <div className="flex flex-col gap-2 rounded-2xl bg-card p-card-pad-lg shadow-md">
+        <h1 className="text-h2">This chat is unavailable</h1>
+        <p className="text-base text-muted-foreground">
+          The link may be incorrect, or the assistant may no longer be published.
+        </p>
+      </div>
     </main>
   );
 }

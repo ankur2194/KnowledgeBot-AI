@@ -97,7 +97,7 @@ export async function browserFetchData<T>(request: BrowserRequest): Promise<T> {
  *
  * Note the METHODS: logout and the org switch are both POST. `DELETE /session` and
  * `PUT /session/organization` were the natural guesses and both are wrong — Laravel's routes are
- * POST, and a wrong verb is a 405 that renders as `error_class: null` ("Something went wrong") with
+ * POST, and a wrong verb is a 405 that renders as `error_class: null` (the unknown-class copy) with
  * no clue in it.
  */
 export const ME_PATH = '/api/v1/me';

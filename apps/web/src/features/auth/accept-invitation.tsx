@@ -134,7 +134,7 @@ export function AcceptInvitation({ token }: { readonly token: string }) {
       </p>
 
       {invitedElsewhere ? (
-        <Alert>
+        <Alert variant="warning">
           <AlertTitle>This invitation is for a different address</AlertTitle>
           <AlertDescription className="space-y-3">
             <span>

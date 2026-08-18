@@ -39,7 +39,7 @@ export default async function ForgotPasswordPage({
 
   return (
     <section aria-labelledby="forgot-heading" className="space-y-6">
-      <h1 id="forgot-heading" className="text-2xl font-semibold">
+      <h1 id="forgot-heading" className="text-h1">
         Reset your password
       </h1>
       <p className="text-muted-foreground text-sm">

@@ -1,6 +1,8 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 
+import { fontClassName } from '../fonts';
+
 import '../globals.css';
 
 /**
@@ -36,10 +38,7 @@ export default function ChatRootLayout({ children }: { children: ReactNode }) {
           nothing writes to it before React runs. <body> needs it for the unrelated reason that browser
           extensions write to this element and the attribute does not cascade from a parent that has
           it. Full reasoning in `(auth)/layout.tsx`. */}
-      <body
-        className="bg-background text-foreground min-h-dvh antialiased"
-        suppressHydrationWarning
-      >
+      <body className={`${fontClassName} min-h-dvh`} suppressHydrationWarning>
         {children}
       </body>
     </html>

@@ -193,8 +193,13 @@ describe('the two lists render what the server derived', () => {
     await expect.element(screen.getByText('Ada Lovelace').first()).toBeVisible();
     // Suspended rows are shown WITH their status rather than filtered out: a filtered list makes "why can I
     // not see Bob" unanswerable from the UI.
-    await expect.element(screen.getByText('Sub Pended')).toBeVisible();
-    await expect.element(screen.getByText('Suspended')).toBeVisible();
+    // Scoped to the TABLE. Below 768px the same rows render as a stack of cards (P6: a table does
+    // not become a horizontal scroller on a phone, because a scroller hides the trailing columns),
+    // so the name appears in two layouts of which CSS shows exactly one — `display: none` also
+    // removes the other from the accessibility tree, so a reader hears each member once. Playwright
+    // locators match hidden elements too, which is why the assertion names which layout it means.
+    await expect.element(screen.getByRole('cell', { name: 'Sub Pended' })).toBeVisible();
+    await expect.element(screen.getByRole('cell', { name: 'Suspended' })).toBeVisible();
 
     // Terminal invitations are listed too — `status` is derived server-side, and hiding accepted rows makes
     // "why can I not re-invite this address" unanswerable.

@@ -9,6 +9,7 @@ import type {
   Role,
 } from '@kb/contracts';
 
+import type { StatusKind } from '@/components/status-pill';
 import { browserFetchData } from '@/features/auth/session';
 import { sessionCredential } from '@/lib/api/browser';
 
@@ -223,6 +224,43 @@ export function membershipStatusLabel(status: MembershipStatus): string {
       return 'Invited';
     case 'suspended':
       return 'Suspended';
+  }
+}
+
+/**
+ * `InvitationStatus` -> the CLOSED status vocabulary the pill renders (kb-ui-patterns P8).
+ *
+ * A `switch` rather than an object for the same reason as the label functions above: a fifth state
+ * added to the union fails the typecheck here instead of rendering an untinted pill, and an object
+ * indexed by a value read off the wire is an injection sink.
+ *
+ * The mapping is the pattern's, not this screen's: pending/queued -> slate, running -> info,
+ * ready/active -> success, degraded/partial -> warning, failed/disabled -> destructive. An expired
+ * invitation is a WARNING rather than a failure — it can still be resent, which is a different next
+ * step from one that was revoked.
+ */
+export function invitationStatusKind(status: InvitationStatus): StatusKind {
+  switch (status) {
+    case 'pending':
+      return 'pending';
+    case 'expired':
+      return 'degraded';
+    case 'accepted':
+      return 'ready';
+    case 'revoked':
+      return 'failed';
+  }
+}
+
+/** `MembershipStatus` -> the pill's status kind. Same reasoning as above. */
+export function membershipStatusKind(status: MembershipStatus): StatusKind {
+  switch (status) {
+    case 'active':
+      return 'ready';
+    case 'invited':
+      return 'pending';
+    case 'suspended':
+      return 'disabled';
   }
 }
 

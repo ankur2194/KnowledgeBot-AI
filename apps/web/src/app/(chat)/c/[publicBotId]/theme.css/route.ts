@@ -100,14 +100,27 @@ export async function GET(
 
   // Values are re-validated here against the closed key set and the exact grammar, because the row
   // may predate the validator. Nothing tenant-supplied is interpolated except a value that has
-  // already matched an anchored pattern with no `}`, no `url(` and no `var(` in its language.
-  const declarations = safeThemeDeclarations(theme)
-    .map(([property, value]) => `  ${property}: ${value};`)
-    .join('\n');
+  // already parsed as an in-range `oklch()` — no `}`, no `url(`, no `var(`, no `calc(` survives
+  // `parseOklch`, and a value that fails is dropped rather than guessed at.
+  //
+  // BOTH COLOUR MODES, and this is the half a stylesheet can do that the CSSOM path cannot. Several
+  // tokens are DERIVED from the tenant's accent — hover, pressed, the active-nav pill, the selected
+  // row — and light darkens on interaction while dark lightens, because on a dark canvas a darker
+  // hover reads as "disabled". A single set of values would therefore be wrong in one mode. The
+  // admin console's `BotThemeScope` can only carry one set on an element, so it re-derives when the
+  // mode changes; here the cascade picks.
+  const block = (selector: string, mode: 'light' | 'dark'): string => {
+    const declarations = safeThemeDeclarations(theme, mode)
+      .map(([property, value]) => `  ${property}: ${value};`)
+      .join('\n');
+    return declarations === '' ? '' : `${selector} {\n${declarations}\n}\n`;
+  };
+
+  const body = `${block(':root', 'light')}${block('.dark', 'dark')}`;
 
   // An empty declaration list is `default`, not `unavailable`: we asked, we were answered, and the
   // answer was "nothing to override".
-  return declarations === '' ? css('', 'default') : css(`:root {\n${declarations}\n}\n`, 'bot');
+  return body === '' ? css('', 'default') : css(body, 'bot');
 }
 
 /**

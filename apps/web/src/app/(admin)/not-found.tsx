@@ -1,4 +1,8 @@
+import { FileQuestionIcon } from 'lucide-react';
 import Link from 'next/link';
+
+import { EmptyState } from '@/components/states';
+import { Button } from '@/components/ui/button';
 
 /**
  * Per-group 404. The admin console and hosted chat have separate root layouts, so each group needs
@@ -12,16 +16,20 @@ import Link from 'next/link';
  */
 export default function AdminNotFound() {
   return (
-    <section aria-labelledby="notfound-heading" className="space-y-4">
-      <h1 id="notfound-heading" className="text-2xl font-semibold">
+    <section aria-labelledby="notfound-heading">
+      <h1 id="notfound-heading" className="sr-only">
         Not found
       </h1>
-      <p className="text-muted-foreground text-sm">
-        That page does not exist, or you do not have access to it.
-      </p>
-      <Link href="/" className="text-sm underline">
-        Back to overview
-      </Link>
+      <EmptyState
+        glyph={FileQuestionIcon}
+        title="Not found"
+        body="That page does not exist, or you do not have access to it."
+        action={
+          <Button variant="outline" asChild>
+            <Link href="/">Back to overview</Link>
+          </Button>
+        }
+      />
     </section>
   );
 }

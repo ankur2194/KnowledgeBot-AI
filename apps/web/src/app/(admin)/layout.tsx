@@ -1,12 +1,16 @@
 import type { Metadata } from 'next';
-import Link from 'next/link';
+import { cookies } from 'next/headers';
 import type { ReactNode } from 'react';
 
+import { AppShell } from '@/components/app-shell';
 import { Providers } from '@/components/providers';
 import { CurrentOrgBadge } from '@/features/auth/current-org-badge';
 import { LogoutButton } from '@/features/auth/logout-button';
-import { SessionProvider } from '@/features/auth/session-provider';
+import { SessionNotice, SessionProvider } from '@/features/auth/session-provider';
 import { UnverifiedBanner } from '@/features/auth/unverified-banner';
+import { SIDEBAR_COOKIE, readSidebarCollapsed } from '@/lib/sidebar';
+
+import { fontClassName } from '../fonts';
 
 import '../globals.css';
 
@@ -33,12 +37,8 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 };
 
-const NAV = [
-  { href: '/', label: 'Overview' },
-  { href: '/bots', label: 'Bots' },
-  { href: '/sources', label: 'Sources' },
-  { href: '/settings', label: 'Settings' },
-] as const;
+// The nav model and the ONE active-state function live in `lib/nav.ts`, shared with the breadcrumb
+// so the two cannot disagree about which item is current.
 
 /**
  * `<SessionProvider>` MOUNTS HERE, INSIDE `<Providers>`, WRAPPING THE NAV AND `{children}` — not in
@@ -65,32 +65,35 @@ const NAV = [
  * a redirect would trap a user on the one screen whose own endpoints it needs to keep reachable. See
  * unverified-banner.tsx for the full argument.
  */
-export default function AdminRootLayout({ children }: { children: ReactNode }) {
+export default async function AdminRootLayout({ children }: { children: ReactNode }) {
+  // Read SERVER-SIDE so the first paint already has the remembered width. Reading it in an effect
+  // makes the sidebar visibly snap after hydration on every navigation. It is a display preference
+  // and carries nothing org-scoped, so it does not widen what this layout knows about the visitor.
+  const collapsed = readSidebarCollapsed((await cookies()).get(SIDEBAR_COOKIE)?.value);
+
   return (
     <html lang="en" suppressHydrationWarning>
       {/* <body> carries its own `suppressHydrationWarning` because the attribute does not cascade and
           browser extensions write to this element. Full reasoning in `(auth)/layout.tsx`. */}
-      <body className="min-h-dvh antialiased" suppressHydrationWarning>
+      <body className={`${fontClassName} min-h-dvh`} suppressHydrationWarning>
         <Providers>
           <SessionProvider>
-            <div className="flex min-h-dvh flex-col">
-              <header className="border-b">
-                <nav
-                  aria-label="Main"
-                  className="mx-auto flex max-w-6xl items-center gap-4 px-6 py-4"
-                >
-                  {NAV.map((item) => (
-                    <Link key={item.href} href={item.href} className="text-sm hover:underline">
-                      {item.label}
-                    </Link>
-                  ))}
+            <AppShell
+              defaultCollapsed={collapsed}
+              brand={<span className="text-h3 whitespace-nowrap">KnowledgeBot</span>}
+              sidebarFooter={
+                <>
                   <CurrentOrgBadge />
                   <LogoutButton />
-                </nav>
-              </header>
+                </>
+              }
+            >
+              {/* Both notices render INSIDE the shell's main column. Before <AppShell/> they were
+                  siblings of the shell and painted on the page background, belonging to no plane. */}
+              <SessionNotice />
               <UnverifiedBanner />
-              <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-8">{children}</main>
-            </div>
+              {children}
+            </AppShell>
           </SessionProvider>
         </Providers>
       </body>

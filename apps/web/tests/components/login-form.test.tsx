@@ -8,6 +8,7 @@ import { browserNavigation } from '@/features/auth/session';
 
 import { envelope, ORIGIN, sessionFixture } from '../msw/handlers';
 import { worker } from '../msw/setup';
+import { ERROR_COPY } from '@/lib/forms/apply-server-errors';
 
 /**
  * The login form.
@@ -219,7 +220,7 @@ describe('a 429 disables submit for the header window and never retries', () => 
   });
 });
 
-describe('a response with no envelope renders "Something went wrong." and invents no class', () => {
+describe('a response with no envelope renders the unknown-class copy and invents no class', () => {
   it('shows the unknown copy with no (ref) when the header is absent too', async () => {
     worker.use(
       http.post(
@@ -231,7 +232,7 @@ describe('a response with no envelope renders "Something went wrong." and invent
     const screen = await renderForm();
     await signIn(screen);
 
-    await expect.element(screen.getByRole('alert')).toHaveTextContent('Something went wrong.');
+    await expect.element(screen.getByRole('alert')).toHaveTextContent(ERROR_COPY.unknown);
     expect(document.body.textContent).not.toContain('(ref');
     expect(document.body.textContent).not.toContain('502 Bad Gateway');
   });
@@ -254,7 +255,7 @@ describe('the CSRF pre-check fails BEFORE the POST, where the typed input still 
     const screen = await renderForm();
     await signIn(screen);
 
-    await expect.element(screen.getByRole('alert')).toHaveTextContent('Something went wrong.');
+    await expect.element(screen.getByRole('alert')).toHaveTextContent(ERROR_COPY.unknown);
     // No POST was made at all, which is the whole value of the pre-check.
     expect(posted).toEqual([]);
     // The message names SESSION_DOMAIN and sanctum.stateful. It is operator-facing and is logged, never

@@ -1,8 +1,11 @@
 'use client';
 
 import { KbError } from '@kb/contracts';
+import { AlertTriangleIcon } from 'lucide-react';
 import { useEffect } from 'react';
 
+import { RequestId } from '@/components/states';
+import { Button } from '@/components/ui/button';
 import { endUserCopy } from '@/lib/forms/apply-server-errors';
 
 /**
@@ -55,16 +58,35 @@ export function ErrorPanel({
   // non-retryable unmapped exception, and the axis separating them is not in the copy.
   const retryable = error instanceof KbError && error.retryable;
 
+  // The one identifier support can grep across both services. It appears on ERRORS only, which is
+  // the whole reason it is the deliberate exception to "never surface internal vocabulary".
+  const requestId = error instanceof KbError ? error.request_id : null;
+
   return (
-    <section role="alert" aria-labelledby="error-heading" className="space-y-4">
-      <h1 id="error-heading" className="text-2xl font-semibold">
-        Something went wrong
+    <section
+      role="alert"
+      aria-labelledby="error-heading"
+      // Scaled to the blast radius: a whole page that failed is a centred block, not an inline
+      // banner (references/states.md). It is a card because content never floats on the canvas.
+      className="mx-auto flex max-w-md flex-col items-start gap-3 rounded-2xl bg-card p-card-pad-lg shadow-md"
+    >
+      <span
+        aria-hidden
+        className="flex size-12 items-center justify-center rounded-full bg-destructive-soft text-destructive-soft-foreground"
+      >
+        <AlertTriangleIcon className="size-6" strokeWidth={1.5} />
+      </span>
+      <h1 id="error-heading" className="text-h2">
+        This page could not be loaded
       </h1>
-      <p className="text-sm">{copy}</p>
+      <p className="text-base text-muted-foreground">{copy}</p>
+      {requestId === null ? null : <RequestId value={requestId} />}
       {retryable ? (
-        <button type="button" onClick={reset} className="rounded-md border px-3 py-2 text-sm">
+        // A real <Button>, so it inherits the pressed state and the global focus ring. The raw
+        // <button> this replaced had neither — its only focus indicator was the UA default.
+        <Button variant="outline" onClick={reset}>
           Try again
-        </button>
+        </Button>
       ) : null}
     </section>
   );

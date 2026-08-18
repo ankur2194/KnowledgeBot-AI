@@ -29,7 +29,7 @@ export function InvitationPreviewSummary({
   readonly preview: InvitationPreview;
 }) {
   return (
-    <dl className="bg-muted/40 space-y-3 rounded-md border p-4 text-sm">
+    <dl className="flex flex-col gap-3 rounded-lg bg-card-inset p-card-pad-sm text-sm">
       <div className="space-y-1">
         <dt className="text-muted-foreground">Organization</dt>
         <dd className="font-medium">{preview.organization_name}</dd>

@@ -61,10 +61,17 @@ export default defineConfig({
   webServer: {
     // Never `next dev`: the production build is what ships, and dev-only behaviour (StrictMode
     // double effects, unminified bundles, no Full Route Cache) hides half of what these specs
-    // assert.
+    // assert. It also hides the opposite: the dev overlay injects inline styles that the `(chat)`
+    // group's `style-src 'self'` refuses, so a dev run reports CSP violations that production does
+    // not have.
     command: 'pnpm build && pnpm start',
     url: baseURL,
     reuseExistingServer: !process.env.CI,
     timeout: 180_000,
+    // `src/lib/env.ts` validates this at MODULE LOAD, so `next build` dies on a zod error before a
+    // single spec runs without it. `.invalid` is reserved by RFC 2606 and never resolves, ON PURPOSE
+    // — the same choice vitest.config.ts makes: a spec that reaches the network fails on DNS rather
+    // than quietly talking to a host that happens to exist.
+    env: { NEXT_PUBLIC_API_ORIGIN: 'http://api.invalid' },
   },
 });

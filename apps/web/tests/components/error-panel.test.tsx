@@ -3,6 +3,7 @@ import { render } from 'vitest-browser-react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ErrorPanel } from '@/components/error-panel';
+import { ERROR_COPY } from '@/lib/forms/apply-server-errors';
 
 /**
  * THE FIRST SPEC IN `tests/components/`, which is what let `passWithNoTests: true` be deleted from
@@ -68,14 +69,14 @@ describe('the copy is mapped from error_class, never from the envelope message',
     });
   });
 
-  it('renders "Something went wrong." with no ref for an error carrying no envelope', async () => {
+  it('renders the unknown-class copy with no ref for an error carrying no envelope', async () => {
     // error_class null means no envelope parsed — unknown, and unknown is permanently
     // non-retryable. Never invent a class name to fill the slot.
     const screen = await render(
       <ErrorPanel surface="admin" error={new Error('boom')} reset={() => undefined} />,
     );
 
-    await expect.element(screen.getByRole('alert')).toHaveTextContent('Something went wrong.');
+    await expect.element(screen.getByRole('alert')).toHaveTextContent(ERROR_COPY.unknown);
     expect(document.body.textContent).not.toContain('(ref');
     expect(document.body.textContent).not.toContain('boom');
   });

@@ -12,6 +12,12 @@
  * this file is also consumed by apps/widget, which runs its own Tailwind build.
  *
  * Derivation, contrast floors and the reasoning behind each value: ./tokens.md
+ *
+ * SIX VALUES HERE MOVED after the contrast checker was first run against the emitted token set
+ * (--border-strong, --warning, --chart-2, --chart-4, --chart-6 in light; --primary in dark). The
+ * before/after table and the measured ratios are in ./tokens.md; the authority is
+ * packages/design-tokens/src/tokens.json, and this file is a reference that has to be kept level
+ * with it by hand.
  */
 
 :root {
@@ -29,7 +35,7 @@
 
   /* ---- line ------------------------------------------------------------ */
   --border: oklch(0.917 0.006 264);
-  --border-strong: oklch(0.660 0.014 264);
+  --border-strong: oklch(0.628 0.014 264);
   --input: oklch(0.900 0.006 264);
   --ring: var(--primary);
 
@@ -47,7 +53,7 @@
   --success: oklch(0.585 0.145 152);
   --success-soft: oklch(0.955 0.040 152);
   --success-soft-foreground: oklch(0.435 0.105 152);
-  --warning: oklch(0.650 0.145 66);
+  --warning: oklch(0.636 0.145 66);
   --warning-soft: oklch(0.960 0.050 80);
   --warning-soft-foreground: oklch(0.450 0.100 62);
   --destructive: oklch(0.577 0.245 27.325);
@@ -81,11 +87,11 @@
 
   /* ---- chart: ordered, adjacent pairs ≥ 0.06 apart in lightness --------- */
   --chart-1: oklch(0.545 0.225 264);
-  --chart-2: oklch(0.700 0.150 45);
+  --chart-2: oklch(0.683 0.150 45);
   --chart-3: oklch(0.575 0.125 168);
-  --chart-4: oklch(0.780 0.135 90);
+  --chart-4: oklch(0.670 0.135 90);
   --chart-5: oklch(0.505 0.180 305);
-  --chart-6: oklch(0.680 0.085 225);
+  --chart-6: oklch(0.663 0.085 225);
   --chart-grid: oklch(0.930 0.004 264);
   --chart-axis: oklch(0.520 0.020 264);
 
@@ -172,7 +178,7 @@
   --border-strong: oklch(0.620 0.016 266);
   --input: oklch(0.330 0.012 266);
 
-  --primary: oklch(0.585 0.215 264);
+  --primary: oklch(0.568 0.215 264);
   --primary-foreground: oklch(0.985 0 0);
   --primary-hover: oklch(0.645 0.200 264);
   --primary-active: oklch(0.700 0.180 264);

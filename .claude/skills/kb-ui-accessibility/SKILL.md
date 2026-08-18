@@ -13,7 +13,7 @@ This skill is short on theory and long on the specific things that break here.
 
 ## The contrast matrix
 
-`kb-design-language` sets the values; this is the check that proves them. A CI job walks the emitted token set and asserts every pair below. <!-- UNVERIFIED: the job does not exist yet; it is owed by admin-web-engineer and belongs in the gates workflow. -->
+`kb-design-language` sets the values; this is the check that proves them. **The check now exists: `apps/web/tests/unit/design-system.test.ts` walks the emitted token set and asserts every pair below, in both modes.** It is a Vitest spec rather than a CI job because `.github/` was deleted on 2026-08-17 and there is no CI in this repository — "enforced by review and by the test suites alone" (CLAUDE.md) is the enforcement model, so the assertion lives where it can actually run. Its first run moved six values in `tokens.json`; the before/after table is `kb-design-language` → `references/tokens.md`.
 
 | Pair | Floor | Why this one is listed |
 | --- | --- | --- |
@@ -112,7 +112,7 @@ Automated checks catch perhaps a third of this, and the third they catch is the 
 - **A screen-reader pass** on chat and on any new form, at least once per surface — VoiceOver or NVDA. The streaming announcement model cannot be verified any other way.
 - **200% zoom and 320px width** on the changed screens.
 - **Reduced motion enabled at the OS level**, not just emulated, for anything with an indicator.
-- The contrast matrix runs in CI over the emitted tokens, so a palette change cannot pass review by looking fine.
+- The contrast matrix runs over the emitted tokens in `pnpm --filter web test`, so a palette change cannot pass review by looking fine. There is no CI to run it for you: it is part of the suite a human invokes.
 
 ## Gotchas
 

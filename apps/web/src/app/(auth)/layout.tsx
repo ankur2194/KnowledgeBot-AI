@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 
 import { Providers } from '@/components/providers';
+import { fontClassName } from '../fonts';
 
 import '../globals.css';
 
@@ -84,13 +85,16 @@ export default function AuthRootLayout({ children }: { children: ReactNode }) {
         a literal constant string — no expression on it could differ between the two renders. Every
         descendant is unaffected and still reports mismatches normally, which is the half that matters.
       */}
-      <body
-        className="bg-background text-foreground min-h-dvh antialiased"
-        suppressHydrationWarning
-      >
+      <body className={`${fontClassName} min-h-dvh`} suppressHydrationWarning>
         <Providers>
-          <main className="mx-auto flex min-h-dvh w-full max-w-sm flex-col justify-center gap-6 px-6 py-12">
-            {children}
+          {/* RULE 1, TWO PLANES: the page is the recessed --canvas and content sits on a raised
+              --card. Content floating directly on the canvas is what makes a screen read as a
+              different application, and an auth screen is the first one a customer ever sees. The
+              card is --radius-2xl with --shadow-md, the standard content card (P5). */}
+          <main className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-gutter-sm py-12">
+            <div className="flex flex-col gap-6 rounded-2xl bg-card p-card-pad-lg shadow-md">
+              {children}
+            </div>
           </main>
         </Providers>
       </body>

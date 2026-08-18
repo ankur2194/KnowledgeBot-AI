@@ -107,7 +107,7 @@ function hasFocusableRef<TFieldValues extends FieldValues, TOutput>(
  * `Record<ErrorClass | StreamLost | 'unknown', string>` rather than `Record<string, string>`. The
  * difference is the whole point: this map was keyed by bare `string`, so a 19th class added to
  * `ERROR_CLASSES` in `@kb/contracts` would have compiled here, typechecked, passed review, and then
- * fallen through `endUserCopy`'s `?? 'Something went wrong.'` — a user-visible regression with both
+ * fallen through `endUserCopy`'s `?? ERROR_COPY.unknown` — a user-visible regression with both
  * halves silent. Now it is a typecheck failure in this file, naming the missing key.
  *
  * `Record` is TOTAL AND CLOSED in both directions: a missing class is an error and so is a key that is
@@ -149,7 +149,12 @@ export const ERROR_COPY: Readonly<Record<ErrorClass | StreamLost | 'unknown', st
   stream_lost: 'The connection dropped before the answer finished.',
   // `null` means no envelope parsed. Unknown, and unknown is permanently non-retryable — never
   // invent a class name to fill the slot.
-  unknown: 'Something went wrong.',
+  //
+  // NOT "Something went wrong.", which references/states.md names as its counter-example: it states
+  // no condition, offers no next step, and reads as an apology. This says what happened, that the
+  // reason is not the user's to find, and what to do with the one handle they have. It deliberately
+  // does NOT say "try again" — unknown is permanently non-retryable, so no affordance follows it.
+  unknown: 'That did not go through, and the reason was not reported. If it keeps happening, quote the reference below.',
 };
 
 /** The whole user-visible string: a class-mapped sentence plus the one identifier support can grep
@@ -158,7 +163,7 @@ export function endUserCopy(error: {
   error_class: ClientErrorClass;
   request_id?: string | null;
 }): string {
-  const copy = ERROR_COPY[error.error_class ?? 'unknown'] ?? 'Something went wrong.';
+  const copy = ERROR_COPY[error.error_class ?? 'unknown'] ?? ERROR_COPY.unknown;
   return error.request_id ? `${copy} (ref ${error.request_id})` : copy;
 }
 

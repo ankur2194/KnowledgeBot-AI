@@ -1,5 +1,7 @@
 import type { Metadata } from 'next';
 
+import { ChatSurface } from '@/features/chat/chat-surface';
+
 /**
  * Hosted chat for one public bot.
  *
@@ -47,7 +49,10 @@ export default async function HostedChatPage({
   const { publicBotId } = await params;
 
   return (
-    <main className="mx-auto flex min-h-dvh max-w-2xl flex-col px-4 py-6">
+    // The chat column: 48rem centred at desktop, full width on a phone with the composer pinned to
+    // the bottom inset (kb-ui-patterns, *Density and responsive*). `min-h-dvh` + `min-h-0` is what
+    // lets the transcript scroll inside its own box instead of scrolling the page.
+    <main className="mx-auto flex h-dvh w-full max-w-3xl flex-col gap-4 px-gutter-sm py-4">
       {/* The palette is a same-origin stylesheet: `style-src 'self'` covers it with no nonce, and
           the response is cacheable by publicBotId alone. A nonced inline <style> could not be
           either of those things at once. */}
@@ -55,16 +60,18 @@ export default async function HostedChatPage({
 
       <h1 className="sr-only">Chat</h1>
 
-      <div aria-hidden className="flex-1 space-y-3">
-        <div className="bg-muted h-16 animate-pulse rounded-lg" />
-        <div className="bg-muted h-24 animate-pulse rounded-lg" />
-      </div>
-
-      {/* <ChatSurface> — 'use client', and the boundary sits at the first thing that varies per
+      {/* <ChatSurface> is 'use client', and the boundary sits at the first thing that varies per
           visitor. It owns the transcript, the composer, the AbortController behind the
           stop-generation action, and streamAnswer() straight to Laravel. Never back through Next,
-          and never a Server Action. */}
-      <p className="text-muted-foreground mt-6 text-sm">The chat surface is not implemented yet.</p>
+          and never a Server Action.
+        
+          `conversation={null}` is HONEST, not a placeholder: a send needs a conversation id and a
+          chat-session credential, both minted by the `sdk/v1` bootstrap, which is deliberately out
+          of scope for this repo. The surface renders its real first-run state and states the
+          condition in place rather than offering a composer that silently does nothing. The bot
+          name and suggestions come from the public bot configuration on the same `rt/v1` surface as
+          the palette; until it exists they are the generic defaults below. */}
+      <ChatSurface botName="this assistant" conversation={null} />
     </main>
   );
 }

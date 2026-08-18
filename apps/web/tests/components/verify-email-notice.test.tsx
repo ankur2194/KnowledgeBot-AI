@@ -7,6 +7,7 @@ import { VerifyEmailNotice } from '@/features/auth/verify-email-notice';
 
 import { envelope, ORIGIN } from '../msw/handlers';
 import { worker } from '../msw/setup';
+import { ERROR_COPY } from '@/lib/forms/apply-server-errors';
 
 /**
  * The email-verification screen — the link target and the notice/resend screen, which are one
@@ -152,7 +153,7 @@ describe('the single failure state claims nothing the server did not say', () =>
     await expect.element(screen.getByRole('alert')).toHaveTextContent('(ref 01JREQFROMLARAVEL)');
   });
 
-  it('renders "Something went wrong." with no invented class when no envelope parsed', async () => {
+  it('renders the unknown-class copy with no invented class when no envelope parsed', async () => {
     worker.use(
       http.post(
         `${ORIGIN}/api/v1/auth/email/verify`,
@@ -162,7 +163,7 @@ describe('the single failure state claims nothing the server did not say', () =>
 
     const screen = await renderNotice('tok_abcdef');
 
-    await expect.element(screen.getByRole('alert')).toHaveTextContent('Something went wrong.');
+    await expect.element(screen.getByRole('alert')).toHaveTextContent(ERROR_COPY.unknown);
     expect(document.body.textContent).not.toContain('(ref');
     expect(document.body.textContent).not.toContain('502 Bad Gateway');
   });
