@@ -4,8 +4,13 @@ declare(strict_types=1);
 
 use App\Enums\BotDomainStatus;
 use App\Enums\OrgRole;
+use App\Models\Bot;
 use App\Models\BotDomain;
+use App\Models\BotFallbackEntry;
 use App\Models\BotStarterQuestion;
+use App\Models\Organization;
+use App\Models\ProviderConnection;
+use App\Models\ProviderModelEntry;
 use App\Models\User;
 use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
@@ -179,7 +184,7 @@ it('404s a child of a DIFFERENT bot inside the SAME organization', function (str
         : BotStarterQuestion::factory()->recycle($t->a)->recycle($t->botA)->at(0)->create()->id;
 
     // A SECOND BOT IN THE SAME ORGANIZATION, with no child rows of its own.
-    $sibling = \App\Models\Bot::factory()->recycle($t->a)->create(['slug' => 'sibling-bot']);
+    $sibling = Bot::factory()->recycle($t->a)->create(['slug' => 'sibling-bot']);
 
     SpaSession::establish(currentTest(), $t->actorA);
 
@@ -357,7 +362,7 @@ it('cannot move a child row to another organization or another bot by over-posti
 
     $domain = BotDomain::factory()->recycle($t->a)->recycle($t->botA)
         ->origin('https://overpost.example')->create();
-    $sibling = \App\Models\Bot::factory()->recycle($t->a)->create(['slug' => 'overpost-sibling']);
+    $sibling = Bot::factory()->recycle($t->a)->create(['slug' => 'overpost-sibling']);
 
     SpaSession::establish(currentTest(), $t->actorA);
 
@@ -379,4 +384,124 @@ it('cannot move a child row to another organization or another bot by over-posti
         ->and($reloaded->origin)->toBe('https://overpost.example')
         // The one field the request was actually entitled to move.
         ->and($reloaded->status)->toBe(BotDomainStatus::Active);
+});
+
+// ── the delete cascade, and the two collections it must not reach ────────────────────────────────
+
+/**
+ * One bot's three child collections, planted with values that name the bot they belong to.
+ *
+ * DISTINGUISHABLE PER BOT AND PER ORGANIZATION, because the assertion below counts survivors: two
+ * bots whose origins were both `https://example.com` would make a row deleted from one and read
+ * back from the other indistinguishable from a row that was never touched.
+ *
+ * @return array{domain: string, question: string, fallback: string}
+ */
+function plantChildCollections(Organization $organization, Bot $bot, string $label): array
+{
+    $connection = ProviderConnection::factory()->recycle($organization)
+        ->create(['label' => $label.' key']);
+
+    $model = ProviderModelEntry::factory()->recycle($organization)->recycle($connection)
+        ->supporting(['text'])
+        ->create(['model' => 'gpt-5.1', 'display_name' => $label.' chat row']);
+
+    $domain = BotDomain::factory()->recycle($organization)->recycle($bot)
+        ->origin('https://'.Str::lower($label).'.example')->create();
+
+    $question = BotStarterQuestion::factory()->recycle($organization)->recycle($bot)
+        ->at(0)->asking('What does '.$label.' cover?')->create();
+
+    $fallback = BotFallbackEntry::factory()->recycle($organization)->recycle($bot)->recycle($model)
+        ->at(0)->create();
+
+    return ['domain' => $domain->id, 'question' => $question->id, 'fallback' => $fallback->id];
+}
+
+/**
+ * Whether each of the three child rows still exists, read WITHOUT the global scopes.
+ *
+ * DELIBERATELY UNSCOPED, and it is the same call `BotEndpointAccessTest` makes for the same reason:
+ * this assertion is about what is IN THE TABLE, not about what a request can see. Reading it
+ * through the tenant scope would make "org B's rows survived" pass whenever the scope hid them —
+ * which is the assertion inverted.
+ *
+ * @param  array{domain: string, question: string, fallback: string}  $ids
+ * @return array{domain: bool, question: bool, fallback: bool}
+ */
+function childCollectionsExist(array $ids): array
+{
+    return [
+        'domain' => BotDomain::query()->withoutGlobalScopes()->whereKey($ids['domain'])->exists(),
+        'question' => BotStarterQuestion::query()->withoutGlobalScopes()->whereKey($ids['question'])->exists(),
+        'fallback' => BotFallbackEntry::query()->withoutGlobalScopes()->whereKey($ids['fallback'])->exists(),
+    ];
+}
+
+it('removes only the deleted bot\'s children, leaving a sibling bot\'s and another organization\'s', function (): void {
+    /*
+     * THE DELETE IS THE ONE WRITE THAT REACHES ROWS THE REQUEST NEVER NAMED. Every other endpoint in
+     * this file touches one child row identified in the URL; DELETE …/bots/{bot} removes three whole
+     * collections by predicate, in code, because all three reference `bots (organization_id, id)`
+     * with ON DELETE RESTRICT and a bot with one origin would otherwise raise SQLSTATE 23503.
+     *
+     * A PREDICATE THAT LOSES ITS `bot_id` TERM STILL PASSES EVERY OTHER TEST IN THIS REPOSITORY.
+     * The organization term keeps it inside one tenant, so no cross-tenant assertion anywhere moves;
+     * the existing delete test in tests/Feature/BotCrudTest.php asserts its own bot's domain is gone
+     * and that the OTHER bot's ROW survives, and neither notices that the other bot's CHILDREN went
+     * with it. What that costs the operator is the whole allow-list of every other bot in the
+     * organization — every widget on every site they run stops booting — from a request that
+     * returned 200 and named one bot.
+     *
+     * WHAT THIS TEST CANNOT PROVE, stated rather than implied: the `organization_id` term in the
+     * same predicate is UNOBSERVABLE from here, and no test can make it observable. `bot_id` is a
+     * ULID primary key, so two organizations cannot share one, and dropping the organization term
+     * changes the result set of no query that could ever run. It is written out in the repository
+     * anyway — that layer's property is that it is correct on its own rather than correct because of
+     * a constraint in another file — and it stays a review obligation.
+     */
+    $t = tenantPair();
+
+    $doomed = Bot::factory()->recycle($t->a)->create(['name' => 'ALPHA doomed', 'slug' => 'alpha-doomed']);
+    $sibling = Bot::factory()->recycle($t->a)->create(['name' => 'ALPHA sibling', 'slug' => 'alpha-sibling']);
+
+    $doomedChildren = plantChildCollections($t->a, $doomed, 'DOOMED');
+    $siblingChildren = plantChildCollections($t->a, $sibling, 'SIBLING');
+    $foreignChildren = plantChildCollections($t->b, $t->botB, 'BRAVO');
+
+    // POSITIVE CONTROL, FIRST (pest-testing NN2). All nine rows are really there, so "org B's
+    // children survived" cannot be satisfied by a fixture that never created them — which is how
+    // this test would go green against a delete that removed every child row in the table.
+    expect(childCollectionsExist($doomedChildren))->toBe(['domain' => true, 'question' => true, 'fallback' => true])
+        ->and(childCollectionsExist($siblingChildren))->toBe(['domain' => true, 'question' => true, 'fallback' => true])
+        ->and(childCollectionsExist($foreignChildren))->toBe(['domain' => true, 'question' => true, 'fallback' => true]);
+
+    SpaSession::establish(currentTest(), $t->actorA);
+
+    currentTest()->deleteJson(
+        "/api/v1/organizations/{$t->a->id}/bots/{$doomed->id}",
+        [],
+        spaHeaders(),
+    )->assertOk();
+
+    // THE DELETE DID HAPPEN. Without this the three survival assertions below all pass against an
+    // endpoint that deleted nothing at all.
+    expect(childCollectionsExist($doomedChildren))
+        ->toBe(['domain' => false, 'question' => false, 'fallback' => false], 'the deleted bot kept its children');
+
+    expect(childCollectionsExist($siblingChildren))->toBe(
+        ['domain' => true, 'question' => true, 'fallback' => true],
+        'deleting one bot removed a SIBLING bot\'s children — same organization, different bot, so no '
+        .'cross-tenant assertion in this repository would have caught it',
+    );
+
+    expect(childCollectionsExist($foreignChildren))->toBe(
+        ['domain' => true, 'question' => true, 'fallback' => true],
+        'deleting org A\'s bot removed org B\'s children',
+    );
+
+    // AND ORG B'S BOT ITSELF. A deletion test needs a surviving second tenant
+    // (kb-deletion-and-verification), and the bot row is the parent all three collections hang off.
+    expect(Bot::query()->withoutGlobalScopes()->whereKey($t->botB->id)->exists())->toBeTrue()
+        ->and(Bot::query()->withoutGlobalScopes()->whereKey($sibling->id)->exists())->toBeTrue();
 });

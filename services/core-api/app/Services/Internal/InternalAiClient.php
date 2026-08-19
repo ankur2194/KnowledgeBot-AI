@@ -16,8 +16,14 @@ use Illuminate\Support\Str;
  * The ONLY class in this application permitted to open a connection to `ai-api`.
  *
  * A controller, job or service that builds its own `Http::` call bypasses signing, deadline
- * propagation and the retry ban; an arch test pins the Http facade to this namespace and CI greps
- * for `services.ai.url` outside it.
+ * propagation and the retry ban; an arch test pins the Http facade to this namespace, and a second
+ * test fails on a literal `services.ai.url` or `ai-api` anywhere in `app/` outside it.
+ *
+ * THAT SECOND HALF USED TO READ "AND CI GREPS FOR `services.ai.url` OUTSIDE IT", AND THERE IS NO
+ * CI: `.github/` was deleted on 2026-08-17 and nothing replaced it. It is now
+ * tests/Arch/StringLevelDoctrineTest.php, which reads STRING LITERALS out of the token stream — so
+ * it does not match the two mentions in this docblock, which the published grep did. The human
+ * spelling is `rg 'ai-api|services\.ai\.url' services/core-api/app | grep -v Services/Internal`.
  *
  * NO ->retry() ANYWHERE. Retry ownership belongs to the tier that owns the adapter, and attempts
  * multiply across tiers (kb-error-taxonomy, "Retry ownership").

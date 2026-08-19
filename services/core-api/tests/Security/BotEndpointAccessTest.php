@@ -6,6 +6,7 @@ use App\Enums\MembershipStatus;
 use App\Enums\OrgRole;
 use App\Models\Bot;
 use App\Models\ProviderConnection;
+use App\Models\ProviderModelEntry;
 use App\Models\User;
 use Database\Factories\ProviderConnectionFactory;
 use Illuminate\Support\Str;
@@ -617,3 +618,137 @@ it('never lets a request body move a bot to another organization', function (): 
         Bot::query()->withoutGlobalScopes()->where('organization_id', '=', $t->b->id)->count(),
     )->toBe(1);
 });
+
+// ── the WRITE path's own tenant check, which is a different layer from the read path's ───────────
+
+it('refuses a bot naming another organization\'s connection or model, as validation and not as a 500', function (
+    string $verb,
+): void {
+    /*
+     * THE LAYER THE READ ASSERTIONS ABOVE CANNOT REACH, and the one with its own CVE class:
+     * Filament CVE-2026-48067 was a select query that WAS tenant-scoped beside a validation rule for
+     * the same field that was not. "The layer above already checked" is the reasoning behind every
+     * incident here (kb-tenancy-isolation NN7).
+     *
+     * WHAT IS AND IS NOT ALREADY COVERED. tests/Security/BotTenancyTest.php asserts the DATABASE
+     * refuses the row — `bots_connection_same_org` and `bots_model_same_org` are composite foreign
+     * keys and they really do — but it writes through the model, so it says nothing about what an
+     * HTTP caller gets. tests/Feature/BotCrudTest.php exercises the pair check with two connections
+     * of the SAME organization. Neither posts a FOREIGN ORGANIZATION'S id, which is the case where
+     * the service check and the constraint would both have to be wrong to leak, and where only one
+     * of them has to be wrong to turn a 422 into a 500.
+     *
+     * A 500 IS NOT MERELY UNTIDY HERE. It is the constraint firing instead of the check, and
+     * `BotService::assertModelSelection()`'s own docblock says as much: for the connection "the
+     * guarantee is the database's and this check only decides whether the caller gets a 422 or a
+     * 500". This test is what holds that sentence true, and it fails closed in the useful
+     * direction — `EloquentBotRepository::create()` rethrows every QueryException but the slug
+     * conflict, so the constraint answering instead renders as `internal`, a different error_class
+     * that no assertion here can be satisfied by.
+     *
+     * MEASURED, so the teeth are not a claim. Making the connection check org-blind at BOTH layers
+     * — the explicit `where('organization_id', …)` in EloquentProviderConnectionRepository AND the
+     * `#[ScopedBy]` backstop — turns the first probe below into a 500. Under that mutation the
+     * whole Security suite plus every bot Feature file is 2 failed / 393 passed, and both failures
+     * are this test. Removing the explicit predicate ALONE changes nothing anywhere, because the
+     * backstop still applies: that is the layering working, not a gap, and it is why the arch rule
+     * banning `withoutGlobalScopes(` in app/ is the other half of this test's defence rather than a
+     * separate concern.
+     */
+    $t = tenantPair();
+
+    // THE SAME MODEL IDENTIFIER IN BOTH ORGANIZATIONS. A lookup that lost its organization
+    // predicate returns a row that looks exactly right — same vendor, same model string — and only
+    // the ULID betrays it, which is the shape BotTenancyTest uses at the database layer.
+    $connectionA = ProviderConnection::factory()->recycle($t->a)->create(['label' => 'ALPHA key']);
+    $modelA = ProviderModelEntry::factory()->recycle($t->a)->recycle($connectionA)
+        ->supporting(['text'])->create(['model' => 'gpt-5.1', 'display_name' => 'ALPHA row']);
+
+    $connectionB = ProviderConnection::factory()->recycle($t->b)->create(['label' => 'BRAVO key']);
+    $modelB = ProviderModelEntry::factory()->recycle($t->b)->recycle($connectionB)
+        ->supporting(['text'])->create(['model' => 'gpt-5.1', 'display_name' => 'BRAVO row']);
+
+    SpaSession::establish(currentTest(), $t->actorA);
+
+    $create = $verb === 'store';
+    $attempt = 0;
+
+    /**
+     * One write, with BOTH selection fields named explicitly on every call.
+     *
+     * NAMING BOTH EVERY TIME IS NOT TIDINESS. A PATCH that names only `provider_connection_id`
+     * merges with the row's existing `provider_model_id`, so the probe "the other organization's
+     * connection, alone" would actually be asking about the pair (their connection, our model) and
+     * would be refused by the pair check rather than by the connection check — a green test about a
+     * different property. Sending `null` makes the two verbs ask the same question.
+     *
+     * The slug moves per attempt because the POSITIVE CONTROL below really does create a bot, and a
+     * second `store` on the same slug is refused for that reason instead of the one under test.
+     */
+    $send = function (array $selection) use ($t, $create, &$attempt): TestResponse {
+        $attempt++;
+
+        /** @var TestResponse<\Illuminate\Http\JsonResponse> $response */
+        $response = $create
+            ? currentTest()->postJson(
+                "/api/v1/organizations/{$t->a->id}/bots",
+                ['name' => 'ALPHA probe '.$attempt, 'slug' => 'alpha-probe-'.$attempt] + $selection,
+                spaHeaders(),
+            )
+            : currentTest()->patchJson(
+                "/api/v1/organizations/{$t->a->id}/bots/{$t->botA->id}",
+                $selection,
+                spaHeaders(),
+            );
+
+        return $response;
+    };
+
+    // POSITIVE CONTROL, FIRST. The organization's OWN pair is accepted, so the three refusals below
+    // are about the tenant boundary and not about a write path that rejects model selection
+    // outright — which is exactly what would make this test decoration.
+    $ownPair = $send(['provider_connection_id' => $connectionA->id, 'provider_model_id' => $modelA->id]);
+
+    expect($ownPair->getStatusCode())->toBeLessThan(300, 'the organization\'s own (connection, model) pair was refused');
+
+    foreach ([
+        'the other organization\'s connection alone' => [
+            'field' => 'provider_connection_id',
+            'body' => ['provider_connection_id' => $connectionB->id, 'provider_model_id' => null],
+        ],
+        'its own connection with the other organization\'s model' => [
+            'field' => 'provider_model_id',
+            'body' => ['provider_connection_id' => $connectionA->id, 'provider_model_id' => $modelB->id],
+        ],
+        'both halves from the other organization' => [
+            'field' => 'provider_model_id',
+            'body' => ['provider_connection_id' => $connectionB->id, 'provider_model_id' => $modelB->id],
+        ],
+    ] as $case => $probe) {
+        $response = $send($probe['body']);
+
+        $response->assertStatus(422)
+            ->assertJsonPath('error_class', 'validation')
+            ->assertJsonValidationErrors([$probe['field']]);
+
+        // AND THE REFUSAL SAYS NOTHING ABOUT THE OTHER ORGANIZATION. The message is one constant
+        // for "no such row" and for "a row you do not own", because distinguishing them would say
+        // whether a ULID the caller does not own exists — the enumeration oracle every other route
+        // on this surface closes at binding time.
+        $body = (string) $response->getContent();
+
+        expect(str_contains($body, 'BRAVO'))->toBeFalse("[{$case}] the refusal named the other organization's row");
+        expect(str_contains($body, $t->b->id))->toBeFalse("[{$case}] the refusal carried the other organization's id");
+    }
+
+    // NOTHING WAS WRITTEN in either direction, read unscoped for the reason the over-posting test
+    // above states: the ambient context fails closed, so a scoped count is a tautology.
+    expect(
+        Bot::query()->withoutGlobalScopes()
+            ->where('provider_connection_id', '=', $connectionB->id)->count(),
+    )->toBe(0)
+        ->and(
+            Bot::query()->withoutGlobalScopes()
+                ->where('provider_model_id', '=', $modelB->id)->count(),
+        )->toBe(0);
+})->with(['store', 'update']);

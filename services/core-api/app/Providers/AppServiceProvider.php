@@ -417,7 +417,14 @@ final class AppServiceProvider extends ServiceProvider
      * handleLazyLoadingViolationUsing() logger) once there is real traffic — never by weakening
      * shouldBeStrict() as a whole.
      *
-     * forceFill() and forceCreate() bypass all of it; CI greps for both.
+     * forceFill() and forceCreate() bypass all of it.
+     *
+     * THIS LINE USED TO SAY "CI GREPS FOR BOTH", AND THERE IS NO CI: `.github/` was deleted on
+     * 2026-08-17 and nothing replaced it. The check is a TEST now rather than a review obligation —
+     * tests/Arch/StringLevelDoctrineTest.php tokenizes app/ and holds the call sites against an
+     * annotated allow-list, so the ONE legitimate use (PasswordResetService, where the write is not
+     * a user-supplied payload) is pinned by file and by count and a second one fails the suite. The
+     * grep a human runs is `rg 'forceFill\(|forceCreate\(' services/core-api/app`.
      */
     private function enforceModelStrictness(): void
     {

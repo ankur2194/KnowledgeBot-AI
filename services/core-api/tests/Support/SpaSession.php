@@ -144,6 +144,60 @@ final class SpaSession
     }
 
     /**
+     * A globally unique token-shaped value of an exact length.
+     *
+     * ── THE AXIS isolateRateLimits() CANNOT REACH, AND WHY IT LOOKED SAFE ─────────────────────────
+     *
+     * `isolateRateLimits()` randomises the CLIENT ADDRESS, which covers the `ip:` half of every
+     * limiter in AppServiceProvider. Three of them carry a second axis derived from the REQUEST
+     * BODY: `verification` and `invitation` key on `hash('sha256', $request->input('token'))`, and
+     * `password-reset` keys on the same digest of its own token. A fresh IP per test does not move
+     * that bucket at all, because it is not built from the IP.
+     *
+     * So a spec that posts a FIXED LITERAL token — the natural way to write "a malformed token is a
+     * 422" — spends one unit of a bucket that survives the test, the suite, and every later run,
+     * and it is the SAME bucket every time. `verification` is 6 per SIXTY MINUTES, so the seventh
+     * suite run inside an hour gets a 429 where the spec asserts a 422. MEASURED, 2026-08-19: four
+     * consecutive green runs of `--filter="rejects a malformed verification token"` followed by
+     * four consecutive 429s. It reads as a flaky test and it is a fixture that never varied.
+     *
+     * THE FIX IS THE KEY, NOT THE ASSERTION. Loosening the assertion to accept 429 would delete the
+     * test; flushing the cache is barred outright (pest-testing: under --parallel it wipes sibling
+     * workers' locks). A per-call value gives each run its own bucket, which is also the honest
+     * model — these really are different tokens.
+     *
+     * THE LENGTH IS THE CALLER'S BECAUSE IT IS USUALLY LOAD-BEARING. Every token rule in this
+     * application is `size:OpaqueToken::LENGTH`, so a spec probing "too short" or "too long" is
+     * asserting on a specific length and must keep it while varying the CONTENT. The alphabet is
+     * hex, matching a real minted token, so the only thing wrong with the value is what the spec
+     * says is wrong with it.
+     */
+    public static function uniqueToken(int $length): string
+    {
+        // A LOUD REFUSAL RATHER THAN AN EMPTY STRING. `random_bytes(0)` throws, and a zero or
+        // negative length here would mean the caller is asking for the digest-of-empty-string bucket
+        // — the one value that CANNOT be made unique, and one this helper must not appear to have
+        // made unique.
+        if ($length < 1) {
+            throw new RuntimeException(
+                'uniqueToken() needs a positive length. The empty token shares one permanent '
+                .'rate-limiter bucket with every request that omits the field, by design, so there '
+                .'is no unique spelling of it to return.',
+            );
+        }
+
+        // `bin2hex(random_bytes())` yields an even number of characters, so an odd length is taken
+        // from one byte more and truncated. Str::random() would do too, but its alphabet includes
+        // characters a hex token never carries, and a probe should differ from a real token in
+        // exactly the one way its name claims.
+        //
+        // `max(1, …)` and not `(int) ceil($length / 2)`: random_bytes() is typed `int<1, max>` and
+        // level-8 analysis cannot narrow a float cast, so the ceiling spelling is an error even
+        // behind the guard above.
+        return substr(bin2hex(random_bytes(max(1, intdiv($length + 1, 2)))), 0, $length);
+    }
+
+    /**
      * Point $test's subsequent requests at an existing session id.
      *
      * withCookie() encrypts and prefixes the value exactly as EncryptCookies expects on the way in,
