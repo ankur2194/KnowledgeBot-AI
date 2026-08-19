@@ -74,20 +74,21 @@ final class UpdateBotRequest extends FormRequest
     }
 
     /**
-     * ── `status` IS WRITABLE HERE AND IS NOT ON THE CREATE PATH ────────────────────────────────
+     * ── `status` IS NOT WRITABLE HERE, AND THE RULE THAT SAYS SO IS `missing` ──────────────────
      *
-     * A bot is created `draft`, always, and every transition is this endpoint. The full vocabulary
-     * is accepted from `BotStatus::values()` and never from a literal — including `archived`, which
-     * is terminal: `BotService` refuses every subsequent write to an archived bot, including one
-     * that would change the status back, because an archived bot's configuration is the record of
-     * what answered the conversations it produced.
+     * A bot is created `draft`, always, and every transition is `PUT /bots/{bot}/status` —
+     * `UpdateBotStatusRequest` accepts the full vocabulary from `BotStatus::values()`, including
+     * `archived`, which is terminal. This endpoint refuses the field outright, and the rule below
+     * carries the argument for which spelling of "refuse" is correct.
      *
      * WHAT MAKES PUBLISHING STRICTER THAN A RENAME IS NOT A RULE HERE AND NOT A PERMISSION. Both
-     * are `bots.manage`, and `BotPolicy` records why a `bots.publish` permission would be granted
-     * to exactly the same two roles and would therefore fail silently in both directions. It is
-     * CHECK 5, the publish guard in `BotService`, which is evaluated against the state this edit
-     * LEAVES the bot in rather than against the body — so clearing the model on an already-published
-     * bot is refused by the same check that refuses publishing a model-less draft.
+     * routes are `bots.manage`, and `BotPolicy` records why a `bots.publish` permission would be
+     * granted to exactly the same two roles and would therefore fail silently in both directions.
+     * It is CHECK 5, the publish guard in `BotService`, which is evaluated against the state the
+     * write LEAVES the bot in rather than against the body — so clearing the model on an
+     * already-published bot is refused by the same check that refuses publishing a model-less
+     * draft. That check lives on the transition route, which is why `status` is not one of the
+     * twenty-five fields here.
      *
      * Every other rule below is byte-identical to `StoreBotRequest`'s apart from the `sometimes`
      * prefix, deliberately: two endpoints that disagreed about what a legal `slug` or a legal
@@ -111,15 +112,35 @@ final class UpdateBotRequest extends FormRequest
             'system_instruction' => ['bail', 'sometimes', 'nullable', 'string', 'max:8000'],
             'answer_style_instruction' => ['bail', 'sometimes', 'nullable', 'string', 'max:4000'],
 
-            // `prohibited` AND NOT AN ABSENT RULE. A transition moved to
-            // PUT /bots/{bot}/status, which is where CHECK 5 is impossible to miss — `status` is
-            // the one field on a bot that decides whether an END USER can reach it, and two doors
-            // to that column are two places a check has to be. Simply deleting the rule would make
-            // `validated()` SILENTLY DISCARD the field, so a client that had not been updated
-            // would publish a bot, receive a 200, and find it still in `draft`. This is a 422
-            // naming the endpoint instead, and it appears in
-            // packages/contracts/rules/UpdateBotRequest.json so a generated client is told.
-            'status' => ['prohibited'],
+            // `missing` AND NOT AN ABSENT RULE, AND NOT `prohibited`. Two separate decisions.
+            //
+            // NOT AN ABSENT RULE, because a deleted rule makes `validated()` SILENTLY DISCARD the
+            // key: a client written against the old contract would publish a bot, receive a 200
+            // with `status: draft` in the body, and have to notice the discrepancy itself. A rule
+            // is also the only way a generated client is told — this one is dumped to
+            // packages/contracts/rules/UpdateBotRequest.json, which is where the prohibited-path
+            // subtraction is derived from.
+            //
+            // NOT `prohibited`, because `prohibited` does not mean "must not be present". Measured
+            // against the installed framework: `{"status":null}`, `{"status":""}` and
+            // `{"status":[]}` all PASS it, and `validated()` keeps the key. Two mechanisms produce
+            // that, and both end the same way — `validateProhibited()` is literally
+            // `! validateRequired()`, and `validateRequired()` is false for null, "" and []; and a
+            // blank string never reaches the rule at all, because `presentOrRuleIsImplicit()` skips
+            // one for a rule that is not implicit, which `Prohibited` is not. The passing shape is
+            // not exotic: `ConvertEmptyStringsToNull` turns a cleared form control's `""` into
+            // `null` before this class sees it, so a stale client that still models `status` as an
+            // optional field emits it on every save. The key then flowed through `toData()` into
+            // `BotEdit` and the repository wrote `status = NULL` against a NOT NULL column —
+            // SQLSTATE 23502, rendered as `internal_dependency`/500, the transaction rolled back,
+            // and the RENAME IN THE SAME REQUEST LOST with no field-keyed error to show the
+            // operator. `{"status":[]}` was worse: `Array to string conversion` in `coerce()`, a
+            // 500 before the database was touched.
+            //
+            // `missing` is implicit and is the inverse of presence, so it fails on all four shapes
+            // and on nothing else — a PATCH that does not name `status` is untouched by it. The
+            // message key moves with the rule name; see `messages()`.
+            'status' => ['missing'],
             'access_mode' => ['bail', 'sometimes', 'required', 'string', Rule::in(BotAccessMode::values())],
 
             // BOTH NULLABLE, because clearing the model selection is a legitimate edit — a bot
@@ -211,7 +232,10 @@ final class UpdateBotRequest extends FormRequest
                 .'`{}` to restore the platform theme; omit the field to leave the current one.',
             'theme.radius.in' => 'A radius is one of the six values the design tokens publish. The '
                 .'renderer matches this string exactly against that set and drops anything else.',
-            'status.prohibited' => 'A lifecycle transition is PUT /bots/{bot}/status, not a field '
+            // KEYED ON `missing` AND NOT ON `prohibited` — the message key is the RULE NAME, so it
+            // has to move with the rule or this sentence is replaced by the framework default and
+            // the endpoint stops being named.
+            'status.missing' => 'A lifecycle transition is PUT /bots/{bot}/status, not a field '
                 .'on this edit. It is separate because publishing is the one change here that '
                 .'decides whether an end user can reach the bot at all, and it is refused for a '
                 .'bot with no provider model or for one in `rag_first` mode with '
@@ -240,6 +264,16 @@ final class UpdateBotRequest extends FormRequest
      * `retrieval_configuration_version` by comparing the incoming value against the CAST value
      * already on the row. A raw `'strict'` string compared against a `BotAnswerMode` case is never
      * equal, so an unchanged answer mode would mint a new configuration identity on every save.
+     *
+     * ── `status` IS SKIPPED HERE TOO, AS A SECOND LAYER AND NOT AS THE MECHANISM ───────────────
+     *
+     * `BotEdit::WRITABLE` lists `status` because `BotService::transition()` legitimately builds a
+     * one-column `BotEdit` naming it — that allow-list is the REPOSITORY's, not this endpoint's. So
+     * the loop below walks a list containing a column this request may never carry, and the only
+     * thing between a `status` key in `validated()` and a write to a NOT NULL column is one rule
+     * name in another method. That is exactly the arrangement the `prohibited` defect exploited.
+     * The skip costs a branch and fails closed: weaken the rule again and the field is DROPPED
+     * rather than written as null.
      */
     public function toData(): BotEdit
     {
@@ -249,6 +283,12 @@ final class UpdateBotRequest extends FormRequest
         $columns = [];
 
         foreach (BotEdit::WRITABLE as $column) {
+            // NEVER FROM THIS ENDPOINT — see the docblock. `WRITABLE` is the repository's list and
+            // the transition path is the caller that uses this entry.
+            if ($column === 'status') {
+                continue;
+            }
+
             if (! array_key_exists($column, $data)) {
                 continue;
             }
@@ -269,12 +309,13 @@ final class UpdateBotRequest extends FormRequest
         }
 
         return match ($column) {
-            // UNREACHABLE TODAY AND KEPT DELIBERATELY. `status` is `prohibited` above, so it never
-            // survives `validated()` and this arm never runs. It stays because deleting it makes
-            // the FAILURE MODE of re-adding the rule silent: an uncoerced raw string reaching
-            // `BotEdit` is not a `BotStatus`, so `statusAfter()` falls back to the STORED status
-            // and the publish guard evaluates the wrong resulting state while every test that
-            // asserts on the response body still passes.
+            // UNREACHABLE BY TWO ROUTES NOW, AND KEPT DELIBERATELY. `status` is `missing` above so
+            // it never survives `validated()`, and `toData()` skips the column outright so it would
+            // not reach this method even if it did. It stays because deleting it makes the FAILURE
+            // MODE of re-admitting the field silent: an uncoerced raw string reaching `BotEdit` is
+            // not a `BotStatus`, so `statusAfter()` falls back to the STORED status and the publish
+            // guard evaluates the wrong resulting state while every test that asserts on the
+            // response body still passes.
             'status' => BotStatus::from((string) $value),
             'access_mode' => BotAccessMode::from((string) $value),
             'answer_mode' => BotAnswerMode::from((string) $value),

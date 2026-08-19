@@ -51,6 +51,29 @@ use Illuminate\Http\Resources\Json\JsonResource;
  * contract change, while an absent key would. It is also the honest rendering, because null is
  * already a real value here: the majority of bots have no instruction at all.
  *
+ * ── AND `instructions_visible` IS WHY THAT NULL IS NOT AMBIGUOUS ──────────────────────────────
+ *
+ * THE PROJECTION IS SELF-DESCRIBING, AND THIS FIELD IS THE WHOLE OF IT. A null carries two
+ * different facts — "this bot has no instruction" and "you were not shown it" — and the paragraph
+ * above deliberately chose a shape in which a client cannot tell them apart from the value alone.
+ * That was the right call for the SHAPE and it left a real data-loss path on the CLIENT: a console
+ * that re-derives `bots.manage` from the session role by hand, seeds an edit form from the
+ * resource, and then PATCHes the form back writes the withheld `null` over an operator-authored
+ * prompt — `UpdateBotRequest` rules both fields `sometimes|nullable|string`, so `null` is a
+ * legitimate "clear it" and the write returns 200. The row was fetched by a caller the client
+ * BELIEVED held `bots.manage`; the server disagreed on that one row, silently, because the only
+ * thing that says so is a value that has another meaning.
+ *
+ * So the server states it. `instructions_visible` is set from the same `$withInstructions` flag
+ * that decides the projection — one source, so the two can never disagree — and a client reads
+ * "withheld" from it instead of re-deriving a grant map it does not own. False means the two
+ * instruction fields in this body are NOT this bot's values and must not be sent back.
+ *
+ * ADDITIVE, AND THAT IS WHAT MAKES IT SAFE TO ADD. An older client ignores an unknown key; the
+ * response shape still does not vary by caller, because this key is present in every rendering
+ * with a boolean in it either way. It is the same key-always-present rule the paragraph above
+ * argues for, applied to the field that explains the rule.
+ *
  * THE FLAG IS DECIDED BY THE CALLER, NOT BY THIS CLASS. `toArray()` must not ask the Gate:
  * `OrgScopedPolicy::permit()` resolves membership per check and is deliberately not memoized across
  * organizations, so a `can()` inside this method is one `organization_users` read PER ROW on a
@@ -121,6 +144,11 @@ final class BotResource extends JsonResource implements ProvidesOpenApiSchema
             'answer_style_instruction' => $this->withInstructions
                 ? $bot->answer_style_instruction
                 : null,
+            // THE PROJECTION, STATED. Same flag, one line down, so "was it withheld" and "what was
+            // rendered" can never disagree — a client that reads a null above without reading this
+            // cannot tell "not set" from "not shown to you", and writing that null back is a
+            // silent overwrite of an operator-authored prompt. See the class docblock.
+            'instructions_visible' => $this->withInstructions,
 
             'status' => $bot->status->value,
             'access_mode' => $bot->access_mode->value,
@@ -189,12 +217,13 @@ final class BotResource extends JsonResource implements ProvidesOpenApiSchema
                     .'publish their own, much smaller, resource. The two instruction fields are '
                     .'further narrowed to callers holding `bots.manage` and are `null` for the '
                     .'rest; every key is present in every response, so the shape does not vary by '
-                    .'caller. Nothing of the parent provider connection appears here beyond its '
+                    .'caller, and `instructions_visible` says which of the two readings a null '
+                    .'carries. Nothing of the parent provider connection appears here beyond its '
                     .'ULID: no vendor, no label, and no masked credential.',
                 'required' => [
                     'id', 'public_bot_id', 'name', 'slug', 'description',
                     'welcome_message', 'placeholder_text', 'system_instruction',
-                    'answer_style_instruction', 'status', 'access_mode',
+                    'answer_style_instruction', 'instructions_visible', 'status', 'access_mode',
                     'provider_connection_id', 'provider_model_id',
                     'answer_mode', 'dense_top_k', 'sparse_top_k', 'rerank_candidates',
                     'rerank_retain', 'evidence_threshold', 'evidence_threshold_scale',
@@ -263,6 +292,21 @@ final class BotResource extends JsonResource implements ProvidesOpenApiSchema
                             .'instruction so a voice change is not a change to the grounding rules. '
                             .'Carries the same management-only projection as `system_instruction` '
                             .'and for the same reason: it is operator-authored prompt text.',
+                    ],
+                    'instructions_visible' => [
+                        'type' => 'boolean',
+                        'description' => 'Whether the two instruction fields in THIS body carry '
+                            .'their stored values. False means they were withheld — the caller does '
+                            .'not hold `bots.manage` on this bot\'s organization — and the `null` '
+                            .'you are reading is the projection rather than the bot\'s state. It '
+                            .'exists because a null otherwise carries two facts a client cannot '
+                            .'tell apart, and the wrong reading is destructive: PATCHing a form '
+                            .'seeded from a withheld body sends `null`, which the edit endpoint '
+                            .'accepts as "clear it" and answers 200. A client MUST NOT send '
+                            .'`system_instruction` or `answer_style_instruction` back on a body '
+                            .'that arrived with this false, and MUST NOT re-derive the answer from '
+                            .'a role name it holds locally: the grant is resolved per record, '
+                            .'against the record\'s own organization.',
                     ],
                     'status' => [
                         'type' => 'string',

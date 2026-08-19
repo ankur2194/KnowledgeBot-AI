@@ -378,6 +378,45 @@ final class AuditLogger
      */
     public const BOT_CREATED = 'bot.created';
 
+    /**
+     * ── WHY THIS ROW CARRIES NO `previous_status` OR `previous_access_mode`, WHICH IS A CALL ───
+     *
+     * `bot.domain.status_changed` one block down DOES carry `previous_status`, and the question
+     * this row cannot answer on its own is the stronger version of the one that field was added
+     * for: "who made this bot answerable by the internet" is `access_mode` going `private` →
+     * `public`, and reading this row alone you see only where it ended up. The asymmetry is
+     * deliberate and it is worth stating rather than leaving to be rediscovered.
+     *
+     * IT IS DERIVABLE, at the cost of an ordered read: every `bot.*` row for a subject carries
+     * `status` and `access_mode`, so the previous values are the previous row's, within one
+     * organization's own trail. That is the fallback, and it is why this is a readability decision
+     * rather than a coverage one — nothing is unrecorded.
+     *
+     * WHAT MAKES THE DOMAIN ROW DIFFERENT IS THAT IT IS A ONE-COLUMN TRANSITION. `status` is the
+     * only thing that row can be about, so "previous" is unambiguous on every instance of it. This
+     * row describes a PATCH over twenty-four columns, the overwhelming majority of which name
+     * neither `status` nor `access_mode`. A `previous_*` pair on every one of those is a "previous"
+     * for a field that did not move — a second spelling of the value beside it, which is exactly
+     * the reading the map below refuses on `bot.domain.deleted`. Emitting the pair only when the
+     * edit names the column is the other option and it is worse: the detail key set would then
+     * vary by request body, so a reader could not tell "this edit did not touch status" from "this
+     * row predates the field".
+     *
+     * AND THE CHEAP SPELLING IS THE WRONG ONE. `BotService::update()` has the ROUTE-BOUND `$bot` in
+     * scope when it builds the audit closure, so `$bot->status` looks like a free previous value —
+     * but it was read OUTSIDE the row lock, before `EloquentBotRepository::update()` opened its
+     * transaction. That is precisely the property `bot.domain.status_changed`'s `previous_status`
+     * exists to guarantee ("read UNDER THE SAME ROW LOCK that writes the new value, so it can never
+     * name a status the row did not hold"), and two concurrent PATCHes would produce a row naming a
+     * state the bot never held. The correct spelling changes `BotRepositoryInterface::update()`'s
+     * `Closure(Bot): void` callback to carry the pre-image, which is a contract shared with the
+     * transition path — a change worth making for a reason, not for a convenience.
+     *
+     * WHAT WOULD FLIP THIS: `access_mode` gaining real reach. Today no runtime surface consults it,
+     * so "who made this bot public" is a question about a column nothing reads yet. When the widget
+     * and hosted-chat runtimes ship, add `previous_access_mode` (and `previous_status` with it),
+     * read under the lock through a widened callback — not from `$bot` in the service.
+     */
     public const BOT_UPDATED = 'bot.updated';
 
     /**
@@ -900,6 +939,13 @@ final class AuditLogger
             // this particular PATCH did not name, because a row that recorded only what changed
             // would be unreadable next to the `created` and `deleted` rows for the same subject —
             // and "what did it look like afterwards" is the question a reader actually has.
+            //
+            // WHICH IS ALSO WHY THERE IS NO `previous_status` OR `previous_access_mode` HERE while
+            // `bot.domain.status_changed` below carries one. It is a decision, not an omission, and
+            // the constant's own docblock states it in full: the previous values are derivable from
+            // the preceding `bot.*` row for this subject, the domain row is a ONE-COLUMN transition
+            // where "previous" is unambiguous and this one is not, and the only cheap way to
+            // populate it here would read the pre-image OUTSIDE the row lock.
             'details' => [
                 'name' => self::ECHOED,
                 'slug' => self::ECHOED,

@@ -159,7 +159,7 @@
             "max:200"
         ],
         "status": [
-            "prohibited"
+            "missing"
         ],
         "system_instruction": [
             "bail",

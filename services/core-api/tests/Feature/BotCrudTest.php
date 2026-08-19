@@ -848,11 +848,69 @@ it('replaces the theme wholesale rather than merging it', function (): void {
         ->toBeTrue('an unthemed bot serialized as a JSON array rather than an object');
 });
 
-it('refuses `status` on the PATCH and points at the transition endpoint', function (): void {
+it('refuses `status` on the PATCH and points at the transition endpoint', function (mixed $status): void {
     // A 422 AND NOT A SILENT DROP, which is the whole reason `UpdateBotRequest` declares the field
-    // `prohibited` rather than simply omitting the rule. An omitted rule means `validated()`
-    // discards the key, so a client written against the old contract would publish a bot, receive a
-    // 200 with `status: draft` in the body, and have to notice the discrepancy itself.
+    // at all rather than simply omitting the rule. An omitted rule means `validated()` discards the
+    // key, so a client written against the old contract would publish a bot, receive a 200 with
+    // `status: draft` in the body, and have to notice the discrepancy itself.
+    //
+    // AND FOUR SHAPES, NOT ONE, BECAUSE THE RULE USED TO BE `prohibited` AND `prohibited` DOES NOT
+    // MEAN "MUST NOT BE PRESENT". `validateProhibited()` is `! validateRequired()`, so it PASSED
+    // for null, `""` and `[]` and `validated()` kept the key — and `ConvertEmptyStringsToNull`
+    // turns a cleared form control's `""` into exactly the first of those before the rule is
+    // reached. The key then flowed into `BotEdit` and the repository wrote `status = NULL` against
+    // a NOT NULL column: SQLSTATE 23502, a 500 wearing `internal_dependency`, the transaction
+    // rolled back, and the RENAME IN THE SAME REQUEST LOST with no field-keyed error. `[]` never
+    // reached the database at all — `Array to string conversion` in `coerce()` got there first.
+    // A single-value dataset cannot fail against `prohibited`; that is why there are four rows.
+    $fixture = botCrudFixture();
+
+    $bot = $fixture['botA'];
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    $response = currentTest()->patchJson(
+        "/api/v1/organizations/{$fixture['orgA']->id}/bots/{$bot->id}",
+        ['name' => 'ALPHA renamed', 'status' => $status],
+        spaHeaders(),
+    )
+        ->assertStatus(422)
+        ->assertJsonPath('error_class', 'validation')
+        ->assertJsonValidationErrors('status');
+
+    // THE MESSAGE STILL NAMES THE ENDPOINT. The message key is the RULE NAME, so moving the rule
+    // from `prohibited` to `missing` without moving `messages()` would replace this sentence with
+    // the framework default ("The status field must be missing.") and leave the operator with
+    // nothing to do next.
+    //
+    // ASSERTED ON THE DECODED MAP AND NOT ON THE RAW BODY, because `json_encode` escapes the
+    // forward slashes in the path and `PUT \/bots\/{bot}\/status` is not the needle anybody writes.
+    expect((string) $response->json('errors.status.0'))
+        ->toContain('PUT /bots/{bot}/status');
+
+    // AND THE REST OF THE BODY IS NOT APPLIED EITHER. Validation fails whole, so a caller cannot
+    // half-succeed: the rename did not happen and neither did the transition. This is the assertion
+    // the empty shapes actually broke — under `prohibited` the rename was lost to a 500 rather than
+    // refused, which is the same database row and an entirely different thing to have happened.
+    assertDatabaseHas('bots', [
+        'id' => $bot->id,
+        'name' => 'ALPHA support bot',
+        'status' => BotStatus::Draft->value,
+    ]);
+})->with([
+    'a real status' => [BotStatus::Published->value],
+    // WHAT A CLEARED FORM CONTROL SENDS, once ConvertEmptyStringsToNull has run.
+    'null' => [null],
+    'an empty string' => [''],
+    // THE 500-BEFORE-THE-DATABASE CASE: `(string) []` under the old coercion.
+    'an empty array' => [[]],
+]);
+
+it('leaves a PATCH that names only `name` alone, which is the shape the refusal must not catch', function (): void {
+    // THE OTHER HALF OF THE RULE, AND THE ONE A HEAVIER RULE BREAKS. `missing` fails on presence
+    // regardless of value; `present`, `prohibited_if`-style spellings or a `required_without` web
+    // would all catch this body instead. A PATCH is defined by naming a subset, and the commonest
+    // subset is one field.
     $fixture = botCrudFixture();
 
     $bot = $fixture['botA'];
@@ -861,18 +919,17 @@ it('refuses `status` on the PATCH and points at the transition endpoint', functi
 
     currentTest()->patchJson(
         "/api/v1/organizations/{$fixture['orgA']->id}/bots/{$bot->id}",
-        ['name' => 'ALPHA renamed', 'status' => BotStatus::Published->value],
+        ['name' => 'ALPHA renamed'],
         spaHeaders(),
     )
-        ->assertStatus(422)
-        ->assertJsonPath('error_class', 'validation')
-        ->assertJsonValidationErrors('status');
+        ->assertOk()
+        ->assertJsonPath('data.name', 'ALPHA renamed')
+        // AND THE STATUS IS UNTOUCHED, from the row rather than from the body.
+        ->assertJsonPath('data.status', BotStatus::Draft->value);
 
-    // AND THE REST OF THE BODY IS NOT APPLIED EITHER. Validation fails whole, so a caller cannot
-    // half-succeed: the rename did not happen and neither did the transition.
     assertDatabaseHas('bots', [
         'id' => $bot->id,
-        'name' => 'ALPHA support bot',
+        'name' => 'ALPHA renamed',
         'status' => BotStatus::Draft->value,
     ]);
 });

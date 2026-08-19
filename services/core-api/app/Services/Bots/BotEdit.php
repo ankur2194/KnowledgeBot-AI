@@ -35,9 +35,17 @@ use InvalidArgumentException;
  * record. `Model::shouldBeStrict()` is the second layer, not the first.
  *
  * `status` IS writable here and is not on `NewBot`: a bot is always created `draft`, and every
- * transition — testing, published, paused, archived — is this endpoint. What makes publishing
- * stricter than a rename is not the permission (both are `bots.manage`) but CHECK 5, the publish
- * guard in `BotService`, which `OrgScopedPolicy::permit()` has no argument position for.
+ * transition — testing, published, paused, archived — goes through `PUT /bots/{bot}/status`.
+ *
+ * THIS TYPE IS SHARED BY TWO ENDPOINTS AND THE `status` ENTRY BELONGS TO ONLY ONE OF THEM.
+ * `BotService::transition()` builds a `BotEdit` naming `status` and nothing else, and hands it to
+ * `BotService::update()` so that both routes are judged by one implementation of every guard —
+ * which is what puts the column on `WRITABLE`. The bot PATCH may never carry it:
+ * `UpdateBotRequest` rules it `missing` AND skips it in `toData()`, and both layers are there
+ * because the allow-list below is the REPOSITORY's rather than that endpoint's. What makes
+ * publishing stricter than a rename is not the permission (both routes are `bots.manage`) but
+ * CHECK 5, the publish guard in `BotService`, which `OrgScopedPolicy::permit()` has no argument
+ * position for — and a transition route is where that check is impossible to miss.
  */
 final readonly class BotEdit
 {

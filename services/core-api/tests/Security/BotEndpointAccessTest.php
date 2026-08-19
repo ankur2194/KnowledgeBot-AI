@@ -397,17 +397,29 @@ it('renders the instruction fields only to a caller holding bots.manage, on show
     $index->assertJsonPath('data.bots.0.system_instruction', $expectedSystem)
         ->assertJsonPath('data.bots.0.answer_style_instruction', $expectedStyle);
 
+    // AND THE PROJECTION SAYS SO ABOUT ITSELF. A null carries two facts — "this bot has no
+    // instruction" and "you were not shown it" — and a client that cannot tell them apart writes
+    // the first meaning back for the second: seed an edit form from a withheld body, PATCH it, and
+    // `sometimes|nullable|string` accepts the null as "clear it" and answers 200 over an
+    // operator-authored prompt. `instructions_visible` is the server saying which reading applies,
+    // set from the SAME flag that decides the projection so the two cannot disagree — which is what
+    // this assertion is really checking: not that the key exists, but that it tracks.
+    $show->assertJsonPath('data.instructions_visible', $visible);
+    $index->assertJsonPath('data.bots.0.instructions_visible', $visible);
+
     // THE KEYS ARE PRESENT EITHER WAY, asserted separately because `assertJsonPath(..., null)` is
     // satisfied by an ABSENT key just as well as by a null one — `data_get()` returns null for
     // both. Dropping a key would change the response SHAPE by role, which is exactly what
     // `packages/contracts/src/resources/bots.ts` cannot absorb; a null costs no contract change
-    // because both fields are already typed nullable there.
+    // because both fields are already typed nullable there. `instructions_visible` is on this list
+    // for the same reason and is additive: an older client ignores it, and it is a boolean in
+    // every rendering rather than a key that comes and goes.
     /** @var array<string, mixed> $detail */
     $detail = (array) $show->json('data');
     /** @var array<string, mixed> $row */
     $row = (array) $index->json('data.bots.0');
 
-    foreach (['system_instruction', 'answer_style_instruction'] as $field) {
+    foreach (['system_instruction', 'answer_style_instruction', 'instructions_visible'] as $field) {
         expect(array_key_exists($field, $detail))->toBeTrue("`{$field}` is missing from the detail body");
         expect(array_key_exists($field, $row))->toBeTrue("`{$field}` is missing from the list row");
     }
@@ -463,7 +475,11 @@ it('still returns the stored instruction to the caller who just wrote it', funct
         spaHeaders(),
     )
         ->assertStatus(201)
-        ->assertJsonPath('data.system_instruction', BOT_SYSTEM_INSTRUCTION_PROBE);
+        ->assertJsonPath('data.system_instruction', BOT_SYSTEM_INSTRUCTION_PROBE)
+        // AND THE WRITE PATHS SAY SO. Both pass `withInstructions: true` as a LITERAL, so this is
+        // the one place `instructions_visible` could go out of step with the projection beside it:
+        // a hard-coded `false` here would tell a console its own successful save was withheld.
+        ->assertJsonPath('data.instructions_visible', true);
 
     currentTest()->patchJson(
         "/api/v1/organizations/{$t->a->id}/bots/{$t->botA->id}",
@@ -471,7 +487,8 @@ it('still returns the stored instruction to the caller who just wrote it', funct
         spaHeaders(),
     )
         ->assertOk()
-        ->assertJsonPath('data.answer_style_instruction', BOT_ANSWER_STYLE_PROBE);
+        ->assertJsonPath('data.answer_style_instruction', BOT_ANSWER_STYLE_PROBE)
+        ->assertJsonPath('data.instructions_visible', true);
 });
 
 it('denies an owner of ANOTHER organization on every bot route', function (string $action): void {

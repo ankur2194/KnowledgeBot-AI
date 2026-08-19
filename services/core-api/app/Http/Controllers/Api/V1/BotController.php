@@ -106,6 +106,12 @@ use Illuminate\Validation\ValidationException;
  * permit()` resolves membership per check and is deliberately never memoized, so a `can()` inside
  * `toArray()` is one `organization_users` read PER ROW on a hundred-row page.
  *
+ * THE SAME FLAG IS PUBLISHED AS `instructions_visible`, which is what stops a client from having to
+ * recompute this decision. It cannot: the grant is resolved against THE RECORD'S organization, and
+ * a console re-deriving it from the session role gets it wrong on exactly the rows where being
+ * wrong is destructive — it seeds an edit form from a withheld `null` and PATCHes it back over an
+ * operator-authored prompt for a 200. `BotResource`'s docblock carries the path in full.
+ *
  * Each action asks the cheapest question that is still the RIGHT one:
  *
  *   show      `Gate::allows('update', $bot)` — the ROW, so membership resolves from the record's
@@ -166,7 +172,8 @@ final class BotController extends Controller
             .'differ from what was asked for because the platform clamps the page size and falls '
             .'back to the endpoint default sort. `system_instruction` and '
             .'`answer_style_instruction` are `null` on every row unless the caller holds '
-            .'`bots.manage`; both keys are present either way.',
+            .'`bots.manage`; both keys are present either way, and `instructions_visible` says '
+            .'which of the two readings that null carries.',
         errors: [401, 403, 404, 422, 429, 500, 503],
     )]
     public function index(
@@ -212,7 +219,9 @@ final class BotController extends Controller
         description: 'One bot, wrapped in `data`. `system_instruction` and '
             .'`answer_style_instruction` carry their stored values only for a caller holding '
             .'`bots.manage` and are `null` for every other caller; both keys are always present, so '
-            .'the response shape does not vary by role. This is an authenticated-only shape either '
+            .'the response shape does not vary by role, and `instructions_visible` distinguishes '
+            .'"withheld" from "not set" so a client cannot write the projection back. This is an '
+            .'authenticated-only shape either '
             .'way — the public chat surfaces publish their own, much smaller, resource. A foreign '
             .'or unknown `{bot}` 404s at binding time, before this action runs, and the body is '
             .'byte-identical to the 404 for a path with no route.',

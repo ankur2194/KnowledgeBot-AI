@@ -230,6 +230,26 @@ it('refuses everything that is not an exact origin, keyed on the field, with a r
     'an underscore in the host' => ['https://my_site.example.com', 'is not one this allow-list can store'],
     'a trailing dot' => ['https://example.com.', 'is not one this allow-list can store'],
     'a non-ASCII host' => ['https://bücher.example', 'is not one this allow-list can store'],
+    // ── THE HOMOGLYPH ROW, WHICH IS THE ONE THAT WAS STORED ──────────────────────────────────
+    //
+    // `ExactOrigin` used to fold with `mb_strtolower()`, which applies Unicode simple lowercase
+    // mapping. Exactly one codepoint above ASCII lowercases INTO ASCII — U+212A KELVIN SIGN, to
+    // `k` — and the control-character guard ahead of the fold is byte-wise with no `/u`, so the
+    // UTF-8 reached it untouched. `https://<U+212A>elvin.example.com` therefore became
+    // `https://kelvin.example.com`, satisfied the ASCII host grammar, and was STORED: an operator
+    // pasting a homoglyph granted a DIFFERENT host from the one they typed, and two distinct
+    // inputs collided onto one row. Both are properties the class argues at length that it does
+    // not have. The fix is ASCII-only `strtolower()`, which leaves the bytes alone so the host
+    // grammar refuses them — which is why the expected needle is the ordinary punycode message
+    // and not a new one.
+    'a KELVIN SIGN homoglyph host' => ["https://\u{212A}elvin.example.com", 'is not one this allow-list can store'],
+    // A SECOND NON-ASCII HOST WHOSE FOLD LANDS BESIDE AN ASCII LABEL, so a fix that only special-
+    // cased a leading character is caught too.
+    'a KELVIN SIGN mid-host' => ["https://example.\u{212A}9.com", 'is not one this allow-list can store'],
+    // U+0130 LATIN CAPITAL I WITH DOT ABOVE, whose simple lowercase mapping is TWO codepoints
+    // (`i` plus U+0307 COMBINING DOT ABOVE) — the other shape of "the fold is not
+    // identity-preserving", and one that also changes the string's length.
+    'a dotted capital I' => ["https://\u{0130}stanbul.example", 'is not one this allow-list can store'],
 ]);
 
 it('refuses a duplicate origin per bot, and does not refuse it across bots', function (): void {

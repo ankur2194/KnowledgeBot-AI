@@ -20,10 +20,13 @@ use Illuminate\Validation\Rule;
  * `OrgScopedPolicy::permit()` has no argument position for. A transition endpoint is where that
  * check is impossible to miss.
  *
- * The PATCH now declares `status` as `prohibited` rather than simply dropping the rule, and the
+ * The PATCH now declares `status` as `missing` rather than simply dropping the rule, and the
  * difference matters: an absent rule means `validated()` SILENTLY DISCARDS the field, so a client
- * that had not been updated would publish a bot, receive a 200, and find it still in `draft`.
- * `prohibited` is a 422 naming this endpoint.
+ * that had not been updated would publish a bot, receive a 200, and find it still in `draft`. The
+ * rule is a 422 naming this endpoint. It is `missing` and NOT `prohibited` because `prohibited`
+ * does not mean "must not be present" — it passes for `null`, `""` and `[]`, which is precisely
+ * what a stale client emits for a cleared control; `UpdateBotRequest`'s rule set carries the
+ * measurement.
  *
  * ── THE GUARD IS NOT HERE, AND IT CANNOT BE ───────────────────────────────────────────────────
  *

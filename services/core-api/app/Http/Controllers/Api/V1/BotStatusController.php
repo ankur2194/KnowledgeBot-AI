@@ -30,9 +30,10 @@ use Illuminate\Support\Facades\Gate;
  * `rag_first` and the escape hatch closed. A transition endpoint is where that is impossible to
  * miss.
  *
- * The PATCH now declares `status` as `prohibited` rather than dropping the rule, because an absent
+ * The PATCH now declares `status` as `missing` rather than dropping the rule, because an absent
  * rule means `validated()` SILENTLY DISCARDS the field: a client that had not been updated would
- * publish a bot, receive a 200, and find it still in `draft`.
+ * publish a bot, receive a 200, and find it still in `draft`. `missing` and not `prohibited` —
+ * `prohibited` passes for `null`, `""` and `[]`, and `UpdateBotRequest` records the measurement.
  *
  * A SINGLE-ACTION CONTROLLER because `arch()->preset()->laravel()` limits a controller's public
  * methods to the seven resource verbs plus `__construct`, `__invoke` and `middleware` — the same

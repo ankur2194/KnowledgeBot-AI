@@ -901,7 +901,7 @@
                 ],
                 "responses": {
                     "200": {
-                        "description": "One page of this organization's bots, with `meta` beside the array inside `data`. Every lifecycle state is included — drafts and archived rows alike, because an operator asking \"where did that bot go\" has to be able to find it. `page` is 1-based; `per_page`, `sort`, `dir` and `filter` are echoed AS APPLIED, which may differ from what was asked for because the platform clamps the page size and falls back to the endpoint default sort. `system_instruction` and `answer_style_instruction` are `null` on every row unless the caller holds `bots.manage`; both keys are present either way.",
+                        "description": "One page of this organization's bots, with `meta` beside the array inside `data`. Every lifecycle state is included — drafts and archived rows alike, because an operator asking \"where did that bot go\" has to be able to find it. `page` is 1-based; `per_page`, `sort`, `dir` and `filter` are echoed AS APPLIED, which may differ from what was asked for because the platform clamps the page size and falls back to the endpoint default sort. `system_instruction` and `answer_style_instruction` are `null` on every row unless the caller holds `bots.manage`; both keys are present either way, and `instructions_visible` says which of the two readings that null carries.",
                         "content": {
                             "application/json": {
                                 "schema": {
@@ -1287,7 +1287,7 @@
                 ],
                 "responses": {
                     "200": {
-                        "description": "One bot, wrapped in `data`. `system_instruction` and `answer_style_instruction` carry their stored values only for a caller holding `bots.manage` and are `null` for every other caller; both keys are always present, so the response shape does not vary by role. This is an authenticated-only shape either way — the public chat surfaces publish their own, much smaller, resource. A foreign or unknown `{bot}` 404s at binding time, before this action runs, and the body is byte-identical to the 404 for a path with no route.",
+                        "description": "One bot, wrapped in `data`. `system_instruction` and `answer_style_instruction` carry their stored values only for a caller holding `bots.manage` and are `null` for every other caller; both keys are always present, so the response shape does not vary by role, and `instructions_visible` distinguishes \"withheld\" from \"not set\" so a client cannot write the projection back. This is an authenticated-only shape either way — the public chat surfaces publish their own, much smaller, resource. A foreign or unknown `{bot}` 404s at binding time, before this action runs, and the body is byte-identical to the 404 for a path with no route.",
                         "content": {
                             "application/json": {
                                 "schema": {
@@ -5234,7 +5234,7 @@
             "BotResource": {
                 "type": "object",
                 "additionalProperties": false,
-                "description": "One bot as the ADMIN surface sees it: identity, voice, lifecycle, model selection, retrieval configuration, appearance, limits and consent. It can carry the bot's SYSTEM INSTRUCTION and is therefore an authenticated-only shape — the hosted-chat, widget and stylesheet surfaces publish their own, much smaller, resource. The two instruction fields are further narrowed to callers holding `bots.manage` and are `null` for the rest; every key is present in every response, so the shape does not vary by caller. Nothing of the parent provider connection appears here beyond its ULID: no vendor, no label, and no masked credential.",
+                "description": "One bot as the ADMIN surface sees it: identity, voice, lifecycle, model selection, retrieval configuration, appearance, limits and consent. It can carry the bot's SYSTEM INSTRUCTION and is therefore an authenticated-only shape — the hosted-chat, widget and stylesheet surfaces publish their own, much smaller, resource. The two instruction fields are further narrowed to callers holding `bots.manage` and are `null` for the rest; every key is present in every response, so the shape does not vary by caller, and `instructions_visible` says which of the two readings a null carries. Nothing of the parent provider connection appears here beyond its ULID: no vendor, no label, and no masked credential.",
                 "required": [
                     "id",
                     "public_bot_id",
@@ -5245,6 +5245,7 @@
                     "placeholder_text",
                     "system_instruction",
                     "answer_style_instruction",
+                    "instructions_visible",
                     "status",
                     "access_mode",
                     "provider_connection_id",
@@ -5318,6 +5319,10 @@
                             "null"
                         ],
                         "description": "Tone and formatting guidance, kept apart from the system instruction so a voice change is not a change to the grounding rules. Carries the same management-only projection as `system_instruction` and for the same reason: it is operator-authored prompt text."
+                    },
+                    "instructions_visible": {
+                        "type": "boolean",
+                        "description": "Whether the two instruction fields in THIS body carry their stored values. False means they were withheld — the caller does not hold `bots.manage` on this bot's organization — and the `null` you are reading is the projection rather than the bot's state. It exists because a null otherwise carries two facts a client cannot tell apart, and the wrong reading is destructive: PATCHing a form seeded from a withheld body sends `null`, which the edit endpoint accepts as \"clear it\" and answers 200. A client MUST NOT send `system_instruction` or `answer_style_instruction` back on a body that arrived with this false, and MUST NOT re-derive the answer from a role name it holds locally: the grant is resolved per record, against the record's own organization."
                     },
                     "status": {
                         "type": "string",

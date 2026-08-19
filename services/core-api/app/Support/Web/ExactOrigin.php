@@ -25,11 +25,26 @@ namespace App\Support\Web;
  *
  * Normalisation that CHANGES what the operator typed has to be justified per change, because a
  * silent widening is the worst possible outcome on an allow-list. Exactly three are performed, and
- * all three are identity-preserving on the origin:
+ * all three are identity-preserving on the origin — a property that holds only because the case
+ * folding is ASCII, which is the next paragraph and not a detail:
  *
- *   1. CASE FOLDING of the scheme and the host. Both are case-insensitive per RFC 3986 §3.1/§3.2.2
- *      and a browser lower-cases both before it serialises, so `HTTPS://Example.COM` and
- *      `https://example.com` are one origin and the browser will only ever send the second.
+ *   1. ASCII CASE FOLDING of the scheme and the host, with `strtolower()`. Both are
+ *      case-insensitive per RFC 3986 §3.1/§3.2.2 and a browser lower-cases both before it
+ *      serialises, so `HTTPS://Example.COM` and `https://example.com` are one origin and the
+ *      browser will only ever send the second.
+ *
+ *      IT WAS `mb_strtolower()` AND THAT WAS A FOURTH MUTATION, NOT A SPELLING OF THE FIRST.
+ *      `mb_strtolower()` applies Unicode simple lowercase mapping, and the control-character guard
+ *      below is byte-wise with no `/u`, so UTF-8 reaches it untouched. Exactly one codepoint above
+ *      ASCII lowercases INTO ASCII — U+212A KELVIN SIGN, which maps to `k`; every other non-ASCII
+ *      uppercase letter maps to a non-ASCII lowercase one and is refused by the host grammar. That
+ *      one exception was enough: `https://<U+212A>elvin.example.com` folded to
+ *      `https://kelvin.example.com`, satisfied the ASCII host allow-list, and was STORED. Both
+ *      properties this class claims it does not have followed from it — an operator pasting a
+ *      homoglyph granted a DIFFERENT host from the one they typed, and two distinct inputs
+ *      collided onto one row. `strtolower()` is byte-wise and ASCII-only (and locale-independent
+ *      since PHP 8.2), so a non-ASCII host survives folding unchanged and falls through to the
+ *      punycode refusal below, which is where it always belonged.
  *   2. A SINGLE TRAILING SLASH is dropped. An empty path is not part of an origin, so `https://a.b/`
  *      and `https://a.b` are the same origin — and the trailing slash is what a browser's address
  *      bar shows, so it is what an operator pastes.
@@ -69,6 +84,9 @@ namespace App\Support\Web;
  *                         and the browser sends the punycode one. Storing the unicode form is a row
  *                         that never matches; converting it here would need `idn_to_ascii` and a
  *                         second normalisation contract nobody else in this system implements.
+ *                         THE REFUSAL IS THE HOST GRAMMAR ITSELF — `self::HOST` admits ASCII bytes
+ *                         and nothing else — which is only a refusal because the case folding above
+ *                         cannot move a byte into ASCII. It could, once: see mutation 1.
  *   `:0`, `:00080`,       A port is 1-65535 with no leading zeros, because that is what a browser
  *   `:70000`              emits. The database CHECK admits `[0-9]{1,5}`, which is looser — this
  *                         class is the stricter of the two on purpose, so the refusal is a 422 with
@@ -153,9 +171,22 @@ final readonly class ExactOrigin
                 .'so list each origin you actually embed on, one row each.';
         }
 
-        // ANY control character, not just the obvious ones. A newline would let a value pass the
-        // database CHECK (POSIX `$` matches before a trailing newline) while being a different
-        // string from the one a browser sends.
+        // ANY control character, not just the obvious ones — a space, a tab, a NUL or a newline in
+        // an origin means the value is not the string a browser sends, whatever else is true of it.
+        //
+        // THIS GUARD USED TO CARRY A FALSE JUSTIFICATION and the guard is right anyway. It claimed
+        // a newline would pass the database CHECK because "POSIX `$` matches before a trailing
+        // newline". PostgreSQL's ARE does NOT do that — `('https://example.com'||chr(10)) ~ '…$'`
+        // returns `f`, verified — so the constraint would have caught a trailing newline on its
+        // own. The guard stays because the real reasons never depended on that: it is the layer
+        // that turns every one of these into a 422 with a sentence rather than a 500 from a CHECK
+        // violation, and it catches the interior whitespace and the C0 controls that a `$`-anchor
+        // argument says nothing about either way.
+        //
+        // IT IS BYTE-WISE AND HAS NO `/u`, WHICH IS DELIBERATE AND IS LOAD-BEARING ELSEWHERE. It
+        // therefore does NOT refuse a non-ASCII byte; that is the host grammar's job, and the case
+        // folding below is ASCII-only so that it stays the host grammar's job. See mutation 1 in
+        // the class docblock for the one codepoint that used to get past both.
         if (preg_match('/[\x00-\x20\x7F]/', $candidate) === 1) {
             return 'An origin contains no spaces and no control characters. Copy it from the '
                 .'browser\'s address bar without the path — `https://example.com`, not '
@@ -169,7 +200,10 @@ final readonly class ExactOrigin
                 .'and grants nothing until it is activated.';
         }
 
-        $scheme = mb_strtolower($matches[1]);
+        // `strtolower()` AND NEVER `mb_strtolower()` — see mutation 1. The scheme cannot carry a
+        // non-ASCII byte (the pattern above is `https?` and its `i` flag is byte-wise without `/u`),
+        // so this one is a consistency call rather than a fix; the host below is the fix.
+        $scheme = strtolower($matches[1]);
         $authority = $matches[2];
 
         if (str_contains($authority, '@')) {
@@ -240,7 +274,12 @@ final readonly class ExactOrigin
             }
         }
 
-        $host = mb_strtolower($host);
+        // ASCII FOLDING, AND THIS IS THE LINE THE HOST ALLOW-LIST BELOW DEPENDS ON. `mb_strtolower`
+        // here folded U+212A KELVIN SIGN to an ASCII `k`, so a homoglyph host passed the grammar on
+        // the next line and was stored as a grant for a host the operator never typed. Mutation 1
+        // in the class docblock carries the measurement and the reasoning; do not "modernise" this
+        // back to the multibyte function.
+        $host = strtolower($host);
 
         if (preg_match(self::HOST, $host) !== 1) {
             return 'The host `'.$host.'` is not one this allow-list can store. A host is '
