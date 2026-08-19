@@ -112,7 +112,10 @@ statement about the vendor and the vendor does publish ``POST /api/v1/rerank``; 
 explicitly forbids. ``OpenRouterAdapter.rerank`` stays for the same reason — the method-versus-
 matrix drift test asserts the two move together. What changes is that ``can_rerank`` and
 ``assert_row_coherent`` now ask the third question, so an ``openrouter`` rerank row is refused
-when it is saved rather than degrading into an exception on a request path.
+when it is EXAMINED rather than degrading into an exception on a request path -- but read
+``assert_row_coherent``'s own docstring before relying on that sentence, because the only thing
+that examines a row is the embedding-readiness walk. A rerank row is examined by nothing
+(finding J1).
 
 **And the ineligibility is structural rather than pending.** ``RERANK_SCALE`` is keyed by
 *provider*. On a gateway the score scale is not a property of the provider: OpenRouter's
@@ -539,7 +542,9 @@ PROVIDER_TASKS: Final[Mapping[tuple[str, ProviderSurface], TaskSupport]] = {
             "about the VENDOR and the vendor does publish the route — but openrouter is NOT "
             "rerank-eligible, because RERANK_SCALE has no entry for it and there is no "
             "ordering-only path in the pipeline that consumes this. can_rerank answers False "
-            "and assert_row_coherent refuses the row at save time. The earlier wording here "
+            "for it. (assert_row_coherent would refuse such a row, but nothing calls it on a "
+            "write path -- finding J1 -- so the row saves and simply never reranks.) "
+            "The earlier wording here "
             "was 'ordering only, never a threshold, until an evaluation run characterizes one "
             "exact (provider, model) pair', and both halves were wrong: nothing consumes an "
             "ordering-only rerank, and no evaluation run can fill a per-provider cell for a "
@@ -658,8 +663,13 @@ def can_rerank(provider: str, caps: ModelCapabilities) -> bool:
     when this returns ``False`` for an uncharacterized scale, ``rerank_gate`` reports
     ``PROVIDER_LACKS_CAPABILITY``, and the provider does have the endpoint. The accurate reason
     is a fifth ``RerankSkipReason`` member, which lives in ``app/rag/rerank.py`` and is not
-    this module's to add. It is a defensive path either way: ``assert_row_coherent`` refuses
-    the row when it is saved, so a request carrying one has bypassed save-time validation.
+    this module's to add. It is a defensive path either way — though not for the
+    reason this paragraph used to give. It said ``assert_row_coherent`` refuses the row when it
+    is saved, "so a request carrying one has bypassed save-time validation". There is no
+    save-time validation (finding J1): nothing calls that function on a write path, and a
+    rerank row never reaches it at all. What makes the branch defensive is this predicate
+    itself — ``can_rerank`` answers ``False``, so nothing binds a ``Reranker`` — while the row
+    stays perfectly savable.
     """
     return (
         provider_offers(provider, ProviderSurface.RERANK)
@@ -676,11 +686,35 @@ def rerank_scale(provider: str) -> RerankScale:
 def assert_row_coherent(provider: str, model: str, caps: ModelCapabilities) -> None:
     """The loud half. Raises when a ``provider_models`` row claims what the vendor cannot do.
 
-    Called when a provider connection or a bot's model selection is **saved** — never on the
-    request path, where the same disagreement degrades quietly through ``can_rerank`` instead.
-    The split is deliberate and is the same one ``app/rag/rerank.py`` draws between a skip and
-    a failure: at save time a mismatch is an error somebody can fix with the model in front of
-    them; at request time it is a stage that did not run.
+    ── WHO ACTUALLY CALLS THIS, AND IT IS NOT THE SAVE PATH (finding J1) ─────────────────
+    This docstring said for a long time that it is "called when a provider connection or a
+    bot's model selection is **saved**". It is not, and it never was.
+    ``grep -rn 'assert_row_coherent(' services/ai-service/app`` returns exactly one call site:
+    ``embedding_selection.ineligibility()``, which invokes it inside a ``try`` and converts the
+    ``KbError`` into an ``EmbeddingIneligibility.ROW_INCOHERENT`` rejection. That is correct
+    where it stands — a capability question on a request path must become a value rather than
+    an exception — but it means this function only ever runs over the connections
+    ``embedding_readiness`` walks, i.e. **embedding candidates**.
+
+    The catalogue itself is written by Laravel (``ProviderModelService``), which does not cross
+    the seam for a metadata edit, deliberately: a coherence call there would fail an edit
+    whenever ``ai-api`` is briefly down, for an operation that has no dependency today. So the
+    reachability is split, and the second half is the one to remember:
+
+    * an incoherent **embedding** row is reported, by name, in the readiness verdict's
+      ``rejected[]`` — which is what every "refused when it is saved" sentence in this package
+      was reaching for and got right only for this family;
+    * an incoherent **rerank** row is reported **nowhere**. It saves with a 200, appears in no
+      ``rejected[]``, and reranking silently never happens.
+
+    That asymmetry is a recorded, accepted cost rather than a bug to fix locally — see finding
+    J1 and its ADR in ``docs/22-spec-findings-and-decisions.md``. Do not repair it by adding a
+    caller here; the decision is about the write path, not about this function.
+
+    The RAISE-versus-degrade split below is still real, and is the same one
+    ``app/rag/rerank.py`` draws between a skip and a failure: where this function runs, a
+    mismatch is an error somebody can fix with the model in front of them; on the request path
+    the same disagreement degrades quietly through ``can_rerank`` instead.
 
     Also rejects a row that claims two task families at once. ``Capability`` records that rows
     are task-exclusive — ``text-embedding-3-large`` and ``gpt-5.6-sol`` are different products
@@ -692,9 +726,9 @@ def assert_row_coherent(provider: str, model: str, caps: ModelCapabilities) -> N
     worded that way. The alternative is worse than a quiet degradation: the row saves, the
     admin console shows reranking configured, and the bot then either fails to resolve its
     retrieval configuration (``RerankNotCalibrated``) or raises ``RerankScaleMismatch`` on
-    every request. This is exactly the split the docstring above draws — at save time the
-    operator has the model in front of them, at request time it is a stage that did not run —
-    applied to the one case where "did not run" is not available.
+    every request. This is exactly the split the docstring above draws, applied to the one case
+    where "did not run" is not available — and it is also, per finding J1, the branch nothing
+    currently reaches: a rerank row never passes through this function at all.
 
     The check reads ``RERANK_SCALE`` rather than restating a provider name, so it lifts by
     itself the day a scale is characterized. For OpenRouter that day needs a contract change

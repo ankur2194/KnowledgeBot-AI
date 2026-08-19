@@ -28,7 +28,13 @@ import { SessionContext, useSession } from './session-context';
  *  - the admin surface has exactly one identity source, so "which organization am I in" has one answer.
  *
  * WHY THIS IS NOT A SERVER COMPONENT, AND CANNOT BECOME ONE. Three independent reasons:
- *  1. `'use server'` is banned across apps/web and grepped for in CI — there is no action path here.
+ *  1. `'use server'` is banned across apps/web — an action is a mutation path that skips Laravel's
+ *     rate limiter, quota accounting and audit log, so there is no action path here. ESLint is what
+ *     enforces it, not a pipeline: `no-restricted-syntax` on
+ *     `ExpressionStatement[directive='use server']` in eslint.base.mjs's `kbRestrictedSyntax`,
+ *     which every file in this app matches. `pnpm web:lint` is the run; NOTHING runs it for you —
+ *     `.github/` was deleted on 2026-08-17 and this repo has no CI. `rg "'use server'" apps/web`
+ *     matches prose only today, and that is the check by hand.
  *  2. `src/lib/api/server.ts` deliberately does not forward the session cookie: a server-side fetch
  *     sends no `Referer`/`Origin`, Sanctum's `fromFrontend()` classifies it third-party, and a
  *     perfectly valid cookie is ignored — a 401 that cannot reproduce in devtools. Identity is

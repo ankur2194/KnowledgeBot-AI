@@ -1110,3 +1110,343 @@ exists for. And the change had a documentation cost that is itself an ADR-036 ep
 naming the old CIDR afterwards, one of them a commented example that would have re-pinned the very range
 the move escapes (`docs/22` § **I5**). **Revisit when** the daemon's `default-address-pools` are
 configured on a deployment host, which changes which ranges are safe to pin.
+
+---
+
+ADR-047…052 come from the provider-connection and model-catalogue effort of 2026-08-19 — the pass that
+completed the provider-connection resource (`index`/`show`/`update`/`destroy` beside the existing
+`store`), added credential rotation and a per-connection model catalogue, and built the three admin
+screens that drive them. They **supersede nothing**, and one of them — ADR-052 — closes at the relay
+boundary a property ADR-029 had already decided, without changing ADR-029. As with ADR-038…046 the
+narrative lives in [`docs/22`](22-spec-findings-and-decisions.md) § *The provider-lifecycle decisions —
+ADR-047…052*, and the findings the effort turned up are § *Found while building the provider surface —
+2026-08-19* (**J1–J7**); the entries below are the decisions and what each one costs.
+
+**Two of the six are corrections to the instruction that asked for them, and both say so in place.**
+An ADR written as if the right answer had been obvious from the start teaches nothing, and the two
+here are the ones a reader will be tempted by in exactly the same way — the brief said *bump
+`key_version`* (ADR-048), and the skill's own worked example refuses the rotation ADR-047 permits.
+
+### ADR-047: Credential Rotation Is Its Own Re-Authenticating Endpoint, and It Is Permitted on a Revoked or Invalid Connection
+
+**Decision:** rotation is `PUT …/provider-connections/{providerConnection}/credential` on a
+single-action controller, and `PATCH …/{providerConnection}` accepts `label` and `status` and **no
+credential field at all**. Rotation re-authenticates the actor — `current_password:web` as a rule on
+`RotateProviderCredentialRequest`, so it runs *before* anything reads or writes the row — and carries
+its own limiter (`throttle:credential-rotation`) beside the group's `throttle:admin`, keyed per actor
+**and** per IP. The organization's status is checked (409 when it is not Active). **The connection's
+own status deliberately is not:** a `revoked` or `invalid` connection may be rotated, and the rotation
+returns it to `active`.
+
+**Reason:** the separation from `update` is the security control rather than REST taste. One route
+means one permission and one re-authentication policy covering both a relabel and a credential
+replacement, and the weaker of each pair wins; splitting them also makes *"the edit endpoint may never
+accept a credential"* checkable by reading one FormRequest instead of by reasoning about a branch.
+**The rotate-a-dead-connection half is a deliberate divergence from `kb-security-baseline` §18.4's
+worked example**, which spells check 5 as
+`abort_unless($credential->status === CredentialStatus::Active, 409)`. That is wrong for this product:
+`invalid` is the state a failed connection check leaves
+behind and `revoked` is the state an operator sets when a key leaks, so replacing the key is the remedy
+for *both*, and refusing would make delete-and-recreate the only escape from a bad key — losing the
+connection id, its `provider_models` rows, and its embedding designation if it held one. That is a
+re-index (ADR-031, ADR-049) as the price of a typo. The divergence is recorded, not resolved:
+`docs/22` § **J7**. **Rejected:** folding rotation into the PATCH (above); a sixth method on the
+resource controller — `arch()->preset()->laravel()` limits a controller's public methods to the seven
+verbs plus `__construct`/`__invoke`/`middleware`, which is the preset working rather than an obstacle,
+and is why `ResendInvitationController` exists (ADR-042); **`throttle:admin` alone**, whose
+(organization, user) budget is over a hundred password guesses a minute from a legitimately signed-in
+session — that makes the §18.3 check a formality, and the account axis is what gives it meaning; and
+the skill's **freshness-window** shape (`requireReauthenticationWithin($actor, minutes: 15)`) — a
+window is state about a session, a password check is evidence at the moment of the act, and only the
+rule form runs early enough to make *"a failed password does not touch the row"* true by construction.
+
+**Trade-off:** three, and the second is the one that will bite. **(1)** Because a FormRequest validates
+before the controller authorizes, a member with the wrong role *and* the wrong password gets **422
+rather than 403** — which leaks nothing, since the only password the rule can test is the caller's own,
+but it is not the status a reader expects. **(2)** The limiter is tight on purpose and its account axis
+is the **actor**, not the connection, so an operator rotating several connections at once — which is
+precisely what a vendor-wide key leak requires — spends one budget for the whole set. Read the
+`credential-rotation` limiter in `AppServiceProvider` for the live numbers rather than trusting a
+figure here (ADR-036). **(3)** Check 6 assumes the actor *has* a password: an SSO identity or a machine
+account has nothing to re-check, and this endpoint would need a second re-authentication mechanism.
+**Revisit when** a non-password identity can hold `providers.manage` — the shape of check 6 has to be
+decided again rather than adapted — or when the leak-storm case is reported, at which point the
+limiter's per-actor budget is what moves, never the password check.
+
+### ADR-048: `key_version` Names the KEK, So a Credential Rotation Bumps a Separate `credential_version`
+
+**Status: `Accepted`. This is a correction to the brief that requested the endpoint**, which said to
+bump `key_version` on rotation. It is recorded as the trap it is rather than as a preference.
+
+**Decision:** `provider_connections.key_version` keeps its single meaning — the version of the
+**key-encrypting key** that wrapped this row, written by `CredentialVault::seal()` from
+`config('kb.kek_version')` and from nowhere else — and a credential rotation does not touch it. The
+generation counter gets its own column: `credential_version integer NOT NULL DEFAULT 1` with a `>= 1`
+CHECK (migration `2026_08_19_001100`), incremented inside the same transaction that replaces the
+ciphertext, written into the `provider.connection.credential_rotated` audit row beside `key_version`,
+and rendered by no resource.
+
+**Reason:** incrementing `key_version` on a credential rotation writes a version **naming a KEK that
+never wrapped that row.** `CredentialVault::open()` ignores the column today only because exactly one
+KEK is configured; the moment a second exists, `open()` must select the KEK *by that number*, and every
+credential rotated in the meantime becomes ciphertext that cannot be unwrapped. Nothing fails at the
+moment of damage — the write succeeds, the response is a 200, and the fault surfaces at the next KEK
+rotation, for every credential rotated since. That is latent data loss, not a naming quibble.
+`kb-security-baseline` §18.2 says the same thing and its worked example passes
+`keyVersion: $dek->kekVersion()` under the comment *"rotation = rewrap, no migration"* — so this is a
+case where the **skill was right and the instruction was wrong**, which is worth stating because the
+instruction is the more recent artifact and the natural tie-break goes the other way. **Rejected:**
+overloading `key_version` with both meanings (above); **inferring the generation from `audit_logs`** —
+that table is monthly-partitioned and prunable (ADR-041), so a question about a live row would depend
+on a retention policy; **no counter at all** — *"which generation of this tenant's key was live on that
+date"* is the first question a `provider_auth` incident asks, and `updated_at` answers it only until
+the row is touched for anything else.
+
+**Trade-off:** two integer columns spelled `*_version` now sit side by side on one table, which is the
+exact confusion this ADR exists to prevent, and only the migration's docblock says which is which.
+**Nothing enforces the split, and nothing can today:** an UPDATE that bumps `key_version` on rotation
+would pass every test in the tree, because a single-KEK deployment cannot observe the difference — the
+tests cannot see it either. **Revisit when** a second KEK is configured. That is simultaneously the
+moment the distinction becomes observable, the moment `open()` must start reading `key_version`, and
+the right moment to add the assertion that a rotation left it alone.
+
+### ADR-049: Deleting a Provider Connection Is a Guarded Hard Delete, and the Embedding Designation Is Surfaced as a 409
+
+**Decision:** `DELETE …/provider-connections/{providerConnection}` removes the connection row and its
+`provider_models` rows in **one transaction**; the audit row is the only thing that survives. It is
+refused with **409** while the connection is the organization's designated embedding credential, with a
+sentence naming the remedy, and with 409 while the organization is not Active. The composite
+`ON DELETE RESTRICT` on `organizations.embedding_connection_id` (ADR-031's migration) remains the
+authority — the application check exists to produce a usable message, and a designation that lands
+between the check and the DELETE is mapped from PostgreSQL's `23503` onto the *same* sentence rather
+than a 500.
+
+**Reason:** hard rather than soft, because `status` already carries `revoked` and that **is** the soft
+delete — a second, structural one means two spellings of "gone" and every catalogue read has to filter
+on both, which is the shape that eventually serves a revoked connection. Cascading the catalogue rows
+is not a convenience: a `provider_models` row keyed to a connection that no longer exists is
+unresolvable, and the FK would refuse the delete anyway. The load-bearing choice is **surfacing the
+RESTRICT instead of working around it**: clearing the designation on the operator's behalf would return
+the organization to resolve-by-rule under ADR-031, which may select a *different* `(provider, model)`
+than the corpus was indexed under — a re-index, not a setting, and a decision an operator has to make
+with their eyes open. **Rejected:** clearing the designation inside the delete (above); a **422** keyed
+on a field, because there is no request body and the refusal is about the state of a *different* record
+— unlike the designation conflict in `EloquentOrganizationRepository`, which *is* about the submitted
+pair and is therefore correctly a 422; and a **204**, because every success body on this surface
+carries `data` and an empty `#[ResponseShape]` publishes `"properties": []`, which is not a JSON Schema
+object (ADR-042, plan D8).
+
+**Trade-off:** a 409 renders as `internal_dependency`, whose class-mapped copy — *"something on our
+side is unavailable, try again shortly"* — is false twice over, so the client has to render the
+server's `message` verbatim. Telling this deliberate 409 from a genuine 500 needed a **message
+sentinel** when this was written; **ADR-053 closed that** (`docs/22` § **J2**) and the client now reads
+the envelope's `actionable` flag, so the recognition is structural and the trade-off is only that the
+message is rendered at all. Second: the connection's history now exists only in `audit_logs` — label,
+provider and masked key are in the deleted row's audit detail, and a pruned partition makes it
+unreconstructable. **Revisit when** an audit-log read surface lands, which turns reconstructability
+from theory into a question someone will ask.
+
+### ADR-050: Pricing Is Three Exact Columns, and the Column's Ceiling Is Deliberately Above the Form's Bound
+
+**Decision:** `provider_models` gains `input_price_per_million` and `output_price_per_million`
+(`numeric(14, 6)`, nullable) and `price_currency` (`text`, constrained to `^[A-Z]{3}$`), with two more
+CHECKs: a price may not exist without a currency — **one-directional**, a currency with no prices is
+legal — and no price may be negative (migration `2026_08_19_001200`). `docs/11` §16.2 lists "pricing
+metadata" and `docs/02` §8.4 bounds its use to *estimated reporting*; no migration had created a
+column. The FormRequests bound a price well below what the column can hold, and **the gap is
+deliberate**.
+
+**Reason:** a price is compared, summed and multiplied, so it is a real column and not a `jsonb` key —
+`'9' > '10'` is true in the text spelling, and `capability_flags` is `jsonb` on this same table only
+because the *key set* there is the vendor's. `numeric` and never `double precision`: `0.15` is not
+`0.15` in binary floating point, and an estimate summed over a month's usage drifts by an amount nobody
+can reproduce to a tenant. The unit is **in the column name** because a bare `input_price` is the
+column somebody later divides by 1,000 "because it is obviously per-thousand", and the result is wrong
+by three orders of magnitude and still plausible. **The width gap is the generalizable half and is the
+reason this is an ADR rather than a migration:** were the column's ceiling flush with the form's bound,
+the boundary value would pass validation and then raise SQLSTATE `22003` from the driver, rendered as a
+**500** — a bug report about the server for a value the form said was fine. A refusal has to happen
+where there is a field to key it on. **Rejected:** `jsonb` (above); `char(3)` for the currency, which
+accepts `'us'`, silently stores `'us '`, and makes every later comparison against `'USD'` fail against
+a value that looks right in a console; a CHECK enumerating real ISO-4217 codes, which makes a new
+currency a migration; and requiring the currency whenever the row exists — an operator records the
+vendor's billing currency before they have looked the prices up, and refusing that makes the form
+unfillable in the order a human fills it.
+
+**Trade-off:** the platform now stores a number it does not verify and cannot refresh. A list price is
+a fact about a vendor's public pricing page, typed in by hand, and it goes stale in silence — every
+report built on it inherits that, which is why §8.4's *"estimated"* is doing real work. `NULL` means
+"nobody recorded a price" and must never be read as zero, and **nothing enforces that**: a SUM over a
+partially priced catalogue reports a plausible under-estimate. And the currency is per row, so one
+organization can hold a catalogue in two currencies — the CHECK stops a price with no currency, not a
+total across two of them. **Revisit when** anything *bills* from these columns rather than estimating:
+an amount that reaches an invoice needs a source, an as-of date and an audit trail, and three nullable
+columns provide none of the three.
+
+### ADR-051: The Capability Vocabulary Stays Out of `packages/contracts`; the Control Plane Constrains Spelling, Not Membership
+
+**Decision:** `supported.*` on the connection body and `capability_flags` on a catalogue row validate
+as an **open shape** — `string|max:64` plus `regex:/^[a-z][a-z0-9_]*$/` — with **no `Rule::in`**, and
+the published OpenAPI component types the field as `array<string>` with **no enum**. The authority is
+`class Capability(StrEnum)` in `services/ai-service/app/providers/contract.py`; the matrix that decides
+whether a claimed flag is *honoured* is `app/providers/capabilities.py`, which carries a source per
+cell. The admin console holds **one** catalogue of flags for its own rendering, and
+`apps/web/tests/unit/model-catalogue.test.ts` reads the enum out of the Python source and
+**set-compares**, behind a positive control that asserts the file was found and the class parsed.
+
+**Reason:** a closed copy in the shared package would assert a guarantee **no layer makes**. The data
+plane adds a capability when a vendor ships one, so a shared enum would have the control plane rejecting
+a flag the data plane already honours — a validation failure produced by nothing but a stale copy, on
+the plane that has no opinion on the question. `packages/contracts` is also imported by the widget and
+by mobile, neither of which has any use for a provider capability, and a second copy of a vocabulary is
+the drift `contract-steward` exists to catch. **The pattern constrains spelling, not membership, and
+that distinction is the point:** it makes `Embedding`, `embedding-flag` and a four-kilobyte string
+impossible while leaving *what the set contains* to the plane that knows. The **positive control** is
+what makes the set-compare a test rather than a decoration — a moved file or a renamed class otherwise
+makes it pass vacuously, which this repository has already shipped twice (`docs/22` § **H2**, § **I6**).
+**Rejected:** the shared enum (above); `Rule::in` against a PHP constant, which is the same drift one
+plane closer; validating **nothing**, which turns an operator's typo into a data-plane refusal at the
+next upload instead of a 422 on the form they are looking at; and **generating** the enum from
+`contract.py` at build time — a cross-language codegen step, and a fourth artifact to keep current, for
+a list whose membership question the control plane never asks.
+
+**Trade-off:** an operator can save a flag that will never be honoured and get no feedback at save
+time. The refusal is supposed to arrive later, from the data plane, by name, with the matrix cell
+quoted — and **for a rerank flag it does not arrive at all**, because the only reachable caller of the
+coherence check walks embedding candidates only. That is `docs/22` § **J1**, and it is owed work rather
+than a consequence anyone chose. Second: the drift test reads another language's source with a regex,
+which is exactly as fragile as it sounds; the positive control bounds the damage to a loud failure
+rather than a silent pass, and it does not remove the fragility. **Revisit when** a second consumer
+needs the vocabulary — at which point the right shape is the data plane *publishing* it at runtime, not
+a third hand-maintained copy.
+
+### ADR-052: The Internal Relay Carries the Whole Envelope, and a Relayed `retryable: false` Is `ORIGIN_SELF`
+
+**Status: `Accepted`. Supersedes nothing.** It closes at the **relay boundary** a property ADR-029
+already decided; ADR-029's decision, reasoning and constraints all stand unchanged.
+
+**Decision:** `InternalAiClient::relay()` reads **four** fields, not two — `error_class`, `message`,
+`retryable`, and the `errors` map that `validation` envelopes carry — and `KbException::relayed()` maps
+a relayed `retryable: false` onto `ORIGIN_SELF` while anything else, **including a missing or
+non-boolean field**, maps to `ORIGIN_DOWNSTREAM`. The HTTP status is still never consulted. The
+`errors` map is relayed verbatim, with each message and each field path length-bounded before it enters
+our own response body. The envelope field was already optional and typed, so carrying it is additive
+and no published component changed shape.
+
+**Reason:** ADR-029 split `internal_dependency` on an origin axis exactly so that a defect (`self`,
+500, never retryable) is not rendered as a brownout (`downstream`, 503, retryable). The data plane's
+`_handle_unexpected` raises with `origin=Origin.SELF` and therefore puts `retryable: false` on the wire
+— and `origin` is a *rendering input*, never a wire field, which a Contract test pins — so that boolean
+is **the only evidence of origin that crosses the seam**. Dropping it let `relayed()` default to
+`ORIGIN_DOWNSTREAM`, let `bootstrap/app.php` recompute `retryable: true`, and let the admin console run
+a full backoff ladder against a guaranteed failure. **That is finding O1 re-opened one hop later, on
+the exact envelope O1 was about**, which is the transferable lesson: a decision about how two planes
+agree on a field survives only where *every* hop that copies the field preserves it, and a relay that
+reads a subset is such a hop. The `errors` half has the same shape — the data plane builds a real
+per-field map on every validation envelope, dropping it turned a per-field refusal into an opaque
+sentence, and it broke an invariant a client tests structurally: `apps/web` discriminates the ADR-031
+resolver refusal on `validation` **with no map**, which is sound only while every *other* `validation`
+keeps its map. **Rejected:** deriving the origin from the status — a status is a rendering of a class,
+and re-deriving anything from it is the failure the carrier exists to prevent; treating a missing or
+non-boolean `retryable` as `false`, which would let an absent key assert SELF origin and suppress a
+legitimate retry, so `null` means *"the envelope did not say"*; and relaying `origin` itself as a wire
+field, which would publish an internal rendering input on the public envelope.
+
+**Trade-off:** `retryable` now carries two readings on one field — *may this be retried* for the client
+and *which origin did the raiser assign* for the relay — and they coincide only on
+`internal_dependency`. The mapping is inert on the other seventeen rows because
+`ErrorTaxonomy::retryable()` overrides on that row alone, which is deliberate but is also a coupling a
+future class could break by needing the axis explicitly. The relay also copies a **downstream-authored**
+per-field map into our own response body, which makes the two length bounds load-bearing rather than
+defensive. And the fix did not, at the time, reach the other half of the same problem: a deliberate 4xx
+and a genuine 500 arrived at a client as the same `(error_class, retryable)` pair, so the console needed
+a message sentinel. **ADR-053 closed that half** — `docs/22` § **J2** — by adding `actionable` to the
+envelope, which this relay now carries as a **fifth** field for precisely the reason stated above; the
+count in the Decision paragraph is the count as of this ADR, and ADR-053 is where it moved.
+**Revisit when** a second internal endpoint is relayed: the relay is one private method today, and
+*"every field the envelope defines crosses"* is a rule a second call site can break silently.
+
+### ADR-053: The Envelope Says Whether Its `message` Is Addressed to a Person, and That Is Not a Status
+
+**Status: `Accepted`. Closes `docs/22` § J2. Amends the envelope ADR-029 and ADR-052 describe.**
+
+**Decision:** the error envelope carries a fifth field, **`actionable: boolean`** — *true* when
+`message` was written for this condition and may be shown to an operator, *false* when it is a fixed
+placeholder chosen to say nothing. Both planes compute it in the one place that chooses the message:
+`bootstrap/app.php` derives it from the arms of its message `match` (false for `status >= 500`, false
+for either `authorization` constant, false for a Laravel `ValidationException`, otherwise the
+exception's own verdict), and `services/ai-service/app/main.py` reads it off `KbError.actionable`,
+which `_handle_unexpected` sets to `False` and every other raise leaves `True`. It is **required** in
+the `ErrorEnvelope` OpenAPI component and **optional** in `packages/contracts/src/envelope.ts`, the
+same asymmetry `request_id` carries and for the same reason — that interface is the union of the HTTP
+body and the SSE `error` frame, which does not carry the field. It **fails closed** in both
+directions that can be wrong: `toKbError` reads `payload.actionable === true`, `KbError`'s constructor
+parameter defaults to `false`, and `KbException::relayed()` defaults its argument to `false`.
+
+**Reason:** the taxonomy has no 409 row, deliberately (ADR-029's arm in the render closure spells out
+why), so an unclassified 4xx our own code raised keeps its status and renders as `internal_dependency`
+with `retryable: false` — and an unhandled exception renders as `internal_dependency` with
+`retryable: false` too. ADR-049's actionable *"clear the designation first, then delete"* and *"the
+service could not complete this request"* were therefore **the same envelope** to a client, and
+`apps/web` told them apart by comparing `message` against a client-side copy of the 5xx constant. That
+worked, and it was a **deny-by-exclusion filter whose premise was a property of the whole server tree
+rather than of the response in hand**: the first `abort(400, $detail)` reachable from those screens
+would have broken it silently, and in the worse direction — a defect whose message happened to differ
+would have read to an operator as advice. A client inferring an HTTP status from a string is exactly
+the coupling `error_class` exists to remove, so the fix belongs on the envelope. **Rejected:**
+carrying the HTTP **status** on the envelope, which is complete and publishes a field every client can
+then branch on *instead of* `error_class` — the coupling the 18-class taxonomy exists to remove, and a
+door that cannot be closed once opened; a nineteenth error class for "conflict", which the taxonomy is
+closed against and which a live tripwire in the data plane's tests would fire on; and re-using
+`validation` for the delete conflict, which would collide with the structural discriminator
+`apps/web` already uses for the ADR-031 resolver refusal (`validation` **with no map**).
+
+**Trade-off:** it is a fifth field on an envelope whose smallness was a feature, and it is one more
+thing two planes must agree on — mitigated by the cross-plane Contract test, which reads
+`app/main.py` as data and now pins the key set, the order and this value. The derivation is a
+conjunction rather than a lookup, so it is prose-in-code that a sixth arm on the message `match` could
+fall out of; it sits directly beside that `match` for that reason. The split it draws is by
+**producer, not by class** — a FormRequest 422 is not actionable while a `KbException::validation` is
+— which reads as an inconsistency until you see that the first one's payload is the `errors` map.
+And the field invites exactly one misuse, which the OpenAPI description names in capitals: inferring a
+status from it. **Revisit when** a client wants to distinguish *kinds* of deliberate 4xx (409 versus
+410 versus 428) — a boolean cannot, and that is the point at which the status question genuinely
+re-opens rather than being answered by a flag.
+
+### ADR-054: A Capability Flag Is a Claim, and the Catalogue Write Path Stays Free of the Data Plane
+
+**Status: `Accepted`. Closes `docs/22` § J1 by accepting the deferral rather than removing it.**
+
+**Decision:** `provider_models.capability_flags` is a **claim about a model, not a verified fact**,
+and Laravel writes it without consulting the data plane. `capabilities.assert_row_coherent` keeps its
+single caller — `embedding_selection.ineligibility()` — so an incoherent **embedding** row is reported
+by name in the readiness verdict's `rejected[]`, and an incoherent **rerank** row is reported nowhere.
+The console says so at the point of entry: `model-form.tsx` renders a standing sentence on the rerank
+task stating that whether the connection's provider can rerank at all is checked neither there nor on
+save. The docblocks in both services that claimed a save-time refusal — five in
+`services/ai-service`, plus `assert_org_can_embed`'s own, which describes a function nothing calls —
+have been corrected to say what the code does.
+
+**Reason:** the honest alternative is a coherence call on the write path, and it buys the rerank
+family a refusal at the price of making a **metadata edit** synchronously dependent on `ai-api`. An
+operator renaming a model, or correcting a price, would get a failure whenever the data plane is
+briefly restarting — on an operation that has no dependency today and no reason to acquire one. The
+asymmetry that remains is real and is the cost being accepted: for the embedding family the refusal
+does arrive, by name, with the matrix cell quoted, because the designation screen asks the data plane
+a question it has to ask anyway. For every other family it does not arrive, so the console's copy is
+the whole of the feedback. **Rejected:** the synchronous check above; and mirroring the provider ×
+task matrix into `apps/web` so the console could answer the third question itself, which would put a
+**fourth copy** of a table that already lives in one place behind ADR-051's line — the control plane
+constrains spelling, not membership, and a client-side copy would go stale in the silent direction
+(claiming a vendor cannot do something it now can).
+
+**Trade-off:** an operator can save `openrouter` + `["rerank"]`, see a 200, see no rejection anywhere,
+and get no reranking — and the only thing standing between them and that is a sentence they may not
+read. Reranking degrades to the fused order with no error, so the symptom is answer quality drifting
+for as long as nobody looks, which is the failure mode the rerank gate's own module documents at
+length. The console's client-side coherence check covers the two rules computable from the flags
+themselves and cannot cover the third, so the screen is *partially* authoritative, which is a worse
+thing to be than either fully or not at all. **Revisit when** a second family joins the readiness
+question — the moment anything else makes the data plane answer a per-connection capability question
+on a path an operator already waits for, the marginal cost of asking about rerank there is near zero
+and this decision inverts.

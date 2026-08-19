@@ -6,8 +6,10 @@ namespace App\Models;
 
 use App\Models\Scopes\OrganizationScope;
 use App\Support\Tenancy\OrgOwned;
+use Database\Factories\ProviderModelEntryFactory;
 use Illuminate\Database\Eloquent\Attributes\ScopedBy;
 use Illuminate\Database\Eloquent\Concerns\HasUlids;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
@@ -47,18 +49,35 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property int $context_window
  * @property int $max_output_tokens
  * @property bool $enabled
+ * @property string|null $input_price_per_million
+ * @property string|null $output_price_per_million
+ * @property string|null $price_currency
+ * @property \Illuminate\Support\Carbon|null $created_at
+ * @property \Illuminate\Support\Carbon|null $updated_at
  */
 #[ScopedBy(OrganizationScope::class)]
 final class ProviderModelEntry extends Model implements OrgOwned
 {
+    /** @use HasFactory<ProviderModelEntryFactory> */
+    use HasFactory;
+
     use HasUlids;
 
     protected $table = 'provider_models';
 
-    /** @var list<string> */
+    /**
+     * `organization_id` is ABSENT on purpose, and it is the one column on this row that decides
+     * which tenant owns it. Over-posting a tenant key is an authorization bug with a 200 response,
+     * and `Model::shouldBeStrict()` turns the silent drop into an exception rather than a shrug
+     * (laravel-rbac-policies NN5). The repository assigns it explicitly from its own
+     * `$organizationId` argument, which is the only place it can be set.
+     *
+     * @var list<string>
+     */
     protected $fillable = [
         'provider_connection_id', 'model', 'display_name',
         'capability_flags', 'context_window', 'max_output_tokens', 'enabled',
+        'input_price_per_million', 'output_price_per_million', 'price_currency',
     ];
 
     public function organizationId(): string
@@ -104,6 +123,15 @@ final class ProviderModelEntry extends Model implements OrgOwned
             'context_window' => 'integer',
             'max_output_tokens' => 'integer',
             'enabled' => 'boolean',
+            // `decimal:6` AND NOT `float`, MATCHING numeric(14, 6) IN THE MIGRATION. The cast
+            // returns a STRING with exactly six fractional digits, which is the only PHP type that
+            // round-trips a PostgreSQL `numeric` without loss — `(float) '0.15'` is not 0.15, and
+            // an estimate summed over a month of usage would drift by an amount nobody can
+            // reproduce. Null survives the cast unchanged (`decimal` is in
+            // HasAttributes::$primitiveCastTypes, which short-circuits before formatting), so
+            // "no price recorded" stays distinguishable from "free".
+            'input_price_per_million' => 'decimal:6',
+            'output_price_per_million' => 'decimal:6',
         ];
     }
 }

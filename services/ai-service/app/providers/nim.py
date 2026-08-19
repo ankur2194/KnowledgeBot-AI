@@ -143,8 +143,10 @@ cut"*, and **that mode does not exist.** Stage 11 takes a ``RerankCalibration`` 
 argument, ``RerankCalibration`` refuses to be constructed on an unthresholdable scale, and
 stage 12's only calibration-free route (``evidence.select_unranked``) selects on branch
 agreement and never calls a reranker. So an uncharacterized scale is not a reduced capability;
-``capabilities.can_rerank`` answers ``False`` for OpenRouter and ``assert_row_coherent``
-refuses the row at save time. **NIM is, in practice, the only rerank-eligible provider**, which
+``capabilities.can_rerank`` answers ``False`` for OpenRouter — which is the whole of it.
+``assert_row_coherent`` would refuse the row, and this sentence used to add "at save time"; no
+write path calls it (finding J1), so the row saves and simply never reranks.
+**NIM is, in practice, the only rerank-eligible provider**, which
 is what the skills' original half-sentence meant and got right for the wrong reason: not
 because OpenRouter lacks the endpoint, but because a gateway's score scale cannot be
 characterized per provider.

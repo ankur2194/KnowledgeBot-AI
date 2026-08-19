@@ -6,14 +6,23 @@ import { describe, expect, it } from 'vitest';
 import * as knownPathsModule from '@/features/auth/known-paths';
 import {
   FORGOT_PASSWORD_KNOWN_PATHS,
-  HIDDEN_PATHS,
   INVITE_KNOWN_PATHS,
-  knownPathsFromRules,
   LOGIN_KNOWN_PATHS,
+  PROVIDER_CONNECTION_EDIT_KNOWN_PATHS,
+  PROVIDER_CONNECTION_KNOWN_PATHS,
   REGISTER_KNOWN_PATHS,
   RESET_PASSWORD_KNOWN_PATHS,
-  type FormRulesManifest,
+  ROTATE_CREDENTIAL_KNOWN_PATHS,
 } from '@/features/auth/known-paths';
+// MOVED OUT OF THE MODULE ABOVE, at that module's own instruction, when `features/models` became the
+// fourth consumer of the derivation. The per-form constants stayed; the shared helper did not, and
+// no re-export shim was left behind — so this import naming a different path is the assertion that
+// the move actually happened.
+import {
+  HIDDEN_PATHS,
+  knownPathsFromRules,
+  type FormRulesManifest,
+} from '@/lib/forms/known-paths';
 
 /**
  * `knownPaths` is "the paths this form RENDERS", which is a different set from "the paths the
@@ -164,6 +173,75 @@ describe('the exported sets come from the committed manifests', () => {
     expect(RESET_PASSWORD_KNOWN_PATHS).toContain('email');
   });
 
+  /**
+   * ── THE PROVIDER SETS, AND THE ONE SUBTRACTION THIS FILE HAS THAT IS NOT `HIDDEN_PATHS` ────────
+   *
+   * `PROVIDER_CONNECTION_KNOWN_PATHS` drops the whole `models` sub-tree, and the reason is the same
+   * one `token` is dropped: the create form renders no control for it. The catalogue is its own screen
+   * (A4a), the form posts `models: []` because the rule is `present`, and a 422 keyed on
+   * `models.0.model` therefore belongs on the banner rather than written to a field that displays
+   * nowhere.
+   *
+   * A POSITIVE CONTROL FIRST in both directions, because a subtraction asserted against a manifest
+   * that does not declare the key is a subtraction asserting nothing.
+   */
+  it('PROVIDER_CONNECTION_KNOWN_PATHS is StoreProviderConnectionRequest.json MINUS the models sub-tree', () => {
+    const rules = manifestOf('StoreProviderConnectionRequest.json');
+
+    expect(rules.class).toBe('App\\Http\\Requests\\StoreProviderConnectionRequest');
+    // The controls this form actually renders.
+    expect([...PROVIDER_CONNECTION_KNOWN_PATHS].sort()).toEqual([
+      'credential',
+      'label',
+      'provider',
+    ]);
+
+    // POSITIVE CONTROL: the manifest really does declare what is being subtracted, and more than one
+    // level of it.
+    expect(Object.keys(rules.rules)).toContain('models');
+    expect(Object.keys(rules.rules).some((path) => path.startsWith('models.'))).toBe(true);
+    expect(PROVIDER_CONNECTION_KNOWN_PATHS.some((path) => path.startsWith('models'))).toBe(false);
+
+    // `credential` IS in the set: `min:8`/`max:512` are per-field 422s that belong under the input the
+    // operator just pasted into. Membership says the form renders a CONTROL with that name; it says
+    // nothing about the value, which is never read back out of form state.
+    expect(PROVIDER_CONNECTION_KNOWN_PATHS).toContain('credential');
+    // …and no ownership column, ever.
+    expect(PROVIDER_CONNECTION_KNOWN_PATHS).not.toContain('organization_id');
+  });
+
+  it('PROVIDER_CONNECTION_EDIT_KNOWN_PATHS is UpdateProviderConnectionRequest.json, nothing subtracted', () => {
+    const rules = manifestOf('UpdateProviderConnectionRequest.json');
+
+    expect(rules.class).toBe('App\\Http\\Requests\\UpdateProviderConnectionRequest');
+    expect([...PROVIDER_CONNECTION_EDIT_KNOWN_PATHS].sort()).toEqual(
+      Object.keys(rules.rules)
+        .filter((path) => !HIDDEN_PATHS.has(path))
+        .sort(),
+    );
+    expect([...PROVIDER_CONNECTION_EDIT_KNOWN_PATHS].sort()).toEqual(['label', 'status']);
+    // THE EDIT ENDPOINT MAY NEVER ACCEPT A CREDENTIAL, and the absence is asserted against the
+    // SERVER's own vocabulary rather than against this app's intent: if the FormRequest ever grew the
+    // field, this set would grow it too and this line is where that shows up.
+    expect(PROVIDER_CONNECTION_EDIT_KNOWN_PATHS).not.toContain('credential');
+  });
+
+  it('ROTATE_CREDENTIAL_KNOWN_PATHS carries BOTH fields, including the re-authentication', () => {
+    const rules = manifestOf('RotateProviderCredentialRequest.json');
+
+    expect(rules.class).toBe('App\\Http\\Requests\\RotateProviderCredentialRequest');
+    expect([...ROTATE_CREDENTIAL_KNOWN_PATHS].sort()).toEqual(
+      Object.keys(rules.rules)
+        .filter((path) => !HIDDEN_PATHS.has(path))
+        .sort(),
+    );
+    // `current_password` is the §18.3 re-authentication and is RENDERED, so "that password is not
+    // correct" lands under the password input. On the banner it would read as a general failure of the
+    // rotation and the operator would retype the same password.
+    expect(ROTATE_CREDENTIAL_KNOWN_PATHS).toContain('current_password');
+    expect(ROTATE_CREDENTIAL_KNOWN_PATHS).toContain('credential');
+  });
+
   it('every exported set is manifest-derived, so none can silently become a typed list', () => {
     // THE CLOSURE OVER THIS MODULE'S OWN EXPORTS. Each assertion above names one constant; this one
     // says there are no OTHERS — a sixth `*_KNOWN_PATHS` added without a spec fails here rather than
@@ -179,8 +257,11 @@ describe('the exported sets come from the committed manifests', () => {
       'FORGOT_PASSWORD_KNOWN_PATHS',
       'INVITE_KNOWN_PATHS',
       'LOGIN_KNOWN_PATHS',
+      'PROVIDER_CONNECTION_EDIT_KNOWN_PATHS',
+      'PROVIDER_CONNECTION_KNOWN_PATHS',
       'REGISTER_KNOWN_PATHS',
       'RESET_PASSWORD_KNOWN_PATHS',
+      'ROTATE_CREDENTIAL_KNOWN_PATHS',
     ]);
 
     // And every one of them is a non-empty array of strings — an accidental `undefined` export would
@@ -199,6 +280,9 @@ describe('the exported sets come from the committed manifests', () => {
     expect(present).toContain('StoreInvitationRequest.json');
     expect(present).toContain('ForgotPasswordRequest.json');
     expect(present).toContain('ResetPasswordRequest.json');
+    expect(present).toContain('StoreProviderConnectionRequest.json');
+    expect(present).toContain('UpdateProviderConnectionRequest.json');
+    expect(present).toContain('RotateProviderCredentialRequest.json');
   });
 });
 

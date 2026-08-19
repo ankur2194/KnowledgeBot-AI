@@ -13,7 +13,11 @@ import { http, HttpResponse, type RequestHandler } from 'msw';
  * Two more reasons `sse()` is unusable here: it requires `accept: text/event-stream` on the
  * request, and constructing the handler throws outright when the browser's built-in SSE
  * constructor is missing from `globalThis` — which it is in Vitest's node environment. (That
- * identifier is deliberately not spelled anywhere in this package; CI greps for it.)
+ * identifier is deliberately not spelled anywhere in this package, and ESLint is what refuses it:
+ * `no-restricted-globals` in eslint.base.mjs's `kbRules`, which covers tests/ too — the tests
+ * override turns off only no-explicit-any and the fs rule. `pnpm web:lint` is the run, and nothing
+ * runs it for you, `.github/` having been deleted on 2026-08-17. The rule matches global
+ * REFERENCES, so this comment's avoidance of the name is convention rather than mechanism.)
  *
  * Every payload built here is typed from `@kb/contracts`. A fixture typed by hand encodes what the
  * author believed the wire says, so a server-side rename ships instead of failing a typecheck.
@@ -46,6 +50,11 @@ export const envelope = (
   message: `operator detail from api-7.internal for ${error_class}`,
   retryable: false,
   request_id: '01JREQFROMLARAVEL',
+  // FALSE BY DEFAULT, matching the server's own default reading of an absent field and matching what
+  // the DEFAULT MESSAGE above is: operator detail naming an internal host, which no screen may
+  // render. A spec that wants the deliberate-4xx path — the one `deleteConflictMessage` reads —
+  // opts in explicitly with `{ actionable: true }`, which is also the shape the server sends.
+  actionable: false,
   ...overrides,
 });
 

@@ -49,7 +49,11 @@ import { API_ORIGIN } from '@/lib/env';
  * NEVER the browser's built-in SSE client: it is GET-only, its constructor's only option is
  * `withCredentials` so it carries neither our POST body nor a header, and its automatic
  * `Last-Event-ID` reconnect is forbidden because token streams are not resumable. Its name is
- * absent from this package on purpose — CI greps for it (nextjs-app-router NN3).
+ * absent from this package on purpose (nextjs-app-router NN3), and what keeps it absent is ESLint
+ * rather than a pipeline: `no-restricted-globals` names it in eslint.base.mjs's `kbRules`, so
+ * constructing one is an error under `pnpm web:lint`. Know the rule's reach — it matches GLOBAL
+ * REFERENCES only, so a computed `globalThis[...]` lookup, a string, or a comment all pass it — and
+ * know that nothing runs it: `.github/` was deleted on 2026-08-17 and this repo has no CI.
  */
 export interface StreamAnswerOptions {
   readonly conversationId: string;

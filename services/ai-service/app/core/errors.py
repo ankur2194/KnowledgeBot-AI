@@ -213,7 +213,7 @@ class KbError(Exception):
     forcing False.
     """
 
-    __slots__ = ("error_class", "message", "origin", "retry_after", "retryable")
+    __slots__ = ("actionable", "error_class", "message", "origin", "retry_after", "retryable")
 
     def __init__(
         self,
@@ -223,6 +223,7 @@ class KbError(Exception):
         retryable: bool | None = None,
         retry_after: int | None = None,
         origin: Origin = Origin.DOWNSTREAM,
+        actionable: bool = True,
     ) -> None:
         super().__init__(message)
         self.error_class = error_class
@@ -236,9 +237,26 @@ class KbError(Exception):
         self.retryable = retryable_for(error_class, origin) if retryable is None else retryable
         #: Seconds. Rendered as the ``Retry-After`` header, never as a body field.
         self.retry_after = retry_after
+        #: Whether ``message`` was written for THIS condition and may be shown to an operator,
+        #: as opposed to being a fixed placeholder chosen to say nothing. Unlike ``origin``
+        #: this IS a wire field, because it answers a question no other field answers: a
+        #: deliberate 4xx and an unhandled exception both render ``internal_dependency`` with
+        #: ``retryable=False``, so a client had no way to tell an actionable refusal from a
+        #: defect except by comparing the message against a copy of the placeholder string
+        #: (finding J2). It is not a status and nothing may infer one from it.
+        #:
+        #: Defaults True because every KbError raised in this service carries a message written
+        #: for its condition. The one producer that must pass False is
+        #: ``main.py::_handle_unexpected``, which is the placeholder by definition. Laravel's
+        #: ``bootstrap/app.php`` derives the same field from the arms of its message ``match``;
+        #: a consumer cannot tell which plane produced an envelope, so a divergence is a bug.
+        self.actionable = actionable
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return f"KbError({self.error_class}, origin={self.origin}, retryable={self.retryable})"
+        return (
+            f"KbError({self.error_class}, origin={self.origin}, "
+            f"retryable={self.retryable}, actionable={self.actionable})"
+        )
 
 
 # Every class has a status, a retry verdict and a fallback verdict, or a lookup at the

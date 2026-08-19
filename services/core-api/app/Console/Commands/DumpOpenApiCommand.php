@@ -623,7 +623,7 @@ final class DumpOpenApiCommand extends Command
                     .'packages/contracts/src/errors.ts is the hand-maintained TypeScript carrier '
                     .'(class KbError, declared exactly once); do not generate a second copy of it '
                     .'from this component.',
-                'required' => ['error_class', 'message', 'retryable', 'request_id'],
+                'required' => ['error_class', 'message', 'retryable', 'request_id', 'actionable'],
                 'properties' => [
                     'error_class' => [
                         'type' => 'string',
@@ -644,6 +644,29 @@ final class DumpOpenApiCommand extends Command
                         'type' => 'boolean',
                         'description' => 'THE AUTHORITY on whether the caller may try again. Never '
                             .'re-derive it from `error_class` or from the status.',
+                    ],
+                    'actionable' => [
+                        // REQUIRED HERE, OPTIONAL IN TYPESCRIPT — the same asymmetry `request_id`
+                        // carries one property up, and for the same reason: the SSE `error` frame
+                        // does not carry this field, and packages/contracts/src/envelope.ts is the
+                        // union of the frame and the body. Absent is read as `false` on the client,
+                        // which is the fail-closed direction (a class-mapped sentence instead of a
+                        // server one), so widening the TS type costs nothing.
+                        'type' => 'boolean',
+                        'description' => 'Whether `message` was written for THIS condition and may '
+                            .'be shown to an operator, as opposed to being a fixed placeholder '
+                            .'chosen to say nothing — the >= 500 constant, or the enumeration-oracle '
+                            .'constants both planes render for `authorization`. IT IS NOT A STATUS '
+                            .'AND NOTHING MAY INFER ONE FROM IT: it exists because a deliberate 4xx '
+                            .'our own code raised and an unhandled exception both render '
+                            .'`internal_dependency` with `retryable: false`, so an actionable '
+                            .'refusal (`clear the designation first, then delete`) was structurally '
+                            .'indistinguishable from `the service could not complete this request`. '
+                            .'Clients rendering a server message must gate on this; clients choosing '
+                            .'a retry must still read `retryable`, and clients choosing copy must '
+                            .'still read `error_class`. `false` on a FormRequest 422, whose payload '
+                            .'is the `errors` map rather than the summary; `true` on a KbException '
+                            .'`validation`, whose message is written for a person.',
                     ],
                     'request_id' => [
                         // NULLABLE, and the null belongs to the OTHER plane. Laravel always sends a
@@ -709,15 +732,31 @@ final class DumpOpenApiCommand extends Command
                         ],
                     ],
                 ],
-                // `errors` is NOT required, and that is not laxity. A 422 whose refusal was relayed
-                // from the data plane's embedding resolver carries a message and no map at all —
-                // see tests/Feature/EmbeddingConfigurationTest.php, "refuses a designation the
-                // resolver cannot resolve". Requiring the map here would describe a body this
-                // service does not always emit, which is the same defect one row over.
+                // `errors` is NOT required, and that is not laxity — but the reason stated here
+                // used to be WRONG, and the wrongness mattered because a client tests the invariant
+                // structurally. "Absent when the refusal was relayed from the data plane" describes
+                // ONE relayed sub-case and mis-describes the other:
+                //
+                //   * the data plane's PYDANTIC refusal DOES carry a map. `_handle_validation_error`
+                //     in services/ai-service/app/main.py builds `dict[str, list[str]]` from every
+                //     `loc` path, and InternalAiClient::relay() now forwards it verbatim.
+                //   * what carries no map is a DELIBERATE refusal with no field to key on — either
+                //     KbException::validation() raised here, or the data plane's embedding
+                //     RESOLVER, which refuses the (connection, model) PAIR an operator named rather
+                //     than a field of the body. tests/Feature/EmbeddingConfigurationTest.php,
+                //     "refuses a designation the resolver cannot resolve", is that case.
+                //
+                // So the axis is DELIBERATE-REFUSAL versus PER-FIELD, not WHICH PLANE. Stating it
+                // the other way made `errors === null` read as "came from over there", when what
+                // apps/web/src/features/embedding/api.ts actually keys on is "there is no field to
+                // show this against" — the ADR-031 resolver refusal.
                 'description' => 'The error envelope narrowed to `error_class: validation`. `errors` '
-                    .'is present when a FormRequest produced per-field messages and absent when the '
-                    .'refusal was relayed from the data plane\'s resolver, so a client reads it '
-                    .'defensively rather than assuming it.',
+                    .'is present whenever a per-field producer made a map — a Laravel FormRequest, '
+                    .'or the data plane\'s Pydantic validation, whose map is relayed verbatim — and '
+                    .'absent when the refusal is a deliberate one with no field to key on, such as '
+                    .'the embedding resolver refusing the (connection, model) pair an operator '
+                    .'named. It is never null and never `{}`, so a client reads it defensively '
+                    .'rather than assuming it.',
             ],
         ];
     }

@@ -119,14 +119,88 @@ it('refuses to delete a connection that is currently designated', function (): v
     $connection = ProviderConnection::factory()->recycle($org)
         ->withModel('text-embedding-3-large', ['embedding'])->create();
 
-    app(\App\Repositories\Contracts\OrganizationRepositoryInterface::class)
-        ->designateEmbeddingConnection(
-            $org->id,
-            new EmbeddingDesignation($connection->id, 'text-embedding-3-large'),
-        );
+    // THE runFor() IS NOT CEREMONY, and it is not "making the test pass" either. The repository
+    // method declares a precondition — bound context, equal to the argument — because its catalog
+    // re-verification reads a #[ScopedBy] model whose scope fails closed. Every production caller
+    // arrives inside App\Http\Middleware\TenantContext, which binds exactly this; a direct call
+    // that skipped it would be exercising a state no request can produce. Calling the repository
+    // directly is still the right shape for this test: what is under assertion is ON DELETE
+    // RESTRICT, and routing through HTTP would drag the resolver's Http::fake() in with it.
+    app(\App\Support\Tenancy\TenantContext::class)->runFor($org->id, function () use ($org, $connection): void {
+        app(\App\Repositories\Contracts\OrganizationRepositoryInterface::class)
+            ->designateEmbeddingConnection(
+                $org->id,
+                new EmbeddingDesignation($connection->id, 'text-embedding-3-large'),
+            );
+    });
 
     expect(fn (): mixed => ProviderConnection::query()->withoutGlobalScopes()
         ->whereKey($connection->id)->delete())->toThrow(QueryException::class);
+});
+
+it('refuses to write a designation at all when the tenant context does not agree', function (): void {
+    /*
+     * THE PRECONDITION ON designateEmbeddingConnection(), ASSERTED IN BOTH ITS FAILING DIRECTIONS.
+     *
+     * This is the companion to "returns nothing at all when no tenant context is bound" below.
+     * That test fixes the READ behaviour: an unbound context makes a scoped query return nothing,
+     * which is the fail-closed direction and a loud, debuggable failure. This one fixes what a
+     * WRITE path may conclude from that nothing — namely, nothing at all. The catalog
+     * re-verification inside the repository reads a #[ScopedBy] model, so under a missing or
+     * disagreeing context it comes back empty whatever the catalog contains; interpreting that as
+     * "the model was removed from this connection" would hand the caller a 422 asserting a
+     * deletion that never happened, and point an investigation at the wrong table.
+     *
+     * So the assertion is specifically that it is NOT a KbException: the failure has to name the
+     * caller's defect, not invent a fact about `provider_models`. KbException extends
+     * RuntimeException, so `toThrow(RuntimeException::class)` would not have distinguished them —
+     * LogicException does.
+     */
+    $org = Organization::factory()->create();
+    $connection = ProviderConnection::factory()->recycle($org)
+        ->withModel('text-embedding-3-large', ['embedding'])->create();
+
+    $repository = app(\App\Repositories\Contracts\OrganizationRepositoryInterface::class);
+    $designation = new EmbeddingDesignation($connection->id, 'text-embedding-3-large');
+
+    // DIRECTION 1: no context at all — the pooled worker whose context was never set.
+    expect(fn (): mixed => $repository->designateEmbeddingConnection($org->id, $designation))
+        ->toThrow(\LogicException::class);
+
+    // DIRECTION 2: a context naming somebody else — the pooled worker still holding the previous
+    // tenant, which is the silent one of the two failures.
+    $other = Organization::factory()->create();
+
+    expect(fn (): mixed => app(\App\Support\Tenancy\TenantContext::class)->runFor(
+        $other->id,
+        fn (): mixed => $repository->designateEmbeddingConnection($org->id, $designation),
+    ))->toThrow(\LogicException::class);
+
+    // AND IT IS NOT THE 422. A KbException here would mean the repository had converted "I could
+    // not ask the question" into "the answer is no", which is the whole defect this guards.
+    $caught = null;
+
+    try {
+        $repository->designateEmbeddingConnection($org->id, $designation);
+    } catch (\Throwable $e) {
+        $caught = $e;
+    }
+
+    expect($caught)->toBeInstanceOf(\LogicException::class)
+        ->and($caught)->not->toBeInstanceOf(\App\Exceptions\KbException::class);
+
+    // NOTHING WAS WRITTEN, in any direction.
+    assertDatabaseHas('organizations', [
+        'id' => $org->id,
+        'embedding_connection_id' => null,
+        'embedding_model' => null,
+    ]);
+
+    // CLEARING IS HELD TO THE SAME BAR, deliberately. A precondition that depends on the value of
+    // an argument is the same trap in a smaller size — and undesignating under a context naming
+    // another tenant is the stale-worker shape, not a harmless no-op.
+    expect(fn (): mixed => $repository->designateEmbeddingConnection($org->id, null))
+        ->toThrow(\LogicException::class);
 });
 
 it('never answers with the ambient tenant\'s rows when asked for another organization', function (): void {

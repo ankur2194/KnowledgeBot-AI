@@ -5,6 +5,7 @@
             "bail",
             "required",
             "string",
+            "not_regex:/^\\x{2026}/u",
             "min:8",
             "max:512"
         ],
@@ -49,8 +50,10 @@
             "max:20"
         ],
         "models.*.supported.*": [
+            "bail",
             "string",
-            "max:64"
+            "max:64",
+            "regex:/^[a-z][a-z0-9_]*$/"
         ],
         "provider": [
             "bail",

@@ -299,8 +299,10 @@ class OpenRouterAdapter:
     path: ``app.rag.rerank.RerankCalibration`` cannot be constructed on an unthresholdable
     scale, stage 11 requires one, and stage 12's only calibration-free route
     (``evidence.select_unranked``) never calls a reranker. ``capabilities.can_rerank`` answers
-    ``False`` for this provider and ``capabilities.assert_row_coherent`` refuses an
-    ``openrouter`` rerank row when it is saved.
+    ``False`` for this provider. ``capabilities.assert_row_coherent`` would refuse an
+    ``openrouter`` rerank row, and this line used to say it does so "when it is saved" — it does
+    not, because nothing calls that function on a write path (finding J1). The row saves, and
+    ``can_rerank`` is the whole of what stops it.
 
     **The method below stays, and deleting it would be the wrong fix.**
     ``PROVIDER_TASKS[("openrouter", RERANK)]`` is a statement about the *vendor*, the vendor
@@ -521,9 +523,12 @@ class OpenRouterAdapter:
         which is ``RerankScale.UNCALIBRATED`` — read from the table, never written as a
         literal, so that characterizing this vendor later is one edit in ``RERANK_SCALE`` and
         not a hunt through adapters. ``UNCALIBRATED.may_threshold`` is False, and under finding
-        #47 that makes this body **unreachable rather than degraded**: ``can_rerank`` answers
-        False for this provider and ``assert_row_coherent`` refuses the row at save time, so
-        nothing binds a ``Reranker`` here. The scale is still read from the table rather than
+        #47 that makes this body **unreachable rather than degraded** — by ``can_rerank``
+        alone, which answers False for this provider, so nothing binds a ``Reranker`` here. The
+        second reason this line used to give, that ``assert_row_coherent`` refuses the row at
+        save time, is false: no write path calls it (finding J1) and the row saves.
+
+        The scale is still read from the table rather than
         hardcoded, because the day this becomes reachable is the day that table changes, and a
         literal would survive the change silently.
 

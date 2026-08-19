@@ -1,9 +1,7 @@
 import { KbError, type InvitationPreview, type SessionResource } from '@kb/contracts';
 import { queryOptions } from '@tanstack/react-query';
 
-import { sessionCredential } from '@/lib/api/browser';
-
-import { browserFetchData } from './session';
+import { browserFetchData, sessionCredential } from '@/lib/api/browser';
 
 /**
  * The invitation flow's transport, cache key and copy — everything the register screen and the accept
@@ -47,15 +45,20 @@ export const ACCEPT_INVITATION_PATH = '/api/v1/auth/invitations/accept';
  * `singleToken` USED TO LIVE HERE AND DELIBERATELY DOES NOT ANY MORE — it is
  * `src/lib/auth/single-token.ts`, dependency-free, for the reason that file's docblock gives:
  *
- * THIS MODULE IS CLIENT-ONLY, TRANSITIVELY, AND ONLY A `'use client'` COMPONENT MAY IMPORT IT. It imports
- * `browserFetchData` from `./session`, and `session.ts` also declares the React context
- * `<SessionProvider>` consumes — so a SERVER COMPONENT importing anything at all from here drags
- * `createContext` into the React Server Component graph and Turbopack refuses the build:
- * "You're importing a module that depends on `createContext` into a React Server Component module."
+ * THIS MODULE IS CLIENT-ONLY AND ONLY A `'use client'` COMPONENT SHOULD IMPORT IT — but the stated
+ * MECHANISM has changed twice and is now weaker than it reads above, so it is restated rather than
+ * left to rot. The original claim was that this file imports `browserFetchData` from `./session` and
+ * that `session.ts` declares the React context `<SessionProvider>` consumes, so a server component
+ * importing anything from here drags `createContext` into the RSC graph and Turbopack refuses the
+ * build. BOTH HALVES ARE NOW FALSE: D38 moved the context to `session-context.ts`, and the unwrap
+ * moved to `@/lib/api/browser`, so this module imports nothing from `./session` at all.
  *
- * It is caught by `pnpm web:build` ONLY. `web:typecheck` and `web:test` both pass while it is broken,
- * because neither compiles the RSC graph — which is why the two server pages in this flow import their
- * token helper from `lib/` and nothing else from `features/auth/`.
+ * What is still true is narrower and worth keeping: every function here reaches Laravel from the
+ * BROWSER, and `sessionCredential()` reads `document.cookie`. On the server it would find no cookie
+ * and no `window`, which is a 401 or a silent empty credential rather than a compile error. So the
+ * rule survives; the red build that used to enforce it does not, and `web:typecheck` and `web:test`
+ * never enforced it either. That is why the two server pages in this flow import their token helper
+ * from `lib/` and nothing else from `features/auth/`.
  */
 
 /**

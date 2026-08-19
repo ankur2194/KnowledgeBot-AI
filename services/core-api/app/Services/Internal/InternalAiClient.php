@@ -24,6 +24,12 @@ use Illuminate\Support\Str;
  */
 final class InternalAiClient
 {
+    /** A relayed per-field message is bounded before it is put in our own response body. */
+    private const MAX_RELAYED_MESSAGE_LENGTH = 512;
+
+    /** A relayed field PATH is bounded for the same reason, and paths are short by construction. */
+    private const MAX_RELAYED_FIELD_LENGTH = 128;
+
     public function __construct(private readonly InternalRequestSigner $signer) {}
 
     /**
@@ -133,11 +139,37 @@ final class InternalAiClient
 
     /**
      * Relay the class the data plane assigned, verbatim, and never re-derive one from the status.
+     *
+     * FOUR FIELDS CROSS, NOT TWO. The envelope is
+     * `{error_class, message, retryable, request_id, actionable}` plus an `errors` superset on
+     * `validation`, and reading only the first two lost the others in ways nobody could see from
+     * this side:
+     *
+     *   * `retryable` IS THE DATA PLANE'S ORIGIN VERDICT. `_handle_unexpected()` raises with
+     *     `origin=Origin.SELF` and sends `retryable: false` — "our bug, do not retry". Dropping it
+     *     let KbException::relayed() default to ORIGIN_DOWNSTREAM and bootstrap/app.php recompute
+     *     `true`, so a defect reached the browser as a brownout and apps/web ran a full backoff
+     *     ladder against a guaranteed failure. That is ADR-029 / finding O1 re-opened at the relay
+     *     boundary. See KbException::relayed() for why the STATUS is still not consulted.
+     *   * `errors` IS THE ONLY THING THAT MAKES A 422 RENDERABLE. main.py's
+     *     `_handle_validation_error` builds a real `dict[str, list[str]]` from Pydantic's `loc`
+     *     paths on EVERY validation envelope; dropping it turned a per-field refusal into an opaque
+     *     sentence. It also broke an invariant a client tests structurally: apps/web discriminates
+     *     the ADR-031 resolver refusal on `validation` WITH NO MAP, which is only sound while every
+     *     other `validation` keeps its map.
+     *   * `actionable` SAYS WHETHER THE RELAYED MESSAGE IS ADDRESSED TO A PERSON (finding J2). The
+     *     data plane's `_handle_unexpected` sends the fixed 5xx placeholder with `false`; every
+     *     other KbError sends a sentence with `true`. Recomputing it on this side would be ADR-052
+     *     recurring on a fourth field — the generalizable form of which is that a decision about
+     *     how two planes agree on a field survives only where every hop that copies the field
+     *     preserves it, and this method is such a hop. It fails closed, below.
      */
     private function relay(int $status, mixed $payload): KbException
     {
         $errorClass = is_array($payload) ? ($payload['error_class'] ?? null) : null;
         $message = is_array($payload) ? ($payload['message'] ?? null) : null;
+        $retryable = is_array($payload) ? ($payload['retryable'] ?? null) : null;
+        $actionable = is_array($payload) ? ($payload['actionable'] ?? null) : null;
 
         if (! is_string($errorClass) || $errorClass === '') {
             // No envelope means the failure did not come from our own handler — a proxy page, a
@@ -156,7 +188,86 @@ final class InternalAiClient
                 ? $message
                 : 'The AI service rejected the embedding-readiness request.',
             $status,
+            // A NON-BOOLEAN IS `null`, NOT `false`. `null` means "the envelope did not say", which
+            // relayed() maps to DOWNSTREAM — the same reading a missing field has always had. A
+            // truthy cast would let `"false"`, `0` or an absent key silently assert SELF origin and
+            // suppress a retry that was legitimate.
+            is_bool($retryable) ? $retryable : null,
+            $this->fieldErrors($errorClass, $payload),
+            // FAILS CLOSED, and in the OPPOSITE direction to `retryable` above — deliberately, so
+            // the asymmetry is not read as an oversight. There, a missing field has a defensible
+            // default (`downstream`) that the taxonomy has always assumed. Here the two outcomes are
+            // not symmetric: a wrong `false` costs an operator a blander sentence, while a wrong
+            // `true` renders a downstream placeholder — or worse, whatever text an unclassified
+            // failure carried — at that operator as though it were advice.
+            $actionable === true,
         );
+    }
+
+    /**
+     * The `validation` superset, normalized — or null on every other class and every other shape.
+     *
+     * FAIL CLOSED ON THE SHAPE, because `errors` is contractually `Record<string, string[]>` and a
+     * client keys a form on it. FastAPI's handler already says why the alternative is worse: "A
+     * list still satisfies `typeof value === 'object'`, so the envelope type-guard passes, the form
+     * then keys on `0` and `1`, no field matches, and every message collapses into one
+     * opaque root error." A malformed map is therefore dropped entirely rather than forwarded —
+     * which renders as the deliberate-refusal shape (`validation`, no map), the one thing a client
+     * already knows how to display.
+     *
+     * NEVER `{}`, NEVER `null` ON THE WIRE. The envelope contract is that `errors` is present only
+     * on `validation` and only when it carries something, so an empty map returns null here and the
+     * render closure omits the key.
+     *
+     * @return array<string, list<string>>|null
+     */
+    private function fieldErrors(string $errorClass, mixed $payload): ?array
+    {
+        if ($errorClass !== 'validation' || ! is_array($payload)) {
+            return null;
+        }
+
+        $errors = $payload['errors'] ?? null;
+
+        if (! is_array($errors) || $errors === []) {
+            return null;
+        }
+
+        $normalized = [];
+
+        foreach ($errors as $field => $messages) {
+            // A field PATH is a string. Pydantic joins its `loc` segments dotted and falls back to
+            // `_`, so an integer key here means the map was really a LIST and the whole envelope is
+            // the shape the type-guard cannot distinguish. Refuse the lot.
+            if (! is_string($field) || $field === '' || ! is_array($messages)) {
+                return null;
+            }
+
+            $texts = [];
+
+            foreach ($messages as $text) {
+                if (! is_string($text)) {
+                    return null;
+                }
+
+                // Bounded on the way in. The messages are the data plane's, not a tenant's, but a
+                // relayed field name and a relayed sentence are both strings this service is about
+                // to put in its own response body.
+                $texts[] = mb_substr($text, 0, self::MAX_RELAYED_MESSAGE_LENGTH);
+            }
+
+            if ($texts === []) {
+                return null;
+            }
+
+            $normalized[mb_substr($field, 0, self::MAX_RELAYED_FIELD_LENGTH)] = $texts;
+        }
+
+        // No emptiness check here: `$errors === []` returned null above, so reaching this
+        // line means the loop ran at least once, and every iteration either returned null or
+        // assigned. PHPStan proves the branch dead; keeping it would be a guard that reads as
+        // defence and is actually unreachable.
+        return $normalized;
     }
 
     /**

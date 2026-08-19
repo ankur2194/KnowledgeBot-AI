@@ -5530,3 +5530,310 @@ Every suite still passes, and the commands are unchanged: Pest **490**, pytest *
 **74** integration (+**6** live-parse via the harness), Vitest **436** web / **160** contracts /
 **31** widget, Playwright **22** widget E2E, Jest **69** mobile. The suites were never the fragile
 part — the gates were, because they asserted the things a passing test cannot see.
+
+## The provider-lifecycle decisions — ADR-047…052
+
+Six decisions from 2026-08-19, from the effort that finished the provider-connection resource
+(`index`/`show`/`update`/`destroy` beside the existing `store`), added credential rotation and a
+per-connection model catalogue, and built `/settings/providers`, `/settings/providers/[connectionId]`
+and `/settings/embedding`. The six are the ones a future change can *violate*; the rest of the effort
+is implementation. **The numbering starts at 047 because ADR-044…046 were taken by the
+shutdown-determinism effort of 2026-08-14** — the brief for this work asked for "ADR-044" and that
+number is five days older than the request.
+
+**Two of the six overturned the instruction that asked for them, and that is the half worth reading.**
+
+* **The brief said "bump `key_version` on rotation."** It cannot: `key_version` is the **KEK's**
+  version, written by `CredentialVault::seal()` from config, and `open()` will have to select a KEK by
+  that number the moment a second one exists. Bumping it on a credential rotation writes a version
+  naming a KEK that never wrapped the row — unwrappable ciphertext, silent at the moment of damage,
+  discovered at the next KEK rotation for every credential rotated since. `kb-security-baseline` §18.2
+  already said so, and its worked example passes `keyVersion: $dek->kekVersion()` under the comment
+  *"rotation = rewrap, no migration"*. **The skill was right and the newer instruction was wrong**,
+  which is the direction a tie-break does not naturally go, so a separate `credential_version` column
+  landed instead. → **ADR-048**.
+* **The same skill's §18.4 worked example refuses the rotation we permit.** Its check 5 reads
+  `abort_unless($credential->status === CredentialStatus::Active, 409)`. Applied here that makes
+  delete-and-recreate the only escape from a bad key, and the delete costs the connection id, its
+  `provider_models` rows and its embedding designation — an ADR-031 re-index as the price of a typo.
+  We check the *organization's* status and not the connection's, and the rotation returns a `revoked`
+  or `invalid` connection to `active`. → **ADR-047**, and the divergence is recorded as **J7** rather
+  than resolved, because this document does not edit skills.
+
+The other four each came from a gap rather than a correction. **ADR-049** — the delete is a guarded
+hard delete, and the `ON DELETE RESTRICT` that ADR-031 put on the designation is surfaced as an
+actionable 409 instead of being worked around, because undesignating returns the organization to
+resolve-by-rule and may move the vector space under an indexed corpus. **ADR-050** — `docs/11` §16.2
+and `docs/02` §8.4 both require pricing metadata and no migration had created a column; the decision
+that generalizes beyond this table is that the column's ceiling sits **above** the FormRequest's bound,
+so the boundary value is a 422 with a field to key on rather than SQLSTATE `22003` rendered as a 500.
+**ADR-051** — the capability vocabulary stays out of `packages/contracts`, because a closed copy there
+would assert a guarantee neither plane makes; the control plane constrains **spelling, not
+membership**. **ADR-052** — the internal relay was reading two fields of a four-field envelope, and one
+of the two it dropped was the data plane's origin verdict.
+
+**ADR-052 is ADR-029 re-opened one hop later, on the exact envelope ADR-029 was about**, and it is
+recorded that way deliberately. O1 established that both planes render an unhandled internal exception
+identically — 500, `internal_dependency`, `retryable: false`. The data plane did.
+`InternalAiClient::relay()` then read `error_class` and `message` only, `KbException::relayed()`
+defaulted `origin` to `DOWNSTREAM`, `bootstrap/app.php` recomputed `retryable` from class-plus-origin, and *"our bug, do not
+retry"* reached the browser as `retryable: true`, where `apps/web`'s query client ran a full backoff
+ladder against a guaranteed failure. The generalizable form: **a decision about how two planes agree on
+a field survives only where every hop that copies the field preserves it**, and a relay that reads a
+subset of an envelope is such a hop. The second dropped field, the per-field `errors` map, broke a
+different invariant — `apps/web` discriminates the ADR-031 resolver refusal on `validation` **with no
+map**, which is sound only while every other `validation` keeps one.
+
+**What this effort did *not* touch:** finding **#79** stays pinned exactly as the 2026-08-12 ruling
+left it (§ *The rulings of 2026-08-12*, G1). Nothing here goes near `chunks`, `document_elements` or
+the `source_versions → source_items → knowledge_sources` cascade, and `ALLOWED_TABLES` is unchanged.
+
+## Found while building the provider surface — 2026-08-19
+
+Seven findings, **all now closed**. Three were defects that were fixed, two of them pre-existing and
+reachable long before that effort; one was a race closed in one direction only; and three were open on
+the day they were written and were closed later the same day by a follow-up pass — J1 and J2 as
+**ADR-054** and **ADR-053**, and J7 by a ruling that edited the skill rather than the code.
+
+**Two of the three closures went a different way from the shape the finding implied, and that is the
+half worth reading.** J1's "owed work" was closed by *deciding not to do it* and writing down the cost;
+J2 was closed by adding a field to an envelope whose smallness was itself a design property. In both
+cases the alternative was the more obviously "complete" fix and was rejected for what it would have made
+permanent — a synchronous dependency on a metadata edit, and a status a client could branch on.
+
+### J1 — `assert_row_coherent` never runs on the catalogue write path, and the docblocks that said it did were in both services
+
+**Closed by ADR-054 on 2026-08-19, by accepting the deferral rather than removing it.** Candidate (b)
+below was taken. The finding text is kept in full because the *reasoning* is what the ADR points at.
+
+Three docblocks in `services/core-api` stated that the data plane refuses an incoherent capability row
+at save time. It does not. The measuring commands:
+
+```bash
+grep -rn 'assert_row_coherent\|assert_org_can_embed' services/ai-service/app/api \
+  services/ai-service/app/ingestion services/ai-service/app/retrieval
+grep -rn 'assert_row_coherent' services/ai-service/app/providers/embedding_selection.py
+```
+
+The first returns nothing — **no HTTP path calls either function.** The second shows the only reachable
+caller: `ineligibility()` in `app/providers/embedding_selection.py`, which invokes
+`assert_row_coherent` inside a `try` and converts the `KbError` into an
+`EmbeddingIneligibility.ROW_INCOHERENT` rejection. That is correct where it stands — a capability
+question on the request path must become a value rather than an exception — but it means the coherence
+check only ever runs over the connections `embedding_readiness` walks, i.e. **embedding candidates**.
+
+So `ProviderModelService` never crosses the seam at all, and a row registering `openrouter` with
+`["rerank"]` saves cleanly with a 200, appears in **no** `rejected[]` on the readiness screen, and
+simply never reranks. `capabilities.can_rerank` is the AND of three questions and OpenRouter fails one
+of them permanently (§ G5) — but nothing tells the operator, at any point, ever. ADR-051's trade-off
+says the refusal "arrives later, by name, with the matrix cell quoted"; for the embedding family that
+is true, and for every other family it is not.
+
+**The docblock half was larger than this finding first reported.** It said three docblocks in
+`services/core-api` had been corrected; a full sweep on 2026-08-19 found the same claim alive in the
+**data plane**, including in `assert_row_coherent`'s own docstring, which stated as fact that it is
+"called when a provider connection or a bot's model selection is **saved**". `assert_org_can_embed`
+carried a matching claim and has **no caller at all**. All of them now say what the code does. Measure
+rather than trust a list (ADR-036):
+
+```bash
+grep -rn 'assert_row_coherent(' services/ai-service/app     # the definition and ONE call site
+grep -rn 'assert_org_can_embed' services/ai-service/app     # the definition and its __all__ entry
+```
+
+**Two candidate closures were offered; (b) was taken and is ADR-054:**
+
+* **(a)** call a coherence endpoint from the catalogue write path. It is the honest fix and it makes
+  the save path synchronous on the data plane, which is a new dependency for an operation that has none
+  today — and one that fails the save when `ai-api` is briefly down, for a metadata edit. **Rejected**
+  for that reason: a rename or a price correction should not fail because the data plane is restarting.
+* **(b)** accept the deferral permanently and say so in the operator-facing copy: a capability flag is a
+  *claim*, honoured only where the matrix agrees, and the console shows which claims are honoured for
+  the families it can ask about. Cheaper, and it leaves the rerank family with no feedback at all.
+  **Taken.** `model-form.tsx` now carries a standing sentence on the rerank task saying that the
+  provider's own ability to rerank is checked neither there nor on save.
+
+A third option was considered and not offered as a closure: mirror the provider × task matrix into
+`apps/web` so the console could answer the third question itself. That is a **fourth copy** of a table
+ADR-051 deliberately keeps out of the client, and it would go stale in the silent direction — claiming
+a vendor cannot do something it now can.
+
+**What is still true after the closure**, and is the cost ADR-054 accepts: an operator can save
+`openrouter` + `["rerank"]`, get a 200, appear in no `rejected[]`, and never rerank. The only thing
+between them and that is copy.
+
+Owner: closed by `control-plane-engineer` and `admin-web-engineer`; the matrix half was never the gap.
+
+### J2 — a deliberate 4xx is indistinguishable from a defect on the client, and the workaround was a message sentinel
+
+**Closed by ADR-053 on 2026-08-19.** Candidate (b) was taken: the envelope carries an `actionable`
+boolean and the client stops comparing strings. The finding is kept in full because the *shape* of the
+workaround — a deny-by-exclusion filter whose premise is a property of the whole tree — is the part
+worth recognising again elsewhere.
+
+`KbError` carries no HTTP status. The render closure maps an unclassified 4xx our own code
+raised onto `internal_dependency` with `retryable: false` — and an unhandled exception renders as
+`internal_dependency` with `retryable: false` too. **A 409 and a 500 therefore arrive at the browser as
+the same `(error_class, retryable)` pair**, so ADR-049's actionable *"clear the designation first"*
+message is indistinguishable, structurally, from *"the service could not complete this request."*
+
+The console's workaround is a **sentinel**: `bootstrap/app.php` renders every status ≥ 500 with one
+fixed string and `services/ai-service/app/main.py::_handle_unexpected` emits it byte for byte (ADR-029),
+so a non-retryable `internal_dependency` carrying *anything else* is a deliberate 4xx. One call site
+discriminates differently, on `errors === null`, which is the ADR-031 refusal shape rather than this
+one. Measure the blast radius rather than counting it here:
+
+```bash
+grep -rn 'deleteConflictMessage\|SERVICE_FAILURE_MESSAGE' apps/web/src
+```
+
+Contract review verified the sentinel is safe **today** by enumerating every `abort*` in the tree and
+confirming none passes a custom message on a status below 500 that this screen can reach. **It is a
+deny-by-exclusion filter**, and its premise is a property of the whole tree rather than of the endpoint
+it guards: the first `abort(400, $detail)` anywhere reachable from these screens breaks it, silently,
+by making a new deliberate 4xx look like a defect — or worse, by making a defect whose message happens
+to differ look actionable. **Two candidate fixes were offered; (b) was taken and is ADR-053:**
+
+* **(a)** carry the HTTP status on the error envelope. Complete, and it publishes a field every client
+  can then branch on — including branching on it *instead of* `error_class`, which is the coupling the
+  taxonomy exists to remove. **Rejected** for exactly that: it is a door that cannot be closed again.
+* **(b)** mark the deliberate-4xx case explicitly — an envelope flag or a dedicated taxonomy reading —
+  so a client recognizes it without inferring anything from a string. Narrower, and it does not hand
+  clients a status to branch on. **Taken**, as a fifth envelope field, `actionable`.
+
+**The shape of what the field replaced is the transferable part.** The sentinel was not wrong; it was
+*correct for a reason that lived somewhere else*. Its premise — "no `abort` below 500 anywhere in the
+tree passes a custom message on a path these screens reach" — was verified once, by enumeration, and
+then had to stay true forever, in files nobody editing them would connect to a delete button in the
+admin console. A guard whose correctness is a property of the whole repository rather than of the value
+in hand is a guard that fails silently and at a distance.
+
+**Two things the closure turned up that the finding had not:**
+
+* the suspended-organization `abort_unless(..., 409)` had **already gained a message**
+  (`OrganizationStatus::SUSPENDED_REFUSAL`) since this finding was written, so a unit test asserting
+  "this 409 carries no sentence for anyone to render" was recording a state that no longer existed and
+  would have kept doing so;
+* two component specs proving that a 500's message never reaches the screen used the 5xx constant *as
+  the fixture message* — so the assertion could not fail whatever the client did. They now carry an
+  operator-shaped message with a hostname in it, which the flag alone keeps off the screen.
+
+Owner: closed by `control-plane-engineer`; the data plane's half of the envelope moved with it, because
+a consumer cannot tell which plane produced one.
+
+### J3 — two `BinaryCast` defects, both pre-existing, both reached by this work, both fixed
+
+`App\Support\Crypto\BinaryCast` is the `bytea` cast every sealed credential passes through. Two
+independent bugs, neither introduced here and both exposed the moment a code path read a ciphertext
+column **twice**:
+
+* **(a) the stream was drained by the first read.** `stream_get_contents($value)` reads from the
+  current position, and Eloquent does not cache a class cast whose `get()` returns a non-object
+  (`getClassCastableAttributeValue()` unsets the cache unless `is_object($value)`), so every access
+  re-ran the cast against the same handle. First read: the bytes. Second and every later read: `''`.
+  `CredentialVault::open()` reports that as **"ciphertext is truncated"** — a message that reads like
+  KEK corruption and sends the reader to the key management, which is the wrong place entirely.
+  **The failure mode here was misdiagnosis, not breakage**, and that is why it is written down. Fixed
+  by reading from offset 0 explicitly, which makes repeated access idempotent.
+* **(b) the resource branch fell through into the string branch.** It assigned back into `$value` and
+  dropped into the `\x`-prefix decode, so **decoded** bytes beginning with the two ASCII bytes `\` and
+  `x` reached `hex2bin()`. A sealed credential begins with a random 12-byte IV, so roughly one in
+  65,536 starts that way by chance; the "and the remainder must look like hex" guard narrowed the
+  window to `(16/256)^n` and left it open — a probability argument standing in for a structural one.
+  The outcome was either a throw or, worse, a **silent decode to different, shorter bytes**. Fixed by
+  branching on the **source**: a resource is decoded bytes and returns immediately; a string came from
+  `set()` and is `\x` + hex by construction. Neither branch has to guess.
+
+A third, smaller one was fixed in the same pass and is recorded because the shape recurs: `set()`
+returned `[$key => null]` for a non-string, which on a **nullable** `bytea` column is silent data loss —
+`save()` succeeds and the row reads back as "no credential stored". It throws now.
+
+### J4 — the designate/delete race was closed in one direction only
+
+**Closed.** `EloquentProviderModelRepository::delete()` locks the model row, then `organizations`, then
+re-reads the designation, so **designate-then-delete** was always caught. The mirror image was not:
+`designateEmbeddingConnection()` locked `organizations` and performed **no existence check on the
+pair**, so **delete-then-designate** left the organization naming a catalogue row that no longer
+existed — both requests 200, nothing raised, and the fault surfacing at the next upload as a resolution
+error nobody can connect to an action taken days earlier.
+
+The reason nothing else caught it is the part worth keeping: **`organizations.embedding_model` is a bare
+`text` column with no foreign key**, unlike `embedding_connection_id`, which has a composite FK with
+`ON DELETE RESTRICT`. Half the pair is protected by the database and half by the application, and only
+the protected half had a test that could fail. The pair is now re-verified **inside** the designating
+transaction, under the `organizations` row lock the delete path also takes — a plain `SELECT` and not a
+second `lockForUpdate()`, because locking the model row here would order the two locks opposite to the
+delete path (model → organizations there, organizations → model here) and turn a refusal into an ABBA
+deadlock: `40P01` for both requests instead of one actionable 422 for one of them.
+
+The pre-flight resolution in `EmbeddingDesignationService` cannot be the authority for this, and the
+reason generalizes: **it makes an HTTP call, and an HTTP call must never sit between BEGIN and COMMIT**
+— it pins `xmin` and stops autovacuum reclaiming dead tuples database-wide — so it runs outside both
+transactions and loses the same race.
+
+### J5 — the audit fingerprint backstop erased the field that identified the row
+
+**Closed.** `AuditLogger`'s `details` writer redacts anything matching the credential heuristics and
+records a keyed fingerprint in its place. Tenant-controlled **free text** can trip that heuristic —
+`label` is exactly the kind of field that can — and the old behaviour dropped the key entirely, so a
+`provider.connection.deleted` row could lose the one field that says *which connection*. An audit row
+that cannot identify its subject is worse than a redacted one.
+
+The row now degrades to `<key>_redacted` beside the fingerprint, carrying whatever survived around the
+match — **unless the whole value was the match**, in which case the marker alone would say exactly what
+the fingerprint's presence already says, and the key is omitted rather than written twice. The
+fingerprint failure path is also deliberate: `fingerprint()` refuses to write an **unkeyed** digest when
+`app.key` is empty, because an unkeyed digest is reversible by lookup and only *looks* redacted, and
+`sanitize()` runs **outside** `record()`'s try/catch — so an escaping throw there would ignore the
+operation's `ON_FAILURE_LOG` policy (ADR-041) and turn a failed login into a 500.
+
+### J6 — `provider-connections.store` was unaudited, and that was a §18 gap rather than a deferred nicety
+
+**Closed.** The endpoint that stores an organization's first provider credential wrote no audit row at
+all. `docs/13` §18.11 lists *"provider credential changes"* among the events that must be audited, and
+creating the credential is the one that trail most obviously exists for. The surface now writes
+`provider.connection.{created,updated,deleted,credential_rotated}` and
+`provider.model.{created,updated,deleted}`, all `ON_FAILURE_ABORT` and all written **inside** the
+repository transaction that makes the change — `AuditLogger` opens no transaction of its own and `DB`
+is arch-pinned to `App\Repositories\Eloquent`, so each mutating repository method takes the audit call
+as a required closure.
+
+One row is deliberately not `ABORT`: `provider.connection.credential_rotation_failed` is
+`OUTCOME_FAILURE` under the lenient policy, because there is no state change left to roll back — the
+point of the row is that nothing happened — and aborting on a failed audit write would convert a
+recorded rejection into an unrecorded 500. Read `AuditLogger::OPERATIONS` for the membership of each
+policy; do not restate it or its cardinality (ADR-036, ADR-041, and § H14 for what happens when it is
+restated beside the constant).
+
+### J7 — `kb-security-baseline` §18.4's worked example refuses the rotation ADR-047 permits
+
+**Ruled on 2026-08-19: the skill names the exception; the code does not move.** Of the two readings
+below, the first was taken — the example is generic and this product's credential lifecycle is the
+exception — so `kb-security-baseline` §18.4 now carries two paragraphs under its code block: one
+stating that **check 5 on a rotation asks about the parent entity**, because the thing being rotated is
+the thing that is broken, and one reconciling the §18.3 half by noting that the `current_password`
+rule form and the freshness window are both legitimate, and that only the rule form runs *before the
+row is read*. `RotateProviderCredentialController` is unchanged and ADR-047 stands.
+
+The reasoning, kept because the ruling is only as good as it: the skill's example spells check 5 as
+`abort_unless($credential->status === CredentialStatus::Active, 409)`, i.e. *a disabled or pending
+credential is not rotatable*. `RotateProviderCredentialController` checks the **organization's** status
+and deliberately not the connection's, for the reason ADR-047 states: `invalid` and `revoked` are the
+two states whose remedy **is** a new key, and refusing makes delete-and-recreate the only escape — at
+the cost of the connection id, its catalogue rows and its embedding designation.
+
+Two readings were available and they are not equivalent: either the skill's example is generic and
+this product's credential lifecycle is the exception (in which case the example wants a sentence naming
+the exception), or check 5 for a *rotation* is genuinely about the parent entity rather than the
+credential (in which case the example is wrong in general and the fix is upstream of us). **The first
+was chosen**, and the reason is worth stating: the second is a claim about every service that rotates a
+credential, made from one product's experience of two states — `invalid` and `revoked` — that another
+product might not have. The skill now says both things: the example stands as written, and a rotation
+is the case where the status question moves up to the owner.
+
+There was a second, smaller divergence in the same example: it satisfies §18.3 with a **freshness
+window** (`requireReauthenticationWithin($actor, minutes: 15)`) where ADR-047 re-checks the password.
+Both are legitimate readings of §18.3, and only the rule form runs before the row is read; the skill now
+says so and recommends the rule form wherever the action has a FormRequest.
+
+Owner: ruled by the session that owns `.claude/skills/**`; no code changed.

@@ -6,11 +6,10 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useCallback } from 'react';
 
 import { useResetQueryClient } from '@/components/providers';
-import { sessionCredential } from '@/lib/api/browser';
+import { browserFetchData, sessionCredential } from '@/lib/api/browser';
 
 import {
   activeOrganizations,
-  browserFetchData,
   NEUTRAL_ROUTE,
   performOrganizationSwitch,
   SESSION_KEY,

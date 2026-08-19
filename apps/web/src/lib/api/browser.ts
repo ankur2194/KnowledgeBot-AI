@@ -96,6 +96,36 @@ export async function browserFetch<T>(request: BrowserRequest): Promise<T> {
   return (await response.json()) as T;
 }
 
+/**
+ * EVERY SUCCESS BODY ON THIS API IS WRAPPED IN `data`, and the wrapper is not decoration:
+ * `App\Support\Contracts\ResponseShape` maps a response KEY to a schema class, so an unwrapped body
+ * is literally unpublishable by `php artisan kb:dump-openapi` — and the two endpoints that predate
+ * all auth work already wrap. `tests/msw/handlers.ts:52-69` is the fixture-side statement of the
+ * same fact and `tests/components/msw-harness.test.tsx:33-39` asserts it.
+ */
+export interface ApiEnvelope<T> {
+  readonly data: T;
+}
+
+/**
+ * THE UNWRAP, IN ONE PLACE. Every call that expects an envelope goes through here, so `data` is read
+ * exactly once — at the fetch boundary — and never by reaching into `.data` at a render site. A
+ * render site that knows about the envelope is a render site that has to be edited when the envelope
+ * changes, and there are more of those than there are fetchers.
+ *
+ * IT LIVES HERE, BESIDE `browserFetch`, AND THAT IS THE RECORD OF A MOVE RATHER THAN AN ORIGIN. It
+ * was written in `features/auth/session.ts` while auth was the only feature that unwrapped anything,
+ * with a standing instruction in this docblock: when a second feature needs it, MOVE it rather than
+ * copy it — a second unwrap is a second place the envelope is known. `features/members` and then
+ * `features/providers` were that second feature, so the move was made and no re-export shim was left
+ * behind in `session.ts`. A single home is the whole point; anyone tempted to add a local
+ * `const body = await browserFetch<{data: T}>(…)` in a feature is re-forking it.
+ */
+export async function browserFetchData<T>(request: BrowserRequest): Promise<T> {
+  const body = await browserFetch<ApiEnvelope<T>>(request);
+  return body.data;
+}
+
 /** One request, built from the credential union and nothing ambient. */
 function send(request: BrowserRequest, credential: Credential): Promise<Response> {
   const headers: Record<string, string> = { Accept: 'application/json' };

@@ -24,6 +24,23 @@ export interface KbErrorEnvelope {
   /** Echoes `X-KB-Request-Id`. Absent on SSE `error` frames, present on HTTP envelopes. */
   readonly request_id?: string | null;
   /**
+   * Whether `message` was written for THIS condition and may be shown to an operator, as opposed to
+   * being a fixed placeholder chosen to say nothing — the >= 500 constant, or the
+   * enumeration-oracle constants both planes render for `authorization`.
+   *
+   * IT IS NOT A STATUS AND NOTHING MAY INFER ONE FROM IT. It exists because a deliberate 4xx and an
+   * unhandled exception both render `internal_dependency` with `retryable: false` (the taxonomy has
+   * no 409 row, on purpose), so "clear the designation first, then delete" and "the service could
+   * not complete this request" were structurally the same envelope. The console used to tell them
+   * apart by comparing `message` against a client-side copy of the 5xx constant — a filter whose
+   * premise was a property of the whole server tree rather than of the response in hand.
+   *
+   * OPTIONAL, like `request_id` and for the same reason: this interface is the union of the HTTP
+   * body and the SSE `error` frame, and the frame does not carry it. Absent must be read as
+   * `false` — see `toKbError`, which is the one place that reads it.
+   */
+  readonly actionable?: boolean;
+  /**
    * Present ONLY on `error_class: "validation"` — never null, never `{}` on any other class.
    * Keyed by input field name, already dot-pathed by Laravel ("retrieval.top_k",
    * "starter_questions.2"), which are valid react-hook-form names as-is.

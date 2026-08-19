@@ -30,7 +30,10 @@ export const revalidate = 0;
 // The per-segment fetch-cache override is NEVER set here — its 'force-cache'/'default-cache'
 // values re-enable caching for fetches issued AFTER a request-time API, which is precisely the
 // window force-dynamic is closing. Its identifier is deliberately unspelled anywhere under this
-// route group, because CI greps this directory for it.
+// route group, and that is enforced — by ESLint, in this workspace, not by a pipeline:
+// eslint.config.mjs bans `VariableDeclarator[id.name='fetchCache']` for `src/app/(admin)/**`,
+// alongside 'force-static' and generateStaticParams. `pnpm web:lint` is the run, and nothing runs
+// it for you: `.github/` was deleted on 2026-08-17 and this repo has no CI.
 
 export const metadata: Metadata = {
   title: 'KnowledgeBot AI',

@@ -177,8 +177,11 @@ class Capability(StrEnum):
     #: serves the surface; ``capabilities.PROVIDER_TASKS`` says whether the vendor publishes
     #: the endpoint at all, and ``capabilities.can_embed`` is the AND. A row carrying this flag
     #: on a vendor with no embedding endpoint is a configuration defect —
-    #: ``capabilities.assert_row_coherent`` rejects it when the connection is saved, and
-    #: ``can_embed`` answers False at request time rather than sending a call that 404s in the
+    #: ``capabilities.assert_row_coherent`` rejects it — on the embedding-readiness walk,
+    #: which is the only thing that calls it, and NOT on the save as this line used to claim
+    #: (finding J1); for this flag the distinction is small, because that walk is what the
+    #: designation screen renders — and ``can_embed`` answers False at request time rather
+    #: than sending a call that 404s in the
     #: middle of an ingest run, after the parse and the OCR have been paid for.
     #:
     #: This comment previously read "verified present on OpenAI, NVIDIA NIM and OpenRouter,

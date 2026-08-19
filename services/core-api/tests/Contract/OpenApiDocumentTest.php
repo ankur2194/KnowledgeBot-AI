@@ -4,10 +4,15 @@ declare(strict_types=1);
 
 use App\Exceptions\KbException;
 use App\Http\Resources\EmbeddingReadinessResource;
+use App\Http\Resources\ProviderConnectionCollectionResource;
 use App\Http\Resources\ProviderConnectionResource;
+use App\Http\Resources\ProviderModelCollectionResource;
+use App\Http\Resources\ProviderModelResource;
 use App\Models\Organization;
 use App\Models\ProviderConnection;
+use App\Models\ProviderModelEntry;
 use App\Services\Embedding\EmbeddingCandidate;
+use App\Services\Embedding\EmbeddingDesignation;
 use App\Services\Embedding\EmbeddingReadiness;
 use App\Services\Embedding\EmbeddingRejection;
 use App\Support\Contracts\ProvidesOpenApiSchema;
@@ -228,37 +233,79 @@ function candidateFixture(string $connectionId): EmbeddingCandidate
  * The fixture matrix. Every branch a single fixture cannot express is a row here: a null
  * `selected`, an empty `eligible`, an empty `rejected`, and both populated.
  *
- * @return array<string, EmbeddingReadiness>
+ * EVERY ROW IS A PAIR, because `designated` is a SECOND, INDEPENDENT axis and not a function of the
+ * verdict. The resource renders the stored `(connection_id, model)` off `organizations`, which the
+ * readiness object does not carry and cannot be derived from: `selected: null` happens both when
+ * nothing was designated and when a designation stopped resolving, and those are the two cells this
+ * matrix has to keep apart. The `null`/populated column is therefore crossed with the ready/blocked
+ * column rather than folded into it.
+ *
+ * @return array<string, array{readiness: EmbeddingReadiness, designated: ?EmbeddingDesignation}>
  */
 function readinessFixtures(): array
 {
     $id = (string) Str::ulid();
 
     return [
-        'ready, with a rejection alongside' => new EmbeddingReadiness(
-            selected: candidateFixture($id),
-            eligible: [candidateFixture($id)],
-            rejected: [new EmbeddingRejection($id, 'anthropic', 'claude-x', 'vendor_has_no_endpoint', 'no embeddings endpoint')],
-            explanation: '',
-        ),
-        'ready, nothing rejected' => new EmbeddingReadiness(
-            selected: candidateFixture($id),
-            eligible: [candidateFixture($id)],
-            rejected: [],
-            explanation: '',
-        ),
-        'blocked, nothing eligible' => new EmbeddingReadiness(
-            selected: null,
-            eligible: [],
-            rejected: [],
-            explanation: 'This organization has no embedding-capable provider connection.',
-        ),
-        'blocked, with rejections' => new EmbeddingReadiness(
-            selected: null,
-            eligible: [],
-            rejected: [new EmbeddingRejection($id, 'openai', 'gpt-x', 'row_lacks_embedding_flag', 'the row does not claim embedding')],
-            explanation: 'Every candidate was refused.',
-        ),
+        'ready, with a rejection alongside, nothing designated' => [
+            'readiness' => new EmbeddingReadiness(
+                selected: candidateFixture($id),
+                eligible: [candidateFixture($id)],
+                rejected: [new EmbeddingRejection($id, 'anthropic', 'claude-x', 'vendor_has_no_endpoint', 'no embeddings endpoint')],
+                explanation: '',
+            ),
+            'designated' => null,
+        ],
+        'ready, nothing rejected, nothing designated' => [
+            'readiness' => new EmbeddingReadiness(
+                selected: candidateFixture($id),
+                eligible: [candidateFixture($id)],
+                rejected: [],
+                explanation: '',
+            ),
+            'designated' => null,
+        ],
+        // THE READY-AND-DESIGNATED CELL. A designation is never substituted, so when one resolves
+        // the two fields agree on connection and model and `selected` alone carries `provider`.
+        'ready, and the designation is what resolved' => [
+            'readiness' => new EmbeddingReadiness(
+                selected: candidateFixture($id),
+                eligible: [candidateFixture($id)],
+                rejected: [],
+                explanation: '',
+            ),
+            'designated' => new EmbeddingDesignation($id, 'text-embedding-3-large'),
+        ],
+        'blocked, nothing eligible, nothing designated' => [
+            'readiness' => new EmbeddingReadiness(
+                selected: null,
+                eligible: [],
+                rejected: [],
+                explanation: 'This organization has no embedding-capable provider connection.',
+            ),
+            'designated' => null,
+        ],
+        'blocked, with rejections, nothing designated' => [
+            'readiness' => new EmbeddingReadiness(
+                selected: null,
+                eligible: [],
+                rejected: [new EmbeddingRejection($id, 'openai', 'gpt-x', 'row_lacks_embedding_flag', 'the row does not claim embedding')],
+                explanation: 'Every candidate was refused.',
+            ),
+            'designated' => null,
+        ],
+        // THE CELL `designated` WAS ADDED FOR: a pair really is stored and it no longer resolves.
+        // Before the field, this row and the two above it were byte-identical apart from
+        // `explanation`, which is prose the data plane owns and a client may not parse.
+        'blocked, and the STORED designation is what stopped resolving' => [
+            'readiness' => new EmbeddingReadiness(
+                selected: null,
+                eligible: [],
+                rejected: [new EmbeddingRejection($id, 'openai', 'text-embedding-3-large', 'row_lacks_embedding_flag', 'the row does not claim embedding')],
+                explanation: 'The designated connection and model no longer resolve to an embedder.',
+            ),
+            'designated' => new EmbeddingDesignation($id, 'text-embedding-3-large'),
+        ],
     ];
 }
 
@@ -268,12 +315,63 @@ it('publishes exactly the keys EmbeddingReadinessResource emits, on every branch
     $components = EmbeddingReadinessResource::openApiSchemas();
     $request = Request::create('/api/v1/organizations/01JQZ0000000000000000000AA/embedding-configuration');
 
-    foreach (readinessFixtures() as $label => $readiness) {
-        $emitted = (new EmbeddingReadinessResource($readiness))->toArray($request);
+    foreach (readinessFixtures() as $label => $fixture) {
+        $emitted = (new EmbeddingReadinessResource($fixture['readiness'], $fixture['designated']))
+            ->toArray($request);
 
         expect(schemaViolations($emitted, $components['EmbeddingReadinessResource'], $components))
             ->toBe([], "the published schema disagrees with toArray() for: {$label}");
     }
+});
+
+it('renders a stored-but-unresolvable designation as a null `selected` AND a populated `designated`', function (): void {
+    // THE WHOLE REASON `designated` EXISTS, asserted as one fact rather than left to the matrix.
+    //
+    // Before it, "you designated nothing and nothing resolved by rule" and "you designated X and X
+    // is failing" produced IDENTICAL structure — `ready: false`, `selected: null`, and the stored
+    // pair mentioned only inside `explanation`, which is the data plane's prose, rendered verbatim
+    // by contract and therefore unparseable by a client that wants to name the failing connection.
+    // So the designation screen could only ever fall back to resolve-by-rule copy, which is a
+    // DIFFERENT claim from the truth.
+    $request = Request::create('/');
+    $connectionId = (string) Str::ulid();
+
+    $blocked = new EmbeddingReadiness(
+        selected: null,
+        eligible: [],
+        rejected: [new EmbeddingRejection(
+            $connectionId,
+            'openai',
+            'text-embedding-3-large',
+            'row_lacks_embedding_flag',
+            'the row does not claim embedding',
+        )],
+        explanation: 'The designated connection and model no longer resolve to an embedder.',
+    );
+
+    $designated = new EmbeddingDesignation($connectionId, 'text-embedding-3-large');
+
+    $rendered = (new EmbeddingReadinessResource($blocked, $designated))->toArray($request);
+
+    expect($rendered['ready'])->toBeFalse()
+        ->and($rendered['blocks_ingestion'])->toBeTrue()
+        ->and($rendered['selected'])->toBeNull()
+        // POPULATED, AND WITH THE STORED PAIR RATHER THAN ANYTHING THE RESOLVER PRODUCED. The two
+        // keys and no third: `organizations` stores a connection id and a model string, and a
+        // `provider` here would be a join publishing a value the designation does not contain.
+        ->and($rendered['designated'])->toBe([
+            'connection_id' => $connectionId,
+            'model' => 'text-embedding-3-large',
+        ]);
+
+    // AND THE DISCRIMINATION IS REAL: the same blocked verdict with nothing stored differs in
+    // exactly this one key. Without this half the assertion above would pass against a `designated`
+    // that echoed something from the readiness object instead of reading the organization.
+    $undesignated = (new EmbeddingReadinessResource($blocked, null))->toArray($request);
+
+    expect($undesignated['designated'])->toBeNull()
+        ->and($undesignated['selected'])->toBe($rendered['selected'])
+        ->and($undesignated['explanation'])->toBe($rendered['explanation']);
 });
 
 it('publishes exactly the keys ProviderConnectionResource emits', function (): void {
@@ -289,6 +387,74 @@ it('publishes exactly the keys ProviderConnectionResource emits', function (): v
     $emitted['created_at'] = null;
 
     expect(schemaViolations($emitted, $components['ProviderConnectionResource'], $components))->toBe([]);
+
+    // AND THE COLLECTION WRAPPER — the one published component that had no toArray()-versus-schema
+    // case, while EmbeddingReadinessResource, ProviderConnectionResource, ProviderModelResource and
+    // ProviderModelCollectionResource all had one. `names its own component` proves it DECLARES a
+    // schema; nothing proved the schema matched what it emits, which is the half that catches a key
+    // renamed on one side only.
+    //
+    // BOTH THE EMPTY AND THE POPULATED CASE. An empty list is what a new organization's index
+    // returns and is the branch a single fixture cannot distinguish — `items` is never evaluated
+    // against a zero-length array, so a `$ref` to a component that does not exist would validate.
+    $collection = ProviderConnectionCollectionResource::openApiSchemas();
+
+    foreach ([[], [$connection]] as $index => $rows) {
+        $emittedCollection = (new ProviderConnectionCollectionResource($rows))->toArray(Request::create('/'));
+
+        expect(schemaViolations($emittedCollection, $collection['ProviderConnectionCollectionResource'], $collection))
+            ->toBe([], "the collection schema disagrees with toArray() for fixture set {$index}");
+    }
+});
+
+it('publishes exactly the keys ProviderModelResource emits, priced and unpriced', function (): void {
+    $org = Organization::factory()->create();
+    $connection = ProviderConnection::factory()->recycle($org)->create();
+
+    $components = ProviderModelResource::openApiSchemas();
+
+    // TWO FIXTURES, BECAUSE ONE CANNOT DISTINGUISH THE BRANCH THAT MATTERS. A priced row proves the
+    // decimal STRING representation is what the schema declares; an unpriced one proves the null
+    // branch is declared as `["string", "null"]` rather than as `string`. A generated client built
+    // from the second-best answer would type `price_currency` as non-nullable and break on the
+    // majority of real rows.
+    $fixtures = [
+        'priced' => ProviderModelEntry::factory()->recycle($org)->recycle($connection)
+            ->supporting(['embedding'])
+            ->priced('0.130000', '0.000000')
+            ->create(['model' => 'text-embedding-3-large']),
+        // An EMPTY flag list too: `supported: []` is a legitimate state ("this row claims nothing")
+        // and is the value a malformed stored envelope also renders as, so the schema has to admit
+        // it.
+        'unpriced, no flags, disabled' => ProviderModelEntry::factory()
+            ->recycle($org)->recycle($connection)
+            ->supporting([])->disabled()
+            ->create(['model' => 'gpt-5-unpriced']),
+    ];
+
+    foreach ($fixtures as $label => $row) {
+        $emitted = (new ProviderModelResource($row))->toArray(Request::create('/'));
+
+        expect(schemaViolations($emitted, $components['ProviderModelResource'], $components))
+            ->toBe([], "the published schema disagrees with toArray() for: {$label}");
+    }
+
+    // The null branch of created_at, which the factory cannot produce.
+    $emitted = (new ProviderModelResource($fixtures['priced']))->toArray(Request::create('/'));
+    $emitted['created_at'] = null;
+
+    expect(schemaViolations($emitted, $components['ProviderModelResource'], $components))->toBe([]);
+
+    // And the collection wrapper, over BOTH rows plus the empty case a connection with no catalogue
+    // returns.
+    $collection = ProviderModelCollectionResource::openApiSchemas();
+
+    foreach ([[], array_values($fixtures)] as $index => $rows) {
+        $emitted = (new ProviderModelCollectionResource($rows))->toArray(Request::create('/'));
+
+        expect(schemaViolations($emitted, $collection['ProviderModelCollectionResource'], $collection))
+            ->toBe([], "the collection schema disagrees with toArray() for fixture set {$index}");
+    }
 });
 
 it('names its own component, so the generated type has the name the client imports', function (): void {
@@ -387,12 +553,16 @@ it('renders no provider credential, from a connection whose key really was seale
 
 it('emits no key at all from EmbeddingReadinessResource', function (): void {
     // The readiness answers a CONFIGURATION question. Even a masked key would be a value on a
-    // screen that had no reason to render one — and EmbeddingCandidate/EmbeddingRejection have
-    // nowhere to put a secret by construction, which is what this asserts is still true.
+    // screen that had no reason to render one — and EmbeddingCandidate, EmbeddingRejection and
+    // EmbeddingDesignation all have nowhere to put a secret by construction, which is what this
+    // asserts is still true. The designation matters most of the three here: it is the only field
+    // read off the ORGANIZATION row rather than relayed from the data plane, so it is the only one
+    // whose source table sits beside `provider_connections` and its credential columns.
     $request = Request::create('/');
 
-    foreach (readinessFixtures() as $label => $readiness) {
-        $rendered = (new EmbeddingReadinessResource($readiness))->toArray($request);
+    foreach (readinessFixtures() as $label => $fixture) {
+        $rendered = (new EmbeddingReadinessResource($fixture['readiness'], $fixture['designated']))
+            ->toArray($request);
 
         foreach (flattenStrings($rendered) as $fragment) {
             expect((bool) preg_match('/credential|api[_-]?key|secret|password|ciphertext|kek|last_four/i', $fragment))
@@ -437,15 +607,36 @@ it('publishes EmbeddingReadinessResource as a named component with its six field
 
     assert(is_array($schemas));
 
-    expect(array_keys($schemas))->toContain('EmbeddingReadinessResource', 'EmbeddingCandidate', 'EmbeddingRejection');
+    expect(array_keys($schemas))->toContain(
+        'EmbeddingReadinessResource',
+        'EmbeddingCandidate',
+        'EmbeddingRejection',
+        // A COMPONENT OF ITS OWN, because a designation is a genuinely different shape from a
+        // candidate: it is the two columns `organizations` stores and carries no `provider`.
+        'EmbeddingDesignation',
+    );
 
     $readiness = $schemas['EmbeddingReadinessResource'];
 
     assert(is_array($readiness) && is_array($readiness['properties']));
 
     expect(array_keys($readiness['properties']))->toEqualCanonicalizing([
-        'ready', 'blocks_ingestion', 'selected', 'eligible', 'rejected', 'explanation',
+        'ready', 'blocks_ingestion', 'selected', 'designated', 'eligible', 'rejected', 'explanation',
     ]);
+
+    // `designated` IS PUBLISHED THE SAME WAY `selected` IS — `anyOf: [{$ref}, {type: null}]` and
+    // not a type array — because a $ref and a type cannot be siblings in one schema object, and
+    // packages/contracts' `wireNullable` reads exactly this form. A `nullable: true` here would be
+    // OpenAPI 3.0 vocabulary in a 3.1 document and would generate a non-nullable type.
+    expect($readiness['properties']['designated']['anyOf'] ?? null)->toBe([
+        ['$ref' => '#/components/schemas/EmbeddingDesignation'],
+        ['type' => 'null'],
+    ]);
+
+    // AND IT IS REQUIRED. Every component in this document is closed AND total, so a key that can
+    // be null is still a key that is always present — `designated: null` means "nothing stored",
+    // never "the server did not say".
+    expect($readiness['required'] ?? [])->toContain('designated');
 
     // additionalProperties:false is what makes the generated type CLOSED. Without it a renamed
     // server field generates as an optional extra rather than as a compile error, which is the
@@ -584,6 +775,97 @@ it('validates the error bodies this service actually emits against the schemas t
 
     expect(schemaViolations($deniedBody, responseSchemaFor($document, '/api/v1/organizations/{organization}/embedding-configuration', 'get', 403), $schemas))
         ->toBe([], 'a real 403 body does not validate against ErrorEnvelope');
+
+    // (4) A RELAYED 422 THAT DOES CARRY A MAP — the half the relay used to erase. FastAPI's
+    // `_handle_validation_error` emits `errors` on EVERY validation envelope, so this body is the
+    // common case rather than an exotic one, and the published schema has to admit it.
+    //
+    // Constructed through KbException::relayed() rather than through Http::fake, because
+    // tests/Contract is a no-fake suite (pest-testing NN4) and the property under test here is the
+    // RENDERING of the carrier, not the HTTP hop that fills it. The hop itself is proved
+    // end-to-end in tests/Feature/EmbeddingConfigurationTest.php.
+    Route::get('api/v1/_test/relayed-422', static fn () => throw KbException::relayed(
+        'validation',
+        'request failed validation',
+        422,
+        false,
+        ['connections.0.model' => ['Input should be a valid string'], 'designated' => ['Field required']],
+    ));
+
+    $relayed = currentTest()->getJson('api/v1/_test/relayed-422');
+
+    $relayed->assertStatus(422)
+        ->assertJsonPath('error_class', 'validation')
+        ->assertJsonPath('errors.designated', ['Field required']);
+
+    $relayedBody = $relayed->json();
+
+    assert(is_array($relayedBody));
+
+    // THE DOTTED KEY IS ASSERTED THROUGH THE DECODED ARRAY, NOT THROUGH assertJsonPath. Pydantic
+    // joins its `loc` segments dotted (`connections.0.model`), and `Arr::get` — which every
+    // assertJsonPath goes through — has no escape for a dot INSIDE a key: it explodes on '.' and
+    // walks segments. Asserting it that way would look right and check a path that does not exist,
+    // so the map is read as data instead.
+    expect($relayedBody['errors'] ?? null)
+        ->toHaveKey('connections.0.model')
+        ->and(($relayedBody['errors'] ?? [])['connections.0.model'] ?? null)
+        ->toBe(['Input should be a valid string']);
+
+    expect(schemaViolations($relayedBody, ['$ref' => '#/components/schemas/ValidationErrorEnvelope'], $schemas))
+        ->toBe([], 'a RELAYED validation envelope carrying a field map does not validate');
+});
+
+it('relays the data plane\'s own retry verdict instead of recomputing it (ADR-029 at the relay)', function (): void {
+    // THE SECOND HALF OF B1, AND THE ONE WITH TEETH. `_handle_unexpected()` on the data plane
+    // raises with `origin=Origin.SELF` and puts `retryable: false` on the wire — "our bug, do not
+    // retry". KbException::relayed() used to omit $origin entirely, so the carrier defaulted to
+    // ORIGIN_DOWNSTREAM and bootstrap/app.php RECOMPUTED `true` from class-plus-origin. The
+    // browser then ran apps/web/src/lib/query/client.ts's full backoff ladder against a defect:
+    // finding O1, re-opened one hop later on the exact envelope O1 was about.
+    //
+    // Note what is deliberately NOT asserted: nothing here reads the STATUS to decide the verdict.
+    // The relayed 500 keeps its 500 because the class carries it, and `retryable` comes from the
+    // relayed field. Deriving either from the other is the mutation this test exists to catch.
+    config(['logging.default' => 'null']);
+
+    Route::get('api/v1/_test/relayed-self-500', static fn () => throw KbException::relayed(
+        'internal_dependency',
+        'The service could not complete this request.',
+        500,
+        false,
+    ));
+
+    currentTest()->getJson('api/v1/_test/relayed-self-500')
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency')
+        ->assertJsonPath('retryable', false);
+
+    // THE POSITIVE CONTROL, and it is what stops the pin above being satisfied by hard-coding
+    // `false`: a genuine downstream brownout still relays 503 / retryable=true on the same class.
+    Route::get('api/v1/_test/relayed-downstream-503', static fn () => throw KbException::relayed(
+        'internal_dependency',
+        'ai-service is draining',
+        503,
+        true,
+    ));
+
+    currentTest()->getJson('api/v1/_test/relayed-downstream-503')
+        ->assertStatus(503)
+        ->assertJsonPath('error_class', 'internal_dependency')
+        ->assertJsonPath('retryable', true);
+
+    // AND A MISSING `retryable` STILL READS AS DOWNSTREAM. An envelope that did not say is not an
+    // envelope that said "no": treating an absent field as SELF would suppress every legitimate
+    // retry the day a producer omits it.
+    Route::get('api/v1/_test/relayed-silent-503', static fn () => throw KbException::relayed(
+        'internal_dependency',
+        'ai-service is draining',
+        503,
+    ));
+
+    currentTest()->getJson('api/v1/_test/relayed-silent-503')
+        ->assertJsonPath('retryable', true);
 });
 
 it('types request_id so the data plane\'s null is describable, without relaxing what Laravel sends', function (): void {

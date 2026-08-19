@@ -10,14 +10,18 @@
  * Provider credentials are displayed as `masked_key` TEXT outside the form. A credential field is
  * optional-means-unchanged and is never seeded into defaultValues — prefilling it submits
  * "sk-…4a91" as the new key and every provider call then fails `provider_auth`.
+ *
+ * That rule now has an implementation rather than only a statement: `/settings/providers` renders the
+ * mask in a table cell, keeps `credential` out of every `defaultValues` in the feature, and gives the
+ * edit form a defaults factory whose parameter type has two members — so `reset({...connection})` is a
+ * typecheck failure rather than a review question. See `src/features/providers/connection-form.tsx`.
  */
 
-import { UsersIcon } from 'lucide-react';
+import { KeyRoundIcon, SlidersHorizontalIcon, UsersIcon } from 'lucide-react';
 import Link from 'next/link';
 
 import { PageHeader } from '@/components/page-header';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Skeleton } from '@/components/ui/skeleton';
 import { OrgSwitcher } from '@/features/auth/org-switcher';
 
 /**
@@ -27,9 +31,9 @@ import { OrgSwitcher } from '@/features/auth/org-switcher';
  * fire-and-forget and cannot be awaited, so the race is removed by placement rather than narrowed by
  * timing.
  *
- * Everything this server component renders is byte-identical for every organization — a heading, a
- * skeleton, a sentence. The switcher itself is a client component whose option list arrives from a
- * browser fetch, so no organization-scoped byte is produced by the Next server, whose five cache keys
+ * Everything this server component renders is byte-identical for every organization — a heading, three
+ * cards, four links and a sentence. The switcher itself is a client component whose option list arrives
+ * from a browser fetch, so no organization-scoped byte is produced by the Next server, whose five cache keys
  * do not contain the organization.
  */
 export default function SettingsPage() {
@@ -86,12 +90,44 @@ export default function SettingsPage() {
               returned in full.
             </CardDescription>
           </CardHeader>
-          <CardContent>
-            <div aria-busy="true" className="flex flex-col gap-3">
-              <Skeleton className="h-9" />
-              <Skeleton className="h-32" />
-            </div>
-            <p className="mt-3 text-sm text-muted-foreground">Settings load in the browser.</p>
+          <CardContent className="flex flex-col gap-2">
+            {/* UNCONDITIONAL, mirroring the People card above, and the role split here is WIDER than
+                that one: §6.4 gives `providers.view` to owner, admin AND knowledge_manager, because an
+                ingestion operator has to be able to see whether the organization can embed at all,
+                while `providers.manage` is owner and admin. An analyst who follows this link reads the
+                class-mapped 403 sentence rather than a list — and the link is still shown to them,
+                because hiding it would need the viewer's role, the role is per organization, and
+                reading it here would make this server component produce an organization-scoped byte.
+                UI hiding is not authorization: Laravel answers 403 whether or not the link was
+                rendered.
+
+                THE SKELETON THAT USED TO SIT HERE IS GONE. It was a placeholder for a settings panel
+                that was going to live on this page; the panel became `/settings/providers`, and a
+                skeleton that never resolves is a loading state for nothing. */}
+            <Link
+              href="/settings/providers"
+              className="inline-flex items-center gap-2 text-base text-primary underline-offset-4 hover:underline"
+            >
+              <KeyRoundIcon aria-hidden className="size-4" />
+              Provider connections
+            </Link>
+            {/* ── LINKED BEFORE IT EXISTS, DELIBERATELY, AND SAID SO ──────────────────────────────
+                `/settings/embedding` is the designation screen and lands next batch. Rendering the
+                link now keeps the agent that builds it from having to edit this file to be reachable —
+                and the same link is on the providers screen, next to the connection whose designation
+                it governs. A link that 404s for one batch is the lesser cost, and the sentence below
+                is what makes the affordance honest: it says the screen is coming, so a 404 reads as
+                "not yet" rather than as a broken console. */}
+            <Link
+              href="/settings/embedding"
+              className="inline-flex items-center gap-2 text-base text-primary underline-offset-4 hover:underline"
+            >
+              <SlidersHorizontalIcon aria-hidden className="size-4" />
+              Embedding designation
+            </Link>
+            <p className="text-sm text-muted-foreground">
+              The embedding screen is being built and is not available yet.
+            </p>
           </CardContent>
         </Card>
       </div>

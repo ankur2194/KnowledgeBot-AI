@@ -6,7 +6,9 @@ use App\Http\Controllers\Api\V1\EmbeddingConfigurationController;
 use App\Http\Controllers\Api\V1\InvitationController;
 use App\Http\Controllers\Api\V1\MemberController;
 use App\Http\Controllers\Api\V1\ProviderConnectionController;
+use App\Http\Controllers\Api\V1\ProviderModelController;
 use App\Http\Controllers\Api\V1\ResendInvitationController;
+use App\Http\Controllers\Api\V1\RotateProviderCredentialController;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -99,13 +101,160 @@ Route::middleware(['auth:sanctum', 'surface:admin', 'org.member', 'verified', 't
             ->name('embedding-configuration.update');
 
         /*
+         * PROVIDER CONNECTIONS — the organization's stored credentials.
+         *
+         * `{providerConnection}` RESOLVES THROUGH `$organization->providerConnections()` because
+         * the group calls ->scopeBindings(). That is the load-bearing part: a foreign or unknown
+         * id 404s at BINDING time, before any policy runs and before the row is in memory. A bare
+         * `ProviderConnection $providerConnection` binding would be a global find with no
+         * organization predicate, executed inside SubstituteBindings, upstream of every check
+         * (laravel-rbac-policies, Gotchas). The parameter is spelled `providerConnection` and not
+         * `connection` on purpose: Laravel derives the child relation as
+         * Str::plural(Str::camel($parameter)), so the name IS the wiring — `{connection}` would
+         * look for a `connections()` relation that does not exist and 404 everything.
+         *
          * A connection may be created purely to embed, and that is not a special case: with one
          * sourced embedding vendor it is the only way an organization on any other vendor can
          * ingest at all (finding C1, item 3). The response carries the resulting embedding
          * readiness beside the connection — the save never fails on it.
+         *
+         * `index` and `show` demand `providers.view`, which a KNOWLEDGE MANAGER holds (§6.4: an
+         * ingestion operator has to know whether the organization can embed at all); the three
+         * write verbs demand `providers.manage`, which that role does not hold. The split is per
+         * action rather than per controller, so it is asserted per action too.
          */
+        Route::get('/provider-connections', [ProviderConnectionController::class, 'index'])
+            ->name('provider-connections.index');
+
         Route::post('/provider-connections', [ProviderConnectionController::class, 'store'])
             ->name('provider-connections.store');
+
+        Route::get('/provider-connections/{providerConnection}', [ProviderConnectionController::class, 'show'])
+            ->name('provider-connections.show');
+
+        /*
+         * A PATCH, and it accepts `label` and `status` and NOTHING ELSE. There is no `credential`
+         * field on this route: UpdateProviderConnectionRequest declares no such rule, its DTO has
+         * no member to hold one, and the service it feeds never reaches the vault. Replacing a key
+         * is the route below.
+         */
+        Route::patch('/provider-connections/{providerConnection}', [ProviderConnectionController::class, 'update'])
+            ->name('provider-connections.update');
+
+        /*
+         * A GUARDED HARD DELETE. Refused with 409 while the connection is the organization's
+         * designated embedding credential — which is exactly what the composite ON DELETE RESTRICT
+         * on `organizations.embedding_connection_id` intends, and the controller does not work
+         * around it: the constraint stays the authority and the pre-flight check is only the
+         * actionable sentence.
+         */
+        Route::delete('/provider-connections/{providerConnection}', [ProviderConnectionController::class, 'destroy'])
+            ->name('provider-connections.destroy');
+
+        /*
+         * ROTATION IS ITS OWN ROUTE, ITS OWN CONTROLLER, AND ITS OWN LIMITER.
+         *
+         * A PUT on a sub-resource rather than a field on the PATCH above, because the separation is
+         * the security control: rotation re-authenticates the actor (§18.3 — it breaks every live
+         * bot on that provider the instant it commits) and a relabel does not, and one route
+         * covering both would apply the weaker policy to both.
+         *
+         * A SINGLE-ACTION CONTROLLER because `arch()->preset()->laravel()` limits a controller's
+         * public methods to the seven resource verbs plus `__construct`, `__invoke` and
+         * `middleware` — the same reason ResendInvitationController exists. `[Class, '__invoke']`
+         * rather than the bare class string is no longer load-bearing (DumpOpenApiCommand reads
+         * `uses`) and is kept because it says which method runs at the call site.
+         *
+         * THE SECOND LIMITER IS NOT DECORATION, and it is the same argument as
+         * `invitation-resend`. `throttle:admin` keys on (organization, user) at 120/min — the
+         * ACTOR — so on an endpoint that verifies a password it permits 120 guesses a minute from
+         * a legitimately signed-in session, which makes the §18.3 re-authentication a formality.
+         * `credential-rotation` keys on the actor at 5 per 15 minutes and on the IP, which is the
+         * per-account-AND-per-IP shape §18.3 requires of every password-verifying endpoint. Both
+         * apply; middleware is additive.
+         */
+        Route::put(
+            '/provider-connections/{providerConnection}/credential',
+            [RotateProviderCredentialController::class, '__invoke'],
+        )
+            ->middleware('throttle:credential-rotation')
+            ->name('provider-connections.credential.update');
+
+        /*
+         * PROVIDER MODELS — the catalog under one connection (docs/11 §16.2).
+         *
+         * THE CHILD SEGMENT IS `{model}`, AND THE NAME IS THE WIRING. `->scopeBindings()` on this
+         * group makes Laravel resolve a child through its PARENT's relation, and the relation name
+         * is DERIVED rather than declared: `Model::childRouteBindingRelationshipName()` is
+         * `Str::plural(Str::camel($childType))`, so `{model}` becomes `models()` — which is
+         * App\Models\ProviderConnection::models(), and it already existed. Verified against
+         * vendor/laravel/framework/src/Illuminate/Database/Eloquent/Model.php:2534, not assumed.
+         * `{providerModel}` would derive `providerModels()`, which does not exist, and every
+         * request here would 404.
+         *
+         * THE PARENT IS THE PRECEDING BOUND PARAMETER, NOT THE FIRST ONE:
+         * `Route::parentOfParameter()` returns `array_values($this->parameters)[$key - 1]`. So
+         * `{model}` scopes to `{providerConnection}` and `{providerConnection}` scopes to
+         * `{organization}` — two hops, both scoped. That is what makes a model row belonging to
+         * ANOTHER connection of the SAME organization a 404 at binding time, which is the case the
+         * composite foreign key `(organization_id, provider_connection_id)` and the scoped binding
+         * exist for together.
+         *
+         * THE FAILURE THIS PREVENTS IS NOT LOUD, AND IT IS WORTH STATING PRECISELY. Losing the
+         * scoping on `{model}` — by renaming the segment, by dropping ->scopeBindings(), or by
+         * omitting `ProviderConnection $providerConnection` from the action signature — does NOT
+         * expose another tenant's row: `#[ScopedBy(OrganizationScope::class)]` on
+         * ProviderModelEntry still appends the organization predicate, which is the backstop
+         * layer doing its job. What is lost is the CONNECTION predicate, so any catalog row of any
+         * of this organization's connections resolves under any other connection's URL. No
+         * cross-tenant test can see that, which is why
+         * tests/Security/ProviderModelAccessTest.php asserts it on its own.
+         *
+         * `index` and `show` demand `providers.view`, which a KNOWLEDGE MANAGER holds (§6.4: an
+         * ingestion operator has to know whether the organization can embed at all, and these
+         * rows' capability flags are half of that answer); the three write verbs demand
+         * `providers.manage`, which that role does not hold.
+         *
+         * WHY `update` IS A PUT AND NOT A PATCH: the row has seven mutable attributes, and "a body
+         * that changes nothing is refused" is expressible in `rules()` only as
+         * `required_without_all` naming six siblings on each of seven fields. The readable
+         * alternative — an `after()` closure — is invisible to `kb:dump-form-rules`, so the
+         * generated client would never be told the constraint exists (docs/22 finding 19). A PUT
+         * states the complete desired state and every rule stays one line the manifest can see.
+         *
+         * NO SECOND LIMITER, unlike the credential rotation below it. Nothing on these five routes
+         * touches a credential or verifies a password, so `throttle:admin`'s (organization, user)
+         * budget is the whole of check 6 here.
+         *
+         * A GUARDED HARD DELETE. Refused with 409 while the row is the (connection, model) PAIR the
+         * organization's embedding designation names. Unlike the connection delete, NO DATABASE
+         * CONSTRAINT backs that refusal — `organizations.embedding_model` is a bare `text` column
+         * with no foreign key to this table — so the check is the authority and is performed twice:
+         * once in the controller for the readable error, and once inside the repository's
+         * transaction under the same organization row lock the designation write takes.
+         *
+         * THAT LOCK CLOSES THE RACE IN BOTH DIRECTIONS ONLY BECAUSE THE DESIGNATION WRITE ALSO
+         * RE-VERIFIES, and this sentence used to claim more than the code did. The delete's
+         * re-read catches designate-then-delete; delete-then-designate was open, because
+         * EloquentOrganizationRepository::designateEmbeddingConnection() took the same lock and
+         * then wrote without checking the pair still existed. Both requests returned 200 and the
+         * organization was left naming a `provider_models` row that had been removed. It now
+         * re-verifies under that lock; the two serialise, and whichever loses is refused.
+         */
+        Route::get('/provider-connections/{providerConnection}/models', [ProviderModelController::class, 'index'])
+            ->name('provider-connections.models.index');
+
+        Route::post('/provider-connections/{providerConnection}/models', [ProviderModelController::class, 'store'])
+            ->name('provider-connections.models.store');
+
+        Route::get('/provider-connections/{providerConnection}/models/{model}', [ProviderModelController::class, 'show'])
+            ->name('provider-connections.models.show');
+
+        Route::put('/provider-connections/{providerConnection}/models/{model}', [ProviderModelController::class, 'update'])
+            ->name('provider-connections.models.update');
+
+        Route::delete('/provider-connections/{providerConnection}/models/{model}', [ProviderModelController::class, 'destroy'])
+            ->name('provider-connections.models.destroy');
 
         /*
          * MEMBERS AND INVITATIONS — org-scoped tenant data, so they go where all org-scoped data

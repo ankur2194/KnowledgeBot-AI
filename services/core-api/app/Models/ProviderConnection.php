@@ -34,6 +34,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property Provider $provider
  * @property string $label
  * @property int $key_version
+ * @property int $credential_version
  * @property string $last_four
  * @property ProviderConnectionStatus $status
  * @property \Illuminate\Support\Carbon|null $created_at
@@ -92,6 +93,12 @@ final class ProviderConnection extends Model implements OrgOwned
             'provider' => Provider::class,
             'status' => ProviderConnectionStatus::class,
             'key_version' => 'integer',
+            // TWO DIFFERENT NUMBERS, AND NEITHER IS THE OTHER. `key_version` names the KEK that
+            // wrapped this row's data key and moves when the PLATFORM rotates that key;
+            // `credential_version` counts how many times THIS TENANT has replaced this provider
+            // key and moves on every rotation. The migration that adds the second one records why
+            // the rotation endpoint may not increment the first.
+            'credential_version' => 'integer',
             'last_tested_at' => 'immutable_datetime',
             // `bytea` has no PDO binding, so the bytes travel as PostgreSQL's own `\x` hex input
             // format. The alternative — a `text` column — appears to work and silently mangles

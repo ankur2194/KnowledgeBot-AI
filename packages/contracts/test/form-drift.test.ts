@@ -17,6 +17,17 @@ import {
 import { botSettingsSchema } from '../src/forms/bot.js';
 import { embeddingDesignationSchema } from '../src/forms/embedding-designation.js';
 import { OWNERSHIP_KEYS, isOwnershipPath } from '../src/forms/ownership.js';
+import {
+  PROVIDER_CONNECTION_STATUSES,
+  providerConnectionEditDefaults,
+  providerConnectionEditSchema,
+} from '../src/forms/provider-connection.js';
+import {
+  providerModelCreateDefaults,
+  providerModelCreateSchema,
+  providerModelEditDefaults,
+  providerModelEditSchema,
+} from '../src/forms/provider-model.js';
 import { uploadSchema } from '../src/forms/upload.js';
 
 /**
@@ -103,6 +114,23 @@ const passwordOfLength: Sizer = (size) =>
   size >= 4 ? `Aa1${'b'.repeat(size - 3)}` : undefined;
 
 /**
+ * A `Sizer` for `supported.*` on both model-catalogue manifests, and the second worked example of why
+ * this hook exists.
+ *
+ * The element rule grew a `regex:/^[a-z][a-z0-9_]*$/` — the server closed a channel that let a tenant
+ * write an arbitrary attacker-chosen string into the model row's audit detail. `regex` is a
+ * `FORMAT_RULES` member, so from that moment `sizerFor` returns `undefined` for this path and BOTH
+ * `max:64` probes disappear: not reported, not failed, simply absent. `missingSizeProbes()` is what
+ * turns that into a red build instead of a quieter suite, and this generator is the repair it asks for.
+ *
+ * `'a'.repeat(n)` is length-exact AND matches the pattern — a run of lower-case letters starting with
+ * one — so `serverAccepts: true` at 64 is a true claim about the server rather than a convenient one,
+ * which is the whole burden a `sized` entry takes on. It is a claim made HERE, beside the mirror whose
+ * author verified it against the dumped rule, rather than inferred in the harness from a rule string.
+ */
+const capabilityFlagOfLength: Sizer = (size) => 'a'.repeat(size);
+
+/**
  * Manifest class → the schema in src/forms/ that mirrors it. Every dumped manifest must appear
  * here or in NO_CLIENT_FORM below, so the FormRequest nobody mirrored fails this suite by name
  * instead of being a form that 422s in production on a rule it was never told about.
@@ -161,6 +189,95 @@ const MIRRORS: Readonly<Record<string, Mirror>> = {
     schema: inviteMemberSchema,
     baseline: () => ({ email: 'invitee@example.com', role: 'analyst' }),
   },
+
+  /**
+   * THE ONE PROVIDER FORM WITH A SHARED SCHEMA, and the other two are the reason this entry needs a
+   * note. `StoreProviderConnectionRequest` and `RotateProviderCredentialRequest` both carry the
+   * plaintext `credential` and are NO_CLIENT_FORM below; this one carries `label` and `status` and
+   * CANNOT acquire a credential field (the FormRequest declares none, `ProviderConnectionEdit` has no
+   * member for one, and the service never reaches the vault). So the argument that exempts the other
+   * two does not reach this one, and what is left is exactly the kind of rule that drifts in silence:
+   * a fourth lifecycle status added server-side becomes a `<Select>` that cannot express a value the
+   * API returns, with nothing red anywhere.
+   *
+   * NO `sized` OVERRIDE. Neither field carries a format rule, so the generic `'a'.repeat(n)` sizer
+   * answers `max:120` honestly.
+   *
+   * BOTH FIELDS ARE `required_without` THE OTHER, which is CROSS_FIELD — so the harness suppresses
+   * the presence probes for both and the schema's `superRefine` (the "names neither" case) is
+   * asserted by hand in the cross-field section below rather than by a generated probe.
+   */
+  'App\\Http\\Requests\\UpdateProviderConnectionRequest': {
+    schema: providerConnectionEditSchema,
+    baseline: () => ({ label: 'Primary OpenAI key', status: 'active' }),
+  },
+
+  /**
+   * THE TWO MODEL-CATALOG REQUESTS, MOVED HERE FROM NO_CLIENT_FORM. That entry recorded them as OWED
+   * rather than exempt — neither carries a credential, both are ordinary field forms — and named the
+   * three-step diff that closes it: the schemas in src/forms/provider-model.ts, these entries, and the
+   * form that renders them (apps/web/src/features/models). rhf-zod-forms NN3 is why the schema could
+   * not simply be written earlier: a schema ships WITH the form that renders it, and one written ahead
+   * of its form is an unread declaration whose drift nobody would notice.
+   *
+   * ONE `sized` OVERRIDE ON EACH, and it is `supported.*` — see `capabilityFlagOfLength`. It used to
+   * be none: the element rule was `string|max:64` and the generic sizer answered it. The server then
+   * added `regex:/^[a-z][a-z0-9_]*$/`, which put the path into `FORMAT_RULES` territory and would have
+   * made `sizerFor` return `undefined`, dropping both `max:64` probes in silence. `missingSizeProbes()`
+   * caught it; the override is the repair.
+   *
+   * Each of the other size rules is probed by a different generator for a different reason.
+   * `display_name`/`model` carry no format rule, so `'a'.repeat(n)` answers `max:200` honestly.
+   * `supported` is `kind: 'array'`, so the sizer builds an n-element array against `max:20` — its
+   * filler element is `'a'`, which satisfies the new element pattern, so that probe stayed honest
+   * without an override. `supported.*` is `kind: 'string'` against `max:64` — reachable only because
+   * `schemaPaths`/`setPath` learned the `.*` segment below. The two prices are `kind: 'number'`, and
+   * their `decimal:0,6` probes pass real JS NUMBERS, which is why the schema's price field is a union
+   * over string AND number rather than the string-only shape the form actually produces: Laravel's
+   * `numeric` accepts both, and a string-only mirror would report a disagreement of this package's own
+   * invention.
+   *
+   * `price_currency` IS `required_with` BOTH PRICES, which is CROSS_FIELD — so the harness suppresses
+   * every presence probe on that field and the schema's `superRefine` is asserted by hand in the
+   * cross-field section below. Its `size:3` stays unprobed for the reason UNPROBED_RULES gives.
+   *
+   * THE BASELINES CARRY PRICES WITH SIX PLACES AND A CURRENCY. Six because that is the scale the
+   * server round-trips (`'0.02'` comes back `'0.020000'`), and a currency because a baseline with a
+   * price and no currency fails the `superRefine` before a single probe runs.
+   */
+  'App\\Http\\Requests\\StoreProviderModelRequest': {
+    schema: providerModelCreateSchema,
+    baseline: () => ({
+      model: 'gpt-5.6-sol',
+      display_name: 'GPT-5.6 Sol',
+      supported: ['text', 'tool_use'],
+      context_window: 400_000,
+      max_output_tokens: 128_000,
+      enabled: true,
+      input_price_per_million: '1.250000',
+      output_price_per_million: '10.000000',
+      price_currency: 'USD',
+    }),
+    sized: { 'supported.*': capabilityFlagOfLength },
+  },
+
+  'App\\Http\\Requests\\UpdateProviderModelRequest': {
+    schema: providerModelEditSchema,
+    // NO `model` KEY, and `strictObject` is what makes that a parse failure rather than a silent
+    // strip: the identifier is immutable, the FormRequest declares no rule for it, and a body
+    // carrying one would be a rename of the vector space everything under this row was embedded into.
+    baseline: () => ({
+      display_name: 'GPT-5.6 Sol',
+      supported: ['text', 'tool_use'],
+      context_window: 400_000,
+      max_output_tokens: 128_000,
+      enabled: true,
+      input_price_per_million: '1.250000',
+      output_price_per_million: '10.000000',
+      price_currency: 'USD',
+    }),
+    sized: { 'supported.*': capabilityFlagOfLength },
+  },
 };
 
 /**
@@ -176,7 +293,41 @@ const NO_CLIENT_FORM: Readonly<Record<string, string>> = {
   // defaultValues, and optional-means-unchanged — pending an explicit decision recorded with the
   // form, not a schema exported to apps/mobile and apps/widget by default.
   'App\\Http\\Requests\\StoreProviderConnectionRequest':
-    'credential field — see the comment above; no shared schema until the form lands in apps/web',
+    'credential field — see the comment above; the create form in apps/web/src/features/providers keeps it local, write-only and out of defaultValues',
+
+  // ROTATION CARRIES THE SAME FIELD AND THE SAME DECISION, and the argument above applies to it
+  // VERBATIM: `credential` is the plaintext provider key, and a shared importable schema naming it is
+  // one `providerConnectionDefaults(resource)` away from posting `…4a91` back as the new key.
+  //
+  // Rotation is in fact the WORSE of the two to export, for two reasons the create endpoint does not
+  // have. First, the seeding bug is unreachable on create — there is no resource to seed FROM — while
+  // rotate is by definition a form opened against an existing connection whose `masked_key` is on
+  // screen beside the input. The server has a `not_regex:/^\x{2026}/u` rule precisely because that is
+  // the obvious way to build this screen, and a rule that exists to catch a client mistake is not a
+  // licence to make it. Second, the body's other field is `current_password`: the §18.3
+  // re-authentication. A schema exported to apps/mobile and apps/widget that names both a provider key
+  // and the actor's password in one object is a shape nothing else in this package has, and the only
+  // thing it would buy is mirroring `min:8|max:512`, which the input's own `minLength`/`maxLength`
+  // carry.
+  //
+  // `current_password:web` is SERVER_ONLY besides — it needs the session and the stored hash — so the
+  // only mirrorable rules on this request are two length bounds and a regex the client must never
+  // rely on. The dialog in apps/web/src/features/providers/rotate-credential-dialog.tsx therefore
+  // ships with no resolver, exactly as the invite form did before its manifest existed, and maps the
+  // server's 422 onto `credential` and `current_password` by name.
+  'App\\Http\\Requests\\RotateProviderCredentialRequest':
+    'plaintext `credential` plus the §18.3 re-authentication password — see the comment above; no shared schema, and the dialog keeps both fields local, write-only and absent from defaultValues',
+
+  // THE TWO MODEL-CATALOG REQUESTS ARE GONE FROM THIS LIST and are MIRRORS entries above. Their
+  // note read "no form renders it yet … OWED rather than exempt", and it carried the hint that
+  // closed it: exact decimal STRINGS out and `numeric|decimal:0,6` in, `price_currency`
+  // `required_with` both prices, and `supported` `present|array` so the form posts `[]` rather than
+  // dropping the key. Every one of those is now a probe or a hand-written cross-field assertion.
+  //
+  // What that episode is worth keeping: the harness gained `numeric` and `decimal` probes BEFORE
+  // those schemas existed, deliberately, so a schema with no scale check could not "agree" with the
+  // server by being unprobed. It could not have gained them afterwards without somebody noticing
+  // they were missing, which nobody would have.
 
   // THE ONE ENDPOINT WHOSE SUBJECT *IS* THE OWNERSHIP RELATION, and therefore the one that cannot
   // have a form schema at all. Its only field is `organization_id`, which is the first entry in
@@ -221,8 +372,17 @@ const NO_CLIENT_FORM: Readonly<Record<string, string>> = {
 const nameOf = (rule: string): string => rule.split(':')[0] ?? rule;
 const argOf = (rule: string): string => rule.slice(rule.indexOf(':') + 1);
 
-/** No client can evaluate these: they need a database or a request context. Present, value-exempt. */
-const SERVER_ONLY = new Set(['exists', 'unique', '@server-only']);
+/**
+ * No client can evaluate these: they need a database or a request context. Present, value-exempt.
+ *
+ * `current_password:web` is the third member and the least obvious one. It resolves the named guard,
+ * pulls the authenticated user and compares a hash — three things a browser has none of — so no probe
+ * against it could be anything but a guess. It is the §18.3 re-authentication on
+ * `RotateProviderCredentialRequest`, and the client's whole job is to RENDER the field and key the
+ * server's 422 to it; a schema that "validated" the actor's password would be validating that the
+ * string is non-empty and implying more.
+ */
+const SERVER_ONLY = new Set(['exists', 'unique', '@server-only', 'current_password']);
 
 /**
  * `sometimes` short-circuits EVERY other rule for the field when the KEY IS ABSENT, `required` and
@@ -303,6 +463,28 @@ const setPath = (target: Candidate, path: string, value: unknown): void => {
   let cursor: Record<string, unknown> = target;
   for (const segment of segments) {
     cursor = cursor[segment] as Record<string, unknown>;
+  }
+
+  /**
+   * `supported.*` — Laravel's per-ELEMENT rules, and the first manifest key in this repo that does
+   * not name a property.
+   *
+   * Writing `cursor['*'] = value` is what the generic branch below would do, and it is silently
+   * wrong in the direction that produces a FALSE FAILURE: setting a `'*'` property on an ARRAY leaves
+   * every element untouched, `z.array(...)` ignores it entirely, and the `null` probe — which claims
+   * the server rejects a null element — would report "form accepts input the server rejects" against
+   * a schema that is exactly right. The obvious repair is to loosen the element schema.
+   *
+   * So the probe REPLACES THE ARRAY with a one-element array holding the value under test, which is
+   * what "this element rule sees this value" means. `OMITTED` becomes the EMPTY array: `supported`
+   * carries no `min:`, so a list with no elements runs no element rule at all and the server accepts
+   * it — which is the honest reading of "omit this element".
+   */
+  if (leaf === '*') {
+    const elements = cursor as unknown as unknown[];
+    elements.length = 0;
+    if (value !== OMITTED) elements.push(value);
+    return;
   }
 
   if (value === OMITTED) delete cursor[leaf];
@@ -527,6 +709,30 @@ function probesFor(path: string, rules: readonly string[], mirror: Mirror): Prob
         probes.push(probe(value, 'a string where a boolean is required', 'yes-ish', false));
         break;
 
+      case 'numeric':
+        // Laravel's `numeric` accepts numeric STRINGS ("1.5" passes), so the rejection probe has to be
+        // a string that is not a number rather than a string at all.
+        probes.push(probe(value, 'a non-numeric string where a number is required', 'not-a-number', false));
+        break;
+
+      case 'decimal': {
+        // `decimal:2` means EXACTLY two places; `decimal:0,6` means between none and six. Both forms
+        // appear in Laravel and only the second is in this repo today, so the parse handles both and
+        // the probes are built off the upper bound either way.
+        const [first, second] = argOf(rule).split(',');
+        const max = Number(second ?? first);
+        if (Number.isFinite(max)) {
+          // A magnitude of 1 keeps every co-declared `min:`/`max:` satisfied, so the only thing under
+          // test is the SCALE. JSON.stringify of a JS number prints its shortest round-trip form, which
+          // is what Laravel then counts the places of.
+          probes.push(probe(value, `decimal:${max} places`, Number(`1.${'1'.repeat(max)}`), true));
+          probes.push(
+            probe(value, `decimal:${max} + 1 places`, Number(`1.${'1'.repeat(max + 1)}`), false),
+          );
+        }
+        break;
+      }
+
       case 'max': {
         const max = Number(argOf(rule));
         sizeProbe(`max:${max} boundary`, max, true);
@@ -588,14 +794,40 @@ function driftFailures(manifest: Manifest, mirror: Mirror): string[] {
   return failures;
 }
 
-/** Every leaf path a schema declares, dotted, so it can be set-compared with the manifest's keys. */
+/**
+ * Every leaf path a schema declares, dotted, so it can be set-compared with the manifest's keys.
+ *
+ * ── THE ARRAY BRANCH, AND WHY IT IS NOT OPTIONAL ────────────────────────────────────────────────
+ * Laravel keys per-element rules with a `.*` segment (`supported.*: string|max:64`), so a manifest
+ * for a request with an array field has ONE MORE KEY than the schema has properties. Without this
+ * branch the `schema declares exactly the fields the FormRequest validates` assertion fails on a
+ * correct schema — and the two repairs it invites are both wrong: subtract `.*` keys from the
+ * manifest side (which silently drops the element rules from `driftFailures` too, so `max:64` stops
+ * being checked at all), or add a `'supported.*'` property to the schema (which is not a schema).
+ *
+ * An array contributes BOTH paths, exactly as the manifest does: `supported` carries the count rules
+ * and `supported.*` carries the element rules, and they are different questions.
+ *
+ * `.element` rather than a `def` walk because that is ZodArray's public accessor and it survives
+ * `.max()` (which returns a new ZodArray carrying the same element). `ZodOptional`/`ZodNullable`
+ * wrappers expose neither `.shape` nor `.element`, so a wrapped array reads as a leaf — no manifest
+ * in this repo has one, and the day one does, this assertion goes red naming the field rather than
+ * passing with the element rules unprobed.
+ */
 function schemaPaths(schema: z.ZodType, prefix = ''): string[] {
   const shape = (schema as unknown as { shape?: Record<string, z.ZodType> }).shape;
-  if (!shape) return prefix === '' ? [] : [prefix];
+  if (shape) {
+    return Object.entries(shape).flatMap(([key, child]) =>
+      schemaPaths(child, prefix === '' ? key : `${prefix}.${key}`),
+    );
+  }
 
-  return Object.entries(shape).flatMap(([key, child]) =>
-    schemaPaths(child, prefix === '' ? key : `${prefix}.${key}`),
-  );
+  const element = (schema as unknown as { element?: z.ZodType }).element;
+  if (element !== undefined && prefix !== '') {
+    return [prefix, ...schemaPaths(element, `${prefix}.*`)];
+  }
+
+  return prefix === '' ? [] : [prefix];
 }
 
 // ── the suite ────────────────────────────────────────────────────────────────────────────────────
@@ -681,13 +913,22 @@ describe('what the harness declines to probe', () => {
     bail: 'a control directive, not a constraint: it changes WHICH message comes back first, never which values are accepted',
     regex:
       'no generic generator satisfies an arbitrary pattern. A field carrying one supplies a `sized` generator in its Mirror so its size rules stay probed, and the patterns themselves are asserted in test/auth-schemas.test.ts — the one residual gap is proved and named in `the sizers` below',
-    size: 'the only `size:` field is the 64-hex invitation/verification token, and registerSchema mirrors it DELIBERATELY LOOSER (src/forms/auth.ts): a wrong-LENGTH token must reach the server and come back as the byte-identical "no longer valid" refusal rather than being rejected locally by a check that tells its holder the token is the wrong SHAPE. Probing it would report that decision as drift',
+    not_regex:
+      'the negative form of `regex`, and unprobeable for the same reason plus one: a REJECTION probe would have to synthesize a value that MATCHES an arbitrary pattern. The only `not_regex` in the tree guards the masked display string (`^…`) on the two credential requests, neither of which has a client schema at all — and the client-side property that matters there is structural rather than validated: no type in this package puts `masked_key` and `credential` in one shape, so there is nothing to seed the input from. See NO_CLIENT_FORM',
+    size: 'the `size:` fields are the 64-hex invitation/verification token and `price_currency`\'s `size:3`, and NEITHER can be probed generically. The token: registerSchema mirrors it DELIBERATELY LOOSER (src/forms/auth.ts), because a wrong-LENGTH token must reach the server and come back as the byte-identical "no longer valid" refusal rather than being rejected locally by a check that tells its holder the token is the wrong SHAPE — probing it would report that decision as drift. `price_currency` NOW HAS A MIRROR (providerModelCreateSchema/providerModelEditSchema) and is still unprobed, which is a narrower claim than the one that used to stand here: `size:3` is co-declared with `regex:/^[A-Z]{3}$/`, so the only honest acceptance value at length 3 is a three-letter UPPER-CASE code and the only honest rejection is a value of another length that also matches nothing — teaching `probesFor` a `size` case to reach it would apply that case to the four token manifests too, where the deliberate looseness above would then read as drift. The schema mirrors both halves as one regex and the cross-field section asserts it by hand',
   };
 
   /** Rule names `probesFor` generates a probe from, by switch case or by driving the presence pair. */
   const PROBED_RULES = new Set([
     'string',
     'integer',
+    // Both arrived with the model-catalogue manifests, whose requests are NO_CLIENT_FORM — so
+    // `probesFor` never runs on them today. They are TAUGHT rather than listed as UNPROBED anyway,
+    // because an entry in UNPROBED_RULES is silent forever: the day A4a mirrors those requests, a
+    // suppressed `decimal:0,6` would let a schema with no scale check "agree" with the server, which is
+    // the false green this file exists to prevent.
+    'numeric',
+    'decimal',
     'array',
     'boolean',
     'max',
@@ -725,8 +966,14 @@ describe('what the harness declines to probe', () => {
     ).toEqual([]);
   });
 
-  it('…and that check has teeth: an invented rule name is reported', () => {
-    expect(unknownRuleNames(['decimal:2', 'string', 'bail'])).toEqual(['decimal']);
+  it('…and that check has teeth: a rule name nobody taught this file is reported', () => {
+    // THIS PROBE USED TO BE `decimal:2`, AND IT HAD TO CHANGE, which is the check working rather than
+    // being weakened: `decimal` is a real Laravel rule that arrived in the model-catalogue manifests and
+    // is now in PROBED_RULES, so asserting it reads as unknown would have been asserting the opposite of
+    // what this file now knows. Any name that is genuinely untaught does the job; `hex_color` is a real
+    // Laravel rule this repo does not use, so the probe still asks "what happens when Laravel gains a
+    // rule nobody told the harness about" rather than "what happens to a typo".
+    expect(unknownRuleNames(['hex_color', 'string', 'bail'])).toEqual(['hex_color']);
   });
 
   /**
@@ -1057,6 +1304,383 @@ describe('embedding designation: the rules a single-field probe cannot express',
   });
 });
 
+/**
+ * The same treatment for the other cross-field pair in the package. `required_without` in BOTH
+ * directions is how `UpdateProviderConnectionRequest` says "either field alone is a legitimate PATCH
+ * body, but a body carrying neither is not" — and `probesFor` suppresses every presence probe on a
+ * CROSS_FIELD rule, because it cannot answer "is this field required?" from one field's rule list. So
+ * the four presence combinations are asserted here, where the intent can be written down.
+ *
+ * WHY THE SERVER SPELLS IT THIS WAY AT ALL: the alternative is a `withValidator`/`after` closure,
+ * which works server-side and is INVISIBLE to `kb:dump-form-rules` — the manifest is dumped from
+ * executing `rules()`, so a constraint expressed in a hook is a constraint this file could never see
+ * and no client would ever be told about.
+ */
+describe('provider connection edit: the rules a single-field probe cannot express', () => {
+  const parse = (value: unknown) => providerConnectionEditSchema.safeParse(value).success;
+
+  it('accepts either field alone — it is a PATCH, not a replace', () => {
+    expect(parse({ label: 'Primary OpenAI key' })).toBe(true);
+    expect(parse({ status: 'revoked' })).toBe(true);
+  });
+
+  it('accepts both together, and each `required_without` is satisfied by the other', () => {
+    expect(parse({ label: 'Primary OpenAI key', status: 'active' })).toBe(true);
+  });
+
+  it('rejects a body that names neither, which would audit an edit that did not happen', () => {
+    expect(parse({})).toBe(false);
+  });
+
+  /**
+   * THE LOOSENESS THIS PACKAGE REPORTED, NOW CLOSED ON BOTH SIDES — and it is asserted by hand for the
+   * same reason the cases above are: `min:1` is probed generically, but the case that MATTERS is
+   * `{label: "", status: "active"}`, and the probe that generates `""` cannot also supply the sibling
+   * that made the old behaviour surprising.
+   *
+   * The old shape was `required_without:status|string|max:120` with no lower bound, so `""` satisfied
+   * `required_without` (via `status`), `string` and `max:` — a 200 that blanked the label. That is not
+   * cosmetic: the update writes the new label into its own audit row and into every later one, so one
+   * empty PATCH erased the only human-readable identifier a reviewer had for that connection,
+   * retroactively. The server added `min:1` and this schema mirrors it.
+   */
+  it('rejects an empty label even when `status` satisfies the `required_without`', () => {
+    expect(parse({ label: '', status: 'active' })).toBe(false);
+    expect(parse({ label: '' })).toBe(false);
+    expect(parse({ label: 'a', status: 'active' })).toBe(true);
+  });
+
+  it('rejects an unknown key rather than silently stripping it', () => {
+    // `strictObject`. The key that matters is `credential`: this endpoint may never accept one, and a
+    // form whose extra field is dropped in silence is a form that looks like it worked.
+    expect(parse({ label: 'Primary', credential: 'sk-live-not-a-real-key' })).toBe(false);
+    expect(parse({ label: 'Primary', masked_key: '…4a91' })).toBe(false);
+  });
+
+  it('carries no credential field, and neither does the defaults factory', () => {
+    const paths = schemaPaths(providerConnectionEditSchema);
+    expect(paths.sort()).toEqual(['label', 'status']);
+    expect(
+      paths.some((path) => /credential|api_key|secret|masked|token|password/i.test(path)),
+    ).toBe(false);
+
+    // The ONLY path from server data into this form's state, and it reaches exactly two fields. A
+    // `reset({...connection})` would keep `masked_key` and submit it; this cannot.
+    expect(
+      providerConnectionEditDefaults({ label: 'Primary OpenAI key', status: 'invalid' }),
+    ).toEqual({ label: 'Primary OpenAI key', status: 'invalid' });
+  });
+
+  it('the status tuple is exactly the enum the schema accepts', () => {
+    // The tuple is what the `<Select>` iterates and the enum is what the resolver checks; two
+    // spellings of one list is how an option that cannot be submitted gets rendered.
+    for (const status of PROVIDER_CONNECTION_STATUSES) {
+      expect(parse({ status })).toBe(true);
+    }
+    expect(PROVIDER_CONNECTION_STATUSES).toHaveLength(3);
+    expect(parse({ status: 'suspended' })).toBe(false);
+  });
+});
+
+/**
+ * The model catalog's own unprobeable rules, and there are four kinds of them here — more than any
+ * other manifest in this package, which is why this block is the longest.
+ *
+ *   1. `required_with` in ONE direction (a price needs a currency; a currency needs no price). The
+ *      harness suppresses every presence probe on a CROSS_FIELD field, so the whole rule is here.
+ *   2. `present` vs omitted on three fields, where the two requests DISAGREE — the difference
+ *      between a create form that may skip pricing and a PUT that refuses a partial body.
+ *   3. The decimal SCALE as a STRING question. The generated probes pass JS numbers, which is the
+ *      right test of the rule and the wrong test of the thing that actually breaks: `'0.020000'`
+ *      surviving a round-trip byte for byte.
+ *   4. `size:3` on the currency, which UNPROBED_RULES declines for a reason it states.
+ */
+describe('the model catalog: the rules a single-field probe cannot express', () => {
+  const create = (value: unknown) => providerModelCreateSchema.safeParse(value);
+  const edit = (value: unknown) => providerModelEditSchema.safeParse(value);
+
+  const CREATE_BASE = {
+    model: 'gpt-5.6-sol',
+    display_name: 'GPT-5.6 Sol',
+    supported: ['text'],
+    context_window: 400_000,
+    max_output_tokens: 128_000,
+    enabled: true,
+    input_price_per_million: '1.250000',
+    output_price_per_million: '10.000000',
+    price_currency: 'USD',
+  };
+
+  const EDIT_BASE = {
+    display_name: 'GPT-5.6 Sol',
+    supported: ['text'],
+    context_window: 400_000,
+    max_output_tokens: 128_000,
+    enabled: true,
+    input_price_per_million: '1.250000',
+    output_price_per_million: '10.000000',
+    price_currency: 'USD',
+  };
+
+  it('refuses a price with no currency, in both price fields independently', () => {
+    // The database says the same thing one layer down (`provider_models_price_needs_currency`), and
+    // the reason is arithmetic rather than tidiness: two organizations billed in different
+    // currencies would both store `15.00`, and a spend estimate would add them.
+    expect(create({ ...CREATE_BASE, price_currency: null }).success).toBe(false);
+    expect(
+      create({ ...CREATE_BASE, output_price_per_million: null, price_currency: null }).success,
+    ).toBe(false);
+    expect(
+      create({ ...CREATE_BASE, input_price_per_million: null, price_currency: null }).success,
+    ).toBe(false);
+    expect(edit({ ...EDIT_BASE, price_currency: null }).success).toBe(false);
+  });
+
+  it('keys that refusal to `price_currency`, because the typed prices are not the mistake', () => {
+    const refused = create({ ...CREATE_BASE, price_currency: null });
+    expect(refused.success).toBe(false);
+    expect(refused.success === false && refused.error.issues[0]?.path).toEqual(['price_currency']);
+  });
+
+  it('accepts a currency with NO prices — the order a human fills the form in', () => {
+    const partial = {
+      ...CREATE_BASE,
+      input_price_per_million: null,
+      output_price_per_million: null,
+      price_currency: 'EUR',
+    };
+    expect(create(partial).success).toBe(true);
+    // …and the fully unpriced row, which is what "no price recorded" looks like. It is NOT free.
+    expect(create({ ...partial, price_currency: null }).success).toBe(true);
+  });
+
+  it('treats a cleared price input ("") as null, exactly as ConvertEmptyStringsToNull does', () => {
+    const cleared = create({
+      ...CREATE_BASE,
+      input_price_per_million: '',
+      output_price_per_million: '   ',
+      price_currency: '',
+    });
+    expect(cleared.success).toBe(true);
+    expect(cleared.success && cleared.data.input_price_per_million).toBeNull();
+    expect(cleared.success && cleared.data.output_price_per_million).toBeNull();
+    expect(cleared.success && cleared.data.price_currency).toBeNull();
+
+    // …and therefore a price with a CLEARED currency is refused rather than posted as "".
+    expect(create({ ...CREATE_BASE, price_currency: '' }).success).toBe(false);
+  });
+
+  /**
+   * THE ASSERTION THIS WHOLE FILE EXISTS FOR ON THIS SURFACE. The generated `decimal:0,6` probes pass
+   * JS NUMBERS — that is the honest test of Laravel's rule — and they cannot see the failure that
+   * actually happens: a schema that parses the price into a `number` agrees with every one of those
+   * probes and re-serializes `'0.020000'` as `'0.02'`. Same amount, different string, in an audit row
+   * and in a diff, and nothing anywhere reports it.
+   */
+  it('round-trips an exact decimal string BYTE FOR BYTE, trailing zeros included', () => {
+    const parsed = create({ ...CREATE_BASE, input_price_per_million: '0.020000' });
+    expect(parsed.success && parsed.data.input_price_per_million).toBe('0.020000');
+
+    // A JSON number is accepted (the server's `numeric` does) and stringified rather than kept as a
+    // number, so what leaves this schema is always the exact-decimal representation.
+    const fromNumber = create({ ...CREATE_BASE, input_price_per_million: 0.02 });
+    expect(fromNumber.success && fromNumber.data.input_price_per_million).toBe('0.02');
+    expect(typeof (fromNumber.success && fromNumber.data.input_price_per_million)).toBe('string');
+  });
+
+  it('mirrors the SCALE and the CEILING, and the ceiling is the form’s and not the column’s', () => {
+    expect(create({ ...CREATE_BASE, input_price_per_million: '0.123456' }).success).toBe(true);
+    expect(create({ ...CREATE_BASE, input_price_per_million: '0.1234567' }).success).toBe(false);
+    expect(create({ ...CREATE_BASE, input_price_per_million: '1000000' }).success).toBe(true);
+    expect(create({ ...CREATE_BASE, input_price_per_million: '1000000.000001' }).success).toBe(false);
+    expect(create({ ...CREATE_BASE, input_price_per_million: '-1' }).success).toBe(false);
+    // `numeric(14, 6)` holds up to 99,999,999.999999 and BOTH FormRequests stop at 1,000,000. The gap
+    // is deliberate: flush bounds would let the boundary value pass validation and then raise
+    // SQLSTATE 22003 from the driver as a 500 — a bug report about the server for a value the form
+    // said was fine. Mirroring the column's number instead of the form's would reproduce that.
+    expect(create({ ...CREATE_BASE, input_price_per_million: '99999999.999999' }).success).toBe(false);
+  });
+
+  it('refuses the exponent form, which `numeric` accepts and `decimal` does not', () => {
+    // PHP's `is_numeric('1e3')` is true, and Laravel's own decimal pattern has no exponent branch —
+    // so the server refuses it on the second rule. A client checking only `Number.isFinite` would
+    // accept a value the server rejects, which is the visible-422 direction and still drift.
+    expect(create({ ...CREATE_BASE, input_price_per_million: '1e3' }).success).toBe(false);
+    expect(create({ ...CREATE_BASE, input_price_per_million: 'not-a-price' }).success).toBe(false);
+  });
+
+  it('enforces the currency SHAPE without folding case, because the server does not fold either', () => {
+    expect(create({ ...CREATE_BASE, price_currency: 'usd' }).success).toBe(false);
+    expect(create({ ...CREATE_BASE, price_currency: 'US' }).success).toBe(false);
+    expect(create({ ...CREATE_BASE, price_currency: 'USDX' }).success).toBe(false);
+    expect(create({ ...CREATE_BASE, price_currency: 'USD' }).success).toBe(true);
+    // The SHAPE is enforced and membership of the real ISO 4217 list is not — that list changes, and
+    // pinning it here would make a new currency a release of this package.
+    expect(create({ ...CREATE_BASE, price_currency: 'ZZZ' }).success).toBe(true);
+  });
+
+  it('is a PUT: the edit schema refuses a body missing any of the three `present` fields', () => {
+    // The server expresses "a body that changes nothing is refused" by demanding the FULL attribute
+    // set, because the readable alternative — an `after()` closure — is invisible to
+    // `kb:dump-form-rules` and no client would ever be told the constraint exists. A form that
+    // omitted a field here would 422 on a rule it was never shown.
+    // `Object.entries().filter()` rather than `delete partial[field]`: indexing an object by a loop
+    // variable is the object-injection sink eslint-plugin-security reports, and a warning nobody can
+    // act on is a warning everybody stops reading.
+    for (const field of [
+      'input_price_per_million',
+      'output_price_per_million',
+      'price_currency',
+      'enabled',
+    ]) {
+      const partial = Object.fromEntries(
+        Object.entries(EDIT_BASE).filter(([key]) => key !== field),
+      );
+      expect(edit(partial).success, `${field} is present/required on the PUT`).toBe(false);
+    }
+  });
+
+  it('…while the create schema permits omitting all four, because that request says `sometimes`', () => {
+    expect(
+      create({
+        model: 'text-embedding-3-large',
+        display_name: 'Embedding 3 Large',
+        supported: ['embedding'],
+        context_window: 8191,
+        max_output_tokens: 0,
+      }).success,
+    ).toBe(true);
+  });
+
+  it('carries no `model` field on the edit schema, and refuses one rather than stripping it', () => {
+    expect(schemaPaths(providerModelEditSchema)).not.toContain('model');
+    // `strictObject`. `edit({...row})` is the tempting call and it is a parse FAILURE — the
+    // identifier is half of the vector-space identity for everything already embedded through the
+    // row, and `organizations.embedding_model` references it as a bare string with no foreign key.
+    expect(edit({ ...EDIT_BASE, model: 'gpt-5.6-sol' }).success).toBe(false);
+    expect(edit({ ...EDIT_BASE, id: ULID }).success).toBe(false);
+    expect(edit({ ...EDIT_BASE, connection_id: ULID }).success).toBe(false);
+  });
+
+  it('declares `supported` and its element rules as two paths, matching the manifest', () => {
+    expect(schemaPaths(providerModelCreateSchema).sort()).toEqual([
+      'context_window',
+      'display_name',
+      'enabled',
+      'input_price_per_million',
+      'max_output_tokens',
+      'model',
+      'output_price_per_million',
+      'price_currency',
+      'supported',
+      'supported.*',
+    ]);
+  });
+
+  it('leaves the capability vocabulary OPEN, because the closed list is the data plane’s', () => {
+    // A `z.enum(...)` here would reject a flag the data plane added last week — functionality
+    // removed with nothing reported — and Laravel validates the members as
+    // `string|max:64|regex:/^[a-z][a-z0-9_]*$/`, which is a claim about SPELLING and not about
+    // membership, and publishes no enum on the resource. The admin console's closed checkbox list is
+    // a UI affordance declared beside the form that renders it, and it PRESERVES an unrecognised flag
+    // rather than dropping it.
+    expect(create({ ...CREATE_BASE, supported: ['a_flag_nobody_here_has_heard_of'] }).success).toBe(
+      true,
+    );
+    expect(create({ ...CREATE_BASE, supported: ['a'.repeat(65)] }).success).toBe(false);
+    // Open on the MEMBERS, closed on the COUNT: `max:20` is a server rule and is mirrored.
+    expect(
+      create({ ...CREATE_BASE, supported: Array.from({ length: 21 }, () => 'text') }).success,
+    ).toBe(false);
+    expect(
+      create({ ...CREATE_BASE, supported: Array.from({ length: 20 }, () => 'text') }).success,
+    ).toBe(true);
+  });
+
+  /**
+   * THE ELEMENT PATTERN IS ASSERTED HERE OR NOWHERE. `regex` is an `UNPROBED_RULES` entry — no generic
+   * generator satisfies an arbitrary pattern — so the drift harness proves the element's `max:64` and
+   * says nothing at all about its shape. A schema that dropped `.regex(CAPABILITY_FLAG)` would stay
+   * green above and be a form accepting input the server rejects, which is the direction that produces
+   * a 422 nobody predicted rather than the silent one, but is still drift.
+   *
+   * The rule exists because `supported` is echoed verbatim into the model row's audit detail, so an
+   * unconstrained element let a tenant write an arbitrary attacker-chosen string — a key-shaped one,
+   * a sentence, a URL — into a field operators read as trustworthy. Every rejection below is a member
+   * of that class; the last is the one the server rule was written for.
+   */
+  it('constrains each flag to a lower-snake identifier, which is what the server now checks', () => {
+    const rejects = (flag: string): boolean =>
+      create({ ...CREATE_BASE, supported: [flag] }).success === false;
+
+    expect(rejects('Text'), 'upper case').toBe(true);
+    expect(rejects('1text'), 'leading digit').toBe(true);
+    expect(rejects('_text'), 'leading underscore').toBe(true);
+    expect(rejects('tool-use'), 'hyphen').toBe(true);
+    expect(rejects('tool use'), 'space').toBe(true);
+    expect(rejects(''), 'empty').toBe(true);
+    expect(rejects('sk-live-0000000000000000'), 'a key-shaped string').toBe(true);
+
+    // …and the shapes the data plane's own `Capability` members actually have still pass, which is
+    // what keeps this a spelling rule rather than a vocabulary.
+    for (const flag of ['text', 'tool_use', 'stream_usage', 'embedding', 'rerank', 'json_mode2']) {
+      expect(create({ ...CREATE_BASE, supported: [flag] }).success, flag).toBe(true);
+    }
+
+    // The edit schema shares the field, and sharing it is the assertion: a second literal here is how
+    // the two spellings start to disagree.
+    expect(edit({ ...EDIT_BASE, supported: ['Text'] }).success).toBe(false);
+    expect(edit({ ...EDIT_BASE, supported: ['tool_use'] }).success).toBe(true);
+  });
+
+  it('the defaults factory reaches exactly the eight mutable fields, and no identifier', () => {
+    // The ONLY path from server data into this form's state. A `reset({...row})` would keep `id`,
+    // `connection_id`, `created_at` AND `model`; this cannot, because its parameter type has eight
+    // members and its RETURN type is the schema's output — which is also what makes it a complete
+    // PUT body for the inline `enabled` toggle.
+    const seeded = providerModelEditDefaults({
+      display_name: 'GPT-5.6 Sol',
+      supported: ['text'],
+      context_window: 400_000,
+      max_output_tokens: 128_000,
+      enabled: false,
+      input_price_per_million: '0.020000',
+      output_price_per_million: null,
+      price_currency: 'USD',
+    });
+
+    expect(Object.keys(seeded).sort()).toEqual([
+      'context_window',
+      'display_name',
+      'enabled',
+      'input_price_per_million',
+      'max_output_tokens',
+      'output_price_per_million',
+      'price_currency',
+      'supported',
+    ]);
+    // It is a value the schema itself accepts — the property the inline toggle depends on.
+    expect(edit(seeded).success).toBe(true);
+    expect(edit({ ...seeded, enabled: true }).success).toBe(true);
+    // And the price survived, unscaled.
+    expect(seeded.input_price_per_million).toBe('0.020000');
+  });
+
+  it('the create defaults are a value the schema accepts once the two identifiers are typed', () => {
+    const empty = providerModelCreateDefaults();
+    // NOT accepted as-is: `model` and `display_name` are `required`, and an empty create form is not
+    // a submittable body. That is the point of rendering it.
+    expect(create(empty).success).toBe(false);
+    expect(
+      create({ ...empty, model: 'gpt-5.6-sol', display_name: 'GPT-5.6 Sol' }).success,
+    ).toBe(true);
+    // The empty price inputs become nulls rather than zeros: "no price recorded" is not "free".
+    const filled = create({ ...empty, model: 'm', display_name: 'M' });
+    expect(filled.success && filled.data.input_price_per_million).toBeNull();
+    expect(filled.success && filled.data.price_currency).toBeNull();
+  });
+});
+
 describe('ownership columns are unrepresentable', () => {
   /**
    * DERIVED FROM `MIRRORS`, NOT A HAND-WRITTEN LIST, and that is the whole repair.
@@ -1094,12 +1718,12 @@ describe('ownership columns are unrepresentable', () => {
     const checked = everySchema();
 
     // A positive control on the LOOP, not on the schemas: an empty or truncated list would make every
-    // assertion below vacuous, and `toEqual([])` on nothing passes. Eight is the whole package today —
-    // the six MIRRORS plus the two schemas with no manifest. It is asserted rather than commented
+    // assertion below vacuous, and `toEqual([])` on nothing passes. Eleven is the whole package today
+    // — the nine MIRRORS plus the two schemas with no manifest. It is asserted rather than commented
     // because the number is the only thing standing between this loop and passing on an empty list;
     // when MIRRORS grows, this goes red once and the new count is a one-character edit with a diff that
-    // says which schema arrived.
-    expect(checked.length, 'every schema in the package must be reached').toBe(8);
+    // says which schema arrived. It just did, twice: the two model-catalog schemas took it from 9.
+    expect(checked.length, 'every schema in the package must be reached').toBe(11);
 
     for (const [label, schema] of checked) {
       expect(schemaPaths(schema).filter(isOwnershipPath), label).toEqual([]);

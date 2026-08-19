@@ -248,6 +248,90 @@ describe('toKbError and the validation errors map', () => {
 });
 
 /**
+ * `actionable` (finding J2). Whether the envelope's `message` was written for THIS condition and may
+ * be shown to an operator, or is a fixed placeholder chosen to say nothing.
+ *
+ * WHY IT IS ON THE WIRE AT ALL. A deliberate 4xx our own code raised and an unhandled exception both
+ * render `internal_dependency` with `retryable: false` — the taxonomy has no 409 row, on purpose —
+ * so the two were structurally the same envelope, and a client wanting to render the actionable one
+ * had to compare `message` against a copy of the server's 5xx constant.
+ *
+ * EVERY ASSERTION HERE IS ABOUT A FAIL-CLOSED DEFAULT, which is the half with no visible symptom
+ * when it is wrong in the other direction: a spurious `true` renders an internal hostname to a
+ * tenant, and nothing throws.
+ */
+describe('toKbError and `actionable`', () => {
+  const conflict = {
+    error_class: 'internal_dependency',
+    message: 'Clear the embedding designation first, then delete this connection.',
+    retryable: false,
+    request_id: '01JREQ',
+  };
+
+  it('carries a true flag through, so a deliberate 4xx is renderable', async () => {
+    const error = await toKbError(
+      responseLike(409, {}, () => Promise.resolve({ ...conflict, actionable: true })),
+    );
+
+    expect(error.actionable).toBe(true);
+    // The pair it shares with a defect. `actionable` is the ONLY thing separating them, which is
+    // why this asserts them together rather than trusting the status the fixture was given.
+    expect(error.error_class).toBe('internal_dependency');
+    expect(error.retryable).toBe(false);
+  });
+
+  it('is false for the same class and status when the envelope says so', async () => {
+    const error = await toKbError(
+      responseLike(500, {}, () =>
+        Promise.resolve({
+          error_class: 'internal_dependency',
+          message: 'The service could not complete this request.',
+          retryable: false,
+          request_id: '01JREQ',
+          actionable: false,
+        }),
+      ),
+    );
+
+    expect(error.actionable).toBe(false);
+  });
+
+  it('is false when the envelope omits the key — the SSE `error` frame does exactly that', async () => {
+    // The field is optional on `KbErrorEnvelope` because that interface is the union of the HTTP
+    // body and the SSE frame, and the frame carries three fields. Absent must read as false.
+    const error = await toKbError(responseLike(409, {}, () => Promise.resolve(conflict)));
+
+    expect(error.actionable).toBe(false);
+  });
+
+  it('is false for anything that is not the literal boolean true', async () => {
+    // `=== true`, not `??` and not a cast. `isKbErrorEnvelope` does not type-check this field, so a
+    // body carrying `"yes"` reaches here; the only safe reading of a non-boolean is "do not render".
+    for (const value of ['true', 1, {}, [], null]) {
+      const error = await toKbError(
+        responseLike(409, {}, () => Promise.resolve({ ...conflict, actionable: value })),
+      );
+      expect(error.actionable).toBe(false);
+    }
+  });
+
+  it('is false on the no-envelope branch, where there is no server sentence at all', async () => {
+    const error = await toKbError(responseLike(502, {}, () => Promise.reject(new Error('nope'))));
+
+    expect(error.error_class).toBeNull();
+    expect(error.actionable).toBe(false);
+  });
+
+  it('defaults to false on the constructor, so a six-argument call site is unchanged', () => {
+    // SEVENTH and defaulted, for the same reason `errors` is sixth. The default is the OPPOSITE of
+    // the server-side one deliberately: on the server the raiser knows it wrote a sentence, while
+    // every construction site here has no envelope behind it.
+    const error = new KbError(STREAM_LOST, true, null, null, 'connection lost mid-answer');
+    expect(error.actionable).toBe(false);
+  });
+});
+
+/**
  * `X-KB-Request-Id` (finding #69b). `request_id` is the ONE identifier a user is ever shown and the
  * one string a support engineer can grep across both planes — and before this it was read only off
  * the parsed envelope, so it was null on exactly the failures people have to debug: a proxy's 502

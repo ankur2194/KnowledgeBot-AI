@@ -56,5 +56,53 @@ export type {
   EmbeddingDesignationSource,
 } from './embedding-designation.js';
 
+/**
+ * The provider EDIT schema, and only the edit schema. The create and rotate bodies carry the
+ * plaintext `credential` and have no shared schema at all, on purpose — `NO_CLIENT_FORM` in
+ * test/form-drift.test.ts records both decisions with their reasons, and this barrel is exactly the
+ * surface those reasons are about: anything exported here is importable by apps/mobile and
+ * apps/widget by default.
+ *
+ * `PROVIDER_CONNECTION_STATUSES` is the second runtime value in this barrel that is not a schema or
+ * a defaults factory (after `ORG_ROLES`), and it is here for the same reason: the root entry is
+ * type-only.
+ */
+export {
+  PROVIDER_CONNECTION_STATUSES,
+  providerConnectionEditDefaults,
+  providerConnectionEditSchema,
+} from './provider-connection.js';
+export type {
+  ProviderConnectionEditIn,
+  ProviderConnectionEditOut,
+  ProviderConnectionEditSource,
+} from './provider-connection.js';
+
+/**
+ * BOTH model-catalog schemas, and the contrast with the block above is the whole reason this one
+ * needs no caveat: neither request carries a credential, a password, or anything a `defaults(row)`
+ * could seed into a secret. What they do carry is a decimal SCALE, a price CEILING and an element
+ * cap — three numbers that drift in silence — so they ship as MIRRORS entries with probes rather
+ * than as an exemption with a reason.
+ *
+ * `providerModelEditDefaults` returns the schema's OUTPUT type rather than its input, which is
+ * unlike every other defaults factory here and is deliberate: `PUT …/models/{model}` refuses a
+ * partial body, so the same value serves as the form's `defaultValues` AND as a complete replacement
+ * payload for the inline `enabled` toggle. See its docblock.
+ */
+export {
+  providerModelCreateDefaults,
+  providerModelCreateSchema,
+  providerModelEditDefaults,
+  providerModelEditSchema,
+} from './provider-model.js';
+export type {
+  ProviderModelCreateIn,
+  ProviderModelCreateOut,
+  ProviderModelEditIn,
+  ProviderModelEditOut,
+  ProviderModelEditSource,
+} from './provider-model.js';
+
 export { uploadSchema } from './upload.js';
 export type { OrgUploadLimits, UploadIn, UploadOut, UploadSchema } from './upload.js';

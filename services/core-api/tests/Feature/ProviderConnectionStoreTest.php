@@ -108,7 +108,14 @@ it('stores a chat-only connection and reports the blocking banner instead of ref
         // it cannot ingest yet — which is exactly the state C1 exists to make visible early.
         ->assertCreated()
         ->assertJsonPath('embedding_readiness.blocks_ingestion', true)
-        ->assertJsonPath('embedding_readiness.explanation', $explanation);
+        ->assertJsonPath('embedding_readiness.explanation', $explanation)
+        // AND `designated` IS NULL AND PRESENT, not absent. This organization has designated
+        // nothing, and the field carries that as a value rather than as a missing key — which is
+        // what lets the providers screen say "choose a connection" here and "the connection you
+        // chose is failing" when the same blocked verdict arrives with a pair stored. Creating a
+        // connection never writes `organizations.embedding_connection_id`, so this is the bound
+        // row and it is current.
+        ->assertJsonPath('embedding_readiness.designated', null);
 
     assertDatabaseHas('provider_connections', [
         'organization_id' => $fixture['org']->id,
@@ -197,4 +204,108 @@ it('refuses an unknown vendor rather than letting the matrix answer for one', fu
         ->assertJsonStructure(['errors' => ['provider']]);
 
     Http::assertNothingSent();
+});
+
+it('refuses the masked display value on the CREATE path, not just on rotation', function (): void {
+    // THE HOLE S5 NAMED. `ProviderConnectionResource::openApiSchemas()` says posting `masked_key`
+    // back into "a create or rotate request" would set the tenant's key to the literal text
+    // `…abcd` — and until this rule landed only the ROTATE half was true. The create path relied
+    // on `min:8` refusing it by coincidence, because `'…'.$last_four` happens to be five
+    // characters, which is one column change away from evaporating.
+    //
+    // A create form is where the mistake is MOST likely: the obvious way to build "add another
+    // connection like this one" is to seed the form from a resource, and `reset({...connection})`
+    // keeps every key it is handed.
+    $fixture = orgWithOwner();
+
+    $existing = ProviderConnection::factory()->recycle($fixture['org'])->create();
+    $mask = '…'.$existing->last_four;
+
+    $response = currentTest()->actingAs($fixture['actor'])
+        ->postJson("/api/v1/organizations/{$fixture['org']->id}/provider-connections", [
+            'provider' => 'openai',
+            'label' => 'Seeded from the resource',
+            'credential' => $mask,
+            'models' => [],
+        ]);
+
+    $response->assertStatus(422)->assertJsonPath('error_class', 'validation');
+
+    // THE MESSAGE, NOT MERELY THE FIELD. `min:8` also puts an `errors.credential` key there, so a
+    // field-presence assertion is green whether the guard runs or not — which is exactly how the
+    // rotate path's own test stayed green against a rule that had never executed. Read from
+    // `messages()` rather than copied, so it can only match if `not_regex` is what refused it.
+    $response->assertJsonPath(
+        'errors.credential.0',
+        (new \App\Http\Requests\StoreProviderConnectionRequest)->messages()['credential.not_regex'],
+    );
+
+    // Nothing was stored, and no second connection appeared beside the fixture.
+    expect(ProviderConnection::query()->withoutGlobalScopes()->count())->toBe(1);
+
+    // The readiness call is made only after a successful write, so a refused body never reaches
+    // the data plane.
+    Http::assertNothingSent();
+});
+
+it('refuses a capability flag that is not a lower-case identifier', function (): void {
+    // FINDING S3, THE INPUT HALF. `supported.*` was `['string', 'max:64']` with no vocabulary and
+    // no character class, and the value is joined into `capabilities` and ECHOED into an
+    // append-only `provider.model.*` audit row. A tenant posting a credential-shaped flag made
+    // AuditLogger's shape backstop fire and erased the security-relevant field of the operation —
+    // the flag list that decides which credential embeds the corpus — from a table that cannot be
+    // corrected afterwards. The same string also crosses the internal seam as a `capability_flags`
+    // member.
+    //
+    // The class is deliberately a SHAPE and not a vocabulary: the capability matrix that matters is
+    // services/ai-service/app/providers/capabilities.py, and a second copy here would drift.
+    $fixture = orgWithOwner();
+
+    currentTest()->actingAs($fixture['actor'])
+        ->postJson("/api/v1/organizations/{$fixture['org']->id}/provider-connections", [
+            'provider' => 'openai',
+            'label' => 'Primary',
+            'credential' => STORE_TEST_CREDENTIAL,
+            'models' => [[
+                'model' => 'text-embedding-3-large',
+                'display_name' => 'Text Embedding 3 Large',
+                'supported' => ['embedding', 'sk-aaaaaaaaaaaa'],
+                'context_window' => 8192,
+                'max_output_tokens' => 0,
+            ]],
+        ])
+        ->assertStatus(422)
+        ->assertJsonPath('error_class', 'validation')
+        ->assertJsonStructure(['errors' => ['models.0.supported.1']]);
+
+    expect(ProviderConnection::query()->withoutGlobalScopes()->count())->toBe(0);
+
+    Http::assertNothingSent();
+});
+
+it('still accepts a flag nobody here has heard of', function (): void {
+    // THE CONTROL. The character class must not become a vocabulary by accident: this repository
+    // does not own the capability matrix, so a flag it has never seen has to save. Without this,
+    // the obvious "improvement" — a Rule::in over the flags we happen to know — passes the test
+    // above and quietly makes a vendor's new capability a code change here.
+    Http::fake(['*/internal/v1/embedding/readiness' => Http::response([
+        'selected' => null, 'eligible' => [], 'rejected' => [], 'explanation' => 'nothing can embed',
+    ], 200)]);
+
+    $fixture = orgWithOwner();
+
+    currentTest()->actingAs($fixture['actor'])
+        ->postJson("/api/v1/organizations/{$fixture['org']->id}/provider-connections", [
+            'provider' => 'openai',
+            'label' => 'Primary',
+            'credential' => STORE_TEST_CREDENTIAL,
+            'models' => [[
+                'model' => 'gpt-6',
+                'display_name' => 'GPT-6',
+                'supported' => ['text', 'tool_use', 'a_flag_nobody_here_has_heard_of'],
+                'context_window' => 8192,
+                'max_output_tokens' => 4096,
+            ]],
+        ])
+        ->assertCreated();
 });

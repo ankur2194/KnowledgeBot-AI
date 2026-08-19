@@ -152,4 +152,34 @@ export default tseslint.config(
       'security/detect-non-literal-fs-filename': 'off',
     },
   },
+  {
+    // THE ONLY TYPE-AWARE BLOCK IN THIS CONFIG, AND IT EXISTS FOR ONE MEASURED FAILURE.
+    //
+    // `vitest-browser-react` wraps `render`, `rerender` and `unmount` in React's `act()` and returns
+    // the promise for it. Two of those overlapping — one still in flight when the next begins —
+    // corrupts React's act queue for the REST OF THE FILE: the offending test still passes, and
+    // every test after it in the same file renders into an empty container and times out at 15s
+    // against an empty `<body>`, which reads exactly like a crash in the component and is not one.
+    //
+    // Measured, both directions, 2026-08-19: `void first.unmount()` followed by a second `render()`
+    // in one `it` = 3 of 4 tests fail in 48s, React logging "You seem to have overlapping act()
+    // calls"; the identical spec with `await first.unmount()` = 4 of 4 pass in 2.5s. A floating
+    // unmount with NOTHING after it is harmless — the next `beforeEach` cleanup awaits its own act
+    // by which time the stray one has settled — so the hazard is the OVERLAP, not the float.
+    //
+    // `no-floating-promises` is the static half and needs type information, which
+    // `tseslint.configs.recommended` does not carry; scoping the project service to this one
+    // directory keeps the cost off the other ~200 files. It found a real one on the first run
+    // (`use-cooldown.test.tsx` called `screen.unmount()` bare, and read a spy on the next line that
+    // the unmount was supposed to populate).
+    //
+    // It is NOT sufficient on its own, which is why tests/msw/setup.ts carries a runtime guard too:
+    // this rule accepts `void promise` as a deliberate discard, and `void first.unmount()` is
+    // precisely the shape that reproduced the failure.
+    files: ['tests/components/**/*.tsx'],
+    languageOptions: {
+      parserOptions: { projectService: true, tsconfigRootDir: import.meta.dirname },
+    },
+    rules: { '@typescript-eslint/no-floating-promises': 'error' },
+  },
 );

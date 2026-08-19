@@ -243,6 +243,119 @@ it('still fingerprints a value carrying a real credential SHAPE', function (stri
     'capability in a query string' => 'https://app.example/reset-password?token=abcdefghijklmnop',
 ]);
 
+it('keeps a readable rendering beside the fingerprint when the backstop eats part of a value', function (): void {
+    // FINDING S3. A fingerprint answers "was it THIS value" and nothing else. That is enough for an
+    // email; it is NOT enough for a field whose CONTENT is the security fact — and `capabilities` is
+    // exactly that, because an `embedding` flag decides which credential embeds an organization's
+    // corpus (see AuditLogger's three-operation docblock, which calls it the security-relevant field
+    // of those operations).
+    //
+    // `capabilities` is joined from `supported.*`, which is tenant-controlled, so
+    // `supported: ["embedding", "sk-aaaaaaaaaaaa"]` used to make the whole field unreadable in an
+    // APPEND-ONLY table: a tenant blanking the record of what they just changed, from a form, with
+    // nothing but a WARNING in Loki — which this repository's own doctrine says is not an audit
+    // record. The input side is now refused by a character class on `supported.*`; this is the
+    // other half, because the backstop must still degrade rather than destroy for every future
+    // caller.
+    $repository = new AuditLogRepositorySpy;
+    $log = new RecordingLogger;
+
+    // Built at runtime rather than written out, so the assertion and the fixture cannot disagree
+    // about how many characters `sk-` needs to clear VENDOR_KEYS' twelve-character floor.
+    $vendorShaped = 'sk-'.str_repeat('a', 12);
+
+    auditLoggerFor($repository, $log)->record(
+        AuditLogger::PROVIDER_MODEL_UPDATED,
+        '01JD00000000000000000ORGA',
+        '01JD00000000000000000USER1',
+        [
+            'connection_id' => '01JD0000000000000000CONN01',
+            'model' => 'text-embedding-3-large',
+            'display_name' => 'Text Embedding 3 Large',
+            'capabilities' => 'embedding,'.$vendorShaped,
+            'enabled' => true,
+        ],
+        subjectType: 'App\\Models\\ProviderModelEntry',
+        subjectId: '01JD0000000000000000MODEL1',
+    );
+
+    /** @var array<string, bool|float|int|string> $details */
+    $details = $repository->last()['details'];
+
+    // THE VALUE IS STILL GONE — this is a degradation, not a relaxation.
+    expect($details)->not->toHaveKey('capabilities')
+        ->and(json_encode($details))->not->toContain($vendorShaped)
+        // Still fingerprinted, so "was it this exact list" is still answerable.
+        ->and($details)->toHaveKey('capabilities_fingerprint')
+        // Still LOUD: a mis-mapped ECHO field is reported, not hidden behind the degradation.
+        ->and($log->messagesAt('warning'))->toHaveCount(1);
+
+    // AND THE ROW STILL SAYS WHAT MATTERED. Only the matched run became the marker; the flag that
+    // decides which credential embeds the corpus survived.
+    expect($details['capabilities_redacted'] ?? null)->toBe('embedding,[REDACTED]');
+});
+
+it('writes no redacted rendering when the whole value was the credential', function (): void {
+    // THE NARROWING. When the value IS the credential and nothing else, `[REDACTED]` says exactly
+    // what the fingerprint's presence already says, and an audit row is not the place to write one
+    // fact twice. Without this the table would grow a column of identical markers on the one
+    // operation (`auth.login.failed`) whose input is openly hostile.
+    $repository = new AuditLogRepositorySpy;
+
+    auditLoggerFor($repository, new RecordingLogger)->record(
+        AuditLogger::LOGIN_FAILED,
+        null,
+        null,
+        ['email' => 'sk-ant-'.str_repeat('A1b2', 6), 'reason' => 'invalid_credentials'],
+    );
+
+    /** @var array<string, bool|float|int|string> $details */
+    $details = $repository->last()['details'];
+
+    expect($details)->toHaveKey('email_fingerprint')
+        ->and($details)->not->toHaveKey('email_redacted')
+        ->and($details)->not->toHaveKey('email');
+});
+
+it('reports a value that NORMALIZED away, and stays silent about one that arrived empty', function (): void {
+    // FINDING S7, THE GENERAL HALF. An allow-listed key whose value vanishes with no drop record is
+    // the same class of defect as an ECHOED field the backstop ate — the row is quietly less than
+    // it claims to be, and nobody finds out.
+    //
+    // But making EVERY empty value loud was the wrong fix and would have been worse than the bug:
+    // `capabilities` is `implode(',', $flags)`, so a model row that claims no flags legitimately
+    // produces `''`, and ProviderModelService's docblock states in two places that the key is then
+    // simply absent. A WARNING per unflagged write is how a signal that means "your field did not
+    // ship" becomes noise nobody reads.
+    //
+    // So the discriminator is whether the value was ALREADY empty on arrival. A caller supplying
+    // `''` said nothing and is not reported; a caller supplying `"   "` supplied something that
+    // READS as content at the call site and STORES as nothing, and that is reported.
+    $repository = new AuditLogRepositorySpy;
+    $log = new RecordingLogger;
+
+    auditLoggerFor($repository, $log)->record(
+        AuditLogger::LOGIN_FAILED,
+        null,
+        null,
+        ['email' => "  \t \n ", 'reason' => ''],
+    );
+
+    /** @var array<string, bool|float|int|string> $details */
+    $details = $repository->last()['details'];
+
+    expect($details)->toBe([]);
+
+    $warnings = $log->messagesAt('warning');
+
+    expect($warnings)->toHaveCount(1);
+
+    // `email` normalized away and IS named. `reason` arrived empty and is NOT — and the VALUE never
+    // appears either way, which is the standing rule for a drop report.
+    expect(str_contains($warnings[0], 'email'))->toBeTrue($warnings[0]);
+    expect(str_contains($warnings[0], 'reason'))->toBeFalse($warnings[0]);
+});
+
 it('drops a non-scalar detail value, which is the shape $request->all() arrives in', function (): void {
     $repository = new AuditLogRepositorySpy;
     $log = new RecordingLogger;
@@ -427,6 +540,32 @@ it('declares a complete, well-formed rule for every operation constant', functio
         'organization.invitation.accepted',
         'organization.invitation.resent',
         'organization.member.role_changed',
+        // THE PROVIDER SURFACE, ADDED WHEN IT STOPPED BEING UNAUDITED. Until the connection
+        // resource was completed a credential could be created, relabelled, revoked, hard-deleted
+        // or replaced with nothing in `audit_logs` to say so — a §18.11 gap rather than a deferred
+        // nicety, which is why `provider.connection.created` was wired into the pre-existing
+        // `store` action in the same change.
+        'provider.connection.created',
+        'provider.connection.updated',
+        'provider.connection.deleted',
+        'provider.connection.credential_rotated',
+        // THE ONLY FAILURE OUTCOME ON THE PROVIDER SURFACE. `current_password:web` lives in
+        // RotateProviderCredentialRequest::rules(), which is right — a wrong password must touch no
+        // column — and the consequence was that a failed attempt never reached the service and all
+        // four operations above were OUTCOME_SUCCESS. `auth.login.failed` exists for the login
+        // surface; the endpoint that CHANGES a credential had no equivalent, so a stolen session
+        // could grind at the re-authentication behind it and leave nothing in audit_logs.
+        'provider.connection.credential_rotation_failed',
+        // THE MODEL CATALOG, AUDITED FOR WHAT A ROW DECIDES RATHER THAN FOR WHAT IT HOLDS. A
+        // `provider_models` row carries no secret — but its `capability_flags` are the ROW axis of
+        // the capability question, and embedding_selection.py reads them to decide which of an
+        // organization's connections embeds its corpus. So adding an `embedding` flag can change
+        // the vector space every future upload is indexed under, and disabling the only
+        // embedding-capable row stops ingestion outright. Neither is visible in the connection
+        // operations above.
+        'provider.model.created',
+        'provider.model.updated',
+        'provider.model.deleted',
     ];
 
     expect($operations)->toEqualCanonicalizing($expected)
@@ -462,6 +601,31 @@ it('declares a complete, well-formed rule for every operation constant', functio
         'organization.invitation.accepted' => AuditLogger::ON_FAILURE_ABORT,
         'organization.invitation.resent' => AuditLogger::ON_FAILURE_ABORT,
         'organization.member.role_changed' => AuditLogger::ON_FAILURE_ABORT,
+        // ALL FOUR ARE ABORT, with no judgement call to make. Every one of them is written inside
+        // the repository transaction that performs the change, so "can this still be rolled back"
+        // — the real test, not "is this an authentication event" — answers yes for all four.
+        // Nothing on the provider surface queues mail and nothing has already happened
+        // irreversibly by the time the row is written. `deleted` matters most: it is a HARD delete,
+        // so the audit row is the only surviving description of the connection, and a LOG policy
+        // there would permit a credential to vanish leaving no record it ever existed.
+        'provider.connection.created' => AuditLogger::ON_FAILURE_ABORT,
+        'provider.connection.updated' => AuditLogger::ON_FAILURE_ABORT,
+        'provider.connection.deleted' => AuditLogger::ON_FAILURE_ABORT,
+        'provider.connection.credential_rotated' => AuditLogger::ON_FAILURE_ABORT,
+        // THE ONE LOG ROW ON THIS SURFACE, and it is the same "can this still be rolled back" test
+        // answering NO from the other direction: there is no state change to undo. The 422 is
+        // already decided, the connection was never touched, and aborting would turn a wrong
+        // password into a 500 — which is both a lie to the caller and still no audit row.
+        'provider.connection.credential_rotation_failed' => AuditLogger::ON_FAILURE_LOG,
+        // ALL THREE ARE ABORT, on the same test and with the same answer: each is written inside
+        // EloquentProviderModelRepository's transaction, so the change can still be rolled back
+        // when the row cannot be written. `deleted` matters most for the same reason it does one
+        // block up — it is a HARD delete, so the audit row is the only surviving description of
+        // the catalog entry, and a LOG policy there would let a model row vanish leaving no record
+        // it ever existed and a `subject_id` pointing at a ULID no table resolves.
+        'provider.model.created' => AuditLogger::ON_FAILURE_ABORT,
+        'provider.model.updated' => AuditLogger::ON_FAILURE_ABORT,
+        'provider.model.deleted' => AuditLogger::ON_FAILURE_ABORT,
     ];
 
     $actualPolicy = array_map(
@@ -498,7 +662,97 @@ it('declares a complete, well-formed rule for every operation constant', functio
             if ($rule === AuditLogger::FINGERPRINTED) {
                 expect($spec['details'])->not->toHaveKey($field.'_fingerprint');
             }
+
+            // THE SAME HAZARD ON THE OTHER SYNTHETIC SUFFIX. An ECHOED field whose value trips the
+            // shape backstop is degraded to `<field>_fingerprint` PLUS `<field>_redacted`, so an
+            // allow-list that already declares a key by either of those names would have two
+            // different values landing in one column with nothing to tell them apart.
+            expect($spec['details'])->not->toHaveKey($field.'_redacted');
         }
+    }
+});
+
+/**
+ * Whether a `details` key NAMES A BEARER CAPABILITY, and must therefore be FINGERPRINTED rather
+ * than ECHOED.
+ *
+ * ── WHY THIS IS NOT `str_contains($field, 'token')` ANY MORE ───────────────────────────────────
+ *
+ * It was, and that substring rule cost the audit trail two real fields. `provider.model.*` records
+ * every attribute of a catalog row except `context_window` and `max_output_tokens`, and the second
+ * of those is a FALSE POSITIVE under the substring rule — an integer limit copied off a vendor's
+ * documentation page, which authorizes nothing and identifies nobody. Both were dropped rather
+ * than weaken a standing credential guard to fit a naming coincidence, which was the right call at
+ * the moment it was made and left a gap: nothing recorded who changed a model's limits.
+ *
+ * The repair is to make the rule SAY WHAT IT MEANS instead of allow-listing one string past it,
+ * and English already draws the distinction the substring rule could not see:
+ *
+ *   SINGULAR `token` is a bearer capability. One capability is one token, so a credential field is
+ *   never plural — `token`, `api_token`, `access_token`, `refresh_token`, `id_token`, `_token`,
+ *   `token_hash`, `token_secret`, and the underscore-less spellings `apitoken` and `tokenhash`.
+ *
+ *   PLURAL `tokens` is a COUNT OF TEXT UNITS — `max_output_tokens`, `total_tokens`, `tokens_used`
+ *   — but only when the name says it is a quantity. `access_tokens` is a bag of capabilities and
+ *   is still refused, because no segment of it states a magnitude.
+ *
+ * So the rule is: any segment that contains `token` and is not exactly `tokens` is a capability;
+ * a segment that IS exactly `tokens` is admitted only alongside a quantity word. That is STRICTLY
+ * STRONGER than the substring rule everywhere except the one cell it was widened for — the
+ * substring rule could not catch `apitoken` at all differently from `max_output_tokens`, because
+ * it could not tell them apart, and this one refuses the first and admits the second.
+ *
+ * It fails CLOSED on anything it has no reading for: a bare `tokens`, or `token_count`, is refused.
+ */
+function namesABearerCapability(string $field): bool
+{
+    // Words that make a plural `tokens` a MEASUREMENT rather than a bag of credentials. A closed
+    // vocabulary of magnitudes and never a list of field names — allow-listing `max_output_tokens`
+    // itself is exactly the shortcut this function exists instead of.
+    $quantities = ['max', 'min', 'total', 'count', 'used', 'limit', 'remaining', 'per', 'window',
+        'budget', 'size', 'length'];
+
+    $segments = explode('_', mb_strtolower($field));
+
+    foreach ($segments as $segment) {
+        if ($segment !== 'tokens' && str_contains($segment, 'token')) {
+            return true;
+        }
+    }
+
+    if (! in_array('tokens', $segments, true)) {
+        return false;
+    }
+
+    return array_intersect($segments, $quantities) === [];
+}
+
+it('recognises a bearer-capability field name, and does not mistake a token COUNT for one', function (): void {
+    // THE GUARD'S OWN TEST. A narrowed rule that nothing exercises is a rule nobody can trust was
+    // narrowed correctly, and the whole reason `context_window` and `max_output_tokens` were left
+    // out of the audit map for a while is that widening a credential check is not a thing to do on
+    // an argument alone. Every name below that USED to be caught by `str_contains($field, 'token')`
+    // is still caught here, except the deliberate plural-with-a-magnitude cell.
+    $capabilities = ['token', 'api_token', 'access_token', 'refresh_token', 'id_token', '_token',
+        'token_hash', 'token_fingerprint', 'token_secret', 'session_token', 'bearer_token',
+        // Underscore-less spellings the segment rule must still reach, because a substring rule
+        // caught them and a naive `in_array('token', $segments)` would not.
+        'apitoken', 'accesstoken', 'tokenhash',
+        // PLURAL WITH NO MAGNITUDE — a bag of capabilities, not a count. This is the case that
+        // stops "plural means quantity" from being a hole.
+        'tokens', 'access_tokens', 'refresh_tokens',
+        // Singular beats the quantity vocabulary: `count` does not rescue `token`.
+        'token_count'];
+
+    $measurements = ['max_output_tokens', 'total_tokens', 'tokens_used', 'prompt_tokens_count',
+        'tokens_per_minute', 'context_window', 'display_name', 'email', 'role', 'capabilities'];
+
+    foreach ($capabilities as $name) {
+        expect(namesABearerCapability($name))->toBeTrue("'{$name}' is a bearer capability and must be refused as ECHOED");
+    }
+
+    foreach ($measurements as $name) {
+        expect(namesABearerCapability($name))->toBeFalse("'{$name}' is a measurement, not a credential, and must be allowed as ECHOED");
     }
 });
 
@@ -515,7 +769,7 @@ it('keeps every secret-shaped detail key out of every allow-list', function (): 
             );
 
             if ($spec['details'][$field] === AuditLogger::ECHOED) {
-                expect(str_contains($field, 'token'))->toBeFalse(
+                expect(namesABearerCapability($field))->toBeFalse(
                     "operation '{$operation}' would ECHO '{$field}': a token is a bearer capability "
                     .'and must be FINGERPRINTED'
                 );

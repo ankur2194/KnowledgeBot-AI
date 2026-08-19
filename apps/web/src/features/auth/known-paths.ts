@@ -2,7 +2,12 @@ import forgotPasswordRules from '@kb/contracts/rules/ForgotPasswordRequest.json'
 import loginRules from '@kb/contracts/rules/LoginRequest.json';
 import registerRules from '@kb/contracts/rules/RegisterRequest.json';
 import resetPasswordRules from '@kb/contracts/rules/ResetPasswordRequest.json';
+import rotateProviderCredentialRules from '@kb/contracts/rules/RotateProviderCredentialRequest.json';
 import inviteRules from '@kb/contracts/rules/StoreInvitationRequest.json';
+import storeProviderConnectionRules from '@kb/contracts/rules/StoreProviderConnectionRequest.json';
+import updateProviderConnectionRules from '@kb/contracts/rules/UpdateProviderConnectionRequest.json';
+
+import { knownPathsFromRules, type FormRulesManifest } from '@/lib/forms/known-paths';
 
 /**
  * `knownPaths` for each auth form — the argument `applyServerErrors` uses to decide whether a 422 key
@@ -41,26 +46,18 @@ import inviteRules from '@kb/contracts/rules/StoreInvitationRequest.json';
  * exactly the case `applyServerErrors` partitions, and the manifest is the only side that knows.
  */
 
-/** The shape `php artisan kb:dump-form-rules` writes (see packages/contracts/rules/*.json). */
-export interface FormRulesManifest {
-  /** The FormRequest FQCN, e.g. `App\\Http\\Requests\\LoginRequest`. */
-  readonly class: string;
-  readonly rules: Readonly<Record<string, readonly string[]>>;
-}
-
 /**
- * Paths that a FormRequest validates and no form RENDERS as a focusable control.
+ * ── THE DERIVATION MOVED TO `@/lib/forms/known-paths`, AS THIS FILE'S OWN NOTE ASKED ────────────
+ * `FormRulesManifest`, `HIDDEN_PATHS` and `knownPathsFromRules` used to be declared here. The note
+ * below the provider block said the next feature to need one should move them rather than add a
+ * fourth block, and the model catalogue (`features/models`) was that feature — so they are in
+ * `@/lib/forms/`, beside `applyServerErrors`, which is the only consumer of what they produce.
  *
- * `token` only, and it is deliberately not per-form: every auth screen that carries a token carries
- * it hidden, and a hidden token is never the field to focus. If a form ever renders a token as a
- * visible, typed input (a 6-digit code, say), that form takes its own subtraction set rather than
- * this one growing an exception.
+ * WHAT STAYED: every per-form CONSTANT. Those are this feature's (plus the two provider screens'),
+ * and `tests/unit/known-paths.test.ts` closes over the exact set of `*_KNOWN_PATHS` this module
+ * exports, so a sixth added without a spec fails by name. Nothing is re-exported from here — one
+ * home for one function.
  */
-export const HIDDEN_PATHS: ReadonlySet<string> = new Set(['token']);
-
-/** The manifest's field vocabulary, minus what the form does not render. */
-export const knownPathsFromRules = (manifest: FormRulesManifest): readonly string[] =>
-  Object.keys(manifest.rules).filter((path) => !HIDDEN_PATHS.has(path));
 
 /** `['email', 'password']` — from `LoginRequest`'s own `rules()`, never typed out. */
 export const LOGIN_KNOWN_PATHS: readonly string[] = knownPathsFromRules(
@@ -148,4 +145,76 @@ export const FORGOT_PASSWORD_KNOWN_PATHS: readonly string[] = knownPathsFromRule
  */
 export const RESET_PASSWORD_KNOWN_PATHS: readonly string[] = knownPathsFromRules(
   resetPasswordRules as FormRulesManifest,
+);
+
+/**
+ * ── THE THREE PROVIDER SETS, AND THE ONE THAT IS NOT A STRAIGHT DERIVATION ───────────────────────
+ *
+ * They live in this file rather than in `features/providers/` because the derivation used to live
+ * here too, and putting a second one beside the forms is how one rule gets two spellings. THE
+ * DERIVATION HAS SINCE MOVED to `@/lib/forms/known-paths`, exactly as the sentence that used to end
+ * this paragraph asked — so the argument for keeping these three here is now weaker than it was:
+ * they could move to `features/providers/` without duplicating anything.
+ *
+ * They have not, and the reason is a boundary rather than a preference: the step that would have
+ * moved them (the model catalogue, `features/models`) was scoped out of editing
+ * `features/providers/`, and a move is worth nothing if it lands half-done. Recorded here so the
+ * next edit to that feature is a move rather than a shrug. The model catalogue's own two sets are
+ * NOT here — they are derived in `features/models/api.ts` from the same shared helper.
+ */
+
+/**
+ * `['provider', 'label', 'credential']` — `StoreProviderConnectionRequest`'s vocabulary MINUS the
+ * model sub-tree, and the subtraction is this file's second one after `HIDDEN_PATHS`.
+ *
+ * WHY IT IS NOT THE WHOLE MANIFEST. That request also rules `models` (`present|array|max:50`) and six
+ * `models.*.…` paths. The create form renders NONE of them: the model catalogue is its own screen
+ * (A4a, `/settings/providers/[connectionId]`), and the form posts `models: []` because `present` means
+ * the KEY must exist — an omitted key is a 422 on a field nobody is looking at.
+ *
+ * So a 422 keyed on `models.0.model` has no control to land on. `applyServerErrors` routes an unknown
+ * key to the single `root.serverError` slot, which is exactly where it belongs — the banner — and
+ * leaving `models` in this set would instead write it to a field that displays NOWHERE: the operator
+ * clicks Save, the server rejects, nothing changes on screen, and they click again. That is the same
+ * failure `HIDDEN_PATHS` exists for, one level of nesting down.
+ *
+ * `credential` IS in the set and must be: `min:8`/`max:512` are per-field 422s that belong under the
+ * input the user just pasted into. Being in this set says only "this form renders a control with this
+ * name" — it says nothing about the value, which is never read back out of form state.
+ */
+export const PROVIDER_CONNECTION_KNOWN_PATHS: readonly string[] = knownPathsFromRules(
+  storeProviderConnectionRules as FormRulesManifest,
+).filter((path) => path !== 'models' && !path.startsWith('models.'));
+
+/**
+ * `['label', 'status']` — from `UpdateProviderConnectionRequest`'s own `rules()`.
+ *
+ * Both survive `HIDDEN_PATHS`, and both are rendered: `label` is a text input and `status` is a
+ * `<Select>`. A Radix trigger has no `register` ref, so `applyServerErrors`' `hasFocusableRef` check
+ * declines to spend `shouldFocus` on it while `FormMessage` still renders the message — which is the
+ * documented reason that check exists.
+ *
+ * The mutual `required_without` 422 ("An edit names a label, a status, or both") arrives keyed on
+ * whichever field Laravel evaluated first, so it lands under a control either way. The client-side
+ * mirror of that rule is a `superRefine` in `@kb/contracts/forms`, which normally gets there first.
+ */
+export const PROVIDER_CONNECTION_EDIT_KNOWN_PATHS: readonly string[] = knownPathsFromRules(
+  updateProviderConnectionRules as FormRulesManifest,
+);
+
+/**
+ * `['current_password', 'credential']` — from `RotateProviderCredentialRequest`'s own `rules()`.
+ *
+ * BOTH ARE RENDERED AND BOTH MUST BE IN THIS SET, and `current_password` is the one that matters:
+ * `current_password:web` is the §18.3 re-authentication, it is a validation rule rather than a service
+ * call, and "that password is not correct" is a 422 keyed on it. Routed to the banner instead, it would
+ * read as a general failure of the rotation rather than as a wrong password in the field directly above
+ * — and the operator would try the same password again.
+ *
+ * The `not_regex` mask rule is keyed on `credential` and lands under that input for the same reason.
+ * Its message is Laravel-translated end-user copy ("That looks like the masked display value…"), shown
+ * verbatim like every other validation message.
+ */
+export const ROTATE_CREDENTIAL_KNOWN_PATHS: readonly string[] = knownPathsFromRules(
+  rotateProviderCredentialRules as FormRulesManifest,
 );

@@ -583,9 +583,19 @@ def assert_org_can_embed(
 ) -> None:
     """The save-time name for the same resolution. Raises what an upload would have raised.
 
-    Called when a provider connection or a model row is saved, beside
-    ``capabilities.assert_row_coherent`` — the connection-save path already runs that one, and
-    this is the org-level question the row-level one cannot ask. Deliberately the *same*
+    ── NOTHING CALLS THIS TODAY, AND THE LINE ABOVE IS AN INTENT (finding J1) ─────────────
+    ``grep -rn assert_org_can_embed services/ai-service/app`` returns this definition and its
+    ``__all__`` entry, and no call site. The same is true of ``capabilities.assert_row_coherent``
+    beside it, whose only caller is ``ineligibility()`` below. This docstring used to state as
+    fact that it is "called when a provider connection or a model row is saved" and that "the
+    connection-save path already runs" the row-level check; neither is true. Laravel owns the
+    save and does not cross the seam for it — see finding J1 and its ADR — and the org-level
+    question reaches an operator through ``embedding_readiness`` instead, which the designation
+    screen renders. Keep the function: it is the raising form of a rule that is already
+    computed, and the day a save path does want to fail closed it is one call. Just do not read
+    the paragraph below as a description of a running check.
+
+    This is the org-level question the row-level one cannot ask. Deliberately the *same*
     computation rather than a looser "is there at least one embedder" check: a looser check
     would pass an ambiguous configuration at save time and fail it at the first upload, which
     is exactly the late discovery C1 is about.

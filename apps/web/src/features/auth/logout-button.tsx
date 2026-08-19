@@ -5,9 +5,9 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 
 import { Button } from '@/components/ui/button';
 import { useResetQueryClient } from '@/components/providers';
-import { sessionCredential } from '@/lib/api/browser';
+import { browserFetchData, sessionCredential } from '@/lib/api/browser';
 
-import { browserFetchData, browserNavigation, LOGOUT_PATH } from './session';
+import { browserNavigation, LOGOUT_PATH } from './session';
 
 /**
  * Sign out, rendered from `(admin)/layout.tsx`'s nav.

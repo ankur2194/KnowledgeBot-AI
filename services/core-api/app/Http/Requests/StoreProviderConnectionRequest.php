@@ -56,15 +56,74 @@ final class StoreProviderConnectionRequest extends FormRequest
             //
             // It never appears in any error message: `dontFlash` in bootstrap/app.php lists
             // `api_key`, `secret` and `provider_credential`, and this field is added there too.
-            'credential' => ['bail', 'required', 'string', 'min:8', 'max:512'],
+            //
+            // THE MASK GUARD IS HERE TOO, AND ITS ABSENCE WAS A REAL HOLE RATHER THAN A HARMLESS
+            // ASYMMETRY. ProviderConnectionResource renders `masked_key` as `…4a91`, and a console
+            // form seeded from a resource it just fetched posts that display string back —
+            // `reset({...connection})` keeps every key it is handed. On the rotation path a
+            // `not_regex` refuses it; on THIS path nothing did, and the value was rejected only by
+            // coincidence, because `'…'.$last_four` happens to be five characters and `min:8` is
+            // eight. That coincidence is one column change away from evaporating, and when it does
+            // the organization's key becomes the literal text `…4a91`, the request is a 201, and
+            // the first chat turn fails with `provider_auth` against something nothing explains.
+            //
+            // BEFORE THE LENGTH BOUNDS, for the reason RotateProviderCredentialRequest records at
+            // length: under `bail` a guard placed after `min:8` never runs against the very value
+            // it exists to refuse.
+            //
+            // ProviderConnectionResource::openApiSchemas() says posting the mask back into "a
+            // create or rotate request" would set the tenant's key to the literal text. This is
+            // what makes the first half of that sentence true.
+            'credential' => [
+                'bail',
+                'required',
+                'string',
+                'not_regex:/^\x{2026}/u',
+                'min:8',
+                'max:512',
+            ],
 
             'models' => ['present', 'array', 'max:50'],
             'models.*.model' => ['bail', 'required', 'string', 'max:200'],
             'models.*.display_name' => ['bail', 'required', 'string', 'max:200'],
             'models.*.supported' => ['present', 'array', 'max:20'],
-            'models.*.supported.*' => ['string', 'max:64'],
+            // A CAPABILITY FLAG IS A LOWER-CASE IDENTIFIER, AND THE CHARACTER CLASS IS A
+            // SECURITY RULE RATHER THAN TIDINESS. The value is joined into `capabilities` and
+            // ECHOED into `provider.model.*` audit rows, which AuditLogger's own docblock calls
+            // the security-relevant field of those operations — an `embedding` flag decides which
+            // credential embeds the corpus. `sanitize()`'s shape backstop fires on anything
+            // `KbJsonFormatter::redactValue()` recognises, so `supported: ["embedding",
+            // "sk-aaaaaaaaaaaa"]` used to make the whole field unreadable in an APPEND-ONLY table
+            // — a tenant blanking the field that identifies what they changed, from a form.
+            //
+            // The same string also crosses the internal seam as a `capability_flags` member, so
+            // constraining it here keeps arbitrary text out of the data plane's row axis too.
+            //
+            // NOT A CLOSED `Rule::in` LIST. The capability matrix that matters is
+            // services/ai-service/app/providers/capabilities.py, with a source per cell; a
+            // vocabulary here would be a second copy, and the drifting copy is always the one that
+            // ships. A CHARACTER CLASS constrains the shape without claiming to know the words.
+            'models.*.supported.*' => ['bail', 'string', 'max:64', 'regex:/^[a-z][a-z0-9_]*$/'],
             'models.*.context_window' => ['required', 'integer', 'min:0', 'max:100000000'],
             'models.*.max_output_tokens' => ['required', 'integer', 'min:0', 'max:100000000'],
+        ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return [
+            // Byte-identical to RotateProviderCredentialRequest's. Two endpoints that must refuse
+            // the same value should say the same sentence, whichever one the operator reached.
+            'credential.not_regex' => 'That looks like the masked display value (`…` followed by '
+                .'the last four characters), not a credential. The mask cannot authenticate '
+                .'anything; paste the full key from the provider.',
+            'models.*.supported.*.regex' => 'A capability flag is a lower-case identifier — '
+                .'letters, digits and underscores, starting with a letter (`embedding`, '
+                .'`tool_use`). It is echoed into an append-only audit row and crosses the internal '
+                .'API, so arbitrary text is refused here rather than sanitized later.',
         ];
     }
 

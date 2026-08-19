@@ -169,9 +169,13 @@ class RerankSkipReason(StrEnum):
     ``capabilities.RERANK_SCALE``, the same table ``RerankCalibration`` consults; nothing about
     it depends on a request having been made.
 
-    It is a **defensive path**: ``assert_row_coherent`` refuses a rerank-claiming row on a
-    provider with an uncharacterized scale at save time, so a request that reaches this member
-    got past save-time validation. That is a reason to name it accurately, not a reason to
+    It is a **defensive path**, and the reason has been corrected (finding J1). It used to
+    read: ``assert_row_coherent`` refuses such a row at save time, so a request reaching this
+    member got past save-time validation. There is no save-time validation — nothing calls
+    ``assert_row_coherent`` on a write path, and a rerank row is examined by nothing. What
+    actually keeps this member unreached is ``capabilities.can_rerank``, which answers ``False``
+    on an uncharacterized scale, so no ``Reranker`` is ever bound. The row itself saves cleanly.
+    That is a reason to name this member accurately, not a reason to
     leave it unnamed — an unreachable branch reporting the wrong thing is discovered by
     reading the metric, months later, on the one day it becomes reachable.
     """
@@ -472,9 +476,11 @@ def rerank_gate(
     endpoint, the row does *not* claim the capability, *and* the scale is uncharacterized, this
     reports ``PROVIDER_SCALE_UNCALIBRATED`` — attributing to the scale a ``False`` the row also
     caused. The only provider that combination is reachable on is OpenRouter, and there the
-    scale is the terminal blocker anyway: a row edited to claim the capability would be refused
-    by ``assert_row_coherent`` at save time. So the reported reason is the one the operator can
-    act on. Distinguishing the corner properly would need axis 2 passed separately as well,
+    scale is the terminal blocker anyway: a row edited to claim the capability is not refused
+    anywhere — nothing calls ``assert_row_coherent`` on a write path (finding J1) — but
+    ``can_rerank`` still answers ``False`` on it, so the outcome does not change. So the
+    reported reason is the one the operator can act on.
+    Distinguishing the corner properly would need axis 2 passed separately as well,
     which is a fourth provider argument bought for a case whose answer would not change.
     """
     if not enabled:

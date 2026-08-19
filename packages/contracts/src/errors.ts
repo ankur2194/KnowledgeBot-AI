@@ -56,6 +56,21 @@ export class KbError extends Error {
      * as "the server sent field errors and there were none", which is not a state that exists.
      */
     readonly errors: Readonly<Record<string, readonly string[]>> | null = null,
+    /**
+     * Whether `message` was written for this condition and may be shown to an operator, or is a
+     * fixed placeholder chosen to say nothing (envelope.ts). Not a status; never infer one.
+     *
+     * SEVENTH POSITION AND DEFAULTED, for the same reason `errors` is sixth: every existing
+     * `new KbError(...)` passes six arguments or fewer, so a trailing defaulted parameter breaks
+     * none of them. Verified across apps/web, apps/widget, apps/mobile and this package's tests.
+     *
+     * THE DEFAULT IS `false`, WHICH IS THE OPPOSITE OF THE SERVER'S. On the server the raiser knows
+     * it wrote a sentence, so `true` is the honest default. Here every construction site that
+     * omits it is one with no envelope behind it — a stream that dropped, a proxy page, a
+     * client-local failure — and none of those messages is addressed to an operator. Fail closed:
+     * a wrong `false` costs a blander sentence, a wrong `true` renders an internal hostname.
+     */
+    readonly actionable: boolean = false,
   ) {
     super(message ?? error_class ?? 'unknown');
     this.name = 'KbError';
@@ -155,6 +170,11 @@ export async function toKbError(response: ErrorResponseLike): Promise<KbError> {
       // as optional on every class and promises it only for `validation` (envelope.ts:26-31), so
       // absence is the normal case and an absent map is null, not `{}`.
       payload.errors ?? null,
+      // `=== true`, NOT `?? false` AND NOT A CAST. The field is optional on the interface because
+      // the SSE `error` frame omits it, and `isKbErrorEnvelope` is structural — a body that reached
+      // here with `actionable: "yes"` is not our envelope on that field, and the only safe reading
+      // of anything but a literal `true` is "do not render the server's message".
+      payload.actionable === true,
     );
   }
 

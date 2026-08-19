@@ -3,10 +3,9 @@ import { HttpResponse, http } from 'msw';
 import { setupServer } from 'msw/node';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import { sessionCredential } from '@/lib/api/browser';
+import { browserFetchData, sessionCredential } from '@/lib/api/browser';
 import {
   activeOrganizations,
-  browserFetchData,
   fetchSession,
   LOGIN_PATH,
   LOGOUT_PATH,
@@ -112,6 +111,15 @@ describe('the endpoint paths are the ones the approved route table names', () =>
 
 // ── the `data` envelope ──────────────────────────────────────────────────────────────────────────
 
+/**
+ * `browserFetchData` NOW LIVES IN `@/lib/api/browser`, not in `features/auth/session.ts`, and these
+ * assertions deliberately stayed here rather than moving to `browser-fetch.test.ts` with it: two of
+ * the three drive `fetchSession`, which is the session layer's own contract, and the third asserts
+ * the acknowledgement shape that logout returns. What is asserted is "the session layer never hands
+ * a render site a wrapper", which is a session claim about a transport helper — so it belongs to the
+ * caller's spec. `browser-fetch.test.ts` owns `browserFetch` itself: statuses, headers, 204/205 and
+ * the KbError mapping.
+ */
 describe('the data envelope is unwrapped ONCE, at the fetch boundary', () => {
   it('returns the resource itself, never the wrapper', async () => {
     withCookies('XSRF-TOKEN=test-token');

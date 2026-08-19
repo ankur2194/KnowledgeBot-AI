@@ -17,12 +17,12 @@ import {
   FormMessage,
 } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
-import { refreshCsrfToken } from '@/lib/api/browser';
+import { browserFetchData, refreshCsrfToken } from '@/lib/api/browser';
 import { asText } from '@/lib/forms/as-text';
 
 import { applyAuthError } from './auth-error';
 import { LOGIN_KNOWN_PATHS } from './known-paths';
-import { browserFetchData, browserNavigation, LOGIN_PATH } from './session';
+import { browserNavigation, LOGIN_PATH } from './session';
 import { useCooldown } from './use-cooldown';
 
 /**

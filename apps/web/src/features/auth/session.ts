@@ -6,7 +6,7 @@ import {
 } from '@kb/contracts';
 import { queryOptions } from '@tanstack/react-query';
 
-import { browserFetch, sessionCredential, type BrowserRequest } from '@/lib/api/browser';
+import { browserFetchData, sessionCredential } from '@/lib/api/browser';
 
 /**
  * The session layer — the ONE answer to "who am I, and which organization am I acting in", which are
@@ -65,31 +65,13 @@ import { browserFetch, sessionCredential, type BrowserRequest } from '@/lib/api/
 export const SESSION_KEY = ['session'] as const;
 
 /**
- * EVERY SUCCESS BODY ON THIS API IS WRAPPED IN `data`, and the wrapper is not decoration:
- * `App\Support\Contracts\ResponseShape` maps a response KEY to a schema class, so an unwrapped body
- * is literally unpublishable by `php artisan kb:dump-openapi` — and the two endpoints that predate
- * all auth work already wrap. `tests/msw/handlers.ts:52-69` is the fixture-side statement of the
- * same fact and `tests/components/msw-harness.test.tsx:33-39` asserts it.
+ * `ApiEnvelope<T>` AND `browserFetchData` USED TO BE DECLARED HERE and are now in
+ * `src/lib/api/browser.ts`, beside `browserFetch`. The docblock they carried held the instruction —
+ * move rather than copy when a second feature needs the unwrap — and that is what happened; the
+ * reasoning travelled with them. There is DELIBERATELY NO RE-EXPORT SHIM at this name: a single home
+ * is the point of the move, and a shim would leave two import paths for one function and two places
+ * a reader has to check.
  */
-export interface ApiEnvelope<T> {
-  readonly data: T;
-}
-
-/**
- * THE UNWRAP, IN ONE PLACE. Every auth call goes through here, so `data` is read exactly once — at
- * the fetch boundary — and never by reaching into `.data` at a render site. A render site that knows
- * about the envelope is a render site that has to be edited when the envelope changes, and there are
- * more of those than there are fetchers.
- *
- * It lives beside the session rather than beside `browserFetch` for a scope reason and not a design
- * one: this batch may add exactly `sessionCredential()` to `src/lib/api/browser.ts`. When a second
- * feature needs it, MOVE it there rather than copying it — a second unwrap is a second place the
- * envelope is known.
- */
-export async function browserFetchData<T>(request: BrowserRequest): Promise<T> {
-  const body = await browserFetch<ApiEnvelope<T>>(request);
-  return body.data;
-}
 
 /**
  * The four auth endpoints, as the approved route table names them (decision D1). Spelled once each,

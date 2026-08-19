@@ -16,7 +16,8 @@ real the moment it is promoted to a base dependency.
 
 Both are asserted at image build time by ``services/ai-service/Dockerfile`` — and since there is
 no CI in this repository at all, those assertions run only when somebody builds the image on their
-own machine. This file is therefore the whole automated guard, not a stand-in until a job exists. It reads pyproject.toml with ``tomllib`` and imports nothing, so it runs on a bare
+own machine. This file is therefore the whole automated guard, not a stand-in until a job
+exists. It reads pyproject.toml with ``tomllib`` and imports nothing, so it runs on a bare
 interpreter with no dependency installed at all — which is the only tier that *can* check a
 dependency deliberately absent from the test environment.
 

@@ -67,3 +67,33 @@ export type {
   MemberCollectionResource,
   MemberResource,
 } from './resources/members.js';
+
+/**
+ * Same `export type` discipline, and one extra reason on this module: it declares `masked_key`, and
+ * a runtime value exported alongside it would be the first byte of a path from "the display string"
+ * to "a form default". There is none — `src/resources/providers.ts` contains no value at all, and the
+ * status tuple the edit form iterates lives behind `@kb/contracts/forms`.
+ */
+export type {
+  EmbeddingCandidate,
+  EmbeddingDesignation,
+  EmbeddingReadinessResource,
+  EmbeddingRejection,
+  ProviderConnectionCollectionResource,
+  ProviderConnectionCreatedResponse,
+  ProviderConnectionResource,
+  ProviderConnectionStatus,
+  ProviderKey,
+} from './resources/providers.js';
+
+/**
+ * The model catalog under one connection. Same `export type` discipline, and the same reason this
+ * module holds no runtime value: `supported` is an OPEN string array because the capability
+ * vocabulary belongs to the data plane and the control plane publishes no enum for it, so there is
+ * nothing here to export as a tuple — the admin console's closed checkbox list is a UI affordance
+ * declared beside the form that renders it, not a contract.
+ */
+export type {
+  ProviderModelCollectionResource,
+  ProviderModelResource,
+} from './resources/provider-models.js';

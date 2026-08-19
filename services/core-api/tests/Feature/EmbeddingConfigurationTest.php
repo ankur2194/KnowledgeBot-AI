@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use App\Enums\OrganizationStatus;
 use App\Enums\OrgRole;
 use App\Models\Organization;
 use App\Models\ProviderConnection;
@@ -358,6 +359,149 @@ it('persists a designation the resolver accepts', function (): void {
     ]);
 });
 
+it('publishes the STORED designation beside the resolved one, on every read and both writes', function (): void {
+    // WHAT `designated` IS FOR. `selected: null` is produced by two different configurations —
+    // "nothing designated, and resolve-by-rule found no embedder" and "a pair IS designated and it
+    // stopped resolving" — which need opposite copy on the designation screen. Before this field
+    // the stored pair appeared only inside `explanation`, which is the data plane's prose, rendered
+    // verbatim by contract and therefore not something a client may parse an id out of.
+    //
+    // This also pins the FRESHNESS rule in both directions, which is the half a resource-level test
+    // cannot reach: `show` renders off the BOUND organization and `update` must render off the row
+    // the WRITE returned. Rendering `update` off the bound row would echo the operator's previous
+    // designation back at them on the very response that changed it — null after a designate, and
+    // the old pair after a clear.
+    $fixture = orgWithEmbeddingConnection();
+
+    // fakeSequence and not four fake() calls: Http::fake() PUSHES a stub and the first match wins,
+    // so a second fake() for the same URL is silently ignored.
+    Http::fakeSequence('*/internal/v1/embedding/readiness')
+        ->push(readyVerdict($fixture['connection']->id), 200)
+        ->push(readyVerdict($fixture['connection']->id), 200)
+        ->push(unreadyVerdict('The designated connection and model no longer resolve to an embedder.'), 200)
+        ->push(unreadyVerdict(), 200);
+
+    $url = "/api/v1/organizations/{$fixture['org']->id}/embedding-configuration";
+
+    // 1. NOTHING STORED. Null here means "this organization designated nothing", which is a real
+    //    and common state — an organization with exactly one embedding-capable connection never
+    //    needs to designate anything.
+    currentTest()->actingAs($fixture['actor'])->getJson($url)
+        ->assertOk()
+        ->assertJsonPath('data.designated', null);
+
+    // 2. THE WRITE'S OWN RESPONSE. The bound organization row still held two nulls when this
+    //    request was routed, so a `designated` read off it would be null here — which is exactly
+    //    the bug this assertion exists to catch.
+    currentTest()->actingAs($fixture['actor'])->putJson($url, [
+        'connection_id' => $fixture['connection']->id,
+        'model' => 'text-embedding-3-large',
+    ])
+        ->assertOk()
+        ->assertJsonPath('data.ready', true)
+        ->assertJsonPath('data.designated.connection_id', $fixture['connection']->id)
+        ->assertJsonPath('data.designated.model', 'text-embedding-3-large')
+        // TWO KEYS AND NO THIRD. `organizations` stores a connection id and a model string;
+        // a `provider` here would be a join publishing a value the designation does not contain.
+        ->assertJsonPath('data.designated', [
+            'connection_id' => $fixture['connection']->id,
+            'model' => 'text-embedding-3-large',
+        ]);
+
+    // 3. THE CELL THE FIELD WAS ADDED FOR: the pair is stored, and it no longer resolves. `selected`
+    //    is null exactly as it would be for an organization that designated nothing, and only
+    //    `designated` tells the two apart.
+    currentTest()->actingAs($fixture['actor'])->getJson($url)
+        ->assertOk()
+        ->assertJsonPath('data.ready', false)
+        ->assertJsonPath('data.selected', null)
+        ->assertJsonPath('data.designated.connection_id', $fixture['connection']->id);
+
+    // 4. AND THE OTHER FRESHNESS DIRECTION. The bound row still holds the pair while this request
+    //    is routed; the response must show it gone.
+    currentTest()->actingAs($fixture['actor'])->putJson($url, [
+        'connection_id' => null,
+        'model' => null,
+    ])
+        ->assertOk()
+        ->assertJsonPath('data.designated', null);
+});
+
+it('refuses a designation whose catalog row was deleted after the resolver looked', function (): void {
+    // FINDING S6 — THE DIRECTION THE LOCK DID NOT CLOSE.
+    //
+    // EloquentProviderModelRepository::delete() locks the model row, then `organizations`, then
+    // re-reads the designation, so DESIGNATE-THEN-DELETE has always been refused. The mirror image
+    // was open: designateEmbeddingConnection() took the same `organizations` lock and then WROTE
+    // without checking the pair still existed, and `organizations.embedding_model` is a bare `text`
+    // column with no foreign key to `provider_models` — so both requests returned 200 and the
+    // organization was left naming a catalog row that had been removed. It surfaced days later, at
+    // the next upload, as a resolution error nobody could connect to an action.
+    //
+    // THE RACE IS REPRODUCED BY MAKING THE VERDICT STALE, which is exactly what it is in
+    // production. `EmbeddingDesignationService` resolves OUTSIDE the transaction — it makes an HTTP
+    // call, and an HTTP call between BEGIN and COMMIT pins xmin and stops autovacuum reclaiming
+    // dead tuples database-wide — so the verdict it acts on is always a statement about a moment
+    // that has already passed. Faking a READY verdict for a pair whose row is gone is that moment,
+    // deterministically.
+    $fixture = orgWithEmbeddingConnection();
+
+    // The resolver says yes, and it is not wrong: this is what it saw.
+    fakeReadiness(readyVerdict($fixture['connection']->id));
+
+    // The other administrator's delete, committed in between.
+    \App\Models\ProviderModelEntry::query()->withoutGlobalScopes()
+        ->where('provider_connection_id', '=', $fixture['connection']->id)
+        ->delete();
+
+    currentTest()->actingAs($fixture['actor'])
+        ->putJson("/api/v1/organizations/{$fixture['org']->id}/embedding-configuration", [
+            'connection_id' => $fixture['connection']->id,
+            'model' => 'text-embedding-3-large',
+        ])
+        // `validation` and not a 409: this IS about a field of the submitted body — the pair the
+        // operator named — which is what distinguishes it from the model DELETE's 409, which is
+        // about the state of a different record and has no field to key on.
+        ->assertStatus(422)
+        ->assertJsonPath('error_class', 'validation')
+        ->assertJsonPath('retryable', false);
+
+    // AND THE TRANSACTION ROLLED BACK. Without this the test passes against an implementation that
+    // writes the designation and then throws, which is the worst of the three possible outcomes:
+    // the caller is told no and the dangling pointer is committed anyway.
+    assertDatabaseHas('organizations', [
+        'id' => $fixture['org']->id,
+        'embedding_connection_id' => null,
+        'embedding_model' => null,
+    ]);
+});
+
+it('still designates a pair whose catalog row is present, so the check is not "always refuse"', function (): void {
+    // THE POSITIVE CONTROL FOR THE TEST ABOVE, stated separately because the existence query is one
+    // predicate away from matching nothing — a `where('model', ...)` against the wrong column, an
+    // organization id taken from the wrong variable — and every assertion in the test above would
+    // still pass while designation stopped working entirely.
+    //
+    // `persists a designation the resolver accepts` covers the same ground from the other end; this
+    // one is here so the two live beside the check they constrain.
+    $fixture = orgWithEmbeddingConnection();
+
+    fakeReadiness(readyVerdict($fixture['connection']->id));
+
+    currentTest()->actingAs($fixture['actor'])
+        ->putJson("/api/v1/organizations/{$fixture['org']->id}/embedding-configuration", [
+            'connection_id' => $fixture['connection']->id,
+            'model' => 'text-embedding-3-large',
+        ])
+        ->assertOk();
+
+    assertDatabaseHas('organizations', [
+        'id' => $fixture['org']->id,
+        'embedding_connection_id' => $fixture['connection']->id,
+        'embedding_model' => 'text-embedding-3-large',
+    ]);
+});
+
 it('refuses a designation the resolver cannot resolve, and stores nothing', function (): void {
     $explanation = 'The designated embedding connection 01JQZ -> nope cannot embed: '
         .'row_lacks_embedding_flag. It is not substituted.';
@@ -482,6 +626,151 @@ it('relays the class the data plane assigned rather than deriving one from the s
         ->assertJsonPath('error_class', 'provider_temporary');
 });
 
+it('relays the data plane\'s retryable verdict rather than recomputing it from the class', function (): void {
+    // FINDING B1, HALF TWO — ADR-029 / O1 re-opened at the relay boundary.
+    //
+    // services/ai-service/app/main.py::_handle_unexpected raises with `origin=Origin.SELF` and puts
+    // `retryable: false` on the wire: "this is our bug, do not retry". KbException::relayed() used
+    // to omit $origin, so the carrier defaulted to ORIGIN_DOWNSTREAM and bootstrap/app.php
+    // recomputed `retryable` as TRUE from class-plus-origin — and apps/web's query client then ran
+    // a full backoff ladder against a guaranteed failure, every attempt costing the data plane
+    // another 500.
+    //
+    // `origin` is not a wire field, so the relayed `retryable` is the ONLY evidence of origin that
+    // crosses. This asserts the whole hop: fake envelope in, rendered envelope out.
+    Http::fake(['*/internal/v1/embedding/readiness' => Http::response([
+        'error_class' => 'internal_dependency',
+        'message' => 'The service could not complete this request.',
+        'retryable' => false,
+        'request_id' => '01JQZ0000000000000000000SS',
+    ], 500)]);
+
+    $fixture = orgWithEmbeddingConnection();
+
+    currentTest()->actingAs($fixture['actor'])
+        ->getJson("/api/v1/organizations/{$fixture['org']->id}/embedding-configuration")
+        // The relayed STATUS is kept verbatim, and the verdict does NOT come from it.
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency')
+        ->assertJsonPath('retryable', false);
+});
+
+it('keeps a genuine downstream 503 retryable, so the fix is not "relayed means never retry"', function (): void {
+    // THE POSITIVE CONTROL FOR THE TEST ABOVE. Collapsing both readings into "not retryable" would
+    // satisfy that pin and would be wrong in the expensive direction: a dependency having a moment
+    // IS worth another attempt, and 503/retryable is what tells a client so.
+    Http::fake(['*/internal/v1/embedding/readiness' => Http::response([
+        'error_class' => 'internal_dependency',
+        'message' => 'qdrant is unreachable',
+        'retryable' => true,
+        'request_id' => '01JQZ0000000000000000000TT',
+    ], 503)]);
+
+    $fixture = orgWithEmbeddingConnection();
+
+    currentTest()->actingAs($fixture['actor'])
+        ->getJson("/api/v1/organizations/{$fixture['org']->id}/embedding-configuration")
+        ->assertStatus(503)
+        ->assertJsonPath('error_class', 'internal_dependency')
+        ->assertJsonPath('retryable', true);
+});
+
+it('relays the data plane\'s per-field validation map instead of erasing it', function (): void {
+    // FINDING B1, HALF ONE. `_handle_validation_error` builds a real `dict[str, list[str]]` from
+    // Pydantic's `loc` paths on EVERY validation envelope — and the relay read only `error_class`
+    // and `message`, so a 422 that named the offending field arrived at the browser as `validation`
+    // with nothing to key a form error on.
+    //
+    // It also broke an invariant apps/web tests STRUCTURALLY: features/embedding/api.ts
+    // discriminates the ADR-031 resolver refusal on `validation` AND `errors === null`. That test
+    // is only sound while "no map" really does mean "a deliberate refusal with no field", which is
+    // what this pair of tests — this one and the resolver-refusal one above — assert together.
+    Http::fake(['*/internal/v1/embedding/readiness' => Http::response([
+        'error_class' => 'validation',
+        'message' => 'request failed validation',
+        'retryable' => false,
+        'request_id' => '01JQZ0000000000000000000UU',
+        'errors' => [
+            'connections.0.model' => ['Input should be a valid string'],
+            'designated' => ['Field required'],
+        ],
+    ], 422)]);
+
+    $fixture = orgWithEmbeddingConnection();
+
+    $response = currentTest()->actingAs($fixture['actor'])
+        ->getJson("/api/v1/organizations/{$fixture['org']->id}/embedding-configuration")
+        ->assertStatus(422)
+        ->assertJsonPath('error_class', 'validation');
+
+    $body = $response->json();
+
+    assert(is_array($body));
+
+    // Read as data rather than through assertJsonPath: `Arr::get` explodes on '.' with no escape,
+    // so a dotted Pydantic field path is unreachable by that route and asserting it there would
+    // check a path that does not exist.
+    expect($body)->toHaveKey('errors')
+        ->and($body['errors'])->toBe([
+            'connections.0.model' => ['Input should be a valid string'],
+            'designated' => ['Field required'],
+        ]);
+});
+
+it('does NOT forward a malformed errors map, and does not invent one on another class', function (): void {
+    // FAIL CLOSED ON THE SHAPE. `errors` is contractually `Record<string, string[]>` and a form keys
+    // on it; FastAPI's own handler records why a LIST is the dangerous near-miss — it still
+    // satisfies `typeof value === "object"`, so the envelope type-guard passes, the form keys on
+    // `0` and `1`, no field matches, and every message collapses into one opaque root error.
+    //
+    // Dropping it renders as the deliberate-refusal shape (`validation`, no map), which is the one
+    // thing every client already knows how to display.
+    Http::fake(['*/internal/v1/embedding/readiness' => Http::response([
+        'error_class' => 'validation',
+        'message' => 'request failed validation',
+        'retryable' => false,
+        'request_id' => '01JQZ0000000000000000000VV',
+        // A LIST, not a map — the exact shape the type-guard cannot tell from a map.
+        'errors' => [['Input should be a valid string']],
+    ], 422)]);
+
+    $fixture = orgWithEmbeddingConnection();
+
+    $body = currentTest()->actingAs($fixture['actor'])
+        ->getJson("/api/v1/organizations/{$fixture['org']->id}/embedding-configuration")
+        ->assertStatus(422)
+        ->assertJsonPath('error_class', 'validation')
+        ->json();
+
+    assert(is_array($body));
+
+    expect($body)->not->toHaveKey('errors');
+});
+
+it('never grows an errors map on a class that is not validation', function (): void {
+    // The superset is keyed on the CLASS, not on "the data plane sent something". A producer that
+    // wrongly attached a map to a `provider_temporary` must not make one appear here, because a
+    // client reads `errors` as proof it is looking at a per-field refusal.
+    Http::fake(['*/internal/v1/embedding/readiness' => Http::response([
+        'error_class' => 'provider_temporary',
+        'message' => 'the vendor is overloaded',
+        'retryable' => true,
+        'request_id' => '01JQZ0000000000000000000WW',
+        'errors' => ['model' => ['nope']],
+    ], 503)]);
+
+    $fixture = orgWithEmbeddingConnection();
+
+    $body = currentTest()->actingAs($fixture['actor'])
+        ->getJson("/api/v1/organizations/{$fixture['org']->id}/embedding-configuration")
+        ->assertStatus(503)
+        ->json();
+
+    assert(is_array($body));
+
+    expect($body)->not->toHaveKey('errors');
+});
+
 it('runs all six checks on the designation endpoint', function (): void {
     $fixture = orgWithEmbeddingConnection();
     fakeReadiness(readyVerdict($fixture['connection']->id));
@@ -517,7 +806,13 @@ it('runs all six checks on the designation endpoint', function (): void {
         ->putJson("/api/v1/organizations/{$suspended->id}/embedding-configuration", [
             'connection_id' => null, 'model' => null,
         ])
-        ->assertStatus(409);
+        ->assertStatus(409)
+        // AND THE SENTENCE, not an empty `message`. A 409 with no message is rendered by
+        // bootstrap/app.php as `internal_dependency`, whose class-mapped client copy is "Something
+        // on our side is unavailable. Try again shortly." — false twice over, because nothing is
+        // unavailable and retrying never works while the organization is suspended. The render
+        // closure's `default => $e->getMessage()` arm carries this through verbatim.
+        ->assertJsonPath('message', OrganizationStatus::SUSPENDED_REFUSAL);
 });
 
 it('lets a knowledge manager read the banner and not change the designation', function (): void {

@@ -3,18 +3,29 @@
 declare(strict_types=1);
 
 use App\Enums\OrgRole;
+use App\Enums\Provider;
+use App\Enums\ProviderConnectionStatus;
 use App\Models\AuditLog;
 use App\Models\EmailVerificationToken;
 use App\Models\Organization;
 use App\Models\OrganizationInvitation;
+use App\Models\ProviderConnection;
+use App\Models\ProviderModelEntry;
 use App\Models\User;
 use App\Repositories\Eloquent\EloquentAuditLogPartitionRepository;
 use App\Repositories\Eloquent\EloquentAuditLogRepository;
 use App\Services\Audit\AuditLogger;
+use App\Support\Crypto\CredentialVault;
 use App\Support\Kb\OpaqueToken;
+use Database\Factories\ProviderConnectionFactory;
 use Database\Factories\UserFactory;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
+
+use function Pest\Laravel\assertDatabaseHas;
+use function Pest\Laravel\assertDatabaseMissing;
+
 use Psr\Log\LoggerInterface;
 use Tests\Support\AuditLogRepositorySpy;
 use Tests\Support\Mailbox;
@@ -144,6 +155,68 @@ function auditAtomicityFixture(): array
         'token' => $token,
         'invitation' => OrganizationInvitation::factory()->recycle($organization)->invitedBy($owner)
             ->token($token)->role(OrgRole::Analyst)->create(['email' => 'atomicity-invitee@example.test']),
+    ];
+}
+
+/**
+ * The plaintext a provider-connection test submits.
+ *
+ * THREE LITERALS NOW EXIST FOR ONE CONCEPT AND THAT IS DELIBERATE: this one, the factory's
+ * FIXTURE_CREDENTIAL (what a fixture row already holds), and ProviderConnectionResourceTest's
+ * ROTATION_TEST_CREDENTIAL. Each is greppable and distinct, so a value found somewhere it should not
+ * be names the file that put it there. It is NOT this file's job to reuse that file's constant —
+ * a top-level `const` is process-global, and reaching for one declared in a sibling test file
+ * couples two files that PHPUnit may load in either order or, running one file alone, not at all.
+ *
+ * Its last four are lower-case alphanumeric for the same reason ROTATION_TEST_CREDENTIAL's are: a
+ * ULID is upper-case base32, so `v8r2` cannot appear inside a subject id or a request id by chance.
+ */
+const ATOMICITY_PROVIDER_CREDENTIAL = 'kb-atomicity-credential-DO-NOT-LOG-v8r2';
+
+/**
+ * TWO ORGANIZATIONS, each holding a connection to the SAME vendor carrying the SAME model id.
+ *
+ * A one-organization fixture would pass every assertion below against a repository whose
+ * organization predicate had been deleted — including the rollback assertions, because "the row is
+ * still there" is satisfied by a delete that ran against nobody. Org B's rows are the control: every
+ * test here asserts they are still standing afterwards, and only the LABEL distinguishes them, which
+ * is why both labels are written out rather than left to the factory's faker default.
+ *
+ * A HELPER OF THIS FILE'S OWN, not ProviderConnectionResourceTest's providerOrgPair(). Pest test
+ * files declare their helpers at file scope, so that one exists only when that file has been loaded
+ * — running `pest tests/Feature/AuditAtomicityTest.php` alone would fatal on an undefined function —
+ * and declaring a second copy under the same name in this file would be a redeclaration fatal in a
+ * full run. tests/Support/tenancy.php's tenantPair() is the intended eventual home for both and
+ * throws by design until the Bot and KnowledgeSource factories exist.
+ *
+ * @return array{
+ *     orgA: Organization, orgB: Organization,
+ *     ownerA: User,
+ *     connectionA: ProviderConnection, connectionB: ProviderConnection,
+ * }
+ */
+function providerAtomicityFixture(): array
+{
+    $orgA = Organization::factory()->create(['name' => 'Atomicity Provider Org ALPHA']);
+    $orgB = Organization::factory()->create(['name' => 'Atomicity Provider Org BRAVO']);
+
+    return [
+        'orgA' => $orgA,
+        'orgB' => $orgB,
+        'ownerA' => User::factory()->recycle($orgA)->orgRole(OrgRole::Owner)
+            ->create(['email' => SpaSession::uniqueEmail('atomicity-provider-owner')]),
+
+        // ->recycle($org) on every factory without exception: ProviderConnectionFactory refuses to
+        // run without one, because a connection minted into a THIRD organization is what makes an
+        // isolation assertion pass with the tenant filter deleted.
+        'connectionA' => ProviderConnection::factory()->recycle($orgA)
+            ->provider(Provider::Anthropic)
+            ->withModel('claude-sonnet-5', ['text'])
+            ->create(['label' => 'ALPHA atomicity chat']),
+        'connectionB' => ProviderConnection::factory()->recycle($orgB)
+            ->provider(Provider::Anthropic)
+            ->withModel('claude-sonnet-5', ['text'])
+            ->create(['label' => 'BRAVO atomicity chat']),
     ];
 }
 
@@ -302,6 +375,535 @@ it('does not change a password when the completion audit row cannot be written',
 });
 
 // -------------------------------------------------------------------------------------------
+// ON_FAILURE_ABORT: the four provider-connection operations
+//
+// ALL FOUR AUDIT WRITES ARE PASSED INTO THE REPOSITORY AS A CLOSURE and invoked inside its own
+// DB::transaction() — App\Repositories\Eloquent\EloquentProviderConnectionRepository, one call site
+// per method. That is why breaking the INSERT at the DATABASE is the right instrument here and a
+// mocked repository is not: the property under test is that the audit write and the business write
+// share a transaction, and a PHP-level double proves only that the ABORT branch rethrows.
+//
+// WHERE THE AUDIT CALL SITS RELATIVE TO THE STATE CHANGE IS NOT UNIFORM, and it decides how much
+// each of these four tests can prove:
+//
+//   create / update / rotateCredential  — save() FIRST, audit SECOND. The row really is written and
+//       really is rolled back, so these three fail if the audit write is moved out of the
+//       transaction in either direction.
+//   delete                              — audit FIRST, deletes SECOND, because a hard delete leaves
+//       the audit row as the only surviving description of the connection. So the delete test proves
+//       "nothing committed" and proves the write is not AFTER the commit — but it cannot, by
+//       construction, distinguish an audit call inside the transaction from one just before it. That
+//       limitation is written here rather than papered over; the other three carry that half.
+// -------------------------------------------------------------------------------------------
+
+it('stores no provider connection when its audit row cannot be written', function (): void {
+    $fixture = providerAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    // POSITIVE CONTROL BEFORE THE BREAK: org A owns exactly one connection right now. Without it,
+    // "org A still owns one connection" below is satisfied by a fixture that never created any and
+    // by an endpoint that has been 500ing since long before the partitions were dropped.
+    expect(ProviderConnection::query()->withoutGlobalScopes()
+        ->where('organization_id', '=', $fixture['orgA']->id)->count())
+        ->toBe(1, 'the fixture did not create org A\'s connection, so nothing below is a rollback');
+
+    // UNREACHABLE ON CORRECT CODE, and that is the point of stating it. `store` computes embedding
+    // readiness AFTER the write, so the ABORT rethrow means this stub is never consulted. It is here
+    // so that if the audit failure is ever swallowed, this test fails on its assertions rather than
+    // on a socket the suite must never open.
+    Http::fake([
+        '*/internal/v1/embedding/readiness' => Http::response([
+            'selected' => null, 'eligible' => [], 'rejected' => [], 'explanation' => 'not yet',
+        ], 200),
+    ]);
+
+    auditWritesBroken();
+
+    currentTest()->postJson(
+        "/api/v1/organizations/{$fixture['orgA']->id}/provider-connections",
+        [
+            'provider' => Provider::OpenAI->value,
+            'label' => 'ALPHA unauditable connection',
+            'credential' => ATOMICITY_PROVIDER_CREDENTIAL,
+            // A MODEL ROW TOO, so the rollback assertion covers the child writes attachModel()
+            // performs inside the same transaction and not just the parent INSERT.
+            'models' => [[
+                'model' => 'text-embedding-3-large',
+                'display_name' => 'Unauditable embedding',
+                'supported' => ['embedding'],
+                'context_window' => 8192,
+                'max_output_tokens' => 0,
+            ]],
+        ],
+        spaHeaders(),
+    )
+        // ON_FAILURE_ABORT rethrows the QueryException UNWRAPPED, so the taxonomy classifies the
+        // SQLSTATE rather than a service-layer wrapper.
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    // NOTHING COMMITTED. A credential stored with no record of who stored it is precisely the state
+    // kb-security-baseline §18.11 exists to make unreachable — and it is invisible in every other
+    // test, because the endpoint's own response would have been a 201.
+    assertDatabaseMissing('provider_connections', ['label' => 'ALPHA unauditable connection']);
+    assertDatabaseMissing('provider_models', ['display_name' => 'Unauditable embedding']);
+
+    expect(ProviderConnection::query()->withoutGlobalScopes()
+        ->where('organization_id', '=', $fixture['orgA']->id)->count())
+        ->toBe(1, 'a connection was created without an audit row');
+
+    // AND ORG B SURVIVES. A rollback that reached beyond its own savepoint would take the other
+    // tenant's rows with it, and no assertion on org A can see that.
+    assertDatabaseHas('provider_connections', [
+        'id' => $fixture['connectionB']->id,
+        'organization_id' => $fixture['orgB']->id,
+        'label' => 'BRAVO atomicity chat',
+    ]);
+    assertDatabaseHas('provider_models', [
+        'organization_id' => $fixture['orgB']->id,
+        'provider_connection_id' => $fixture['connectionB']->id,
+    ]);
+});
+
+it('does not relabel or restatus a provider connection when its audit row cannot be written', function (): void {
+    $fixture = providerAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    $connection = $fixture['connectionA'];
+
+    // POSITIVE CONTROL FIRST: the values this test claims survive are the values the row actually
+    // holds right now. Asserting only the "after" state would pass against a fixture whose label was
+    // never what the assertion names.
+    $before = ProviderConnection::query()->withoutGlobalScopes()->findOrFail($connection->id);
+
+    expect($before->label)->toBe('ALPHA atomicity chat')
+        ->and($before->status)->toBe(ProviderConnectionStatus::Active);
+
+    auditWritesBroken();
+
+    // `update()` calls save() BEFORE the audit closure, so both columns really are written and both
+    // really have to come back on the ROLLBACK TO SAVEPOINT. This is the shape that fails if the
+    // audit write is moved outside the repository's transaction.
+    currentTest()->patchJson(
+        "/api/v1/organizations/{$fixture['orgA']->id}/provider-connections/{$connection->id}",
+        [
+            'label' => 'ALPHA renamed by an unauditable edit',
+            'status' => ProviderConnectionStatus::Revoked->value,
+        ],
+        spaHeaders(),
+    )
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    $after = ProviderConnection::query()->withoutGlobalScopes()->findOrFail($connection->id);
+
+    expect($after->label)->toBe(
+        'ALPHA atomicity chat',
+        'the connection was relabelled with no audit row, so the trail cannot say which credential '
+        .'the operator was describing when they later revoked it',
+    );
+
+    // THE STATUS HALF MATTERS MORE THAN THE LABEL. `revoked` takes the credential out of every
+    // capability query, so a status change that committed without its audit row is an organization
+    // whose ingestion silently stopped with nothing recording who stopped it.
+    expect($after->status)->toBe(ProviderConnectionStatus::Active);
+
+    assertDatabaseMissing('provider_connections', ['label' => 'ALPHA renamed by an unauditable edit']);
+
+    // ORG B UNTOUCHED.
+    assertDatabaseHas('provider_connections', [
+        'id' => $fixture['connectionB']->id,
+        'label' => 'BRAVO atomicity chat',
+        'status' => ProviderConnectionStatus::Active->value,
+    ]);
+});
+
+it('deletes no provider connection when its audit row cannot be written', function (): void {
+    $fixture = providerAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    $connection = $fixture['connectionA'];
+
+    // POSITIVE CONTROL FIRST, BOTH HALVES: the connection and the `provider_models` row the delete
+    // would have to take with it both exist. Without the child assertion, "the model rows are still
+    // there" is satisfied by a fixture that never attached one.
+    assertDatabaseHas('provider_connections', [
+        'id' => $connection->id,
+        'organization_id' => $fixture['orgA']->id,
+    ]);
+    assertDatabaseHas('provider_models', [
+        'organization_id' => $fixture['orgA']->id,
+        'provider_connection_id' => $connection->id,
+        'model' => 'claude-sonnet-5',
+    ]);
+
+    auditWritesBroken();
+
+    currentTest()->deleteJson(
+        "/api/v1/organizations/{$fixture['orgA']->id}/provider-connections/{$connection->id}",
+        [],
+        spaHeaders(),
+    )
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    // THE HARD DELETE DID NOT HAPPEN. This is the one operation whose audit row is the ONLY thing
+    // that would have survived it, so a delete that committed without one erases the connection AND
+    // the record that it ever existed — `subject_id` would point at a ULID no table resolves and no
+    // row would carry the provider, label or status that made it readable.
+    assertDatabaseHas('provider_connections', [
+        'id' => $connection->id,
+        'organization_id' => $fixture['orgA']->id,
+        'label' => 'ALPHA atomicity chat',
+    ]);
+    assertDatabaseHas('provider_models', [
+        'organization_id' => $fixture['orgA']->id,
+        'provider_connection_id' => $connection->id,
+        'model' => 'claude-sonnet-5',
+    ]);
+
+    // ORG B SURVIVES — connection and child row alike. A delete whose predicate lost its
+    // organization term is invisible to every assertion above.
+    assertDatabaseHas('provider_connections', [
+        'id' => $fixture['connectionB']->id,
+        'organization_id' => $fixture['orgB']->id,
+    ]);
+    assertDatabaseHas('provider_models', [
+        'organization_id' => $fixture['orgB']->id,
+        'provider_connection_id' => $fixture['connectionB']->id,
+    ]);
+});
+
+it('does not replace a stored credential when the rotation audit row cannot be written', function (): void {
+    $fixture = providerAtomicityFixture();
+
+    // A REVOKED CONNECTION ON PURPOSE. rotateCredential() writes four credential columns, bumps
+    // `credential_version` AND returns the connection to `active`, all in one save() before the
+    // audit closure runs — so a revoked fixture gives this test a fifth, independently observable
+    // column that must also roll back. An active fixture would make the status assertion vacuous.
+    $connection = ProviderConnection::factory()->recycle($fixture['orgA'])
+        ->provider(Provider::OpenAI)
+        ->revoked()
+        ->create(['label' => 'ALPHA atomicity revoked']);
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    $before = ProviderConnection::query()->withoutGlobalScopes()->findOrFail($connection->id);
+
+    // POSITIVE CONTROL FIRST, AND IT IS THE WHOLE TEST: the row really does hold a sealed credential
+    // that round-trips through the vault. "The ciphertext did not change" is otherwise a statement
+    // about an empty column, and it would go green against a factory that sealed nothing.
+    expect(app(CredentialVault::class)->open(
+        (string) $before->getAttribute('credential_ciphertext'),
+        (string) $before->getAttribute('data_key_ciphertext'),
+    ))->toBe(ProviderConnectionFactory::FIXTURE_CREDENTIAL);
+
+    expect($before->credential_version)->toBe(1)
+        ->and($before->last_four)->toBe(substr(ProviderConnectionFactory::FIXTURE_CREDENTIAL, -4))
+        ->and($before->status)->toBe(ProviderConnectionStatus::Revoked);
+
+    auditWritesBroken();
+
+    currentTest()->putJson(
+        "/api/v1/organizations/{$fixture['orgA']->id}/provider-connections/{$connection->id}/credential",
+        [
+            // §18.3 re-authentication. It is a validation rule, so it runs before the row is read —
+            // a 422 here would mean this test never reached the transaction it is about.
+            'current_password' => UserFactory::PASSWORD,
+            'credential' => ATOMICITY_PROVIDER_CREDENTIAL,
+        ],
+        spaHeaders(),
+    )
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    $after = ProviderConnection::query()->withoutGlobalScopes()->findOrFail($connection->id);
+
+    // THE OLD KEY STILL OPENS, which is the observable consequence of the rollback rather than a
+    // restatement of it: a half-applied rotation would leave the organization authenticating to the
+    // provider with a key nobody holds, and no audit row saying when that started.
+    expect(app(CredentialVault::class)->open(
+        (string) $after->getAttribute('credential_ciphertext'),
+        (string) $after->getAttribute('data_key_ciphertext'),
+    ))->toBe(ProviderConnectionFactory::FIXTURE_CREDENTIAL);
+
+    expect($after->getAttribute('credential_ciphertext'))
+        ->toBe($before->getAttribute('credential_ciphertext'))
+        ->and($after->getAttribute('data_key_ciphertext'))
+        ->toBe($before->getAttribute('data_key_ciphertext'))
+        ->and($after->last_four)->toBe($before->last_four)
+        // THE VERSION COUNTER IS THE TELL. It is the one column an investigation reads to answer
+        // "which generation of this credential was live on that date", and a rotation that committed
+        // without its audit row moves it to 2 with nothing to explain the gap.
+        ->and($after->credential_version)->toBe(1)
+        ->and($after->status)->toBe(ProviderConnectionStatus::Revoked);
+
+    // AND THE SUBMITTED PLAINTEXT IS NOWHERE IN THE ROW. `credential_ciphertext` is bytea, so read
+    // the whole row back AS TEXT: a plaintext that landed in a column this test does not know about
+    // still trips it.
+    //
+    // str_contains(...)->toBeFalse(), never ->not->toContain(...): toContain() takes only needles, so
+    // a message argument becomes a second needle and `not` treats any failure as success. That exact
+    // shape has already hidden a real tenant-id leak in this repo.
+    $raw = (string) json_encode(
+        Schema::getConnection()->select(
+            'SELECT provider_connections::text AS value FROM provider_connections WHERE id = ?',
+            [$connection->id],
+        ),
+        JSON_THROW_ON_ERROR,
+    );
+
+    expect($raw)->not->toBe('[]');
+    expect(str_contains($raw, ATOMICITY_PROVIDER_CREDENTIAL))
+        ->toBeFalse('the rotation plaintext reached a column despite the rollback');
+
+    // ORG B'S CREDENTIAL IS UNTOUCHED — same vendor, same fixture plaintext, so only the id and the
+    // version counter distinguish it from org A's.
+    $survivor = ProviderConnection::query()->withoutGlobalScopes()
+        ->findOrFail($fixture['connectionB']->id);
+
+    expect($survivor->credential_version)->toBe(1, 'rotated org B\'s credential anyway')
+        ->and($survivor->label)->toBe('BRAVO atomicity chat');
+});
+
+// -------------------------------------------------------------------------------------------
+// ON_FAILURE_ABORT: the PROVIDER MODEL CATALOG
+// -------------------------------------------------------------------------------------------
+//
+// THE SAME TECHNIQUE AND A DIFFERENT SUBJECT. `provider.model.created`, `.updated` and `.deleted`
+// are all ABORT and all written inside EloquentProviderModelRepository's transaction, so each
+// change must roll back with its row.
+//
+// WHAT EACH OF THE THREE CAN PROVE, which is not the same for all three:
+//   create   — the row does not exist afterwards. It cannot distinguish "the audit write was
+//       inside the transaction" from "it happened before the INSERT", because there is nothing to
+//       observe before the INSERT.
+//   update   — the strongest of the three. `update()` calls save() BEFORE the audit closure, so
+//       five columns really are written and really have to come back on the ROLLBACK TO SAVEPOINT.
+//       This is the shape that fails if the audit write is moved outside the transaction.
+//   delete   — audit FIRST, delete SECOND, because a hard delete leaves the audit row as the only
+//       surviving description. So it proves "nothing committed" and proves the write is not AFTER
+//       the commit, but cannot distinguish inside-the-transaction from just-before-it. The update
+//       test carries that half.
+
+/**
+ * TWO ORGANIZATIONS, each holding a connection whose catalog carries THE SAME MODEL ID.
+ *
+ * Only the DISPLAY NAME distinguishes them, which is the point: a repository whose organization
+ * predicate had been deleted would still return, edit or delete a plausible-looking row, and every
+ * assertion keyed on the model identifier would pass. Org B's rows are the control, and every test
+ * below asserts they are still standing afterwards.
+ *
+ * A HELPER OF THIS FILE'S OWN, and a name of its own. Pest declares test-file helpers at FILE
+ * SCOPE, so `providerOrgPair()` from ProviderConnectionResourceTest.php exists only when that file
+ * has been loaded — running this file alone would fatal on an undefined function — and declaring a
+ * second copy under the same name here would be a redeclaration fatal in a full run.
+ * tests/Support/tenancy.php's tenantPair() is the intended eventual home for all of them and
+ * throws by design until the Bot and KnowledgeSource factories exist.
+ *
+ * @return array{
+ *     orgA: Organization, orgB: Organization,
+ *     ownerA: User,
+ *     connectionA: ProviderConnection, connectionB: ProviderConnection,
+ *     modelA: ProviderModelEntry, modelB: ProviderModelEntry,
+ * }
+ */
+function providerModelAtomicityFixture(): array
+{
+    $orgA = Organization::factory()->create(['name' => 'Model Atomicity Org ALPHA']);
+    $orgB = Organization::factory()->create(['name' => 'Model Atomicity Org BRAVO']);
+
+    $connectionA = ProviderConnection::factory()->recycle($orgA)
+        ->provider(Provider::OpenAI)->create(['label' => 'ALPHA model atomicity']);
+    $connectionB = ProviderConnection::factory()->recycle($orgB)
+        ->provider(Provider::OpenAI)->create(['label' => 'BRAVO model atomicity']);
+
+    return [
+        'orgA' => $orgA,
+        'orgB' => $orgB,
+        'ownerA' => User::factory()->recycle($orgA)->orgRole(OrgRole::Owner)
+            ->create(['email' => SpaSession::uniqueEmail('model-atomicity-owner')]),
+        'connectionA' => $connectionA,
+        'connectionB' => $connectionB,
+
+        // ->recycle() of BOTH parents on every factory call: ProviderModelEntryFactory refuses to
+        // run without them, and refuses a pair that disagrees, because a row minted into a THIRD
+        // organization is what makes an isolation test pass with the tenant filter deleted.
+        'modelA' => ProviderModelEntry::factory()->recycle($orgA)->recycle($connectionA)
+            ->supporting(['embedding'])
+            ->create(['model' => 'text-embedding-3-large', 'display_name' => 'ALPHA embedding row']),
+        'modelB' => ProviderModelEntry::factory()->recycle($orgB)->recycle($connectionB)
+            ->supporting(['embedding'])
+            ->create(['model' => 'text-embedding-3-large', 'display_name' => 'BRAVO embedding row']),
+    ];
+}
+
+it('registers no provider model when its audit row cannot be written', function (): void {
+    $fixture = providerModelAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    // POSITIVE CONTROL BEFORE THE BREAK: org A's connection carries exactly one catalog row right
+    // now. Without it, "still one row" below is satisfied by a fixture that created none and by an
+    // endpoint that has been 500ing since long before the partitions were dropped.
+    expect(ProviderModelEntry::query()->withoutGlobalScopes()
+        ->where('organization_id', '=', $fixture['orgA']->id)->count())
+        ->toBe(1, 'the fixture did not create org A\'s catalog row, so nothing below is a rollback');
+
+    auditWritesBroken();
+
+    currentTest()->postJson(
+        "/api/v1/organizations/{$fixture['orgA']->id}/provider-connections/{$fixture['connectionA']->id}/models",
+        [
+            'model' => 'gpt-5-unauditable',
+            'display_name' => 'ALPHA unauditable model',
+            'supported' => ['text'],
+            'context_window' => 200000,
+            'max_output_tokens' => 32000,
+        ],
+        spaHeaders(),
+    )
+        // ON_FAILURE_ABORT rethrows the QueryException UNWRAPPED, so the taxonomy classifies the
+        // SQLSTATE rather than a service-layer wrapper.
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    // NOTHING COMMITTED. A capability flag that reached the table with no record of who declared
+    // it is exactly the state §18.11 exists to make unreachable — and it is invisible in every
+    // other test, because the endpoint's own response would have been a 201.
+    assertDatabaseMissing('provider_models', ['model' => 'gpt-5-unauditable']);
+    assertDatabaseMissing('provider_models', ['display_name' => 'ALPHA unauditable model']);
+
+    expect(ProviderModelEntry::query()->withoutGlobalScopes()
+        ->where('organization_id', '=', $fixture['orgA']->id)->count())
+        ->toBe(1, 'a catalog row was created without an audit row');
+
+    // AND ORG B SURVIVES. A rollback that reached beyond its own savepoint would take the other
+    // tenant's rows with it, and no assertion on org A can see that.
+    assertDatabaseHas('provider_models', [
+        'id' => $fixture['modelB']->id,
+        'organization_id' => $fixture['orgB']->id,
+        'display_name' => 'BRAVO embedding row',
+    ]);
+});
+
+it('does not replace a provider model when its audit row cannot be written', function (): void {
+    $fixture = providerModelAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    $model = $fixture['modelA'];
+
+    // POSITIVE CONTROL FIRST: the values this test claims survive are the values the row actually
+    // holds right now. Asserting only the "after" state would pass against a fixture whose display
+    // name was never what the assertion names.
+    $before = ProviderModelEntry::query()->withoutGlobalScopes()->findOrFail($model->id);
+
+    expect($before->display_name)->toBe('ALPHA embedding row')
+        ->and($before->supportedCapabilities())->toBe(['embedding'])
+        ->and($before->enabled)->toBeTrue()
+        ->and($before->price_currency)->toBeNull();
+
+    auditWritesBroken();
+
+    // `update()` calls save() BEFORE the audit closure, so all five of these really are written and
+    // all five really have to come back on the ROLLBACK TO SAVEPOINT. This is the shape that fails
+    // if the audit write is moved outside the repository's transaction.
+    currentTest()->putJson(
+        "/api/v1/organizations/{$fixture['orgA']->id}/provider-connections/{$fixture['connectionA']->id}/models/{$model->id}",
+        [
+            'display_name' => 'ALPHA renamed by an unauditable edit',
+            'supported' => [],
+            'context_window' => 1,
+            'max_output_tokens' => 1,
+            'enabled' => false,
+            'input_price_per_million' => '9.500000',
+            'output_price_per_million' => '19.500000',
+            'price_currency' => 'EUR',
+        ],
+        spaHeaders(),
+    )
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    $after = ProviderModelEntry::query()->withoutGlobalScopes()->findOrFail($model->id);
+
+    expect($after->display_name)->toBe(
+        'ALPHA embedding row',
+        'the row was renamed with no audit row, so the trail cannot say what the operator was '
+        .'describing when they later changed its capabilities',
+    );
+
+    // THE CAPABILITY AND ENABLED HALVES MATTER MORE THAN THE LABEL. Dropping `embedding` or
+    // disabling the row takes this organization's only embedder out of the candidate set, so a
+    // change that committed without its audit row is an organization whose ingestion silently
+    // stopped with nothing recording who stopped it.
+    expect($after->supportedCapabilities())->toBe(['embedding'])
+        ->and($after->enabled)->toBeTrue()
+        ->and($after->context_window)->toBe($before->context_window)
+        ->and($after->price_currency)->toBeNull()
+        ->and($after->input_price_per_million)->toBeNull();
+
+    assertDatabaseMissing('provider_models', ['display_name' => 'ALPHA renamed by an unauditable edit']);
+
+    // ORG B UNTOUCHED — same model identifier, so only the display name distinguishes it.
+    assertDatabaseHas('provider_models', [
+        'id' => $fixture['modelB']->id,
+        'organization_id' => $fixture['orgB']->id,
+        'display_name' => 'BRAVO embedding row',
+    ]);
+});
+
+it('deletes no provider model when its audit row cannot be written', function (): void {
+    $fixture = providerModelAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    $model = $fixture['modelA'];
+
+    // POSITIVE CONTROL FIRST: the row this test claims survives is really there, under the
+    // organization and the connection the assertion names.
+    assertDatabaseHas('provider_models', [
+        'id' => $model->id,
+        'organization_id' => $fixture['orgA']->id,
+        'provider_connection_id' => $fixture['connectionA']->id,
+        'model' => 'text-embedding-3-large',
+    ]);
+
+    auditWritesBroken();
+
+    currentTest()->deleteJson(
+        "/api/v1/organizations/{$fixture['orgA']->id}/provider-connections/{$fixture['connectionA']->id}/models/{$model->id}",
+        [],
+        spaHeaders(),
+    )
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    // THE HARD DELETE DID NOT HAPPEN. This is the one operation whose audit row is the ONLY thing
+    // that would have survived it, so a delete that committed without one erases the catalog entry
+    // AND the record that it ever existed — `subject_id` would point at a ULID no table resolves
+    // and no row would carry the connection, model id or capabilities that made it readable.
+    assertDatabaseHas('provider_models', [
+        'id' => $model->id,
+        'organization_id' => $fixture['orgA']->id,
+        'provider_connection_id' => $fixture['connectionA']->id,
+        'display_name' => 'ALPHA embedding row',
+    ]);
+
+    // ORG B SURVIVES. A delete whose predicate lost its organization term is invisible to every
+    // assertion above — and org B's row carries the SAME model identifier, so a delete keyed on
+    // `model` alone would have taken it.
+    assertDatabaseHas('provider_models', [
+        'id' => $fixture['modelB']->id,
+        'organization_id' => $fixture['orgB']->id,
+    ]);
+});
+
+// -------------------------------------------------------------------------------------------
 // ON_FAILURE_LOG: the action stands, and the failure is loud
 // -------------------------------------------------------------------------------------------
 
@@ -382,6 +984,26 @@ it('has a test in this file for every ABORT-policy operation that has a producer
         AuditLogger::INVITATION_RESENT,
         AuditLogger::INVITATION_REVOKED,
         AuditLogger::PASSWORD_RESET_COMPLETED,
+
+        // The four provider-connection operations. All four have live producers —
+        // ProviderConnectionController@store/@update/@destroy and
+        // RotateProviderCredentialController@__invoke — so none of them belongs in $noProducer, and
+        // each has a test above that breaks the audit INSERT and asserts the business row is
+        // unchanged. See that section's header for which of the four can also prove the audit write
+        // is INSIDE the transaction rather than merely before the commit.
+        AuditLogger::PROVIDER_CONNECTION_CREATED,
+        AuditLogger::PROVIDER_CONNECTION_DELETED,
+        AuditLogger::PROVIDER_CONNECTION_UPDATED,
+        AuditLogger::PROVIDER_CREDENTIAL_ROTATED,
+
+        // The three provider-MODEL operations. All three have live producers —
+        // ProviderModelController@store/@update/@destroy — so none of them belongs in $noProducer,
+        // and each has a test above that breaks the audit INSERT and asserts the catalog row is
+        // unchanged. See that section's header for which of the three can also prove the audit
+        // write is INSIDE the transaction rather than merely before the commit.
+        AuditLogger::PROVIDER_MODEL_CREATED,
+        AuditLogger::PROVIDER_MODEL_DELETED,
+        AuditLogger::PROVIDER_MODEL_UPDATED,
     ];
 
     // ROLE_CHANGED has no producer: PATCH /members/{user} is deliberately not built yet, because the

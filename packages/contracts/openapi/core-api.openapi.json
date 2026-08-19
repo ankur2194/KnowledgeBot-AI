@@ -939,6 +939,16 @@
                             }
                         }
                     },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
                     "429": {
                         "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
                         "content": {
@@ -999,7 +1009,7 @@
                 ],
                 "responses": {
                     "200": {
-                        "description": "The readiness AFTER the designation was applied, wrapped in `data`.",
+                        "description": "The readiness AFTER the designation was applied, wrapped in `data`. A nonexistent `{organization}` 404s at binding time, before this action runs.",
                         "content": {
                             "application/json": {
                                 "schema": {
@@ -1029,6 +1039,16 @@
                     },
                     "403": {
                         "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
                         "content": {
                             "application/json": {
                                 "schema": {
@@ -1702,6 +1722,114 @@
             }
         },
         "/api/v1/organizations/{organization}/provider-connections": {
+            "get": {
+                "operationId": "admin.provider-connections.index",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Every provider connection belonging to this organization, whatever its status, oldest first. Revoked and invalid rows are included: an operator diagnosing \"why can I not ingest\" has to be able to see the credential that stopped working. Each carries `masked_key` and never a credential. The array is nested inside an object; see ProviderConnectionCollectionResource for why the document cannot express a bare array here.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/ProviderConnectionCollectionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            },
             "post": {
                 "operationId": "admin.provider-connections.store",
                 "parameters": [
@@ -1717,7 +1845,7 @@
                 ],
                 "responses": {
                     "201": {
-                        "description": "The stored connection, plus the organization's embedding readiness AFTER storing it. The readiness never blocks the write.",
+                        "description": "The stored connection, plus the organization's embedding readiness AFTER storing it. The readiness never blocks the write. A nonexistent `{organization}` 404s at binding time, before this action runs.",
                         "content": {
                             "application/json": {
                                 "schema": {
@@ -1751,6 +1879,16 @@
                     },
                     "403": {
                         "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
                         "content": {
                             "application/json": {
                                 "schema": {
@@ -1824,6 +1962,1198 @@
                     }
                 ],
                 "x-kb-request-rules": "../rules/StoreProviderConnectionRequest.json"
+            }
+        },
+        "/api/v1/organizations/{organization}/provider-connections/{providerConnection}": {
+            "delete": {
+                "operationId": "admin.provider-connections.destroy",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "providerConnection",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {providerConnection} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The connection and its model rows are gone. 409 when the connection is the organization's designated embedding credential — clear the designation first — or when the organization is not active. A foreign or unknown `{providerConnection}` 404s at binding time, before this action runs.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/AcknowledgementResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "The organization is not active. Its configuration may be read but not changed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            },
+            "get": {
+                "operationId": "admin.provider-connections.show",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "providerConnection",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {providerConnection} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "One provider connection, wrapped in `data`. A foreign or unknown `{providerConnection}` 404s at binding time, before this action runs.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/ProviderConnectionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            },
+            "patch": {
+                "operationId": "admin.provider-connections.update",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "providerConnection",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {providerConnection} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The connection after the edit, wrapped in `data`. Only `label` and `status` are editable; the request body carries no credential field and this endpoint cannot store one. 409 when the organization is not active; 422 when the body changes neither field.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/ProviderConnectionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "The organization is not active. Its configuration may be read but not changed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/UpdateProviderConnectionRequest.json"
+            }
+        },
+        "/api/v1/organizations/{organization}/provider-connections/{providerConnection}/credential": {
+            "put": {
+                "operationId": "admin.provider-connections.credential.update",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "providerConnection",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {providerConnection} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The connection after its credential was replaced, wrapped in `data`. `masked_key` reflects the NEW key's last four; no part of either key — old or new — appears in this body, in a log line, or in the audit row. 422 when the actor's password is wrong (keyed on `current_password`, and the stored credential is untouched) or when the submitted value is the masked display string rather than a key. 409 when the organization is not active.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/ProviderConnectionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "The organization is not active. Its configuration may be read but not changed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/RotateProviderCredentialRequest.json"
+            }
+        },
+        "/api/v1/organizations/{organization}/provider-connections/{providerConnection}/models": {
+            "get": {
+                "operationId": "admin.provider-connections.models.index",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "providerConnection",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {providerConnection} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Every model row under this connection, enabled or not, ordered by model identifier. Disabled rows are included: an operator asking \"why is this model missing from the bot's dropdown\" has to be able to find it. The array is nested inside an object; see ProviderModelCollectionResource for why the document cannot express a bare array here.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/ProviderModelCollectionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            },
+            "post": {
+                "operationId": "admin.provider-connections.models.store",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "providerConnection",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {providerConnection} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "The registered model row, wrapped in `data`. 409 when the organization is not active; 422 when this connection already carries a row for the same model identifier, keyed on `model`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/ProviderModelResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "The organization is not active. Its configuration may be read but not changed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/StoreProviderModelRequest.json"
+            }
+        },
+        "/api/v1/organizations/{organization}/provider-connections/{providerConnection}/models/{model}": {
+            "delete": {
+                "operationId": "admin.provider-connections.models.destroy",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "providerConnection",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {providerConnection} record, scoped to the organization above it."
+                    },
+                    {
+                        "name": "model",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {model} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The model row is gone. 409 when it is the (connection, model) pair the organization's embedding designation names — clear the designation first — or when the organization is not active. A foreign or unknown `{providerConnection}` or `{model}` 404s at binding time, before this action runs.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/AcknowledgementResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "The organization is not active. Its configuration may be read but not changed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            },
+            "get": {
+                "operationId": "admin.provider-connections.models.show",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "providerConnection",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {providerConnection} record, scoped to the organization above it."
+                    },
+                    {
+                        "name": "model",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {model} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "One model row, wrapped in `data`. A foreign or unknown `{providerConnection}` or `{model}` 404s at binding time, before this action runs — including a model that exists but belongs to a DIFFERENT connection of the same organization.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/ProviderModelResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            },
+            "put": {
+                "operationId": "admin.provider-connections.models.update",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "providerConnection",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {providerConnection} record, scoped to the organization above it."
+                    },
+                    {
+                        "name": "model",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {model} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The row after the replacement, wrapped in `data`. The official model identifier is immutable and the request body carries no field for it. 409 when the organization is not active.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/ProviderModelResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "The organization is not active. Its configuration may be read but not changed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/UpdateProviderModelRequest.json"
             }
         },
         "/api/v1/session/organization": {
@@ -1976,6 +3306,25 @@
                     }
                 }
             },
+            "EmbeddingDesignation": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "The (connection, model) pair this organization has STORED as its explicit embedding choice, read from `organizations.embedding_connection_id` and `organizations.embedding_model`. A PAIR and not a bare connection id: one connection legitimately carries several embedding rows, and `text-embedding-3-large` and `text-embedding-3-small` on one credential are two vector spaces.",
+                "required": [
+                    "connection_id",
+                    "model"
+                ],
+                "properties": {
+                    "connection_id": {
+                        "type": "string",
+                        "description": "ULID of the designated provider connection. It may name a connection that no longer resolves — this is what was stored, not what the resolver made of it."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "The official vendor model id, verbatim. An alias or a shortened form names a different vector space that silently finds nothing."
+                    }
+                }
+            },
             "EmbeddingReadinessResource": {
                 "type": "object",
                 "additionalProperties": false,
@@ -1984,6 +3333,7 @@
                     "ready",
                     "blocks_ingestion",
                     "selected",
+                    "designated",
                     "eligible",
                     "rejected",
                     "explanation"
@@ -2007,6 +3357,17 @@
                             }
                         ],
                         "description": "The resolved candidate, or null. Exactly one of `selected` and a non-empty `explanation` is populated — a verdict carrying both would let a client draw the blocking banner AND proceed to embed."
+                    },
+                    "designated": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/EmbeddingDesignation"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "description": "The pair this organization has STORED as its explicit choice, or null when it has designated nothing. NOT derivable from `selected`: a null `selected` means either \"nothing designated and nothing resolved by rule\" or \"the designation no longer resolves\", and only this field tells them apart. The stored pair is also named inside `explanation`, but that is prose the data plane owns and may reword — render it, do not parse it. On a ready verdict with a designation the two agree on connection and model, and `selected` additionally carries the resolved `provider`."
                     },
                     "eligible": {
                         "type": "array",
@@ -2070,7 +3431,8 @@
                     "error_class",
                     "message",
                     "retryable",
-                    "request_id"
+                    "request_id",
+                    "actionable"
                 ],
                 "properties": {
                     "error_class": {
@@ -2104,6 +3466,10 @@
                     "retryable": {
                         "type": "boolean",
                         "description": "THE AUTHORITY on whether the caller may try again. Never re-derive it from `error_class` or from the status."
+                    },
+                    "actionable": {
+                        "type": "boolean",
+                        "description": "Whether `message` was written for THIS condition and may be shown to an operator, as opposed to being a fixed placeholder chosen to say nothing — the >= 500 constant, or the enumeration-oracle constants both planes render for `authorization`. IT IS NOT A STATUS AND NOTHING MAY INFER ONE FROM IT: it exists because a deliberate 4xx our own code raised and an unhandled exception both render `internal_dependency` with `retryable: false`, so an actionable refusal (`clear the designation first, then delete`) was structurally indistinguishable from `the service could not complete this request`. Clients rendering a server message must gate on this; clients choosing a retry must still read `retryable`, and clients choosing copy must still read `error_class`. `false` on a FormRequest 422, whose payload is the `errors` map rather than the summary; `true` on a KbException `validation`, whose message is written for a person."
                     },
                     "request_id": {
                         "type": [
@@ -2307,6 +3673,23 @@
                     }
                 }
             },
+            "ProviderConnectionCollectionResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "The organization's provider connections. An OBJECT wrapping the array so pagination fields can join it later without moving the list.",
+                "required": [
+                    "connections"
+                ],
+                "properties": {
+                    "connections": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/ProviderConnectionResource"
+                        },
+                        "description": "Every connection belonging to this organization, whatever its status. Revoked and invalid rows are included because an operator diagnosing \"why can I not ingest\" has to be able to see the credential that stopped working — hiding it makes the question unanswerable from the console. Ordered oldest first, deterministically, so two reads of an unchanged set are byte-identical."
+                    }
+                }
+            },
             "ProviderConnectionResource": {
                 "type": "object",
                 "additionalProperties": false,
@@ -2351,6 +3734,108 @@
                             "revoked"
                         ],
                         "description": "Lifecycle state of the connection."
+                    },
+                    "created_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "ISO 8601 with offset. Null only for a record whose timestamp was never set."
+                    }
+                }
+            },
+            "ProviderModelCollectionResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One provider connection's model catalog. An OBJECT wrapping the array so pagination fields can join it later without moving the list.",
+                "required": [
+                    "models"
+                ],
+                "properties": {
+                    "models": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/ProviderModelResource"
+                        },
+                        "description": "Every model row under this connection, ENABLED OR NOT. Disabled rows are included because an operator asking \"why is this model missing from the bot's dropdown\" has to be able to find it — hiding it makes the question unanswerable from the console while the row sits in the table. Ordered by model identifier, deterministically, so two reads of an unchanged set are byte-identical."
+                    }
+                }
+            },
+            "ProviderModelResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One model in a provider connection's catalog: its official identifier, the capabilities the operator declared for it, its limits, and its list price. Carries nothing from the credential on the parent connection — not the masked form, not the vendor.",
+                "required": [
+                    "id",
+                    "connection_id",
+                    "model",
+                    "display_name",
+                    "supported",
+                    "context_window",
+                    "max_output_tokens",
+                    "enabled",
+                    "input_price_per_million",
+                    "output_price_per_million",
+                    "price_currency",
+                    "created_at"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "ULID of the catalog row. NOT the model identifier — that is `model`, and it is the vendor's."
+                    },
+                    "connection_id": {
+                        "type": "string",
+                        "description": "ULID of the provider connection this row belongs to. Echoed so a flattened client-side list of models across several connections stays attributable without a second lookup."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "The official model identifier, exactly as the vendor publishes it. IMMUTABLE: it is half of the vector-space identity for everything already embedded through this row, so there is no edit path for it — a mistyped id is deleted and re-created."
+                    },
+                    "display_name": {
+                        "type": "string",
+                        "description": "Operator-supplied name. Tenant-controlled text: escape it on render."
+                    },
+                    "supported": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "The capability flags this row CLAIMS, as the operator declared them. Deliberately an open string array and not an enum: the vocabulary belongs to the data plane, and a closed copy here would break a generated client the day that vocabulary grows. A claim is not a guarantee — whether a flag is honoured is the AND of this list and a sourced vendor fact, and an incoherent row is refused by the data plane with the reason named. An empty array means the row claims nothing, which is also what a malformed stored value renders as."
+                    },
+                    "context_window": {
+                        "type": "integer",
+                        "description": "Total context window in tokens, entered from the vendor's documentation. 0 means \"not recorded\"."
+                    },
+                    "max_output_tokens": {
+                        "type": "integer",
+                        "description": "Maximum configured output in tokens. 0 means \"not recorded\"; it is not a limit of zero."
+                    },
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Whether this row may be offered and used. A disabled row stays in the catalog and stays listed — an operator asking \"why is this model missing from the dropdown\" has to be able to find it."
+                    },
+                    "input_price_per_million": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "List price per ONE MILLION input tokens, as an exact decimal STRING — never a JSON number, because a per-million price summed over a month of usage as an IEEE 754 double drifts by an amount nobody can reproduce. Null means no price has been recorded, which is NOT the same as free. Used only for estimated reporting; it authorizes nothing and gates nothing."
+                    },
+                    "output_price_per_million": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "List price per ONE MILLION output tokens, same representation and same caveats as `input_price_per_million`."
+                    },
+                    "price_currency": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "ISO 4217-shaped currency code, three upper-case letters. Non-null whenever either price is non-null — the database CHECK `provider_models_price_needs_currency` enforces that direction — and permitted on its own, which is the state of a row whose operator recorded the billing currency before the prices. The shape is enforced; membership of the real ISO list is not, because that list changes."
                     },
                     "created_at": {
                         "type": [
@@ -2486,7 +3971,7 @@
                         }
                     }
                 ],
-                "description": "The error envelope narrowed to `error_class: validation`. `errors` is present when a FormRequest produced per-field messages and absent when the refusal was relayed from the data plane's resolver, so a client reads it defensively rather than assuming it."
+                "description": "The error envelope narrowed to `error_class: validation`. `errors` is present whenever a per-field producer made a map — a Laravel FormRequest, or the data plane's Pydantic validation, whose map is relayed verbatim — and absent when the refusal is a deliberate one with no field to key on, such as the embedding resolver refusing the (connection, model) pair an operator named. It is never null and never `{}`, so a client reads it defensively rather than assuming it."
             }
         }
     }

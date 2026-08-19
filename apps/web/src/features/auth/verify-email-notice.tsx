@@ -7,10 +7,9 @@ import { useForm, type FieldValues } from 'react-hook-form';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
-import { sessionCredential } from '@/lib/api/browser';
+import { browserFetchData, sessionCredential } from '@/lib/api/browser';
 
 import { applyAuthError } from './auth-error';
-import { browserFetchData } from './session';
 import { useCooldown } from './use-cooldown';
 
 /**

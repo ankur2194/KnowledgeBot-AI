@@ -10,6 +10,7 @@ use App\Http\Requests\DesignateEmbeddingConnectionRequest;
 use App\Http\Resources\EmbeddingReadinessResource;
 use App\Models\Organization;
 use App\Models\User;
+use App\Services\Embedding\EmbeddingDesignation;
 use App\Services\Embedding\EmbeddingDesignationService;
 use App\Services\Embedding\EmbeddingReadinessService;
 use App\Support\Contracts\ResponseShape;
@@ -25,7 +26,10 @@ use Illuminate\Support\Facades\Gate;
  *   2. organization membership       `org.member`, which RE-READS the row from PostgreSQL
  *   3. role / permission             Gate::authorize() below — providers.view / providers.manage
  *   4. entity ownership              the policy resolves membership of THE RECORD's organization
- *   5. entity status                 abort_unless on OrganizationStatus, below
+ *   5. entity status                 abort_unless on OrganizationStatus, below, carrying
+ *                                    OrganizationStatus::SUSPENDED_REFUSAL as the message — a
+ *                                    409 with an EMPTY message renders as `internal_dependency`'s
+ *                                    class copy, which is false twice for a suspension
  *   6. rate limit                    `throttle:admin` on the route group
  *
  * Checks 5 and 6 are the ones reviewers forget, because 1 through 4 are visible in the route file
@@ -48,7 +52,11 @@ final class EmbeddingConfigurationController extends Controller
         properties: ['data' => EmbeddingReadinessResource::class],
         description: 'The organization\'s embedding readiness. Wrapped in `data` because the action '
             .'returns the Resource itself and Laravel wraps it.',
-        errors: [401, 403, 429, 500, 503],
+        // 404: the `{organization}` binding, same as every sibling under it. See the note on
+        // ProviderConnectionController@store — this operation and its PUT were missing it for the
+        // same reason, and a nonexistent organization ULID 404s at binding time on all of them
+        // alike.
+        errors: [401, 403, 404, 429, 500, 503],
     )]
     public function show(
         Organization $organization,
@@ -58,6 +66,9 @@ final class EmbeddingConfigurationController extends Controller
 
         return new EmbeddingReadinessResource(
             $readiness->for($organization, $this->actorId()),
+            // The STORED pair off the bound row. Nothing on this path writes, so the bound
+            // organization IS the current one.
+            EmbeddingDesignation::fromOrganization($organization),
         );
     }
 
@@ -69,15 +80,20 @@ final class EmbeddingConfigurationController extends Controller
      * explicitly choosing which connection embeds, and accepting a choice that cannot resolve
      * would store a configuration whose only symptom is a failed upload later.
      *
-     * 409 is check 5 — a suspended organization may not move its vector space. 422 is both the
-     * FormRequest's half-designation rule and the resolver's refusal, which share an `error_class`
-     * of `validation` and differ only in whether `errors` is present.
+     * 409 is check 5 — a suspended organization may not move its vector space. 422 has THREE
+     * producers now, all sharing `error_class: validation` and differing only in whether `errors`
+     * is present: the FormRequest's half-designation rule, which carries a per-field map; the
+     * resolver's refusal, which carries a sentence and no map because there is no field to key it
+     * on; and the catalog re-verification inside
+     * EloquentOrganizationRepository::designateEmbeddingConnection(), likewise mapless, which
+     * refuses a pair whose `provider_models` row was deleted after the resolver looked at it.
      */
     #[ResponseShape(
         status: 200,
         properties: ['data' => EmbeddingReadinessResource::class],
-        description: 'The readiness AFTER the designation was applied, wrapped in `data`.',
-        errors: [401, 403, 409, 422, 429, 500, 503],
+        description: 'The readiness AFTER the designation was applied, wrapped in `data`. A '
+            .'nonexistent `{organization}` 404s at binding time, before this action runs.',
+        errors: [401, 403, 404, 409, 422, 429, 500, 503],
     )]
     public function update(
         DesignateEmbeddingConnectionRequest $request,
@@ -89,7 +105,11 @@ final class EmbeddingConfigurationController extends Controller
         // Check 5. A suspended organization is not editable — and a designation change is the one
         // edit that would otherwise be a no-op with a lasting consequence, because it decides the
         // vector space of everything indexed after the suspension is lifted.
-        abort_unless($organization->status === OrganizationStatus::Active, 409);
+        abort_unless(
+            $organization->status === OrganizationStatus::Active,
+            409,
+            OrganizationStatus::SUSPENDED_REFUSAL,
+        );
 
         $result = $designations->designate(
             $organization,
@@ -97,7 +117,14 @@ final class EmbeddingConfigurationController extends Controller
             $this->actorId(),
         );
 
-        return (new EmbeddingReadinessResource($result['readiness']))
+        // THE ORGANIZATION THE WRITE RETURNED, NOT THE BOUND ONE. `designate()` returns the row as
+        // it stands after `designateEmbeddingConnection()`, and the bound `$organization` still
+        // holds the pre-write columns — rendering `designated` off it would echo the operator's
+        // PREVIOUS designation back at them on the very response that changed it.
+        return (new EmbeddingReadinessResource(
+            $result['readiness'],
+            EmbeddingDesignation::fromOrganization($result['organization']),
+        ))
             ->response()
             ->setStatusCode(200);
     }

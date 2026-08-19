@@ -159,6 +159,158 @@ final class AuditLogger
 
     public const ROLE_CHANGED = 'organization.member.role_changed';
 
+    /**
+     * ── THE PROVIDER-CONNECTION OPERATIONS ─────────────────────────────────────────────────────
+     *
+     * FOUR SUCCESSES AND ONE FAILURE. The four below are state changes;
+     * :self::PROVIDER_CREDENTIAL_ROTATION_FAILED is a failed re-authentication ATTEMPT on the
+     * rotation endpoint and carries its own docblock. Everything in this block describes the four.
+     *
+     * kb-security-baseline §18.11 requires credential changes audited, and until this batch the
+     * provider surface wrote NO audit row at all — a connection could be created, relabelled,
+     * revoked, hard-deleted or have its key replaced with nothing in `audit_logs` to say so. That
+     * was a real §18 gap rather than a deferred nicety, and `provider.connection.created` is
+     * wired into the pre-existing `store` action for exactly that reason.
+     *
+     * ALL FOUR ARE `ON_FAILURE_ABORT`, with no judgement call to make: every one of them is a
+     * state change that is still inside a repository transaction when the row is written, so
+     * "can this still be rolled back" — the real test, see the class docblock — answers yes for
+     * all of them. Nothing here queues mail and nothing here has already happened irreversibly.
+     * The rotation-FAILURE row is `ON_FAILURE_LOG` for the mirror-image reason: there is no state
+     * change to roll back at all.
+     *
+     * WHAT THE ALLOW-LISTS DELIBERATELY CANNOT CARRY. `credential`, `provider_credential`,
+     * `api_key`, `secret`, `password`, `current_password`, `last_four`, `masked_key`,
+     * `credential_ciphertext` and `data_key_ciphertext` are absent from all five, so no call site can put one in a row even
+     * by passing it under that key — an unlisted key is dropped and reported, never written. That
+     * includes FINGERPRINTED: a rotation records no digest of the key at all. §18.11's worked
+     * example does fingerprint the key, and the argument for omitting it here is that a
+     * fingerprint answers "was it THIS key" — a question nobody asks of a provider credential,
+     * because unlike an invitation or reset token it is not a capability anyone presents to us.
+     * `key_version` and `credential_version` answer the question that IS asked ("which generation
+     * of this credential was live on that date") and are derivable back to nothing.
+     */
+    public const PROVIDER_CONNECTION_CREATED = 'provider.connection.created';
+
+    public const PROVIDER_CONNECTION_UPDATED = 'provider.connection.updated';
+
+    /**
+     * A HARD delete, so this row is the only surviving description of the connection.
+     *
+     * That is what makes `provider`, `label` and `status` load-bearing here rather than
+     * decorative: `subject_id` points at a ULID no table resolves any more, and without the three
+     * echoed fields the trail says a connection was deleted without being able to say which.
+     */
+    public const PROVIDER_CONNECTION_DELETED = 'provider.connection.deleted';
+
+    public const PROVIDER_CREDENTIAL_ROTATED = 'provider.connection.credential_rotated';
+
+    /**
+     * AN ATTEMPT THAT FAILED THE RE-AUTHENTICATION, AND THE ONLY PROVIDER OPERATION THAT IS NOT A
+     * SUCCESS.
+     *
+     * §18.11 requires credential changes audited, and an ATTEMPT on the endpoint that changes a
+     * credential is precisely what a post-incident timeline needs: `auth.login.failed` exists for
+     * the login surface, and this endpoint — which verifies the actor's password under §18.3 —
+     * had no equivalent, so a session stolen through XSS could grind at the re-authentication
+     * behind it and leave nothing in `audit_logs` at all. The rate limiter bounds the attempts
+     * (`credential-rotation`, 5 per 15 minutes per actor); it does not RECORD them.
+     *
+     * `current_password:web` sits in `rules()` — which is correct and stays, because it is what
+     * makes "a wrong password touches no column" true by construction rather than by ordering
+     * discipline — so a failed attempt never reaches the service layer and the row has to be
+     * written from `failedValidation()`. That is also why it is the only `ON_FAILURE_LOG` row on
+     * this surface: there is no transaction to roll back, the 422 is already decided, and turning
+     * a wrong password into a 500 because the audit table was unwell would be the worst response
+     * to an attempted credential change.
+     *
+     * WHAT IT MAY RECORD IS THE SAME THREE FIELDS THE SUCCESS ROW CARRIES, so the two read side by
+     * side in one query. THE SUBMITTED PASSWORD IS NOT AMONG THEM AND CANNOT BE: `password` and
+     * `current_password` are not in the allow-list, so a call site cannot put one in a row even by
+     * passing it under that key — and no fingerprint of it either, which would turn an append-only
+     * table into an offline guessing oracle against the actor's own account password.
+     */
+    public const PROVIDER_CREDENTIAL_ROTATION_FAILED = 'provider.connection.credential_rotation_failed';
+
+    /**
+     * ── THE THREE PROVIDER-MODEL OPERATIONS ────────────────────────────────────────────────────
+     *
+     * A CATALOG ROW IS NOT A CREDENTIAL, AND THESE ARE AUDITED ANYWAY. §18.11 requires credential
+     * changes and destructive operations audited, and a model row is neither a secret nor, on its
+     * face, destructive — so the case for auditing it has to be made on what the row DECIDES
+     * rather than on what it holds:
+     *
+     *   * `capability_flags` is the ROW axis of the capability question, and
+     *     services/ai-service/app/providers/embedding_selection.py reads it to decide WHICH of an
+     *     organization's connections embeds its corpus. Adding an `embedding` flag can therefore
+     *     change the vector space every future upload is indexed under — at a provider's
+     *     per-token price, under a different account, with no error anywhere, because cosine
+     *     distance is defined between any two vectors of equal width.
+     *   * `enabled` can take an organization's only embedder out of the candidate set, which stops
+     *     ingestion entirely.
+     *   * a DELETE is a hard delete, and if the row was the designated embedding model it would
+     *     leave the designation naming nothing.
+     *
+     * "Who made this organization start embedding through a different model" is exactly the
+     * question an incident asks, and without these rows the trail answers it with the connection's
+     * `created` row from months earlier.
+     *
+     * ALL THREE ARE `ON_FAILURE_ABORT`, with no judgement call to make: every one of them is a
+     * state change that is still inside EloquentProviderModelRepository's transaction when the row
+     * is written, so "can this still be rolled back" — the real test, see the class docblock —
+     * answers yes for all of them. Nothing here queues mail and nothing here has already happened
+     * irreversibly.
+     *
+     * WHAT THE ALLOW-LISTS DELIBERATELY CANNOT CARRY. The same nine names absent from the four
+     * connection operations are absent from these three — `credential`, `provider_credential`,
+     * `api_key`, `secret`, `password`, `last_four`, `masked_key`, `credential_ciphertext`,
+     * `data_key_ciphertext` — so no call site can put one in a row even by passing it under that
+     * key. That is belt-and-braces here rather than the mechanism: `ProviderModelEntry` has no
+     * credential to offer at all, and ProviderModelService builds every detail from the persisted
+     * row.
+     *
+     * `display_name` is TENANT-CONTROLLED FREE TEXT and so is `model` — an operator types the
+     * vendor's identifier by hand — so both are bounded by MAX_VALUE_LENGTH and pass the shape
+     * backstop like any other echoed string.
+     *
+     * `context_window` AND `max_output_tokens` ARE ALLOW-LISTED, AND FOR A WHILE THEY WERE NOT.
+     * AuditLoggerTest carries a standing guard that no ECHOED field may name a bearer capability,
+     * and its first form was `str_contains($field, 'token')` — under which `max_output_tokens` is
+     * a false positive, being an integer limit copied off a vendor's documentation page that
+     * authorizes nothing and identifies nobody. Both fields were dropped rather than weaken a
+     * credential guard to fit a naming coincidence. That was the right call at the time and it
+     * left a real gap: the trail could not say who changed a model's limits, on a surface where
+     * `max_output_tokens` decides how much a bot may be billed for in one turn and
+     * `context_window` decides how much retrieved evidence fits.
+     *
+     * The guard was NARROWED instead, and the two fields came back with it. `namesABearerCapability()`
+     * in tests/Unit/AuditLoggerTest.php now reads the name segment by segment: SINGULAR `token`
+     * anywhere is a capability — one capability is one token, so a credential field is never plural
+     * — while a segment that is exactly `tokens` is admitted only alongside a magnitude word
+     * (`max`, `total`, `used`, …). That is strictly stronger than the substring rule everywhere
+     * except the cell it was widened for: it refuses `apitoken` and `access_tokens`, which the
+     * substring rule caught only by accident of spelling, and admits `max_output_tokens`, which it
+     * could not tell apart from them at all.
+     *
+     * BOTH VALUES ARE INTEGERS AND TAKE THE `is_int()` FAST PATH in sanitize(), so neither is
+     * length-bounded, neither is trimmed, and neither can trip the shape backstop — a
+     * `max_output_tokens` of `0` is written as `0` rather than skipped the way an empty string or
+     * a null price is.
+     */
+    public const PROVIDER_MODEL_CREATED = 'provider.model.created';
+
+    public const PROVIDER_MODEL_UPDATED = 'provider.model.updated';
+
+    /**
+     * A HARD delete, so this row is the only surviving description of the catalog entry.
+     *
+     * That is what makes `connection_id`, `model` and `display_name` load-bearing here rather than
+     * decorative: `subject_id` points at a ULID no table resolves any more, and without the echoed
+     * fields the trail says a model was removed without being able to say which, from whose
+     * catalog.
+     */
+    public const PROVIDER_MODEL_DELETED = 'provider.model.deleted';
+
     public const OUTCOME_SUCCESS = 'success';
 
     public const OUTCOME_FAILURE = 'failure';
@@ -307,6 +459,170 @@ final class AuditLogger
             'details' => [
                 'from_role' => self::ECHOED,
                 'to_role' => self::ECHOED,
+            ],
+        ],
+        self::PROVIDER_CONNECTION_CREATED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                // The vendor, the operator's own name for the connection, and the lifecycle state
+                // it was stored in. `label` is TENANT-CONTROLLED FREE TEXT — the only hostile
+                // input in these four allow-lists — so it is bounded by MAX_VALUE_LENGTH and
+                // passes the shape backstop like any other echoed string.
+                'provider' => self::ECHOED,
+                'label' => self::ECHOED,
+                'status' => self::ECHOED,
+            ],
+        ],
+        self::PROVIDER_CONNECTION_UPDATED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            // The values AFTER the edit. `provider` is not editable and is carried anyway, because
+            // a row that cannot say which vendor was touched is unreadable next to a `deleted` row
+            // for the same subject.
+            'details' => [
+                'provider' => self::ECHOED,
+                'label' => self::ECHOED,
+                'status' => self::ECHOED,
+            ],
+        ],
+        self::PROVIDER_CONNECTION_DELETED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                'provider' => self::ECHOED,
+                'label' => self::ECHOED,
+                'status' => self::ECHOED,
+            ],
+        ],
+        self::PROVIDER_CREDENTIAL_ROTATED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                'provider' => self::ECHOED,
+                'label' => self::ECHOED,
+                'status' => self::ECHOED,
+                // WHICH KEK WRAPPED THE NEW DATA KEY, and WHICH GENERATION of this credential the
+                // rotation produced. Two different numbers and neither is the other:
+                // `key_version` moves when the platform rotates its key-encrypting key,
+                // `credential_version` moves when this tenant replaces this provider key. Both
+                // are integers with no derivation back to any secret, and together they are what
+                // lets an investigation answer "which key was live on that date" — the only
+                // question this row is ever asked. See the four-operation docblock above for why
+                // there is no `key_fingerprint` beside them.
+                'key_version' => self::ECHOED,
+                'credential_version' => self::ECHOED,
+            ],
+        ],
+        self::PROVIDER_CREDENTIAL_ROTATION_FAILED => [
+            // THE ONLY FAILURE OUTCOME ON THIS SURFACE. `outcome` is derived from the operation, so
+            // no row can claim this name with `outcome = success`.
+            'outcome' => self::OUTCOME_FAILURE,
+            // LOG, not ABORT, and it is the "can this still be rolled back" test answering NO for
+            // the usual reason inverted: there is no state change to undo. The 422 is decided by
+            // the time this runs, the connection is untouched, and aborting would turn a wrong
+            // password into a 500. See the constant's docblock.
+            'on_failure' => self::ON_FAILURE_LOG,
+            // THE SAME THREE FIELDS THE SUCCESS ROW CARRIES, so a reader can put a failed attempt
+            // and the rotation that followed it in one query. `key_version` and
+            // `credential_version` are absent because nothing was rotated — writing the CURRENT
+            // generation on a failed attempt would read as though a rotation had produced it.
+            'details' => [
+                'provider' => self::ECHOED,
+                'label' => self::ECHOED,
+                'status' => self::ECHOED,
+            ],
+        ],
+
+        // ── THE THREE PROVIDER-MODEL OPERATIONS ────────────────────────────────────────────────
+        //
+        // ONE ALLOW-LIST, REPEATED THREE TIMES RATHER THAN SHARED THROUGH A CONSTANT. The four
+        // connection operations do the same, and the reason is that the lists must be able to
+        // DIVERGE: a shared constant makes "add a field to the created row" silently add it to the
+        // deleted row too, and the whole design of this table is that each operation decides for
+        // itself what it may record.
+        //
+        // The three lists are IDENTICAL TODAY, deliberately. A hard delete leaves this row as the
+        // only description of the entry, so it must carry everything that made the row readable —
+        // and a `created`/`updated` pair that carried LESS than the `deleted` row would make the
+        // three unreadable side by side when the question is "what changed before it was removed".
+        self::PROVIDER_MODEL_CREATED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                // The PARENT connection, on every row. `subject_id` is the catalog row's own ULID
+                // and after a hard delete it resolves to nothing, so without this the trail cannot
+                // say WHICH credential's catalog was changed.
+                'connection_id' => self::ECHOED,
+                // The vendor's official identifier, typed by an operator — tenant-controlled free
+                // text, bounded like any other echoed string.
+                'model' => self::ECHOED,
+                'display_name' => self::ECHOED,
+                // THE FLAG LIST, JOINED INTO A STRING BY THE CALLER. It has to be a scalar: an
+                // array in `details` is dropped outright by sanitize(), because a structure here
+                // is how `$request->all()` gets in one nesting level down and is also what would
+                // stop `details` json-encoding as an OBJECT, which the table CHECKs. This is the
+                // security-relevant field of the three operations — an `embedding` flag decides
+                // which credential embeds the corpus — so losing it silently would be the worst
+                // of both.
+                'capabilities' => self::ECHOED,
+                // Whether the row is offerable at all. A row disabled without a trace is an
+                // organization whose ingestion silently stopped with nothing recording who
+                // stopped it — the same argument `status` carries on the connection operations.
+                'enabled' => self::ECHOED,
+                // THE TWO LIMITS. Not credentials and not a naming coincidence any more — see the
+                // PROVIDER_MODEL_CREATED docblock for why they were absent and what changed.
+                // `max_output_tokens` caps what one turn may bill and `context_window` caps how
+                // much retrieved evidence fits, so "who moved this, and when" is a question the
+                // trail has to be able to answer. Both are integers and take sanitize()'s
+                // `is_int()` path unaltered, so a limit of 0 records as 0.
+                'context_window' => self::ECHOED,
+                'max_output_tokens' => self::ECHOED,
+                // PRICING IS NOT A SECRET AND IS NOT A CREDENTIAL. It is a list price the operator
+                // copied from a public vendor page, it authorizes nothing, and "who changed the
+                // number this month's estimate was computed from" is a question a finance reader
+                // asks of exactly this table. The values arrive as decimal STRINGS (the
+                // `decimal:6` cast), and a null is skipped by sanitize() without being reported —
+                // so an unpriced row simply omits all three rather than writing nulls or a
+                // warning per request.
+                'input_price_per_million' => self::ECHOED,
+                'output_price_per_million' => self::ECHOED,
+                'price_currency' => self::ECHOED,
+            ],
+        ],
+        self::PROVIDER_MODEL_UPDATED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            // The values AFTER the replacement. `model` is not editable and is carried anyway,
+            // because a row that cannot say which model was touched is unreadable next to a
+            // `deleted` row for the same subject.
+            'details' => [
+                'connection_id' => self::ECHOED,
+                'model' => self::ECHOED,
+                'display_name' => self::ECHOED,
+                'capabilities' => self::ECHOED,
+                'enabled' => self::ECHOED,
+                'context_window' => self::ECHOED,
+                'max_output_tokens' => self::ECHOED,
+                'input_price_per_million' => self::ECHOED,
+                'output_price_per_million' => self::ECHOED,
+                'price_currency' => self::ECHOED,
+            ],
+        ],
+        self::PROVIDER_MODEL_DELETED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                'connection_id' => self::ECHOED,
+                'model' => self::ECHOED,
+                'display_name' => self::ECHOED,
+                'capabilities' => self::ECHOED,
+                'enabled' => self::ECHOED,
+                'context_window' => self::ECHOED,
+                'max_output_tokens' => self::ECHOED,
+                'input_price_per_million' => self::ECHOED,
+                'output_price_per_million' => self::ECHOED,
+                'price_currency' => self::ECHOED,
             ],
         ],
     ];
@@ -517,6 +833,31 @@ final class AuditLogger
             $normalized = mb_substr(trim($value), 0, self::MAX_VALUE_LENGTH);
 
             if ($normalized === '') {
+                // AN EMPTY VALUE IS SKIPPED — BUT NOT ALWAYS SILENTLY, AND THE SPLIT IS THE POINT.
+                //
+                // The silent case is load-bearing and relied on by name: `capabilities` on the
+                // three provider-model operations is `implode(',', $flags)`, so a row that claims
+                // nothing legitimately produces `''` and simply omits the key, exactly as a null
+                // price does (ProviderModelService::record()'s docblock states that reading in
+                // both directions). Reporting it would put a WARNING on every unflagged write,
+                // which is how a signal that means "your field did not ship" becomes noise.
+                //
+                // The LOUD case is the hole. A value the caller really did supply — `"   "`, a
+                // string of control characters, anything `trim()` eats — reads as content at the
+                // call site and stores as nothing, and an allow-listed key that vanishes without a
+                // drop record is the same class of defect as an ECHOED field the backstop ate.
+                // The discriminator is therefore whether the value was ALREADY empty on arrival,
+                // not whether it is empty now.
+                //
+                // A LABEL BLANKED BY A TENANT IS THE `''` CASE AND SO IS STILL SILENT HERE, which
+                // is deliberate rather than an oversight: that hole is closed where it belongs, by
+                // `min:1` on UpdateProviderConnectionRequest::rules(), so the value cannot reach
+                // this method at all. Making `''` loud instead would have traded one real defect
+                // for a warning on every unflagged provider-model write.
+                if ($value !== '') {
+                    $dropped[] = $key;
+                }
+
                 continue;
             }
 
@@ -565,7 +906,9 @@ final class AuditLogger
             // that one. `redact()` now delegates to it, so the superset relationship is structural rather
             // than a promise: a rule added to the value path cannot go missing from the message path.
             // Coverage is published as `KbJsonFormatter::VALUE_REDACTION_LIMITS`.
-            if (KbJsonFormatter::redactValue($normalized) !== $normalized) {
+            $redacted = KbJsonFormatter::redactValue($normalized);
+
+            if ($redacted !== $normalized) {
                 $dropped[] = $key;
 
                 // Never overwrite a fingerprint the map asked for itself. `AuditLoggerTest` asserts no
@@ -573,6 +916,47 @@ final class AuditLogger
                 // field downgraded here has had no such check, and a silent overwrite would make two
                 // different values indistinguishable in the one column meant to tell them apart.
                 $fingerprintKey = $key.'_fingerprint';
+
+                // THE ROW DEGRADES, IT DOES NOT LOSE ITS IDENTITY. A fingerprint alone answers
+                // "was it THIS value" and nothing else, which is enough for an email and NOT
+                // enough for a field whose CONTENT is the security fact — and three of the ECHOED
+                // fields here are exactly that, all three tenant-controlled free text:
+                //
+                //   * `capabilities` is joined from `supported.*`. This class's own docblock calls
+                //     it the security-relevant field of the three model operations, because an
+                //     `embedding` flag decides which credential embeds the corpus. A tenant
+                //     posting `supported: ["embedding", "sk-aaaaaaaaaaaa"]` used to make the whole
+                //     field unreadable in an APPEND-ONLY table — a self-inflicted blind spot in
+                //     the row that records what they just changed.
+                //   * `label` is the identifying field of `provider.connection.deleted`, whose
+                //     `subject_id` resolves to nothing after a hard delete. The same trick there
+                //     left a row saying a connection was deleted without being able to say which.
+                //   * `display_name` and `model` carry the same exposure on the catalog rows.
+                //
+                // So the SAFE RENDERING is kept beside the fingerprint: `redactValue()`'s output,
+                // in which only the recognised credential substring has become `[REDACTED]` and
+                // everything else survives — `embedding,[REDACTED]` rather than nothing at all.
+                // It is not a prefix of the secret and not a truncation of it: the marker replaces
+                // the whole matched run, which is what makes this a degradation rather than the
+                // "no prefix beyond the documented last four" rule being bent (§18.2).
+                //
+                // A SEPARATE KEY RATHER THAN THE ORIGINAL ONE, deliberately. `$kept[$key]` must
+                // stay absent so a reader — and every existing assertion — can still tell an
+                // echoed value from a rewritten one; a redacted rendering silently occupying the
+                // echoed key would make `details.email` mean two different things depending on a
+                // regex nobody can see from the query.
+                //
+                // A RENDERING THAT IS NOTHING BUT THE MARKER IS NOT WRITTEN. When the whole value
+                // was the credential — `sk-ant-…` and nothing else, which is what a mis-mapped
+                // ECHO field usually looks like — `[REDACTED]` says exactly what the fingerprint's
+                // presence already says, and an audit row is not the place to write the same fact
+                // twice. The key appears only when something around the match survived.
+                $redactedKey = $key.'_redacted';
+
+                if ($redacted !== KbJsonFormatter::REDACTION_MARKER
+                    && ! array_key_exists($redactedKey, $kept)) {
+                    $kept[$redactedKey] = $redacted;
+                }
 
                 if (! array_key_exists($fingerprintKey, $kept)) {
                     try {

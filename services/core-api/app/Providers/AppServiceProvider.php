@@ -9,11 +9,13 @@ use App\Repositories\Contracts\EmbeddingCandidateRepositoryInterface;
 use App\Repositories\Contracts\MembershipRepositoryInterface;
 use App\Repositories\Contracts\OrganizationRepositoryInterface;
 use App\Repositories\Contracts\ProviderConnectionRepositoryInterface;
+use App\Repositories\Contracts\ProviderModelRepositoryInterface;
 use App\Repositories\Contracts\SparseCorpusStatisticsRepositoryInterface;
 use App\Repositories\Eloquent\EloquentEmbeddingCandidateRepository;
 use App\Repositories\Eloquent\EloquentMembershipRepository;
 use App\Repositories\Eloquent\EloquentOrganizationRepository;
 use App\Repositories\Eloquent\EloquentProviderConnectionRepository;
+use App\Repositories\Eloquent\EloquentProviderModelRepository;
 use App\Repositories\Eloquent\EloquentSparseCorpusStatisticsRepository;
 use App\Services\Internal\InternalRequestSigner;
 use App\Support\Crypto\CredentialVault;
@@ -93,6 +95,15 @@ final class AppServiceProvider extends ServiceProvider
         $this->app->bind(
             ProviderConnectionRepositoryInterface::class,
             EloquentProviderConnectionRepository::class,
+        );
+
+        // The model catalog under a connection. A SEPARATE interface from the one above rather
+        // than five more methods on it: the connection repository owns the credential columns and
+        // is the only thing that touches the vault's output, and a catalog write has no business
+        // sharing a seam with that.
+        $this->app->bind(
+            ProviderModelRepositoryInterface::class,
+            EloquentProviderModelRepository::class,
         );
 
         $this->app->bind(
@@ -280,6 +291,36 @@ final class AppServiceProvider extends ServiceProvider
         RateLimiter::for('invitation', static fn (Request $request): array => [
             Limit::perMinute(10)->by('inv:'.hash('sha256', self::inputString($request, 'token'))),
             Limit::perMinute(20)->by('ip:'.((string) $request->ip())),
+        ]);
+
+        /*
+         * ROTATING A PROVIDER CREDENTIAL VERIFIES THE ACTOR'S PASSWORD, so it is a
+         * password-verifying endpoint and gets the shape §18.3 requires of every one of them: per
+         * ACCOUNT and per IP together. Neither axis works alone — per-IP only lets a botnet spray
+         * one account, per-account only lets one host walk the table.
+         *
+         * WHAT `throttle:admin` CANNOT DO HERE. It keys on (organization, user) at 120/min, which
+         * is a fine budget for reading and relabelling and is a terrible one for an endpoint that
+         * answers "is this the right password": 120 guesses a minute from a legitimately signed-in
+         * session makes the re-authentication a formality rather than a control. The account axis
+         * below is what gives the §18.3 check its meaning.
+         *
+         * 5 per 15 MINUTES is deliberately tight and is not a usability problem: rotating a
+         * provider key follows a human going to the vendor's console and copying a new one, which
+         * does not happen five times a quarter-hour. A stolen SPA session that survives XSS still
+         * cannot brute-force the password behind it at this rate.
+         *
+         * KEYED ON THE ACTOR AND NOT ON THE CONNECTION. The thing being guessed is the actor's
+         * password, and the password is the same whichever connection the request names — a
+         * per-connection key would let an organization with twenty connections buy twenty budgets
+         * for one password. The IP axis is what bounds a distributed attempt against many
+         * accounts.
+         */
+        RateLimiter::for('credential-rotation', static fn (Request $request): array => [
+            Limit::perMinutes(15, 5)->by(
+                'actor:'.((string) ($request->user()?->getAuthIdentifier() ?? 'anon')),
+            ),
+            Limit::perMinute(10)->by('ip:'.((string) $request->ip())),
         ]);
 
         /*

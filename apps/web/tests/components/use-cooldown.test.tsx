@@ -208,7 +208,13 @@ describe('the interval does not outlive the component', () => {
     await expect.element(screen.getByTestId('remaining')).toHaveTextContent(/^30$/);
 
     for (const call of setSpy.mock.results) created.push(call.value as number);
-    screen.unmount();
+    // AWAITED, AND NOT AS TIDINESS. `unmount()` wraps its work in React's `act()` and returns the
+    // promise for it, so reading `clearSpy.mock.calls` on the next line without awaiting reads the
+    // spy BEFORE the effect cleanups are guaranteed to have run — the assertion below would be
+    // racing the thing it measures. The second reason is the harness-wide one in tests/msw/setup.ts:
+    // an un-awaited act-wrapping call that OVERLAPS the next one corrupts React's act queue for the
+    // rest of the file. Nothing overlaps this one today, which is exactly how it survived.
+    await screen.unmount();
     for (const call of clearSpy.mock.calls) cleared.push(call[0] as number);
 
     expect(created.length).toBeGreaterThan(0);

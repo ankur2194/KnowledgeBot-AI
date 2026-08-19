@@ -10,8 +10,7 @@ import type {
 } from '@kb/contracts';
 
 import type { StatusKind } from '@/components/status-pill';
-import { browserFetchData } from '@/features/auth/session';
-import { sessionCredential } from '@/lib/api/browser';
+import { browserFetchData, sessionCredential } from '@/lib/api/browser';
 
 /**
  * The members-and-invitations transport: five endpoints, their paths, and the two resource shapes they

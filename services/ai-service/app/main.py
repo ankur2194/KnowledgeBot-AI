@@ -140,6 +140,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[AppState]:
         logger.info("ai-service stopped")
 
 
+#: The 5xx message, in ONE place. Byte-identical to bootstrap/app.php's `$status >= 500` arm
+#: (ADR-029), so a consumer cannot tell which plane produced the envelope. It was written inline
+#: at its single use; it is a constant now because `actionable` below is the field that replaces
+#: reading it, and a string two places can spell differently is what that field exists to retire.
+#: "an internal dependency failed" would be a false statement: nothing downstream failed, we did.
+SERVICE_FAILURE_MESSAGE = "The service could not complete this request."
+
+
 def _envelope(exc: KbError, request: Request) -> JSONResponse:
     """The one error body, for every failure path.
 
@@ -157,6 +165,11 @@ def _envelope(exc: KbError, request: Request) -> JSONResponse:
             "message": exc.message,
             "retryable": exc.retryable,
             "request_id": getattr(request.state, "request_id", None),
+            # Read off the error, never recomputed here: the raiser knows whether it wrote a
+            # sentence or a placeholder, and this function cannot tell them apart without
+            # comparing strings. Laravel derives the same field from the arms of its own
+            # message `match` and relays ours verbatim rather than re-deriving it (ADR-052).
+            "actionable": exc.actionable,
         },
         headers=headers,
     )
@@ -195,6 +208,12 @@ async def _handle_validation_error(request: Request, exc: Exception) -> JSONResp
             "message": "request failed validation",
             "retryable": False,
             "request_id": getattr(request.state, "request_id", None),
+            # FALSE. The summary is a fixed string; the thing a caller acts on is the `errors`
+            # map below it. Laravel's ValidationException arm answers the same, and for the
+            # same reason — while a KbError(VALIDATION, ...) raised deliberately keeps its own
+            # True, because those messages are written for the operator (the ADR-031 resolver
+            # refusal is a paragraph the console renders verbatim).
+            "actionable": False,
             # The `errors` map is a superset present ONLY on this class — the envelope's
             # four fields are identical everywhere else.
             "errors": detail,
@@ -221,10 +240,13 @@ async def _handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
     return _envelope(
         KbError(
             ErrorClass.INTERNAL_DEPENDENCY,
-            # Matches Laravel's wording for the same case. "an internal dependency failed"
-            # would be a false statement: nothing downstream failed, we did.
-            "The service could not complete this request.",
+            SERVICE_FAILURE_MESSAGE,
             origin=Origin.SELF,
+            # THE PLACEHOLDER, BY DEFINITION — this is the one handler whose message is chosen
+            # to say nothing. Marking it lets a client distinguish a deliberate 4xx from a
+            # defect without comparing the message against a copy of the constant above, which
+            # is what apps/web had to do before (finding J2).
+            actionable=False,
         ),
         request,
     )

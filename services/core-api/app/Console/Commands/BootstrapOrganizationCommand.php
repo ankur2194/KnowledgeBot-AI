@@ -8,11 +8,13 @@ use App\Models\User;
 use App\Repositories\Contracts\OrganizationRepositoryInterface;
 use App\Support\Kb\FrontendUrl;
 use App\Support\Observability\LogContext;
+use Illuminate\Auth\Passwords\PasswordBroker;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
+use RuntimeException;
 use Throwable;
 
 /**
@@ -211,12 +213,18 @@ final class BootstrapOrganizationCommand extends Command
      * repository — so the link this prints and the link the mail carries are the same link, and the
      * expiry is `config('auth.passwords.users.expire')` with no second opinion.
      *
+     * `broker()` below is what makes `createToken()` reachable — see that method for why the call
+     * cannot be made straight off the facade. Its throw happens inside this try, so a broken
+     * container surfaces as "Password-setup link failed: …" and a non-zero exit with the
+     * organization already created, which is this method's documented failure mode rather than a
+     * new one.
+     *
      * Returns null on failure, so the caller can exit non-zero with the organization already created.
      */
     private function issuePasswordSetupLink(User $owner): ?string
     {
         try {
-            $token = Password::broker()->createToken($owner);
+            $token = $this->broker()->createToken($owner);
 
             // The standard notification, via App\Models\User::sendPasswordResetNotification(), which is
             // queued. Nothing bespoke: an operator's first email from this system should be the exact
@@ -235,6 +243,58 @@ final class BootstrapOrganizationCommand extends Command
 
             return null;
         }
+    }
+
+    /**
+     * The default password broker, narrowed to the CONCRETE class that actually has `createToken()`.
+     *
+     * ── WHY THIS METHOD EXISTS AT ALL ─────────────────────────────────────────────────────────────
+     *
+     * `Password::broker()` is DECLARED as `Illuminate\Contracts\Auth\PasswordBroker`, and that
+     * interface declares exactly two methods: `sendResetLink()` and `reset()`. `createToken()` lives
+     * only on the concrete `Illuminate\Auth\Passwords\PasswordBroker`, which is what
+     * `PasswordBrokerManager` has always returned. So PHPStan is RIGHT — the declared type has no
+     * such method — and the code is also right, which is precisely the situation that must not be
+     * settled with a baseline entry or a `phpstan-ignore` line (spelled without its leading @ here
+     * precisely because the analyser parses the mention as the annotation): the analyser cannot see a fact the
+     * container guarantees, so the fact is asserted where it is cheap and the analyser is left able
+     * to fail on everything else.
+     *
+     * A THROW AND NOT `assert()`. Assertions compile out under `zend.assertions=-1`, so on a
+     * production box a substituted broker would reach `createToken()` on an object that has no such
+     * method and take the process down with a fatal error instead of a catchable Throwable. The
+     * caller's `catch (Throwable)` turns this into a readable message and a non-zero exit.
+     *
+     * NOT `Password::createToken($owner)`, which the facade publishes as an `@method` and which
+     * would also analyse cleanly. That routes through `PasswordBrokerManager::__call`, whose return
+     * type PHPStan can only take from a docblock on a magic method — a weaker guarantee than a real
+     * instance of a real class — and it would leave nothing in the tree explaining why the obvious
+     * call does not type-check.
+     *
+     * THE `->broker()` IN THE CALL SITE IS LOAD-BEARING FOR MORE THAN READABILITY.
+     * tests/Security/SingleCredentialMechanismTest.php scans every line of app/ for a `createToken`
+     * call and narrows its one exclusion BY RECEIVER — `Password::`, `->broker()` or the class name
+     * on the same line — so that a genuine mint on a User in this same file still fails. Reading the
+     * broker into a local first would leave a bare `$variable` as the receiver on that line, which
+     * trips a Sanctum-credential check over a password-reset token that is not one. Keeping the
+     * receiver as `$this->broker()` keeps that narrowing meaningful without widening its regex, and
+     * that is why the local lives behind this method instead of in the caller.
+     */
+    private function broker(): PasswordBroker
+    {
+        $broker = Password::broker();
+
+        if (! $broker instanceof PasswordBroker) {
+            throw new RuntimeException(
+                'The default password broker is '.$broker::class.', which does not implement '
+                .'createToken(). This command mints a reset token through the NORMAL broker on '
+                .'purpose, so the first operator sets their own password through the same flow '
+                .'every other user uses; a substituted broker has to provide the same token '
+                .'repository, or the printed link and the mailed link stop being the same link.',
+            );
+        }
+
+        return $broker;
     }
 
     /**

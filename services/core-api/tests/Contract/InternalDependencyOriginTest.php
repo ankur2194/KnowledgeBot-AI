@@ -131,16 +131,31 @@ function kbPythonSelfOriginStatus(): int
  */
 function kbPythonSelfOriginMessage(): string
 {
+    $source = kbAiServiceSource('app/main.py');
+
     $body = kbExtract(
         '/async def _handle_unexpected\((.*?)\n\ndef /s',
-        kbAiServiceSource('app/main.py'),
+        $source,
         'the body of _handle_unexpected()',
     );
 
     expect($body)->toContain('ErrorClass.INTERNAL_DEPENDENCY')
-        ->and($body)->toContain('origin=Origin.SELF');
+        ->and($body)->toContain('origin=Origin.SELF')
+        // AND THAT IT MARKS ITSELF NON-ACTIONABLE (finding J2). This handler's message is the
+        // placeholder by definition; dropping the argument would default it to True and publish
+        // "this sentence was written for you" on a string chosen to say nothing — which is the
+        // one direction of that field's failure that reaches a tenant.
+        ->and($body)->toContain('actionable=False');
 
-    return kbExtract('/^\s+"([^"]+)",$/m', $body, 'the envelope message in _handle_unexpected()');
+    // READ FROM THE MODULE CONSTANT, NOT FROM THE HANDLER BODY. The literal used to be inline and
+    // this parser read it out of `$body`; it is a named constant now precisely because `actionable`
+    // retired the client-side comparison that made a second spelling of it dangerous. Reading the
+    // constant keeps this assertion pinned to the same bytes without depending on where they sit.
+    return kbExtract(
+        '/^SERVICE_FAILURE_MESSAGE = "([^"]+)"$/m',
+        $source,
+        'the SERVICE_FAILURE_MESSAGE constant used by _handle_unexpected()',
+    );
 }
 
 /**
@@ -163,7 +178,7 @@ function kbPythonEnvelopeKeys(): array
 
     preg_match_all('/^\s+"([a-z_]+)":/m', $content, $keys);
 
-    expect($keys[1])->toHaveCount(4, 'the envelope is exactly four keys — the parser found something else');
+    expect($keys[1])->toHaveCount(5, 'the envelope is exactly five keys — the parser found something else');
 
     return $keys[1];
 }
@@ -190,7 +205,7 @@ it('reads the FastAPI rendering as data, and finds every part of it', function (
     expect(kbPythonSelfOriginStatus())->toBe(500)
         ->and(kbPythonDownstreamStatus())->toBe(503)
         ->and(kbPythonSelfOriginMessage())->not->toBe('')
-        ->and(kbPythonEnvelopeKeys())->toBe(['error_class', 'message', 'retryable', 'request_id']);
+        ->and(kbPythonEnvelopeKeys())->toBe(['error_class', 'message', 'retryable', 'request_id', 'actionable']);
 });
 
 it('renders an unhandled exception exactly as FastAPI _handle_unexpected does', function (): void {
@@ -205,7 +220,12 @@ it('renders an unhandled exception exactly as FastAPI _handle_unexpected does', 
     $response->assertJsonPath('retryable', false);
     $response->assertJsonPath('message', kbPythonSelfOriginMessage());
 
-    // Same four keys, same order, so the two planes' envelopes are the same BYTES.
+    // AND THE SAME `actionable`, read from the other plane's source rather than restated. This is
+    // the field that separates this response from a deliberate 409, which shares its class and its
+    // retry verdict — so a divergence here is a client rendering one plane's placeholder as advice.
+    $response->assertJsonPath('actionable', false);
+
+    // Same five keys, same order, so the two planes' envelopes are the same BYTES.
     expect(array_keys((array) $response->json()))->toBe(kbPythonEnvelopeKeys());
 });
 
@@ -251,7 +271,10 @@ it('does not carry origin onto the wire', function (): void {
     // Origin is a RENDERING INPUT, not a nineteenth field. It selects the status and the retry
     // verdict, both of which the envelope already carries; publishing it would invite a client to
     // branch on "was this your bug or theirs", which is not a question a client can act on and not
-    // one we want to answer. FastAPI's _envelope() emits four keys and so does this one.
+    // one we want to answer. FastAPI's _envelope() emits five keys and so does this one.
+    //
+    // `actionable` IS on the wire and is not a counter-example: it answers "may I show this
+    // message", which a client can act on, rather than "whose bug was it", which it cannot.
     $response = originProbe('api/v1/_origin/no-wire-field', new \RuntimeException('ours'));
 
     expect((array) $response->json())->not->toHaveKey('origin')

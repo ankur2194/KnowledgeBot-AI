@@ -23,12 +23,12 @@ import {
   FormMessage,
 } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
-import { sessionCredential } from '@/lib/api/browser';
+import { browserFetchData, sessionCredential } from '@/lib/api/browser';
 import { asText } from '@/lib/forms/as-text';
 
 import { applyAuthError } from './auth-error';
 import { RESET_PASSWORD_KNOWN_PATHS } from './known-paths';
-import { browserFetchData, browserNavigation } from './session';
+import { browserNavigation } from './session';
 import { useCooldown } from './use-cooldown';
 import { useStripTokenFromUrl } from './use-strip-token-from-url';
 

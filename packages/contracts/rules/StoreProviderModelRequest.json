@@ -1,0 +1,71 @@
+{
+    "class": "App\\Http\\Requests\\StoreProviderModelRequest",
+    "rules": {
+        "context_window": [
+            "bail",
+            "required",
+            "integer",
+            "min:0",
+            "max:100000000"
+        ],
+        "display_name": [
+            "bail",
+            "required",
+            "string",
+            "max:200"
+        ],
+        "enabled": [
+            "bail",
+            "sometimes",
+            "boolean"
+        ],
+        "input_price_per_million": [
+            "bail",
+            "nullable",
+            "numeric",
+            "decimal:0,6",
+            "min:0",
+            "max:1000000"
+        ],
+        "max_output_tokens": [
+            "bail",
+            "required",
+            "integer",
+            "min:0",
+            "max:100000000"
+        ],
+        "model": [
+            "bail",
+            "required",
+            "string",
+            "max:200"
+        ],
+        "output_price_per_million": [
+            "bail",
+            "nullable",
+            "numeric",
+            "decimal:0,6",
+            "min:0",
+            "max:1000000"
+        ],
+        "price_currency": [
+            "bail",
+            "nullable",
+            "string",
+            "size:3",
+            "regex:/^[A-Z]{3}$/",
+            "required_with:input_price_per_million,output_price_per_million"
+        ],
+        "supported": [
+            "present",
+            "array",
+            "max:20"
+        ],
+        "supported.*": [
+            "bail",
+            "string",
+            "max:64",
+            "regex:/^[a-z][a-z0-9_]*$/"
+        ]
+    }
+}

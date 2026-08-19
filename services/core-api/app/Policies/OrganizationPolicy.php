@@ -36,6 +36,25 @@ final class OrganizationPolicy extends OrgScopedPolicy
     }
 
     /**
+     * LIST the organization's connections.
+     *
+     * Here and not on ProviderConnectionPolicy because a list has no row to take an organization
+     * from — the same reason `viewMembers` and `inviteMember` live here rather than on
+     * OrganizationInvitationPolicy. `ProviderConnectionPolicy::view()` is the per-row half and
+     * carries the identical permission, so the two never disagree about who may read a connection;
+     * what differs is only which record supplied the organization.
+     *
+     * A `viewAny` on the connection policy would be the alternative spelling. It is not used,
+     * because Laravel resolves `viewAny` from a CLASS NAME rather than an instance, which means
+     * the organization would have to come from somewhere other than a record — and "somewhere
+     * other than a record" is precisely the shape OrgScopedPolicy exists to make unrepresentable.
+     */
+    public function viewProviderConnections(?User $user, Organization $organization): Response
+    {
+        return $this->permit($user, $organization, Permission::ProvidersView);
+    }
+
+    /**
      * The three membership abilities have no MODEL of their own — listing members and creating an
      * invitation both act on the organization itself — so they live here rather than on
      * OrganizationInvitationPolicy, which can only authorize a row that already exists. `Organization`

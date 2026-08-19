@@ -278,6 +278,59 @@ return Application::configure(basePath: dirname(__DIR__))
             'api_key', 'secret', 'provider_credential', 'credential',
         ]);
 
+        /*
+         * THE SEALED CREDENTIAL AND THE WRAPPED DATA KEY MUST NOT REACH THE LOG STORE.
+         *
+         * `BinaryCast::set()` hands PDO a `'\x'.bin2hex(...)` string because there is no way to
+         * bind a `bytea`, and `QueryException::formatMessage()` interpolates EVERY binding into the
+         * message it builds. So any database failure on a statement that writes a vault column —
+         * a deadlock, a CHECK violation, a mid-statement reset — reports the tenant's key material
+         * into Loki twice over, in a store nobody classifies as sensitive. `KbJsonFormatter::redact()`
+         * cannot catch it: every rule in it recognises a credential by its own SHAPE, and hex has
+         * none.
+         *
+         * REGISTERED HERE RATHER THAN AS A try/catch AT THE TWO WRITE SITES, because the property
+         * is about the COLUMN and not about a call site: a KEK-rewrap command, an Eloquent backfill
+         * or a second credential-bearing table reaches the same PDO path with none of a local
+         * guard, and `AuditLogger` rethrows an ON_FAILURE_ABORT failure unwrapped so somebody
+         * else's QueryException can arrive from inside the same transaction. This is the one funnel
+         * every reported throwable passes through. VaultQueryScrubber carries the full argument and
+         * the two detection tests.
+         *
+         * RETURNING `false` STOPS THE DEFAULT LOGGING STACK (Handler::reportThrowable — a report
+         * callback returning false returns early). That is the entire point: the default stack is
+         * what would log `$e->getMessage()`. A scrubbed ERROR is emitted here in its place, so the
+         * failure is still loud, still carries `error_class`, and is still correlatable by
+         * `request_id` — which KbJsonFormatter stamps on every line.
+         *
+         * NOTHING IS PASSED UNDER `exception`. Handing the Throwable to the formatter would render
+         * its message again and undo the whole exercise; the SQLSTATE, the connection and the
+         * PARAMETERIZED sql (placeholders, never values) are what an operator can act on.
+         *
+         * THE RENDERED RESPONSE IS UNAFFECTED. `report` and `render` are separate funnels: a
+         * QueryException is not an HttpExceptionInterface, so the render closure still emits 500
+         * with the fixed constant message.
+         */
+        $exceptions->report(function (\Illuminate\Database\QueryException $e): bool {
+            if (! \App\Support\Crypto\VaultQueryScrubber::isVaultQuery($e)) {
+                // Not our concern: fall through to the default stack, which logs it normally.
+                return true;
+            }
+
+            \Illuminate\Support\Facades\Log::error(
+                \App\Support\Crypto\VaultQueryScrubber::summarize($e),
+                [
+                    // From ErrorTaxonomy, so the existing error panels see this line. A database
+                    // failure is a dependency of ours failing, whatever the statement was.
+                    'error_class' => 'internal_dependency',
+                    'dependency' => 'postgresql',
+                    'outcome' => 'error',
+                ],
+            );
+
+            return false;
+        });
+
         // ONE render closure. Both the non-streaming body and the SSE `error` frame carry the same
         // four keys, so one parser serves every surface and `error_class` is the only field a client
         // branches on (kb-internal-api-contracts). Status comes from the CLASS, never from the
@@ -443,9 +496,78 @@ return Application::configure(basePath: dirname(__DIR__))
                 'request_id' => (string) ($request->headers->get('X-KB-Request-Id') ?: Str::ulid()),
             ];
 
+            // ── `actionable`: IS THE MESSAGE ABOVE ADDRESSED TO A PERSON? ──────────────────────
+            //
+            // WHAT IT ANSWERS. True when `message` was written for THIS condition and names
+            // something about this request; false when it is a fixed placeholder chosen to say
+            // nothing. It is NOT a status and nothing may infer one from it — `error_class` and
+            // `retryable` keep every job they have, and a client that branches on a status is the
+            // coupling the 18-class taxonomy exists to remove.
+            //
+            // WHY IT EXISTS (finding J2). The taxonomy has no 409 row on purpose: a deliberate 4xx
+            // our own code raised renders as `internal_dependency` with the status preserved, and
+            // an unhandled exception renders as `internal_dependency` too. So a 409 that says
+            // "clear the designation first, then delete" and a 500 that says nothing arrive at the
+            // browser as the SAME (error_class, retryable) pair. apps/web told them apart by
+            // comparing `message` against a client-side copy of the 5xx constant below — a
+            // deny-by-exclusion filter whose premise was a property of the WHOLE TREE: the first
+            // `abort(400, $detail)` reachable from those screens broke it silently, and in the
+            // worse direction (a defect whose message happened to differ would read as advice).
+            //
+            // DERIVED FROM THE SAME CONDITIONS AS THE `match` ABOVE, ARM FOR ARM, so the two cannot
+            // drift. Each conjunct names the arm it mirrors:
+            //
+            //   $status < 500                  the >=500 arm replaced the message with a constant
+            //   not `authorization`            both authorization arms are enumeration-oracle
+            //                                  constants; a sentence there would REOPEN the oracle
+            //   not a ValidationException      Laravel's own summary string is generic; the payload
+            //                                  a client acts on is the `errors` map beside it. Note
+            //                                  this is deliberately narrower than "not validation":
+            //                                  KbException::validation() carries the ADR-031
+            //                                  resolver refusal, a full paragraph written for the
+            //                                  operator that apps/web renders verbatim.
+            //   the KbException's own verdict  a RELAYED envelope's verdict wins, exactly as
+            //                                  $origin does above. Recomputing it here would be
+            //                                  ADR-052 recurring on a fourth field.
+            //   a non-empty message            "" is not advice however it got here.
+            //
+            // services/ai-service/app/main.py carries the mirror: `_handle_unexpected` emits false,
+            // `_handle_validation_error` emits false, and every other KbError emits its own flag.
+            // A consumer cannot tell which plane produced an envelope, so a divergence is a bug.
+            $payload['actionable'] = $status < 500
+                && $errorClass !== 'authorization'
+                && ! $e instanceof ValidationException
+                && (! $e instanceof \App\Exceptions\KbException || $e->actionable)
+                && $payload['message'] !== '';
+
             // `errors` is a SUPERSET present only on `validation` — never null, never {} elsewhere.
+            //
+            // TWO PRODUCERS, AND THE SECOND ONE WAS MISSING. A FormRequest produces the map from
+            // its own rules; the DATA PLANE produces one too — `_handle_validation_error` in
+            // services/ai-service/app/main.py builds a real `dict[str, list[str]]` out of Pydantic's
+            // `loc` paths on EVERY validation envelope. While this branch tested only
+            // `instanceof ValidationException`, a relayed 422 reached the browser as `validation`
+            // with NO map, and a form had nothing to key its per-field errors on.
+            //
+            // The condition is `error_class === 'validation'` and NOT `$e instanceof KbException`,
+            // because the field the contract keys the superset on is the class, and a KbException
+            // carrying any other class must not grow one.
+            //
+            // AN EMPTY MAP IS NOT FORWARDED. The contract is "present only on `validation`, and only
+            // when a producer made one — never null, never {}", so the relay normalizes a malformed
+            // or empty map to null (InternalAiClient::fieldErrors) and this omits the key entirely.
+            // That absence is itself an invariant a client tests: apps/web discriminates the ADR-031
+            // resolver refusal on `validation` WITH NO MAP, which is only sound while every 422 that
+            // HAS per-field detail carries it.
             if ($e instanceof ValidationException) {
                 $payload['errors'] = $e->errors();
+            } elseif (
+                $errorClass === 'validation'
+                && $e instanceof \App\Exceptions\KbException
+                && $e->errors !== null
+                && $e->errors !== []
+            ) {
+                $payload['errors'] = $e->errors;
             }
 
             $headers = [];

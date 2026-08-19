@@ -242,7 +242,14 @@ def test_kb_error_carries_no_status_of_its_own() -> None:
     # `origin` is here and `status` is not, and the difference is the point: origin is an
     # INPUT to the rendering, chosen at the raise site; a status would be an output the
     # exception had already decided for itself.
+    #
+    # `actionable` is here too and is a WIRE field, which `origin` is not -- the test for that
+    # is test_a_kb_error_carries_its_own_actionable_verdict_onto_the_wire. It does not weaken
+    # the rule above: it says whether `message` is addressed to a person, which is a fact about
+    # the message, not a status by another name. A client that inferred 409 from it would be
+    # making exactly the mistake this test guards, and the field's docstring says so.
     assert set(KbError.__slots__) == {
+        "actionable",
         "error_class",
         "message",
         "origin",
@@ -368,7 +375,77 @@ async def test_the_unhandled_exception_handler_renders_exactly_what_laravel_rend
     body = json.loads(bytes(response.body))
     assert body["error_class"] == "internal_dependency"
     assert body["retryable"] is False
+    # THE PLACEHOLDER, MARKED AS ONE (finding J2). This handler's message is chosen to say
+    # nothing, and saying so on the wire is what lets a client tell a deliberate 4xx from a
+    # defect -- the two are otherwise the same (error_class, retryable) pair, because the
+    # taxonomy has no 409 row on purpose.
+    assert body["actionable"] is False
     # `origin` selects the rendering; it is not itself a wire field. Adding one would be a
-    # contract change across three clients for something no client can act on.
-    assert set(body) == {"error_class", "message", "retryable", "request_id"}
+    # contract change across three clients for something no client can act on. `actionable`
+    # IS one, and the difference is that a client can act on it: it decides whether the
+    # message may be rendered.
+    #
+    # THIS SET IS EXACT ON PURPOSE. It is the tripwire that fires when either plane grows a
+    # field the other does not have, and it did its job when `actionable` was added.
+    assert set(body) == {"error_class", "message", "retryable", "request_id", "actionable"}
     assert "hunter2" not in bytes(response.body).decode()
+
+
+async def test_a_kb_error_carries_its_own_actionable_verdict_onto_the_wire() -> None:
+    """The other side of finding J2: a raised KbError's message IS written for a person.
+
+    ``_envelope`` reads the flag off the error rather than recomputing it, because this
+    function cannot tell a sentence from a placeholder without comparing strings -- which is
+    exactly the client-side workaround the field exists to retire.
+    """
+    import json
+
+    from starlette.requests import Request
+
+    from app.core.errors import ErrorClass, KbError
+    from app.main import _envelope
+
+    scope = {"type": "http", "method": "POST", "path": "/internal/v1/chat", "headers": []}
+    request = Request(scope)
+
+    refusal = KbError(ErrorClass.VALIDATION, "two eligible connections disagree")
+    default = _envelope(refusal, request)
+    assert json.loads(bytes(default.body))["actionable"] is True
+
+    # Narrowable at the call site, the same way `retryable` is.
+    muted = _envelope(
+        KbError(ErrorClass.VALIDATION, "two eligible connections disagree", actionable=False),
+        request,
+    )
+    assert json.loads(bytes(muted.body))["actionable"] is False
+
+
+async def test_the_pydantic_validation_envelope_is_not_actionable_but_carries_its_map() -> None:
+    """A generic summary beside a real per-field map.
+
+    ``"request failed validation"`` is a placeholder; the payload a caller acts on is
+    ``errors``. Laravel answers the same for its own ValidationException and True for a
+    deliberately raised ``KbException::validation`` -- the split is by PRODUCER, not by class.
+    """
+    import json
+
+    from fastapi.exceptions import RequestValidationError
+    from pydantic import BaseModel, ValidationError
+    from starlette.requests import Request
+
+    from app.main import _handle_validation_error
+
+    class Body(BaseModel):
+        top_k: int
+
+    try:
+        Body(top_k="not an int")  # type: ignore[arg-type]
+    except ValidationError as exc:  # pragma: no branch - always raises
+        wrapped = RequestValidationError(exc.errors())
+
+    scope = {"type": "http", "method": "POST", "path": "/internal/v1/chat", "headers": []}
+    response = await _handle_validation_error(Request(scope), wrapped)
+
+    body = json.loads(bytes(response.body))
+    assert body["actionable"] is False
+    assert body["errors"]  # the map is what the caller keys on instead

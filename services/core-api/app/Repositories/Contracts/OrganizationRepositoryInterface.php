@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace App\Repositories\Contracts;
 
+use App\Exceptions\KbException;
 use App\Models\Organization;
 use App\Models\OrganizationUser;
 use App\Models\User;
 use App\Services\Embedding\EmbeddingDesignation;
+use LogicException;
 use SensitiveParameter;
 
 interface OrganizationRepositoryInterface
@@ -20,6 +22,36 @@ interface OrganizationRepositoryInterface
      * stale both layers fail together unless the argument is explicit.
      *
      * Returns the refreshed organization.
+     *
+     * AN IMPLEMENTATION MUST RE-VERIFY THE PAIR INSIDE ITS OWN TRANSACTION, and that is part of
+     * the contract rather than an implementation detail: nothing in the database ties
+     * `(embedding_connection_id, embedding_model)` to a `provider_models` row — the composite
+     * foreign key covers the CONNECTION only — so a delete committing between the caller's
+     * pre-flight resolution and this write would otherwise leave the organization naming a catalog
+     * row that no longer exists, with both requests returning 200.
+     *
+     * ── PRECONDITION: THE AMBIENT TENANT CONTEXT MUST BE BOUND AND MUST EQUAL $organizationId ───
+     *
+     * READ THIS BEFORE CALLING FROM A JOB, A CONSOLE COMMAND OR A BACKFILL. The re-verification the
+     * paragraph above mandates is a read of a `#[ScopedBy(OrganizationScope::class)]` model, and
+     * that scope fails closed — no context appends `1 = 0`, a disagreeing context appends a
+     * predicate that conflicts with the explicit one. Either way the check answers "empty" for a
+     * reason that has nothing to do with the catalog, and a 422 built on that answer would tell the
+     * operator something false about a table nobody touched.
+     *
+     * An implementation therefore ASSERTS the precondition and raises rather than interpreting an
+     * empty result. Satisfying it is one line — `TenantContext::runFor($organizationId, fn () =>
+     * …)` — which is exactly what App\Http\Middleware\TenantContext already does for every request
+     * that reaches this method, so no HTTP caller has to do anything.
+     *
+     * The precondition does NOT make the ambient context an authorization layer or replace the
+     * explicit argument: $organizationId remains the mechanism and the scope remains the backstop.
+     * It only says that this method's caller must not have put the two in disagreement.
+     *
+     * @throws KbException `validation` (422) when the designation names a (connection, model) pair
+     *                     this organization's catalog does not contain
+     * @throws LogicException when the ambient tenant context is unbound or names another
+     *                        organization — a caller defect, rendered 500 / `internal`
      */
     public function designateEmbeddingConnection(
         string $organizationId,
