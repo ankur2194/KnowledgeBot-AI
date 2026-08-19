@@ -6,6 +6,7 @@ use App\Enums\OrgRole;
 use App\Enums\Provider;
 use App\Enums\ProviderConnectionStatus;
 use App\Models\AuditLog;
+use App\Models\Bot;
 use App\Models\EmailVerificationToken;
 use App\Models\Organization;
 use App\Models\OrganizationInvitation;
@@ -187,7 +188,7 @@ const ATOMICITY_PROVIDER_CREDENTIAL = 'kb-atomicity-credential-DO-NOT-LOG-v8r2';
  * — running `pest tests/Feature/AuditAtomicityTest.php` alone would fatal on an undefined function —
  * and declaring a second copy under the same name in this file would be a redeclaration fatal in a
  * full run. tests/Support/tenancy.php's tenantPair() is the intended eventual home for both and
- * throws by design until the Bot and KnowledgeSource factories exist.
+ * is live for bots as of the bots-schema step; its KnowledgeSource half is still commented for Phase C, so a suite that needs INDEXED SOURCE content still builds its own fixture.
  *
  * @return array{
  *     orgA: Organization, orgB: Organization,
@@ -702,7 +703,7 @@ it('does not replace a stored credential when the rotation audit row cannot be w
  * has been loaded — running this file alone would fatal on an undefined function — and declaring a
  * second copy under the same name here would be a redeclaration fatal in a full run.
  * tests/Support/tenancy.php's tenantPair() is the intended eventual home for all of them and
- * throws by design until the Bot and KnowledgeSource factories exist.
+ * is live for bots as of the bots-schema step; its KnowledgeSource half is still commented for Phase C, so a suite that needs INDEXED SOURCE content still builds its own fixture.
  *
  * @return array{
  *     orgA: Organization, orgB: Organization,
@@ -904,6 +905,217 @@ it('deletes no provider model when its audit row cannot be written', function ()
 });
 
 // -------------------------------------------------------------------------------------------
+// ON_FAILURE_ABORT: BOTS
+// -------------------------------------------------------------------------------------------
+//
+// THE SAME TECHNIQUE AND A DIFFERENT SUBJECT AGAIN. `bot.created`, `.updated` and `.deleted` are
+// all ABORT and all written inside EloquentBotRepository's transaction, so each change must roll
+// back with its row.
+//
+// WHAT EACH OF THE THREE CAN PROVE, which is not the same for all three:
+//   create   — the row does not exist afterwards. It cannot distinguish "the audit write was inside
+//       the transaction" from "it happened before the INSERT", because there is nothing to observe
+//       before the INSERT.
+//   update   — the strongest of the three, and stronger here than on the catalog. `update()` calls
+//       save() BEFORE the audit closure AND may have bumped `retrieval_configuration_version`, so a
+//       rollback has to take both the column values and the version increment back. A version that
+//       moved without an audit row is the specific defect: the §21.5 regression gate would then
+//       replay a trace against a configuration identity no audit row explains.
+//   delete   — audit FIRST, children SECOND, bot THIRD, because a hard delete leaves the audit row
+//       as the only surviving description. So it proves "nothing committed" — including the CHILD
+//       rows, which no other test in this file has an equivalent of — and proves the write is not
+//       AFTER the commit, but cannot distinguish inside-the-transaction from just-before-it. The
+//       update test carries that half.
+
+/**
+ * TWO ORGANIZATIONS, one bot each, and the two bots share a SLUG.
+ *
+ * A bot slug is unique PER ORGANIZATION, so the pair is legal — and it is exactly the fixture that
+ * makes a missing organization predicate visible: a repository whose tenant term had been deleted
+ * would edit or delete a plausible-looking row and every assertion keyed on the slug would pass.
+ * Org B's bot is the control and every test below asserts it is still standing afterwards.
+ *
+ * ORG A'S BOT CARRIES ONE ROW IN EACH CHILD TABLE, which no other fixture in this file needs: the
+ * delete path removes three child collections inside the same transaction, and a rollback that took
+ * the bot back while leaving an orphaned domain would be invisible without them.
+ *
+ * A HELPER OF THIS FILE'S OWN, with a name of its own, for the reason
+ * providerModelAtomicityFixture() states: Pest declares test-file helpers at FILE SCOPE, so a
+ * second declaration of a name another test file already uses is a redeclaration fatal in a full
+ * run and only in a full run.
+ *
+ * @return array{orgA: Organization, orgB: Organization, ownerA: User, botA: Bot, botB: Bot}
+ */
+function botAtomicityFixture(): array
+{
+    $orgA = Organization::factory()->create(['name' => 'Bot Atomicity Org ALPHA']);
+    $orgB = Organization::factory()->create(['name' => 'Bot Atomicity Org BRAVO']);
+
+    return [
+        'orgA' => $orgA,
+        'orgB' => $orgB,
+        'ownerA' => User::factory()->recycle($orgA)->orgRole(OrgRole::Owner)
+            ->create(['email' => SpaSession::uniqueEmail('bot-atomicity-owner')]),
+
+        // ->recycle() on both, without exception: BotFactory REFUSES to run without a recycled
+        // organization, because a bot minted into a THIRD organization is what makes an isolation
+        // assertion pass with the tenant filter deleted.
+        'botA' => Bot::factory()->recycle($orgA)
+            ->withOrigins(['https://alpha.example.com'])
+            ->create(['name' => 'ALPHA atomicity bot', 'slug' => 'shared-handle']),
+        'botB' => Bot::factory()->recycle($orgB)
+            ->create(['name' => 'BRAVO atomicity bot', 'slug' => 'shared-handle']),
+    ];
+}
+
+it('creates no bot when its audit row cannot be written', function (): void {
+    $fixture = botAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    // POSITIVE CONTROL BEFORE THE BREAK: org A holds exactly one bot right now. Without it, "still
+    // one bot" below is satisfied by a fixture that created none and by an endpoint that has been
+    // 500ing since long before the partitions were dropped.
+    expect(Bot::query()->withoutGlobalScopes()->where('organization_id', '=', $fixture['orgA']->id)->count())
+        ->toBe(1, 'the fixture did not create org A\'s bot, so nothing below is a rollback');
+
+    auditWritesBroken();
+
+    currentTest()->postJson(
+        "/api/v1/organizations/{$fixture['orgA']->id}/bots",
+        ['name' => 'ALPHA unauditable bot', 'slug' => 'unauditable-bot'],
+        spaHeaders(),
+    )
+        // ON_FAILURE_ABORT rethrows the QueryException UNWRAPPED, so the taxonomy classifies the
+        // SQLSTATE rather than a service-layer wrapper.
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    // NOTHING COMMITTED. A bot that reached the table with no record of who created it is a
+    // retrieval scope nobody can attribute — and it is invisible in every other test, because the
+    // endpoint's own response would have been a 201.
+    assertDatabaseMissing('bots', ['slug' => 'unauditable-bot']);
+    assertDatabaseMissing('bots', ['name' => 'ALPHA unauditable bot']);
+
+    expect(Bot::query()->withoutGlobalScopes()->where('organization_id', '=', $fixture['orgA']->id)->count())
+        ->toBe(1, 'a bot was created without an audit row');
+
+    // AND ORG B SURVIVES. A rollback that reached beyond its own savepoint would take the other
+    // tenant's rows with it, and no assertion on org A can see that.
+    assertDatabaseHas('bots', [
+        'id' => $fixture['botB']->id,
+        'organization_id' => $fixture['orgB']->id,
+        'name' => 'BRAVO atomicity bot',
+    ]);
+});
+
+it('does not edit a bot, or move its configuration version, when the audit row cannot be written', function (): void {
+    $fixture = botAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    $bot = $fixture['botA'];
+
+    // POSITIVE CONTROL FIRST: the values this test claims survive are the values the row actually
+    // holds. Without it a rollback assertion passes against a fixture that never had them.
+    assertDatabaseHas('bots', [
+        'id' => $bot->id,
+        'organization_id' => $fixture['orgA']->id,
+        'name' => 'ALPHA atomicity bot',
+        'dense_top_k' => 20,
+        'retrieval_configuration_version' => 1,
+    ]);
+
+    auditWritesBroken();
+
+    currentTest()->patchJson(
+        "/api/v1/organizations/{$fixture['orgA']->id}/bots/{$bot->id}",
+        // A NAME CHANGE **AND** A RETRIEVAL KNOB, deliberately. The knob is what makes this the
+        // strongest of the three: `update()` bumps `retrieval_configuration_version` inside the same
+        // transaction, so a rollback has to take the increment back as well as the columns. A
+        // version that moved with no audit row explaining it is a configuration identity the §21.5
+        // regression gate would replay against and nobody could account for.
+        ['name' => 'ALPHA unauditable rename', 'dense_top_k' => 42],
+        spaHeaders(),
+    )
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    assertDatabaseHas('bots', [
+        'id' => $bot->id,
+        'organization_id' => $fixture['orgA']->id,
+        'name' => 'ALPHA atomicity bot',
+        'dense_top_k' => 20,
+        // THE ASSERTION THIS TEST EXISTS FOR. Everything above would also pass if the audit write
+        // had happened before the UPDATE; only a version that came back proves the write is inside
+        // the transaction that performed it.
+        'retrieval_configuration_version' => 1,
+    ]);
+
+    assertDatabaseMissing('bots', ['name' => 'ALPHA unauditable rename']);
+
+    assertDatabaseHas('bots', [
+        'id' => $fixture['botB']->id,
+        'organization_id' => $fixture['orgB']->id,
+        'name' => 'BRAVO atomicity bot',
+    ]);
+});
+
+it('deletes no bot, and no child of one, when its audit row cannot be written', function (): void {
+    $fixture = botAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    $bot = $fixture['botA'];
+
+    // POSITIVE CONTROL FIRST, ON BOTH THE BOT AND ITS CHILD. The child is the half no other test in
+    // this file has: the delete path removes three child collections inside the same transaction,
+    // and an orphaned allow-list entry left behind by a partial rollback is invisible from `bots`.
+    assertDatabaseHas('bots', [
+        'id' => $bot->id,
+        'organization_id' => $fixture['orgA']->id,
+        'slug' => 'shared-handle',
+    ]);
+    assertDatabaseHas('bot_domains', [
+        'bot_id' => $bot->id,
+        'organization_id' => $fixture['orgA']->id,
+        'origin' => 'https://alpha.example.com',
+    ]);
+
+    auditWritesBroken();
+
+    currentTest()->deleteJson(
+        "/api/v1/organizations/{$fixture['orgA']->id}/bots/{$bot->id}",
+        [],
+        spaHeaders(),
+    )
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    // THE HARD DELETE DID NOT HAPPEN, AND NEITHER DID THE CASCADE. This is the one operation whose
+    // audit row is the ONLY thing that would have survived it, so a delete that committed without
+    // one erases the bot, its origin allow-list, its starter questions and its fallback chain AND
+    // the record that any of them existed — `subject_id` would point at a ULID no table resolves.
+    assertDatabaseHas('bots', [
+        'id' => $bot->id,
+        'organization_id' => $fixture['orgA']->id,
+        'name' => 'ALPHA atomicity bot',
+    ]);
+    assertDatabaseHas('bot_domains', [
+        'bot_id' => $bot->id,
+        'origin' => 'https://alpha.example.com',
+    ]);
+
+    // ORG B SURVIVES. A delete whose predicate lost its organization term is invisible to every
+    // assertion above — and org B's bot carries the SAME slug, so a delete keyed on the handle
+    // alone would have taken it.
+    assertDatabaseHas('bots', [
+        'id' => $fixture['botB']->id,
+        'organization_id' => $fixture['orgB']->id,
+    ]);
+});
+
+// -------------------------------------------------------------------------------------------
 // ON_FAILURE_LOG: the action stands, and the failure is loud
 // -------------------------------------------------------------------------------------------
 
@@ -1004,6 +1216,17 @@ it('has a test in this file for every ABORT-policy operation that has a producer
         AuditLogger::PROVIDER_MODEL_CREATED,
         AuditLogger::PROVIDER_MODEL_DELETED,
         AuditLogger::PROVIDER_MODEL_UPDATED,
+
+        // The three BOT operations. All three have live producers — BotController@store/@update/
+        // @destroy — so none of them belongs in $noProducer, and each has a test above that breaks
+        // the audit INSERT and asserts the bot is unchanged. The update test is the one that also
+        // proves the write is INSIDE the transaction rather than merely before the commit, because
+        // it asserts `retrieval_configuration_version` came back; the delete test additionally
+        // asserts the CHILD rows the same transaction removes came back, which no other operation
+        // in this file has an equivalent of.
+        AuditLogger::BOT_CREATED,
+        AuditLogger::BOT_DELETED,
+        AuditLogger::BOT_UPDATED,
     ];
 
     // ROLE_CHANGED has no producer: PATCH /members/{user} is deliberately not built yet, because the

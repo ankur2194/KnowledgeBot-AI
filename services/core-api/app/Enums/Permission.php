@@ -54,9 +54,18 @@ enum Permission: string
      * Create, edit, publish, pause, archive or delete a bot; edit its origin allow-list, its
      * starter questions, its retrieval configuration and its fallback chain.
      *
-     * OWNER AND ADMIN ONLY, which IS a reading of the spec: §6.3 lists "Manage bots" as an
-     * Organization Administrator capability, and §6.4 excludes bot publish from the Knowledge
-     * Manager explicitly.
+     * OWNER AND ADMIN ONLY, which IS a reading of the spec — but read what it actually says.
+     * §6.2 gives the Organization Owner "Create and publish bots" and §6.3 gives the Organization
+     * Administrator "Manage bots". Those two grants are the whole of the positive evidence, and
+     * they are enough.
+     *
+     * §6.4 DOES NOT EXCLUDE ANYTHING, and an earlier draft of this docblock said it did. That
+     * section is a six-item list about SOURCES — upload, add sites, review parsed content, trigger
+     * reprocessing, disable/archive/delete sources, view freshness — and it never mentions bots in
+     * either direction, which is exactly what `bots.view`'s note below says correctly. Restricting
+     * writes to the two roles the spec names is a decision that SILENCE IS NOT A GRANT, not a
+     * refusal the spec performed for us. Citing a silence as an explicit exclusion is how a
+     * defensible decision acquires a false justification that outlives the person who made it.
      *
      * ONE PERMISSION FOR EVERY WRITE, INCLUDING PUBLISH AND DELETE, for the reason
      * `ProviderConnectionPolicy::rotateCredential()` records about rotation: a `bots.publish` case

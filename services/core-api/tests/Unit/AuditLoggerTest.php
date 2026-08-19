@@ -566,6 +566,18 @@ it('declares a complete, well-formed rule for every operation constant', functio
         'provider.model.created',
         'provider.model.updated',
         'provider.model.deleted',
+        // THE BOT SURFACE, AUDITED ON THE SAME TEST AS THE CATALOG ABOVE: what the row DECIDES. A
+        // bot carries no secret either — its `provider_connection_id` is a ULID and the key behind
+        // it is never reachable from the row — but `access_mode` moving to `public` makes it
+        // answerable by an anonymous visitor, `status` moving to `published` exposes it on every
+        // channel, and the pair of provider ids decides which credential is BILLED for every
+        // answer. None of those transitions leaves a trace anywhere else. `bot.deleted` matters
+        // most for the same reason `provider.model.deleted` does: it is a HARD delete that also
+        // removes the origin allow-list, the starter questions and the fallback chain, so this row
+        // is the only surviving description and its `subject_id` resolves to nothing afterwards.
+        'bot.created',
+        'bot.updated',
+        'bot.deleted',
     ];
 
     expect($operations)->toEqualCanonicalizing($expected)
@@ -626,6 +638,15 @@ it('declares a complete, well-formed rule for every operation constant', functio
         'provider.model.created' => AuditLogger::ON_FAILURE_ABORT,
         'provider.model.updated' => AuditLogger::ON_FAILURE_ABORT,
         'provider.model.deleted' => AuditLogger::ON_FAILURE_ABORT,
+        // ALL THREE ARE ABORT, on the same test and with the same answer: each is written inside
+        // EloquentBotRepository's transaction, so the change can still be rolled back when the row
+        // cannot be written. `deleted` matters most, and slightly more than it does one block up:
+        // the transaction removes the bot AND its origin allow-list, its starter questions and its
+        // fallback chain, so a LOG policy there would let a whole configuration graph vanish with
+        // no record that any of it existed.
+        'bot.created' => AuditLogger::ON_FAILURE_ABORT,
+        'bot.updated' => AuditLogger::ON_FAILURE_ABORT,
+        'bot.deleted' => AuditLogger::ON_FAILURE_ABORT,
     ];
 
     $actualPolicy = array_map(

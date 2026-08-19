@@ -27,8 +27,8 @@ use Tests\Support\SpaSession;
 |
 | TWO ORGANIZATIONS IN EVERY FIXTURE, with distinguishable names. A one-organization fixture cannot
 | fail "registration granted membership of the wrong tenant": there is no wrong tenant to grant.
-| TODO(fixtures): tests/Support/tenancy.php's tenantPair() when the bots and knowledge_sources
-| migrations exist. It throws by design until then.
+| TODO(fixtures): tests/Support/tenancy.php's tenantPair() once its KnowledgeSource half lands
+| in Phase C. Its bot half is already live.
 */
 
 beforeEach(function (): void {

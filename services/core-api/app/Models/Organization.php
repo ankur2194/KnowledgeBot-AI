@@ -83,6 +83,24 @@ final class Organization extends Model implements OrgOwned
     }
 
     /**
+     * REQUIRED BY ROUTE BINDING, exactly as `invitations()` is.
+     *
+     * `->scopeBindings()` resolves a child through its parent's relation, and the relation name is
+     * DERIVED rather than declared: `Model::childRouteBindingRelationshipName()` is
+     * `Str::plural(Str::camel($childType))`, so the `{bot}` segment on every admin bot route
+     * resolves through THIS method. Without it the nested binding has nothing to scope by and every
+     * bot route 404s — including for the organization that owns the row. With it, a bot id
+     * belonging to another organization 404s at BINDING time, before any policy is constructed and
+     * before the row is in memory, which is the enumeration-safe order.
+     *
+     * @return HasMany<Bot, $this>
+     */
+    public function bots(): HasMany
+    {
+        return $this->hasMany(Bot::class);
+    }
+
+    /**
      * @return HasMany<OrganizationUser, $this>
      */
     public function memberships(): HasMany

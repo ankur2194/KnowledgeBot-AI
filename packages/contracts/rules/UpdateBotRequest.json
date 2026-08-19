@@ -1,0 +1,208 @@
+{
+    "class": "App\\Http\\Requests\\UpdateBotRequest",
+    "rules": {
+        "access_mode": [
+            "bail",
+            "sometimes",
+            "required",
+            "string",
+            "in:\"public\",\"private\""
+        ],
+        "allow_general_answers": [
+            "bail",
+            "sometimes",
+            "required",
+            "boolean"
+        ],
+        "answer_mode": [
+            "bail",
+            "sometimes",
+            "required",
+            "string",
+            "in:\"strict\",\"rag_first\""
+        ],
+        "answer_style_instruction": [
+            "bail",
+            "sometimes",
+            "nullable",
+            "string",
+            "max:4000"
+        ],
+        "collect_end_user_data": [
+            "bail",
+            "sometimes",
+            "required",
+            "boolean"
+        ],
+        "consent_text": [
+            "bail",
+            "sometimes",
+            "nullable",
+            "string",
+            "max:2000"
+        ],
+        "dense_top_k": [
+            "bail",
+            "sometimes",
+            "required",
+            "integer",
+            "min:1",
+            "max:200"
+        ],
+        "description": [
+            "bail",
+            "sometimes",
+            "nullable",
+            "string",
+            "max:2000"
+        ],
+        "evidence_threshold": [
+            "bail",
+            "nullable",
+            "numeric",
+            "min:-100",
+            "max:100",
+            "required_with:evidence_threshold_scale",
+            "App\\Rules\\EvidenceThresholdWithinScale"
+        ],
+        "evidence_threshold_scale": [
+            "bail",
+            "nullable",
+            "string",
+            "in:\"logit\",\"sigmoid\",\"unit_interval\"",
+            "required_with:evidence_threshold"
+        ],
+        "name": [
+            "bail",
+            "sometimes",
+            "required",
+            "string",
+            "min:1",
+            "max:120"
+        ],
+        "placeholder_text": [
+            "bail",
+            "sometimes",
+            "nullable",
+            "string",
+            "max:200"
+        ],
+        "provider_connection_id": [
+            "bail",
+            "sometimes",
+            "nullable",
+            "string",
+            "ulid",
+            "required_with:provider_model_id"
+        ],
+        "provider_model_id": [
+            "bail",
+            "sometimes",
+            "nullable",
+            "string",
+            "ulid"
+        ],
+        "rate_limit_per_day": [
+            "bail",
+            "sometimes",
+            "nullable",
+            "integer",
+            "min:1",
+            "max:100000000"
+        ],
+        "rate_limit_per_minute": [
+            "bail",
+            "sometimes",
+            "nullable",
+            "integer",
+            "min:1",
+            "max:100000"
+        ],
+        "rerank_candidates": [
+            "bail",
+            "sometimes",
+            "required",
+            "integer",
+            "min:20",
+            "max:30"
+        ],
+        "rerank_retain": [
+            "bail",
+            "sometimes",
+            "required",
+            "integer",
+            "min:6",
+            "max:10"
+        ],
+        "retention_days": [
+            "bail",
+            "sometimes",
+            "nullable",
+            "integer",
+            "min:1",
+            "max:3650"
+        ],
+        "slug": [
+            "bail",
+            "sometimes",
+            "required",
+            "string",
+            "max:64",
+            "regex:/^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/"
+        ],
+        "sparse_top_k": [
+            "bail",
+            "sometimes",
+            "required",
+            "integer",
+            "min:1",
+            "max:200"
+        ],
+        "status": [
+            "bail",
+            "sometimes",
+            "required",
+            "string",
+            "in:\"draft\",\"testing\",\"published\",\"paused\",\"archived\""
+        ],
+        "system_instruction": [
+            "bail",
+            "sometimes",
+            "nullable",
+            "string",
+            "max:8000"
+        ],
+        "theme": [
+            "bail",
+            "sometimes",
+            "array:primary,accent,radius"
+        ],
+        "theme.accent": [
+            "bail",
+            "sometimes",
+            "string",
+            "max:64",
+            "App\\Rules\\ReadableThemeColor"
+        ],
+        "theme.primary": [
+            "bail",
+            "sometimes",
+            "string",
+            "max:64",
+            "App\\Rules\\ReadableThemeColor"
+        ],
+        "theme.radius": [
+            "bail",
+            "sometimes",
+            "string",
+            "in:\"0rem\",\"0.25rem\",\"0.5rem\",\"0.625rem\",\"0.75rem\",\"1rem\""
+        ],
+        "welcome_message": [
+            "bail",
+            "sometimes",
+            "nullable",
+            "string",
+            "max:2000"
+        ]
+    }
+}

@@ -2,12 +2,16 @@
 
 declare(strict_types=1);
 
+use App\Enums\EvidenceThresholdScale;
 use App\Exceptions\KbException;
+use App\Http\Resources\BotCollectionResource;
+use App\Http\Resources\BotResource;
 use App\Http\Resources\EmbeddingReadinessResource;
 use App\Http\Resources\ProviderConnectionCollectionResource;
 use App\Http\Resources\ProviderConnectionResource;
 use App\Http\Resources\ProviderModelCollectionResource;
 use App\Http\Resources\ProviderModelResource;
+use App\Models\Bot;
 use App\Models\Organization;
 use App\Models\ProviderConnection;
 use App\Models\ProviderModelEntry;
@@ -16,8 +20,10 @@ use App\Services\Embedding\EmbeddingDesignation;
 use App\Services\Embedding\EmbeddingReadiness;
 use App\Services\Embedding\EmbeddingRejection;
 use App\Support\Contracts\ProvidesOpenApiSchema;
+use App\Support\Http\ListQuery;
 use Database\Factories\ProviderConnectionFactory;
 use Illuminate\Http\Request;
+use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Route;
@@ -108,6 +114,14 @@ function schemaViolations(mixed $value, array $schema, array $components, string
     $actual = match (true) {
         is_bool($value) => 'boolean',
         is_int($value) => 'integer',
+        // ADDED WITH THE FIRST RESOURCE THAT PUBLISHES A JSON `number`, and it was a real gap
+        // rather than a missing convenience: without this arm a float fell to `get_debug_type()`
+        // and reported as the type `float`, which matches no JSON Schema keyword at all — so the
+        // only way to make such a field pass was to declare a type JSON Schema does not have.
+        // `bots.evidence_threshold` is that field: a CUTOFF compared once against a double, where
+        // the decimal-string representation the prices use would claim a precision the score does
+        // not have.
+        is_float($value) => 'number',
         is_string($value) => 'string',
         $value === null => 'null',
         is_array($value) => array_is_list($value) ? 'array' : 'object',
@@ -118,6 +132,14 @@ function schemaViolations(mixed $value, array $schema, array $components, string
     // whichever of the two the schema declares rather than guessing from the value.
     if ($actual === 'array' && $value === [] && in_array('object', $types, true)) {
         $actual = 'object';
+    }
+
+    // JSON Schema's `integer` is a SUBTYPE of `number`, so a whole-numbered value emitted as a PHP
+    // int satisfies a `number` declaration. Written as a widening of the ACTUAL type rather than of
+    // the declared set, so a schema that declares `integer` still refuses a float — which is the
+    // direction that matters: a client generated from `integer` and served 0.5 is a parse error.
+    if ($actual === 'integer' && ! in_array('integer', $types, true) && in_array('number', $types, true)) {
+        $actual = 'number';
     }
 
     if ($types !== [] && ! in_array($actual, $types, true)) {
@@ -455,6 +477,116 @@ it('publishes exactly the keys ProviderModelResource emits, priced and unpriced'
         expect(schemaViolations($emitted, $collection['ProviderModelCollectionResource'], $collection))
             ->toBe([], "the collection schema disagrees with toArray() for fixture set {$index}");
     }
+});
+
+it('publishes exactly the keys BotResource emits, unconfigured and fully configured', function (): void {
+    $org = Organization::factory()->create();
+    $connection = ProviderConnection::factory()->recycle($org)->create();
+    $model = ProviderModelEntry::factory()->recycle($org)->recycle($connection)
+        ->supporting(['text'])->create(['model' => 'gpt-5.1']);
+
+    $components = BotResource::openApiSchemas();
+
+    // TWO FIXTURES, BECAUSE ONE CANNOT DISTINGUISH THE BRANCH THAT MATTERS. Almost every column on
+    // this table is nullable and the UNCONFIGURED state — draft, no model, no threshold, no limits,
+    // no theme — is the state EVERY bot is in when it is created, so a schema validated only
+    // against a populated row would type half the resource as non-nullable and break on the
+    // majority of real rows. The configured one proves the populated branch and, in particular,
+    // that `theme` is published as an OBJECT: PHP cannot tell an empty array from an empty map, so
+    // the unthemed case is the one that would silently emit a JSON array.
+    $fixtures = [
+        'unconfigured draft' => Bot::factory()->recycle($org)->create(),
+        'configured, thresholded, themed, collecting' => Bot::factory()->recycle($org)
+            ->usingModel($connection, $model)
+            ->published()
+            ->thresholdedAt(0.3, EvidenceThresholdScale::Sigmoid)
+            ->collecting('We store your email to follow up.')
+            ->create([
+                'theme' => ['primary' => 'oklch(0.525 0.235 264)', 'radius' => '1rem'],
+                'rate_limit_per_minute' => 30,
+                'rate_limit_per_day' => 5000,
+                'retention_days' => 90,
+                'system_instruction' => 'Answer only from the handbook.',
+            ]),
+    ];
+
+    foreach ($fixtures as $label => $bot) {
+        // THROUGH json_encode AND BACK, deliberately, and this is the only assertion in this file
+        // that does it. `toArray()` returns `theme` as a stdClass so the wire carries `{}` rather
+        // than `[]` for an unthemed bot, and schemaViolations() types a stdClass as its class name
+        // — so validating the PHP array would report a type violation for a body that is correct.
+        // Round-tripping validates the shape the client actually receives, which is the shape the
+        // document describes.
+        /** @var array<string, mixed> $emitted */
+        $emitted = (array) json_decode(
+            (string) json_encode((new BotResource($bot))->toArray(Request::create('/')), JSON_THROW_ON_ERROR),
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+
+        expect(schemaViolations($emitted, $components['BotResource'], $components))
+            ->toBe([], "the published schema disagrees with toArray() for: {$label}");
+    }
+
+    // The null branch of the timestamps, which the factory cannot produce.
+    /** @var array<string, mixed> $emitted */
+    $emitted = (array) json_decode(
+        (string) json_encode(
+            (new BotResource($fixtures['unconfigured draft']))->toArray(Request::create('/')),
+            JSON_THROW_ON_ERROR,
+        ),
+        true,
+        flags: JSON_THROW_ON_ERROR,
+    );
+    $emitted['created_at'] = null;
+    $emitted['updated_at'] = null;
+
+    expect(schemaViolations($emitted, $components['BotResource'], $components))->toBe([]);
+});
+
+it('publishes the paginated envelope with `meta` beside the collection inside `data`', function (): void {
+    $org = Organization::factory()->create();
+
+    $bots = Bot::factory()->recycle($org)->count(3)->create()->all();
+
+    $components = BotCollectionResource::openApiSchemas();
+
+    $query = ListQuery::fromValidated(['per_page' => 2, 'page' => 1], defaultSort: 'id');
+
+    // BOTH THE POPULATED AND THE EMPTY PAGE. `meta` is present on an empty page too — a client that
+    // had to branch on its absence would be branching on "did this list have results", which is
+    // exactly the question `total` answers — so a schema validated only against a populated page
+    // would let the empty one drift.
+    foreach (['a populated page' => $bots, 'an empty page' => []] as $label => $rows) {
+        $paginator = new LengthAwarePaginator($rows, count($bots), 2, 1);
+
+        /** @var array<string, mixed> $emitted */
+        $emitted = (array) json_decode(
+            (string) json_encode(
+                (new BotCollectionResource($paginator, $query))->toArray(Request::create('/')),
+                JSON_THROW_ON_ERROR,
+            ),
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+
+        // THE ENVELOPE THE ADMIN CONSOLE IS ALREADY WRITTEN AGAINST, asserted as a shape before the
+        // schema check: apps/web/src/lib/table/envelope.ts reads `data.<collection>` and
+        // `data.meta` and THROWS rather than degrading, so `meta` promoted out of `data` would
+        // render the error state on every table in the console.
+        expect(array_keys($emitted))->toBe(['bots', 'meta'], "the envelope moved for: {$label}");
+
+        expect(schemaViolations($emitted, $components['BotCollectionResource'], $components))
+            ->toBe([], "the published schema disagrees with toArray() for: {$label}");
+    }
+
+    // AND THE ITEM COMPONENT IS CONTRIBUTED RATHER THAN RE-DECLARED, so `BotResource` is ONE
+    // component in the generated client — the same one the create, read and update actions return.
+    // A second, divergent declaration would be a build failure in the dumper; an identical one is a
+    // no-op, and neither is what this asserts. What this asserts is that the envelope's `$ref`
+    // resolves at all: a dangling `$ref` is not a dump failure, it is a generated client with a
+    // missing type, discovered by the person importing it.
+    expect($components)->toHaveKeys(['BotResource', 'BotCollectionResource', 'ListMetaResource']);
 });
 
 it('names its own component, so the generated type has the name the client imports', function (): void {

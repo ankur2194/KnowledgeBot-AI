@@ -311,6 +311,84 @@ final class AuditLogger
      */
     public const PROVIDER_MODEL_DELETED = 'provider.model.deleted';
 
+    /**
+     * ── THE THREE BOT OPERATIONS ───────────────────────────────────────────────────────────────
+     *
+     * A BOT IS NOT A CREDENTIAL EITHER, AND THESE ARE AUDITED FOR THE SAME KIND OF REASON THE
+     * PROVIDER-MODEL ONES ARE: what the row DECIDES rather than what it holds.
+     *
+     *   * `access_mode` moving from `private` to `public` makes the bot answerable by an anonymous
+     *     visitor with no account and no invitation, and `status` moving to `published` exposes it
+     *     on every channel the access mode and the origin allow-list permit. Neither transition
+     *     leaves a trace anywhere else in the system.
+     *   * `provider_connection_id` and `provider_model_id` decide which credential is BILLED for
+     *     every answer and which vendor sees the tenant's questions.
+     *   * the four retrieval depths and the evidence pair decide what the bot retrieves and when it
+     *     refuses, and a refusal rate that moved without an explanation is the hardest kind of
+     *     regression to attribute — `retrieval_configuration_version` is recorded beside them so
+     *     the trail can answer "which configuration was version 7" after the row has changed again.
+     *   * a DELETE is a hard delete that takes the origin allow-list, the starter questions and the
+     *     fallback chain with it, and leaves this row as the only surviving description.
+     *
+     * "Who made this bot answerable by the internet, and when" is exactly the question an incident
+     * asks, and without these rows the trail answers it with the `created` row from months earlier.
+     *
+     * ALL THREE ARE `ON_FAILURE_ABORT`, with no judgement call to make: every one of them is still
+     * inside `EloquentBotRepository`'s transaction when the row is written, so "can this still be
+     * rolled back" — the real test, see the class docblock — answers yes for all of them. Nothing
+     * here queues mail and nothing here has already happened irreversibly.
+     *
+     * ── WHAT THE ALLOW-LISTS DELIBERATELY CANNOT CARRY, AND THE FIRST ITEM IS THE POINT ────────
+     *
+     * `system_instruction` AND `answer_style_instruction` ARE ABSENT. They are the bot's
+     * operator-authored PROMPT — unbounded tenant text, and the exact string a prompt-injection
+     * review is about — and echoing one wholesale into an append-only, long-lived, exportable table
+     * is the shape of the defect this whole class exists to prevent, with the additional property
+     * that MAX_VALUE_LENGTH would truncate it into something that reads as the whole instruction
+     * and is not. "Who changed the prompt" is answerable from `updated_at` and the actor; "to what"
+     * is a question for a configuration history feature, not for the audit table.
+     *
+     * `welcome_message`, `placeholder_text`, `description` and `consent_text` are absent for the
+     * weaker version of the same reason: prose that decides nothing, in a table an investigator has
+     * to be able to read. `collect_end_user_data` IS carried, because the FLAG is the compliance
+     * fact and `bots_consent_text_present_when_collecting` already guarantees a disclosure exists
+     * whenever it is true.
+     *
+     * `theme` is absent because it is an ARRAY, which `sanitize()` drops outright — a structure in
+     * `details` is how `$request->all()` gets in one nesting level down, and it is also what would
+     * stop `details` json-encoding as an OBJECT, which the table CHECKs.
+     *
+     * `public_bot_id` IS ABSENT DELIBERATELY, and it is the one a reviewer will ask about. It is
+     * not a secret — it is printed into the customer's own page source — but it is a token-shaped
+     * string whose only use is addressing a bot anonymously, and the trail has no question it
+     * answers that `name` and `slug` do not. An append-only table is the wrong place to accumulate
+     * identifiers of that shape.
+     *
+     * The same nine names absent from the connection and model operations are absent here too —
+     * `credential`, `provider_credential`, `api_key`, `secret`, `password`, `last_four`,
+     * `masked_key`, `credential_ciphertext`, `data_key_ciphertext` — so no call site can put one in
+     * a row even by passing it under that key. Belt-and-braces rather than the mechanism: a `Bot`
+     * has no credential to offer at all, only a connection ULID.
+     *
+     * `name` and `slug` are TENANT-CONTROLLED FREE TEXT, bounded by MAX_VALUE_LENGTH and passing
+     * the shape backstop like any other echoed string. `evidence_threshold` is the first FLOAT in
+     * this table and takes `sanitize()`'s `is_float()` path, which refuses NAN and INF because
+     * neither is representable in JSON and either would fail the insert and take the whole audit
+     * row with it.
+     */
+    public const BOT_CREATED = 'bot.created';
+
+    public const BOT_UPDATED = 'bot.updated';
+
+    /**
+     * A HARD delete, so this row is the only surviving description of the bot.
+     *
+     * That is what makes `name` and `slug` load-bearing here rather than decorative: `subject_id`
+     * points at a ULID no table resolves any more, and without the echoed fields the trail says a
+     * bot was removed without being able to say which.
+     */
+    public const BOT_DELETED = 'bot.deleted';
+
     public const OUTCOME_SUCCESS = 'success';
 
     public const OUTCOME_FAILURE = 'failure';
@@ -623,6 +701,129 @@ final class AuditLogger
                 'input_price_per_million' => self::ECHOED,
                 'output_price_per_million' => self::ECHOED,
                 'price_currency' => self::ECHOED,
+            ],
+        ],
+
+        // ── THE THREE BOT OPERATIONS ───────────────────────────────────────────────────────────
+        //
+        // ONE ALLOW-LIST, REPEATED THREE TIMES RATHER THAN SHARED THROUGH A CONSTANT — the same
+        // call the four connection operations and the three model operations make, and the same
+        // reason: the lists must be able to DIVERGE. A shared constant makes "add a field to the
+        // created row" silently add it to the deleted row too, and the whole design of this table
+        // is that each operation decides for itself what it may record.
+        //
+        // The three lists are IDENTICAL TODAY, deliberately. A hard delete leaves the third row as
+        // the only description of the bot, so it must carry everything that made the row readable —
+        // and a `created`/`updated` pair carrying LESS than the `deleted` row would make the three
+        // unreadable side by side when the question is "what changed before it was removed".
+        //
+        // See the BOT_CREATED docblock for what is deliberately NOT here, and why the first item on
+        // that list — the system instruction — is the one that matters.
+        self::BOT_CREATED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                // TENANT-CONTROLLED FREE TEXT, and the only surviving identification of the bot
+                // after a hard delete: `subject_id` resolves to nothing then.
+                'name' => self::ECHOED,
+                'slug' => self::ECHOED,
+
+                // WHO CAN REACH THIS BOT, AND HOW IT MAY ANSWER. Four separate facts and a bot is
+                // reachable only when they agree, so recording one without the others would make
+                // the row unreadable — "published" says nothing on its own about whether an
+                // anonymous visitor could get to it.
+                'status' => self::ECHOED,
+                'access_mode' => self::ECHOED,
+                'answer_mode' => self::ECHOED,
+                'allow_general_answers' => self::ECHOED,
+
+                // WHICH CREDENTIAL IS BILLED AND WHICH VENDOR SEES THE QUESTIONS. ULIDs, never key
+                // material: the credential behind the connection is envelope-encrypted and is not
+                // reachable from a Bot at all.
+                'provider_connection_id' => self::ECHOED,
+                'provider_model_id' => self::ECHOED,
+
+                // THE RETRIEVAL CONFIGURATION AND THE VERSION THAT MAKES IT REPLAYABLE. A refusal
+                // rate that moved without an explanation is the hardest regression to attribute,
+                // and the version is what lets a stored trace be matched to the configuration that
+                // produced it after the row has changed again.
+                'dense_top_k' => self::ECHOED,
+                'sparse_top_k' => self::ECHOED,
+                'rerank_candidates' => self::ECHOED,
+                'rerank_retain' => self::ECHOED,
+                // THE FIRST FLOAT IN THIS TABLE. sanitize()'s `is_float()` path keeps it and
+                // refuses NAN and INF, because neither is representable in JSON and either would
+                // fail the insert and take the whole audit row with it. Null is skipped silently —
+                // an uncalibrated bot, which is every bot today, simply omits the pair.
+                'evidence_threshold' => self::ECHOED,
+                'evidence_threshold_scale' => self::ECHOED,
+                'retrieval_configuration_version' => self::ECHOED,
+
+                // Integers, kept by the `is_int()` path. Null means "the platform default applies",
+                // which is a different fact from a configured limit that happens to equal it — and
+                // a null is skipped without being reported, so an unlimited bot omits all three.
+                'rate_limit_per_minute' => self::ECHOED,
+                'rate_limit_per_day' => self::ECHOED,
+                'retention_days' => self::ECHOED,
+
+                // A COMPLIANCE FLAG AND THEREFORE AN AUDIT FIELD. The consent TEXT it requires is
+                // NOT echoed: it is prose, and the CHECK constraint already guarantees it exists
+                // whenever this is true.
+                'collect_end_user_data' => self::ECHOED,
+            ],
+        ],
+        self::BOT_UPDATED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            // The values AFTER the edit. Every field is carried on every row, including the ones
+            // this particular PATCH did not name, because a row that recorded only what changed
+            // would be unreadable next to the `created` and `deleted` rows for the same subject —
+            // and "what did it look like afterwards" is the question a reader actually has.
+            'details' => [
+                'name' => self::ECHOED,
+                'slug' => self::ECHOED,
+                'status' => self::ECHOED,
+                'access_mode' => self::ECHOED,
+                'answer_mode' => self::ECHOED,
+                'allow_general_answers' => self::ECHOED,
+                'provider_connection_id' => self::ECHOED,
+                'provider_model_id' => self::ECHOED,
+                'dense_top_k' => self::ECHOED,
+                'sparse_top_k' => self::ECHOED,
+                'rerank_candidates' => self::ECHOED,
+                'rerank_retain' => self::ECHOED,
+                'evidence_threshold' => self::ECHOED,
+                'evidence_threshold_scale' => self::ECHOED,
+                'retrieval_configuration_version' => self::ECHOED,
+                'rate_limit_per_minute' => self::ECHOED,
+                'rate_limit_per_day' => self::ECHOED,
+                'retention_days' => self::ECHOED,
+                'collect_end_user_data' => self::ECHOED,
+            ],
+        ],
+        self::BOT_DELETED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                'name' => self::ECHOED,
+                'slug' => self::ECHOED,
+                'status' => self::ECHOED,
+                'access_mode' => self::ECHOED,
+                'answer_mode' => self::ECHOED,
+                'allow_general_answers' => self::ECHOED,
+                'provider_connection_id' => self::ECHOED,
+                'provider_model_id' => self::ECHOED,
+                'dense_top_k' => self::ECHOED,
+                'sparse_top_k' => self::ECHOED,
+                'rerank_candidates' => self::ECHOED,
+                'rerank_retain' => self::ECHOED,
+                'evidence_threshold' => self::ECHOED,
+                'evidence_threshold_scale' => self::ECHOED,
+                'retrieval_configuration_version' => self::ECHOED,
+                'rate_limit_per_minute' => self::ECHOED,
+                'rate_limit_per_day' => self::ECHOED,
+                'retention_days' => self::ECHOED,
+                'collect_end_user_data' => self::ECHOED,
             ],
         ],
     ];

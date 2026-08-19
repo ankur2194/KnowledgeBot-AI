@@ -64,6 +64,28 @@ interface ProviderConnectionRepositoryInterface
     public function forOrg(string $organizationId): array;
 
     /**
+     * Whether ONE connection id belongs to ONE organization.
+     *
+     * ── IT EXISTS SO A BOT NAMING A FOREIGN CONNECTION IS A 422 AND NOT A 500 ─────────────────
+     *
+     * `bots_connection_same_org` is a composite foreign key against
+     * `provider_connections (organization_id, id)`, so the database already refuses the row — a bot
+     * cannot name another tenant's credential, which is the guarantee that matters and it is not
+     * being duplicated here. What it refuses it refuses as SQLSTATE 23503, rendered by the error
+     * envelope as a 500: a bug report about the server for what is plainly a bad request, on a
+     * field the form has an input for.
+     *
+     * A REPOSITORY METHOD AND NOT AN `exists:` VALIDATION RULE, for the reason
+     * `DesignateEmbeddingConnectionRequest` writes out at length: `exists:` queries the table with
+     * NO organization predicate unless somebody remembers to add one, which is the exact shape of
+     * Filament CVE-2026-48067. It would also turn the endpoint into an existence oracle over the
+     * whole platform — "this id exists but you may not use it" and "this id does not exist" would
+     * be two different validation outcomes. Scoped here, a foreign id and an unknown id are
+     * indistinguishable, which is the same property the 404-at-binding-time rule gives the routes.
+     */
+    public function existsForOrg(string $organizationId, string $connectionId): bool;
+
+    /**
      * Apply a label and/or status edit under a row lock.
      *
      * NO CREDENTIAL PATH EXISTS HERE BY CONSTRUCTION: `ProviderConnectionEdit` has no member that

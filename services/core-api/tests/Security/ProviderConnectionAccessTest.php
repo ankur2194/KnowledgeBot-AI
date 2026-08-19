@@ -44,7 +44,7 @@ use Tests\Support\SpaSession;
 | this repo (tests/Contract/OpenApiDocumentTest.php:40-46).
 |
 | TODO(fixtures): tests/Support/tenancy.php's tenantPair() is the intended home for this pair and
-| throws by design until the Bot and KnowledgeSource factories exist.
+| is live for bots as of the bots-schema step; its KnowledgeSource half is still commented for Phase C, so a suite that needs INDEXED SOURCE content still builds its own fixture.
 */
 
 beforeEach(function (): void {

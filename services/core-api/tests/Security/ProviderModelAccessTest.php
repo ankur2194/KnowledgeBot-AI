@@ -44,7 +44,7 @@ use Tests\Support\SpaSession;
 | this repo.
 |
 | TODO(fixtures): tests/Support/tenancy.php's tenantPair() is the intended home for this pair and
-| throws by design until the Bot and KnowledgeSource factories exist. The helper below carries a
+| is live for bots as of the bots-schema step; its KnowledgeSource half is still commented for Phase C, so a suite that needs INDEXED SOURCE content still builds its own fixture. The helper below carries a
 | name of its own because Pest declares test-file helpers at FILE SCOPE — `providerAccessPair()`
 | exists only when ProviderConnectionAccessTest.php has been loaded, and a second declaration under
 | that name would be a redeclaration fatal in a full run.

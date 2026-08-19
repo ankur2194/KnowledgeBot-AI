@@ -57,7 +57,7 @@ use Tests\Support\SpaSession;
 | the RESPONSE SHAPE, and it is open or closed identically for one organization or a thousand. Where
 | a probe needs an organization at all (the invitation family) TWO are built, because "this
 | invitation belongs to somebody else" is a case that only exists with a second tenant.
-| TODO(fixtures): move to tenantPair() when the bots/knowledge_sources migrations let it be
+| TODO(fixtures): move to tenantPair() once its KnowledgeSource half lands in Phase C and lets it be
 | implemented.
 */
 

@@ -28,9 +28,11 @@ enum OrgRole: string
      *
      * ── THE BOT GRANTS ARE AN EXTENSION OF THE SPEC, NOT A READING OF IT ──────────────────────
      *
-     * `bots.manage` goes to Owner and Admin, and that IS the spec: §6.3 lists "Manage bots" as an
-     * Organization Administrator capability and §6.4 excludes bot publish from the Knowledge
-     * Manager.
+     * `bots.manage` goes to Owner and Admin, and that IS the spec: §6.2 gives the Owner "Create
+     * and publish bots" and §6.3 gives the Administrator "Manage bots". Nothing is read out of
+     * §6.4 to get there — that section excludes nothing, as the paragraph below says, and an
+     * earlier draft of this comment claimed otherwise. Withholding the write from the other two
+     * roles is a decision that silence is not a grant.
      *
      * `bots.view` ADDITIONALLY goes to Knowledge Manager and Analyst, and §6.4 and §6.5 NEVER
      * MENTION BOTS — in either direction. This is therefore an extension of the specification
