@@ -4939,8 +4939,17 @@ registrable domain as the admin console, so a `.${DOMAIN}` cookie would reach it
 
 ### H9 — `tenantPair()` still throws, and the two-org fixtures are inline with a pointer
 
+**CLOSED IN PART on 2026-08-19 by ADR-058.** The `bots` migrations landed, the helper no longer
+raises, and its signature is unchanged. What is *not* closed is the canary's position: it sits in Org
+B's bot welcome message rather than in indexed source content, because the latter needs Phase C's
+migrations and a real Qdrant container — so a leak through retrieval, a citation title or an export
+is still not covered by this fixture. The finding text below is kept as written, because the reason a
+second helper was refused is the reason the Phase C move must be a *move* and not a second canary.
+The measuring command inverts on closure:
+
 ```bash
-grep -n 'not implemented' services/core-api/tests/Support/tenancy.php
+grep -n 'not implemented' services/core-api/tests/Support/tenancy.php   # was the finding; now silent
+grep -n 'TODO(phase-c)' services/core-api/tests/Support/tenancy.php     # what is still owed
 ```
 
 Unchanged and still blocked on the `bots`/`knowledge_sources` migrations, which this scope does not
@@ -5837,3 +5846,257 @@ Both are legitimate readings of §18.3, and only the rule form runs before the r
 says so and recommends the rule form wherever the action has a FormRequest.
 
 Owner: ruled by the session that owns `.claude/skills/**`; no code changed.
+
+## The bots-schema decisions — ADR-055…059
+
+Five decisions from 2026-08-19, from the step that landed the `bots` schema, its models, its policy,
+its permission grant, its factories, and the two primitives the rest of Phase B is built on. **No
+endpoint shipped in it** — routes and controllers are the next step — so everything here is schema,
+authorization vocabulary, test harness or wire shape, which is exactly the set a later change can
+*violate* without noticing. **The numbering starts at 055 because 044…046 are the shutdown-determinism
+effort of 2026-08-14 and 047…054 the provider-lifecycle effort earlier the same day**; check
+`grep -c '^### ADR-' docs/19-repo-structure-adrs.md` rather than trusting a number in prose (ADR-036).
+
+**The one that generalizes furthest is ADR-055, and it is a rule about `jsonb` rather than about
+fallback chains.** `postgresql-patterns` admits `jsonb` for three shapes, one of which is a
+configuration snapshot written once and read whole — and the fallback chain genuinely *is* part of the
+configuration snapshot that crosses the internal seam. That is the strongest argument for the `jsonb`
+spelling and it still loses, because **a snapshot is assembled from the source of truth and is not the
+source of truth.** What settles it is narrower and harder: `jsonb` cannot carry a foreign key, every
+other model reference in this schema is guarded by a composite key against `(organization_id, id)`
+precisely so a row cannot name another tenant's, and a `jsonb` chain would leave the *primary* model
+guarded by the database and its *replacements* guarded by whichever service last wrote them. The
+failure that follows is one tenant's conversations answered on another tenant's credential, with every
+downstream layer agreeing because it was told whose credential answers.
+
+**ADR-056 is the one to read if you only read one, because it is an extension of the specification
+rather than an interpretation of it.** §6.3 gives an Organization Administrator "Manage bots", so
+`bots.manage → Owner/Admin` is the spec as written. §6.4 and §6.5 **never mention bots in either
+direction**, and `bots.view` is granted to the Knowledge Manager and the Analyst anyway, against two
+named upcoming surfaces (Phase C6's source-to-bot assignment; Phase E's per-bot conversation review).
+It is labelled an extension at all three sites that encode it — `Permission::BotsView`,
+`OrgRole::grants()` and `RolePermissionMatrixTest`, which states the matrix independently — because a
+silence somebody filled in must not read later as something the spec said. Its most surprising
+consequence is one line: **the Analyst row is no longer all-false**, so "an analyst holds nothing" has
+gone from a true shortcut to a false one, and any dataset resting on it now passes for the wrong
+reason.
+
+**ADR-057 is ADR-030's consequence arriving in the control-plane schema**, and its load-bearing
+sentence is a negative: a `0.30` column default on `bots.evidence_threshold` **would fail no test**.
+`0.30` is a valid float on every scale, applying it to a logit passes almost everything, applying a
+logit threshold to a bounded score refuses almost everything, and nothing raises — only the refusal
+rate moves, only in aggregate, and since ADR-030 it moves for one tenant and not the rest. So the
+column is nullable with no default and stores its scale beside it, and
+`App\Enums\EvidenceThresholdScale` is deliberately the data plane's `RerankScale` **minus
+`uncalibrated`**: that member is not a scale, it is the statement that no characterization exists, so
+a threshold carrying it would be a stored contradiction. The enum and `bots_evidence_threshold_scale_check`
+are generated from one another at migration time and **must move together** — a fourth thresholdable
+member is an enum case *and* an `ALTER`, in one migration, or they drift silently.
+
+**ADR-058 closes § H9 in part and is the one whose trade-off is easiest to miss.** `tenantPair()` no
+longer throws, its signature is unchanged, and all six `TenantPair` properties were narrowed from
+`object` — not the two the brief named, because level 8 rejects a property read on `object` and a
+partial narrowing leaves the fixture unusable. The half that stays open is the canary's *position*:
+it is in Org B's bot welcome message, not in indexed source content, so the surfaces the canary was
+designed to police — retrieval, citations, exports — remain uncovered until Phase C. **The fixture is
+now half a fixture that looks whole**, and a green isolation suite is what makes that dangerous.
+
+**ADR-059** is the repo's first paginated envelope and is therefore the shape both planes are now
+built against: an object wrapper (because `#[ResponseShape]` cannot express "an array of" and
+`additionalProperties: false` cannot apply to an array schema), one shared `meta` component, and the
+**applied** query echoed back rather than the requested one, because `ListQuery::fromValidated()`
+clamps `per_page` silently for callers that never ran a FormRequest.
+
+**What this step did not touch:** finding **#79** stays pinned exactly as the 2026-08-12 ruling left
+it (§ *The rulings of 2026-08-12*, G1). Nothing here goes near `chunks`, `document_elements` or the
+`source_versions → source_items → knowledge_sources` cascade, and `ALLOWED_TABLES` is unchanged.
+
+## Found while landing the bots schema — 2026-08-19
+
+**K1 is a pre-existing flake this work only surfaced**; K2 was a schema asymmetry that had been
+invisible for as long as nothing referenced a model row; K3 is an encoding trap whose failure reads as
+a constraint bug; K4 and K5 are the two halves of the theme handoff that are *not* yet enforced
+anywhere, one of them named against a column that does not exist. **K6 was found by writing ADR-056
+rather than by the effort** — two docblocks cite §6.4 as an explicit exclusion where §6.4 is silent —
+which is a shape this document has recorded before — § **H14** (*"found by writing this section rather
+than by the effort"*) and § **G10–G15** (*"what recording them turned up"*) are the same thing: a
+defect surfaced by writing the record rather than by the work the record is about.
+
+### K1 — two auth specs post fixed literals against limiters keyed on those literals, so the suite 429s on a later run
+
+**Confirmed, not suspected**, and **not caused by this change.** The `control-plane-engineer` who
+found it reproduced it and then confirmed the diagnosis by flushing the limiter store and re-running
+clean. The two tests:
+
+```bash
+grep -n "malformed verification token" services/core-api/tests/Feature/AuthEmailVerificationTest.php
+grep -n "malformed address"            services/core-api/tests/Feature/AuthPasswordResetTest.php
+grep -n "RateLimiter::for('verification'\|RateLimiter::for('password-request'" \
+     services/core-api/app/Providers/AppServiceProvider.php
+```
+
+Both post a **fixed literal** — `'too-short'` as a token, `'not-an-address'` as an email — and both
+limiters key on exactly that value: `verification` on `'tok:'.hash('sha256', $token)`,
+`password-request` on `'acct:'.Str::lower($email)`. The store is persistent, so the budget carries
+across runs of the suite, and `SpaSession::isolateRateLimits()` randomizes **only the IP axis**
+(`REMOTE_ADDR` to a fresh `2001:db8::/32` address) — which is the axis that is not binding here. Every
+*other* test in `AuthPasswordResetTest` already uses `SpaSession::uniqueEmail()`; these two are the
+ones that did not.
+
+**A correction to the brief that reported this, and it makes the flake worse rather than better.** The
+brief described both as "6 per 60 minutes against `hash('sha256', …)`". That is the `verification`
+limiter only. `password-request`'s account axis is a *different* limiter with a *shorter* window and a
+*smaller* budget, keyed on the lower-cased submitted address and not on a digest — read the two
+`RateLimiter::for` blocks for the live numbers (ADR-036; `SpaSession::uniqueEmail()`'s own docblock
+states the same hazard). So the reset spec turns red after **fewer** consecutive runs than the
+verification one, in a **shorter** window, which is the direction that matters when somebody is
+deciding whether they can reproduce it.
+
+**Fix:** unique literals in those two tests, the same way every neighbouring test already does it. It
+is a one-line change in each and it is deliberately **not** made here. **Owner:** whoever owns the
+auth suite (`test-engineer` with `control-plane-engineer`); this step does not touch `tests/Feature/Auth*`.
+
+### K2 — `provider_models` carried no `UNIQUE (organization_id, id)`, so the composite FK that stops cross-tenant model naming failed with 42830
+
+**Closed by migration `2026_08_19_001300`.**
+
+```bash
+grep -rn 'org_scoped_key' services/core-api/database/migrations
+```
+
+PostgreSQL requires a referenced column list to be backed by a unique constraint, so
+`FOREIGN KEY (organization_id, provider_model_id) REFERENCES provider_models (organization_id, id)`
+fails outright with **42830 — "there is no unique constraint matching given keys"**. `bots` carries
+that key, `bot_fallback_models` carries it a second time, and the index has to exist before either
+table is created.
+
+**Why the asymmetry survived is the transferable part.** `provider_connections` got its identical
+index inside its own `CREATE TABLE` (`2026_08_07_000300`, which writes the reasoning out at length),
+because the tables pointing at it were already planned. `provider_models` did not, because at the time
+**nothing referenced a model row at all** — the catalogue was a leaf. A bot naming a model is what
+promotes it to an interior node, and the missing index is the other half of that promotion. The
+general shape: *a tenancy guard that is only needed by a referent is absent for exactly as long as
+there is no referent, and its absence is invisible until the first one arrives — as a raw SQLSTATE
+from a migration, not as a security finding.* Nothing sweeps for it; the check is to ask, whenever a
+table gains its first inbound composite key, whether the target index exists.
+
+It is its own migration rather than a line in `create_bots_table` because it is an **ALTER on a
+populated table and therefore has a lock story** — `SET lock_timeout`, `CREATE INDEX` taking a `SHARE`
+lock, and the deliberate refusal of `CONCURRENTLY` (which cannot run inside the transaction every
+migration in that directory runs inside). Folding it into a lock-free `CREATE` would hide that
+paragraph in a file whose every other statement has no lock story, which is exactly where the next
+reader would stop looking for one.
+
+### K3 — `bots.theme` cannot use Laravel's built-in `array` cast, and the failure reads as a constraint bug
+
+**Closed by `App\Support\Casts\JsonObjectCast`. Both halves were verified against the running server,
+not reasoned about.**
+
+PHP cannot distinguish an empty array from an empty map, and Eloquent's built-in `array` cast is
+`json_encode($value)`. So `$bot->theme = []` — the overwhelmingly common state, *"this bot uses the
+platform theme"* — encodes as `[]`, whose `jsonb_typeof` is `'array'`, while a themed bot encodes as
+`{}`. The column would then silently hold **two JSON types** depending on whether anybody had themed
+the bot.
+
+`bots_theme_vocabulary` is a **key-set subset test written without a subquery** (a CHECK may not
+contain one): `theme - 'primary' - 'accent' - 'radius' = '{}'::jsonb`. `'[]'::jsonb` is not
+`'{}'::jsonb`, so **with the built-in cast every unthemed bot is refused by the database** — and the
+error points at a constraint, so the first diagnosis is that the constraint is wrong rather than that
+the encoding is. Without the constraint it would be worse rather than better: `theme -> 'primary'`
+over an array returns NULL, a client generated from the OpenAPI document would declare an object and
+receive an array, and `Object.entries([])` happens to equal `[]` — so the renderer would work, on the
+empty case, forever, and break the first time a migration assumed the column's type.
+
+The cast is `(object)` on write, and that is the whole mechanism: it makes `[]` encode as `{}`, and it
+makes a **list** like `['primary','accent']` encode as `{"0":"primary","1":"accent"}`, which the
+key-set CHECK then refuses **by name** — the correct outcome, because a list is not a map and the
+refusal says so, whereas `["primary","accent"]` would produce a type failure whose message points at
+the type rather than at the keys. Three alternatives were rejected in the file's own docblock: a
+column default (present, and useless, because an explicit `[]` from a FormRequest overrides it); a
+mutator on the one model (which every future `jsonb` map would have to repeat, and the one somebody
+forgets fails in production); and `AsArrayObject` (Laravel's own answer, which encodes `{}` correctly
+and changes the PHP-side type at every read site to fix an encoding detail at one).
+
+### K4 — the theme's enforcement is split, and the half that is not yet built is the half a customer notices
+
+**Open. Owner: `control-plane-engineer`, on the bot write endpoint.**
+
+The database CHECK covers **the key set and the value types**: `theme` is an object, its keys are a
+subset of `{primary, accent, radius}`, and each present value is a string. It does **not** cover the
+value **grammar**, and three rules therefore live nowhere yet:
+
+* whether `primary` / `accent` are legal `oklch()` triples,
+* whether `radius` is one of the values `packages/design-tokens` publishes,
+* and the one easiest to miss — whether the supplied colour can be given **readable text at all**.
+
+The third is a refusal the renderer already makes. `apps/web/src/lib/theme.ts` measures an unreachable
+band (its docblock records L in [0.538, 0.634] for some chroma/hue combinations, bottoming out at
+4.143:1) and returns `null` rather than shipping unreadable text, and it flags the control plane
+explicitly for the matching write-side refusal. Until the FormRequest lands, **a customer can be told
+their colour was accepted and then be served the platform default**, with nothing anywhere saying why.
+
+The migration's docblock names this so that the PR writing the FormRequest cannot claim nobody said;
+this finding exists so that the gap is visible from the findings log too, rather than only from a
+comment inside the file that has the gap.
+
+**Work on the closing half was already in the working tree when this was written**, uncommitted and
+concurrent — `App\Rules\ReadableThemeColor`, `App\Support\Theme\OklchColor` and
+`App\Support\Theme\ThemeVocabulary` exist while no bot FormRequest does yet. So the honest status is
+*in flight, not neglected*, and the closing condition is a rule reaching a request class rather than a
+rule class existing:
+
+```bash
+ls services/core-api/app/Http/Requests | grep -i bot
+grep -rn 'ReadableThemeColor\|ThemeVocabulary' services/core-api/app/Http/Requests
+```
+
+Both silent means the refusal still has nowhere to run.
+
+### K5 — `apps/web`'s theme module flags the control plane about a column that is not called that
+
+**Open, and it is a pointer defect rather than a behaviour defect. Owner: `admin-web-engineer`** —
+`docs/` does not edit `apps/`.
+
+```bash
+grep -rn 'theme_configuration' apps/web/src/lib/theme.ts services/core-api
+```
+
+`apps/web/src/lib/theme.ts` reads *"Laravel validates `bots.theme_configuration` on write"*. The
+shipped column is `bots.theme` (migration `2026_08_19_001400`), and `theme_configuration` exists
+nowhere in `services/core-api`. `docs/11` §16.3 lists the field in prose as *"Theme configuration"*
+and names no column, so neither spelling contradicts the spec — but a cross-tree flag addressed to
+another agent that names a non-existent column is the kind of pointer that sends the reader looking
+for a migration that was never written, which is precisely the failure the K4 flag exists to prevent.
+Fix the name in the flag, not the column: `theme` is what the CHECK, the cast and the model all use.
+
+### K6 — two docblocks say §6.4 *explicitly excludes* bot publish; §6.4 is silent, and the same docblocks say so one paragraph later
+
+**Open, and found while writing ADR-056 rather than by the effort. Owner: `control-plane-engineer`
+(two comment lines). The grant is correct; one sentence of its stated justification is not.**
+
+```bash
+grep -rn 'excludes bot publish' services/core-api/app
+sed -n '/^### 6.4 Knowledge Manager/,/^### 6.5/p' docs/01-product-scope.md
+```
+
+`Permission::BotsManage` and `OrgRole::grants()` both justify `bots.manage → Owner/Admin` with *"§6.3
+lists 'Manage bots' as an Organization Administrator capability, and §6.4 **excludes bot publish**
+from the Knowledge Manager explicitly."* Read §6.4: it is a six-item responsibility list about
+uploads, websites, parsed content, reprocessing, source deletion and freshness. **Bots do not appear
+in it in either direction** — which is precisely what the *next* paragraph of both docblocks says,
+correctly, when it labels the `bots.view` grant an extension of the specification. One file therefore
+reads §6.4's silence as an explicit exclusion for `manage` and as a genuine silence for `view`, two
+paragraphs apart.
+
+**Nothing about the shipped grants changes.** `bots.manage → Owner/Admin` is supported by §6.2
+(*"Create and publish bots"*, Owner) and §6.3 (*"Manage bots"*, Administrator) without needing §6.4
+at all; the argument is *positive grant to two roles*, not *explicit denial to a third*. **Why it is
+worth two comment edits anyway:** an "explicitly excludes" claim is the sentence a later reviewer
+cites when refusing a Phase C6 or Phase E request, and citing it sends them to a section that says
+nothing — the exact failure mode ADR-056 exists to prevent, since the whole point of labelling the
+`bots.view` grant an extension is that a silence somebody filled in must not read later as something
+the spec said. A justification that overstates the spec in the *strict* direction is the mirror image
+of the one this repo has been careful about, and it is no more true.
+
+The fix is to say what §6.2 and §6.3 say and to stop citing §6.4 for `manage`. ADR-056's Decision
+paragraph already carries the corrected wording and a pointer here.

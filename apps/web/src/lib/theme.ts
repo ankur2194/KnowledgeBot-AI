@@ -3,7 +3,7 @@ import { RADIUS_VALUES, TENANT_OVERRIDABLE_COLOR_KEYS } from '@kb/design-tokens'
 import { formatOklch, parseOklch, contrastRatio, type Oklch } from './color';
 
 /**
- * A tenant supplies token VALUES, never CSS. `bots.theme_configuration` (§16.3) is a fixed key set
+ * A tenant supplies token VALUES, never CSS. `bots.theme` (§16.3) is a fixed key set
  * of scalars validated against an exact grammar — not a stylesheet, not a class name, not a `style`
  * string. Interpolating a tenant string into a `<style>` element is CSS injection: `}` closes the
  * rule and everything after it is attacker CSS, and `url()` in a matched selector is an
@@ -45,7 +45,7 @@ const ON_LIGHT: Oklch = { l: 0.205, c: 0.014, h: 266 };
  * choice of candidates closes it. A `primary` that lands there is REFUSED (below), not shipped with
  * unreadable text on it.
  *
- * FLAG for `control-plane-engineer`: Laravel validates `bots.theme_configuration` on write and its
+ * FLAG for `control-plane-engineer`: Laravel validates `bots.theme` on write and its
  * grammar must carry this same refusal, or the console will silently fall back to the platform
  * accent for a colour the customer was told was accepted.
  */
