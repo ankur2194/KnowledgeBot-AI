@@ -73,6 +73,14 @@ export default defineConfig({
           // Anything a component spec imports transitively belongs here. `radix-ui` is the unified
           // package the shadcn new-york-v4 registry items pull (not the per-primitive
           // @radix-ui/react-* ones), so one entry covers every vendored primitive.
+          //
+          // `@tanstack/react-table` joined the list when the server-driven table landed, and it is
+          // here on the RULE above rather than on a reproduction. The agent that built the table
+          // reported the cold-cache failure by name; re-running `rm -rf node_modules/.vite` followed
+          // by the whole components project did NOT reproduce it — 22 files, 240 tests, no reload
+          // and no failed dynamic import. So this entry is not evidence of a bug that was seen. It
+          // is the stated rule applied to a new transitive import, which costs one pre-bundle and
+          // removes the only variable that would make the question interesting later.
           include: [
             'zod',
             'react-hook-form',
@@ -80,6 +88,7 @@ export default defineConfig({
             'radix-ui',
             'next-themes',
             'class-variance-authority',
+            '@tanstack/react-table',
           ],
         },
         test: {

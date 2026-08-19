@@ -248,3 +248,88 @@ export function DegradedNote({ children, className }: { readonly children: React
     </p>
   );
 }
+
+/**
+ * PAGE OUT OF RANGE — the fifth state, and the only one no click can reach.
+ *
+ * The URL is the table's state, so `?page=99` is typeable, bookmarkable and survives a filter that has
+ * since narrowed the result set to two pages. Every in-app path resets `pageIndex` in the same
+ * navigation as the change that shortened the list (`lib/table/use-table-params.ts`), so this is
+ * unreachable from the UI — but a stale bookmark is not a bug in the bookmark.
+ *
+ * It is NOT `FilteredEmptyState`: "Clear filters" is the wrong advice for someone whose filter is fine
+ * and whose page number is not, and clearing the filter would usually make the page valid again by
+ * accident, which teaches the wrong lesson.
+ */
+export function PageOutOfRangeState({ onFirstPage }: { readonly onFirstPage: () => void }) {
+  return (
+    <StateShell
+      title="That page is empty"
+      body="This list has fewer pages than the address asks for."
+      action={
+        <Button variant="outline" onClick={onFirstPage}>
+          Go to first page
+        </Button>
+      }
+    />
+  );
+}
+
+/**
+ * FIRST-LOAD SKELETON FOR A TABLE, and it is a different component from `SkeletonLines` for the reason
+ * states.md gives: the skeleton mirrors the LOADED LAYOUT box for box, or the page reflows when the
+ * data arrives and reads as a rendering bug. A table's loaded layout is a header strip on
+ * `--card-inset` and rows of a fixed 3.25rem (P6), which three stacked text lines are not.
+ *
+ * `aria-busy` on the container, `aria-hidden` on every block (`<Skeleton>` sets its own). A skeleton is
+ * not announced.
+ */
+export function TableSkeleton({
+  rows = 5,
+  columns = 4,
+  className,
+}: {
+  readonly rows?: number;
+  readonly columns?: number;
+  readonly className?: string;
+}) {
+  // Varying widths, because a grid of identical bars reads as a broken table rather than a loading one.
+  const widths = ['w-3/4', 'w-1/2', 'w-2/3', 'w-1/3'];
+
+  return (
+    <div aria-busy="true" className={cn('w-full', className)}>
+      <div className="flex h-10 items-center gap-4 bg-card-inset px-card-pad-md">
+        {Array.from({ length: columns }, (_, column) => (
+          <Skeleton key={column} className="h-3 w-24 flex-1" />
+        ))}
+      </div>
+      {Array.from({ length: rows }, (_, row) => (
+        <div
+          key={row}
+          className="flex h-13 items-center gap-4 border-b border-border px-card-pad-md last:border-0"
+        >
+          {Array.from({ length: columns }, (_, column) => (
+            <Skeleton
+              key={column}
+              className={cn('h-4 flex-1', widths[(row + column) % widths.length])}
+            />
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * REFETCH IS NOT A SKELETON. Data already on screen and still correct stays on screen; this is the
+ * "subtle progress affordance" states.md asks for instead — a 2px indeterminate bar directly under the
+ * card header.
+ *
+ * `aria-hidden`, and not a live region: a table that polls every five seconds while a source ingests
+ * would otherwise announce itself every five seconds, which states.md and `kb-ui-accessibility` both
+ * name as a reason to stop using the product. It reuses the `kb-skeleton` utility, so reduced motion
+ * stops the sweep and leaves the tinted bar — the indicator is not deleted, it stops moving.
+ */
+export function RefetchIndicator({ className }: { readonly className?: string }) {
+  return <div aria-hidden className={cn('kb-skeleton h-0.5 w-full rounded-none', className)} />;
+}
