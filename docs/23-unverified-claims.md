@@ -422,6 +422,57 @@ thing wearing the same name**, and nothing in the output says so.
 mislead in the same direction — in both cases something ran, reported success, and was not the thing
 named — so neither closes by reading and both close by re-running somewhere else.
 
+## Re-checked at the close of Phase B — the same five, wider
+
+**No new entries, deliberately.** The five rows above were raised by Phase B's first step and every
+one of them still holds at its last; re-tabling them under a second heading would be the parallel
+account `docs/00-index.md` warns against. What changed is **scope**, and scope is the whole reason
+this section exists rather than a line in a commit message: the bots-schema step was one migration
+set, whereas the phase went on to ship a list screen, an editor shell, a create path, three editor
+tabs and two child-resource surfaces (`git log --oneline b976735..HEAD` — read the range; the count
+in the commissioning brief was wrong and moves again on the next commit). **Every one of those
+screens inherits every row above.**
+
+Each command below was re-run on this host at the close of the phase and returned what it returned
+when the rows were written:
+
+```bash
+psql -c 'select version()'            # server unreachable now; psql --version is 16.13, the pin is 18
+php -m | grep -i bcmath               # silent — still unmet, still waived with --ignore-platform-req
+docker info                           # "failed to connect to the docker API at unix:///var/run/docker.sock"
+ls -la /opt/pw-browsers/chromium_headless_shell-1234/chrome-headless-shell-linux64/
+                                      # every entry a symlink into chromium_headless_shell-1194
+```
+
+**The accessibility row is the one whose scope moved most, and it is worth restating as a rule rather
+than as a gap.** *No accessibility property of anything Phase B shipped has been verified by any
+means* — no axe run, no keyboard-only walk, nothing viewed in dark mode, nothing viewed at the
+responsive floors — across the bots list, the editor shell, all three editor tabs, the create dialog,
+the origin allow-list and the starter-question editor. There is no browser session on this host and
+no person at it. Four of the phase's commits say so in their own *"owed to a human"* paragraphs
+rather than leaving it to be inferred, which is the right precedent and is the reason this row can be
+stated with confidence rather than by assumption.
+
+**And the sharpest half of it is not "unrun tests" but "untestable by construction":** the component
+suite loads **no CSS**, so both layouts of the server-driven table are in the DOM at once and
+**which one is visible at which width is asserted nowhere at all**. A component can render, pass its
+suite, and be laid out unusably; the below-768px card layout in particular is fed from the same row
+model as the table precisely so the two cannot disagree about *content*, and nothing anywhere checks
+that either is *seen*. `kb-ui-accessibility`'s contrast matrix and focus-order requirements are
+unexercised for the same reason.
+
+**The Playwright row now covers more than it did.** Every component test added in this phase ran on
+`chromium-1194` wearing the pinned build's directory name, because the CDN is blocked by egress
+policy. That is a larger body of evidence about a browser the lockfile does not pin than the row was
+written to describe, and the suite reports success either way.
+
+**One row is load-bearing for a *comment* rather than for behaviour, and it is easy to lose.** The
+index reasoning added in this phase argues about PostgreSQL 18's **b-tree skip scan** when it
+explains why the bots indexes are tenant-leading. 16 has no skip scan, so no plan captured here is
+evidence about the planner those paragraphs reason about — and the phase added more such comments
+than the row was written against. The correctness half remains expected to be a no-op; the plan half
+is the one to re-capture when Docker is available.
+
 ## Full list, by file
 
 Line numbers are accurate as of this commit and will drift as files are edited.

@@ -6137,3 +6137,316 @@ invisible: `provider_connection_id` and `provider_model_id` are visible to an An
 `providers.view` and therefore cannot resolve either ULID to a vendor, a label or a `last_four`
 through any endpoint. What they learn is configuration topology — which bots share a connection. It
 is the only remaining thing on the row that ADR-056's justification does not name.
+
+## The Phase B audits — M1–M7, 2026-08-19
+
+Two read-only reads over the whole bots console effort. `git log --oneline b976735..HEAD` is the
+phase — **read the range rather than a count**: the number arrived in the commissioning brief as
+*fourteen*, was *thirteen* when measured, and moves again on the next commit, which makes it the
+worked example of the rule this file keeps applying to other people's sentences (ADR-036).
+
+**The verdicts, which are the half an audit write-up usually loses.** Security: **clean, with nits.**
+Contract: **consistent, with nits.** Neither read returned a **Blocking** issue. Between them they
+found **no cross-tenant read or write**, no dropped tenant predicate, no missing authorization check,
+no role mapped to the wrong permission, and **no path by which a provider credential reaches a
+response, a log or an audit row**. An audit recorded only as its hits reads as a worse result than it
+was, and the two Should-fix items below (M1, M3) were both found *inside* code that was otherwise
+doing the right thing.
+
+**Five claims were confirmed by execution rather than by reading** — each one had been flagged in the
+brief as *distrust this, it is asserted by the code that would be wrong*:
+
+| Claim distrusted | How it was confirmed |
+|---|---|
+| The composite foreign keys that stop a bot naming another tenant's model actually exist in the database, rather than only in a migration file | Queried from `pg_constraint` on the live schema, not read from `database/migrations/` |
+| A child row of one bot cannot resolve under a **different bot in the same organization** — the failure that every cross-tenant assertion in the repo passes against | `tests/Security/BotChildEndpointAccessTest.php` → *"404s a child of a DIFFERENT bot inside the SAME organization"*, asserted on its own for that reason |
+| The delete path's child summary is read **inside** the transaction, **before** the children are removed — a summary read anywhere else records zeroes for exactly the row that needed them | Executed against the delete path (`app/Services/Bots/BotService.php`, `BotChildSummary`); the recorded counts are non-zero and match the rows that were then deleted |
+| `tests/Contract/ThemeGrammarParityTest.php` genuinely **parses** `apps/web/src/lib/theme.ts` rather than restating its constants in PHP | Read the parse: `repoFile('apps/web/src/lib/theme.ts')` with the constants extracted by pattern. A test carrying its own copy of the regex would be the third copy and the first to go stale |
+| `public_bot_id` is unguessable, at all three layers that constrain it | `App\Support\Kb\PublicBotIdentifier` mints `pub_` + 16 CSPRNG bytes hex-encoded; `bots_public_bot_id_shape` CHECKs `^[A-Za-z0-9_-]{1,64}$`; the hosted-chat route segment refuses anything else. The minted grammar is a strict **subset** of the other two, so a minted value can never be the one that discovers a disagreement between them |
+
+**Why the prefix is `M`.** `K1`–`K6` are the bots-schema findings and `L1`–`L6` are the security read
+of the bots *surface*; `S1`–`S17` mean the second scaffolding audit round and have already caused one
+ADR to cite the wrong finding. `M` continues `K` and `L` and is **not** `docs/23`'s class letter `M`
+(*"needs a machine or a person this host does not have"*) — a class letter never appears as `§ M3`.
+
+**M1–M5 are this phase's own findings and are all fixed**, in commits `769fbf2` and `a0b2ea7`.
+**M6 and M7 are outside Phase B, already false before it started, and are recorded rather than
+fixed** — neither is in a tree `docs/` may write to.
+
+### M1 — `prohibited` does not mean "must not be present", and the mechanism is not the one the brief assumed *(CLOSED)*
+
+**Closed in `769fbf2`. Owner was `control-plane-engineer`; the rule is now `missing`.**
+
+```bash
+grep -n "'status' => \['missing'\]" services/core-api/app/Http/Requests/UpdateBotRequest.php
+grep -n 'function validateProhibited' -A3 \
+  services/core-api/vendor/laravel/framework/src/Illuminate/Validation/Concerns/ValidatesAttributes.php
+```
+
+`validateProhibited` is `! $this->validateRequired(...)`. So it **passes** for `null`, for `""` and
+for `[]` — and `validated()` keeps the key, because the field was declared. `ConvertEmptyStringsToNull`
+turns a cleared control's `""` into `null` before validation runs, which is exactly the shape a stale
+client still modelling `status` as an optional field emits. The key then reached `BotEdit`, the
+repository wrote `NULL` into a `NOT NULL` column, PostgreSQL raised **23502**, and **the rename
+carried in the same request was lost behind a 500 with no field-keyed error**. An array-valued
+`status` was worse still: a type error before the database was touched at all.
+
+`missing` is the rule that fails on **presence, regardless of value** — `! Arr::has($this->data,
+$attribute)`. The four passing shapes are now a dataset asserting a 422, the validation class, a
+`status`-keyed error, and that the accompanying rename did **not** land; plus the case that must
+still work, a PATCH carrying only a name.
+
+**The mechanism correction, recorded because it differs from the conclusion the brief handed over.**
+The brief reasoned that `Prohibited` behaves as an implicit rule. It is **not** in this framework's
+`$implicitRules` list, while `Missing` **is** — read `$implicitRules` in `Validation/Validator.php`.
+The consequence is a split the outcome table hides: for `null` and `[]` the rule **runs** and returns
+`! validateRequired`; for `""` it is **skipped entirely, *because* it is not implicit**. Both routes
+end in a pass, so the finding stands exactly as reported — but it was **measured against the
+installed framework rather than inherited**, and the two routes matter to anyone who later reasons
+about which values a `prohibited`-shaped rule can see.
+
+Each fix carries a **negative control**: reinstating the old rule fails exactly the three
+empty-value rows.
+
+### M2 — a homoglyph changed the host, in a file that stated twice that all its mutations are identity-preserving *(CLOSED)*
+
+**Closed in `769fbf2`. Fixed at the class, not at the instance.**
+
+```bash
+# Every surviving `mb_strtolower` hit is a DOCBLOCK WARNING against it, not a call. The live folds
+# are the two `strtolower(` lines; if that ever inverts, this finding has been reopened by an edit.
+grep -n 'mb_strtolower\|[^_]strtolower(' services/core-api/app/Support/Web/ExactOrigin.php
+```
+
+`App\Support\Web\ExactOrigin` folded case with `mb_strtolower()`, which applies **Unicode simple
+lowercase mapping**, while the control-character guard directly above it is byte-wise. **U+212A
+KELVIN SIGN lowercases to ASCII `k`**, so `https://Kelvin.example.com` — with the Kelvin sign in place
+of the K — was stored as `kelvin.example.com`. Two properties the file argues at length that it does
+**not** have were both false: the folding was not identity-preserving, and **two distinct inputs
+collided onto one row**. On a table whose whole purpose is that a stored origin equals the `Origin`
+header a browser sends, a fold that rewrites the host is a grant applied to a name the operator never
+entered.
+
+The repair is `strtolower()` — byte-wise, ASCII-only and locale-independent — and it closes the
+**class** rather than the instance: an exhaustive scan of U+0080–U+2FFFF confirms **exactly one**
+codepoint above ASCII folds into an ASCII letter this way. A non-ASCII host now reaches the punycode
+refusal the file always documented it as reaching. The fix is additive: no existing expectation
+moved, and the new rows expect the message an existing non-ASCII row already expected. Negative
+control: reinstating `mb_strtolower` fails exactly the two homoglyph rows.
+
+**The transferable shape:** a normalisation step and the guard above it must agree about what a
+*character* is. A byte-wise guard followed by a Unicode-aware transform means the transform can
+produce a string the guard never saw.
+
+### M3 — a data-loss path: a *withheld* field became a form value and a save wrote `null` over both operator-authored prompts *(CLOSED)*
+
+**Closed in `769fbf2` (server half) and `a0b2ea7` (client half). Recorded as decisions in
+[ADR-060](19-repo-structure-adrs.md) and [ADR-061](19-repo-structure-adrs.md); this entry is the
+defect.** It was **live on the shipped console**, not latent.
+
+Three independently-reasonable things composed into it:
+
+1. **The console re-derived `bots.manage` from the session role by hand** — a third spelling of the
+   server's grant map, answering a question about the **session** while ADR-056's projection is
+   resolved **per record, per request**.
+2. **The panel defaults builder seeded every field in its tuple from the resource unconditionally.**
+   So on a row fetched while the instruction fields were withheld — a role promoted mid-session, a
+   cached detail row, any refetch skew — both prompts arrived `null` and became form values.
+3. **`sometimes|nullable|string` accepted them.** `sometimes` leaves an **absent** key alone; a
+   **present `null` clears the column**. Saving a rename wrote `null` over both operator-authored
+   prompts and **returned 200**.
+
+The repair is at the seam, in both directions: the server states what it withheld
+(`instructions_visible`, ADR-060) and the client **omits** a withheld field from form state rather
+than seeding it null (ADR-061), with a conditionally-rendered card body as the second line, because
+React Hook Form submits a registered input's DOM value whether or not `defaultValues` named it.
+
+**Two testing notes worth more than the fix.** The window tests assert on **keys, never values** — a
+body carrying `system_instruction: null` is byte-identical to the destructive request, so a value
+assertion would have passed *against* the bug. And the first version of the component test was itself
+a **false green**: `elements()` on an unpainted page returns an empty list, so both *"no control"*
+assertions passed against a blank document. It now awaits a control the tab **does** render before
+asserting the absence of the ones it does not.
+
+The role helper survives as an **affordance only** — it gates whether an editor is offered at all —
+and its docblock now says so. The sentence removed from it, that it also decides whether those two
+fields *mean* anything, **was the bug**.
+
+### M4 — a mirrored type was hand-duplicated in `apps/web`, in the same phase as the docblock warning against exactly that duplication *(CLOSED)*
+
+**Closed in `a0b2ea7`.**
+
+```bash
+git show 62e06f9 -- apps/web/src/lib/table/envelope.ts | grep -n 'interface PaginationMeta'
+grep -n 'ListMetaResource' apps/web/src/lib/table/envelope.ts packages/contracts/src/resources/bots.ts
+```
+
+`apps/web/src/lib/table/envelope.ts` declared its own `PaginationMeta` — field for field identical to
+`ListMetaResource`, which `packages/contracts/src/resources/bots.ts` mirrors and
+`test/resource-drift.test.ts` compares against the generated OpenAPI document. The local copy landed
+in `62e06f9`, the phase's **first** commit, and survived to its last; `resource-drift.test.ts` was
+itself rewritten to catch this shape after `MemberResource` was hand-written a second time earlier in
+this repository, and says so in its own comments.
+
+**The window a local copy opens is narrow and silent, which is why it needs a finding rather than a
+tidy-up:** a server-side change to the `meta` block turns `@kb/contracts` red while `apps/web`
+compiles clean against a stale interface. `readMeta` guards only `page`, `per_page` and `total`, so
+the pager would go on reading a field that is no longer what it says, with the drift test green in
+the package that does not render it. Importing the type makes the drift test *this file's* drift test
+too. There is no local envelope type either, for the same reason.
+
+This is the failure `packages/contracts` exists to prevent and that `contract-steward` exists to
+catch — see `CLAUDE.md` § *Shared directories*: *"a second copy of the frame parser is the drift
+`contract-steward` exists to catch"*. It is recorded here because it got past the phase's own
+reviews for the whole phase.
+
+### M5 — the derived radius scale was declared on `:root`, so a scoped `--radius` was inert *(CLOSED)*
+
+**Closed in `a0b2ea7`, in `packages/design-tokens/scripts/build.mjs` and its generated output.**
+
+```bash
+grep -n 'radius' packages/design-tokens/generated/theme.css
+grep -n 'radius' packages/design-tokens/generated/tokens.css
+```
+
+A custom property's `var()` references are substituted **at the element that declares it**. The
+`@theme inline` block emitted `--radius-sm: var(--radius-sm)` — the self-reference shape that is
+correct and inert for every *literal* family (`--shadow-md`, `--text-h1`, `--font-sans`,
+`--ease-out`) because unlayered CSS beats layered CSS and the real value always wins. **Radius is the
+one family whose steps are derived from another property**, and for it that shape resolves the whole
+chain at `:root`: a `rounded-sm` utility read a fixed length computed from the *root* `--radius`, so
+writing `--radius` onto a nested element — which is exactly what the bot theme preview
+(`apps/web/src/components/bot-theme-scope.tsx`) does — **moved nothing**. The console preview and the
+shipped widget, which sets `--radius` at its own root, therefore disagreed about corner radius, and
+each looked right in isolation.
+
+The fix emits the **unsubstituted `calc()`** into the inline block, so the utility carries the
+expression and `var(--radius)` resolves at the element. `apps/web/tests/components/design-system-css.test.tsx`
+now walks every step of the scale at every value in the tenant radius enum. The `max(0px, …)` wrapper
+is load-bearing and unchanged: at `--radius: 0rem`, `calc(0rem - 6px)` is `-6px`, which is an invalid
+`border-radius` that the browser **discards** — the test probes for a fallback value precisely so a
+discarded declaration is something an assertion can see.
+
+### M6 — the *"CI greps for this"* claim shape survives the 2026-08-17 sweep, the sweep's own grep cannot see it, and it is not confined to `services/core-api`
+
+**Open, and wider than it was reported. Not fixed here — `docs/` does not edit `services/` or
+`apps/`. Owners are per tree: `control-plane-engineer`, `mobile-engineer`, `widget-sdk-engineer`,
+and whoever owns the `services/ai-service` file a hit lands in.**
+
+`CLAUDE.md` states that these claims were swept when `.github/` was deleted and that **a surviving
+one is a bug**. They survive. Three things about *how* they survive are the finding:
+
+**(1) The sweep's own measuring command returns clean against them.** The grep published in
+`CLAUDE.md` matched `gates\.yml` and `\.github/workflows` — the deleted gate by **filename** — while
+the surviving comments name it by **behaviour** and never once by filename. Run the published command
+and the tree looks swept. `CLAUDE.md`'s block now carries `CI grep` as a third alternative, and the
+comment beside it says why.
+
+**(2) The obvious widening is the wrong inflection, which is `docs/22` § H1 one level up.** Matching
+`CI greps` (plural) finds the `Controller.php`, `OrganizationScope.php`, `AppServiceProvider.php`,
+`InternalAiClient.php` and `config/services.php` comments and **misses**
+`app/Models/EmailVerificationToken.php` and `app/Models/OrganizationInvitation.php`, which both say
+*"the CI grep"* — singular. H1 is a tenancy gate that greps only the plural form of the bypass it
+exists to catch; this is the same defect in the sweep that was supposed to remove H1's kind of claim.
+Match `CI grep` and both inflections fall out.
+
+**(3) It was never a `services/core-api` problem.** The commissioning brief reported *five* comments
+in that service. Measured at the commit rather than in prose, the non-test trees of that service
+alone return more than five, and the same shape is live in `apps/mobile`, `apps/widget` and
+`services/ai-service` — including `services/ai-service/app/db/writes.py`, whose comment describes
+the allow-list gate that ADR-033 and `CLAUDE.md` both record as **deleted**.
+
+**Measure it at a commit, not in the working tree**, because a commit does not move while you read it
+and this tree does:
+
+```bash
+# a0b2ea7 is Phase B's last commit and is the state this finding was measured against. Swap it for
+# HEAD to see the state now — expect the two to differ while the repair below is in flight.
+git grep -n 'CI grep' a0b2ea7 -- apps services packages scripts infrastructure
+git grep -n 'CI grep' a0b2ea7 -- services/core-api/app services/core-api/config services/core-api/database
+```
+
+**This grep is a lead, not a verdict, and that is the reason it was not simply added to the sweep and
+left.** It matches the *corrections* as well as the claims: `apps/mobile/jest.config.js`,
+`apps/mobile/eslint.config.mjs` and `apps/mobile/README.md` each contain the sentence recording that
+**no such grep ever existed** (`docs/22` § *Found while completing the stubs*, the seventeenth false
+enforcement claim). Those hits are history and must stay. Every hit needs reading before it is
+touched — which is precisely the self-tripping shape the sweep's filename-only pattern was chosen to
+avoid, and the cost of avoiding it was blindness.
+
+**Why the surviving claims are load-bearing in the wrong direction.** A reader who finds
+`// CI greps for both` beside a rule concludes the rule is machine-checked and does not add a test.
+That is `docs/22` § F7 (a vendored ruleset counted by a gate and executed by nothing) and § F1–F13's
+seventeenth claim, again. The one to repair first is
+`services/core-api/app/Models/Scopes/OrganizationScope.php`, because **ADR-043's decision rests on
+it**: the bypass alternative is barred there on the stated ground that *the CI grep cannot see its
+singular form*, and that argument now cites a mechanism which does not exist. The correct repair is
+the one the 2026-08-17 sweep used elsewhere — state the invariant, say it is held by review and by
+the test suites, and name the test where one exists.
+
+**In flight, not neglected, and recorded that way for the same reason § K4 was.** While this finding
+was being written, `git status --porcelain` showed `Controller.php`, `OrganizationScope.php`,
+`AppServiceProvider.php` and `InternalAiClient.php` modified in the working tree, alongside an
+untracked `services/core-api/tests/Arch/StringLevelDoctrineTest.php` whose opening comment reads
+*"Each rule below was a CI grep"* — a `test-engineer` converting the claims into assertions rather
+than into prose, which is the better of the two repairs. That work is uncommitted and this record
+does not depend on it: the closing condition is the **committed** state, and the check is the first
+command above run against a commit that contains the repair.
+
+### M7 — `kb-design-language`'s Definition of done asserts a `tokens.widget.css` subset check "asserted in CI"; the file, the export and the CI all do not exist
+
+**Open. Not fixed here — `docs/` never edits `.claude/skills/**`. Owner: the skill's owner, with
+`admin-web-engineer` (`packages/design-tokens`) and `widget-sdk-engineer` (`apps/widget`).**
+
+```bash
+grep -n 'tokens.widget.css' .claude/skills/kb-design-language/SKILL.md \
+                            .claude/skills/kb-design-language/references/cross-platform.md
+ls packages/design-tokens/generated/                     # index.d.ts index.js theme.css tokens.css
+sed -n '/"exports"/,/^  }/p' packages/design-tokens/package.json
+grep -rn 'design-tokens' apps/widget/src/app/styles.css  # imports tokens.css, the FULL set
+```
+
+The skill's Definition of done reads *"`tokens.widget.css` is a strict subset of `tokens.css` **by
+name in both the `:root` and `.dark` blocks**, asserted in CI"*, and `references/cross-platform.md`
+carries a table row for the file, a `node -e` verification recipe and a second checklist entry.
+**No such file is generated, no package export names it, `apps/widget` imports the full `tokens.css`,
+and there is no CI** (`.github/` was deleted 2026-08-17). `packages/design-tokens/src/tokens.json`
+already knows: its `_legacyColors_note` says the removal of the legacy aliases belongs to
+`widget-sdk-engineer` *"together with the tokens.widget.css subset that does not exist yet."* So one
+file in the repository states the truth while the skill that governs it states a check.
+
+**Why this one matters more than an ordinary stale line.** A widget agent in a later phase reads a
+skill's Definition of done as a list of things to satisfy before shipping, and this entry sends it
+looking for a build entry point, a generated artifact and a CI job that have never existed —
+the pointer-leads-somewhere-false failure mode this file has recorded against itself repeatedly
+(§ G16, § K5, and the `S2`/`L2` citation slip at the head of § *The security read of the bots
+surface*). The budget argument behind the entry is **sound and unaffected**: custom properties are
+not tree-shaken, so the full token set is dead weight against the widget's brotli shell budget. What
+is false is only the claim that anything checks it. The honest repair is to state the subset rule as
+a rule and name what would verify it — the `node -e` recipe already in `cross-platform.md` — rather
+than to assert a gate.
+
+**Where the specification and a skill disagree, documented rather than resolved.** `docs/23` carries
+`tailwind-shadcn/SKILL.md:64` as class **D**: *"the spec does not enumerate `theme_configuration`; an
+ADR should ratify this list before the first migration."* **The first migration has now landed and
+the list was not ratified.**
+
+```bash
+grep -n "the tenant contributes six scalars" .claude/skills/tailwind-shadcn/SKILL.md
+grep -n "theme - 'primary'" services/core-api/database/migrations/2026_08_19_001400_create_bots_table.php
+grep -n 'logo_object_key\|avatar_object_key\|default_mode' \
+  services/core-api/database/migrations/2026_08_19_001400_create_bots_table.php   # silent
+```
+
+The skill names **six** tenant scalars — `primary`, `accent`, `radius`, `logo_object_key`,
+`avatar_object_key`, `default_mode` — on a column it calls `theme_configuration`. The shipped column
+is `bots.theme` (§ K5) and its `bots_theme_vocabulary` CHECK admits **`primary`, `accent`, `radius`
+and nothing else**; the remaining three have **no column anywhere on `bots`**, in the jsonb map or
+beside it. So the divergence is not a narrower key set — it is three scalars the skill says a tenant
+contributes and that the schema has no place to put.
+
+Documented, not resolved: `docs/` does not edit `.claude/skills/**`, and the two candidate answers
+are a real decision rather than a wording fix — either the three missing scalars are a Phase C/D
+column addition, or the skill is describing a surface this product will not have. That is
+`admin-web-engineer`'s to rule, and it needs an ADR whichever way it goes, exactly as the
+`UNVERIFIED` marker asked for before the migration existed.

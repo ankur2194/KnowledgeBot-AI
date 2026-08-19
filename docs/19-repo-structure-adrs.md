@@ -1796,3 +1796,154 @@ no existing single-resource response looks like it. **Revisit when** the first l
 expensive — conversations or messages — reaches this envelope. `total_pages` and a cursor are
 mutually exclusive answers, and the right move is a **second** envelope for keyset lists rather than
 a `total` that stalls or lies; the observable is the count appearing in that endpoint's p95.
+
+---
+
+ADR-060 and ADR-061 come from the **Phase B audits** — the two read-only reads over the whole bots
+console effort. `git log --oneline b976735..HEAD` is the phase (read the range, not a number: the
+count moved between the brief that commissioned this record and the record being written, and it
+moves again on the next commit); `docs/22` § _The Phase B audits — M1–M7_ is the findings log and the
+coverage. **Neither audit returned a Blocking issue**, and both ADRs below are the durable half of a
+single finding — the data-loss path, `docs/22` § **M3** — split at the seam it broke on: the server
+saying what it withheld (ADR-060) and the client refusing to seed what was withheld (ADR-061).
+
+**ADR-060 is the third narrow supersession in this register**, after ADR-033 and ADR-037. It
+overturns **one named rejection** inside ADR-056's 2026-08-19 amendment. Nothing else in ADR-056
+moves: `bots.view` is still held by all four roles, the two instruction fields are still a
+management-only projection, and both keys are still present in every response.
+
+### ADR-060: A Response States Its Own Projection; a Client Never Re-Derives One From a Role
+
+**Status: `Accepted`. Supersedes the `*_visible` rejection in ADR-056's amendment, and only that
+claim.** ADR-056's decision, its grant and its projection all stand as written.
+
+**Decision:** where a response body varies by caller, **the body says how it varied**.
+`App\Http\Resources\BotResource` publishes `instructions_visible`, a boolean set from the same
+`$withInstructions` flag that decides the projection, declared one line below the two fields it
+describes. It is a **required** constructor argument (a default would let a new call site inherit a
+decision it never made) and is computed **once per request** in `BotController`, exactly where
+ADR-056's amendment already computes the projection. Clients read that flag; **no client re-derives
+the projection from a permission, a role, or a session**.
+
+**Reason — ADR-056's amendment rejected this flag, and both halves of the stated reason turned out
+to be wrong.** The rejection read: a `*_visible` sibling flag *"publishes the permission matrix to
+every caller for no gain the console cannot get from the role it already knows."*
+
+**(1) It publishes no matrix.** The flag carries one bit about the **caller's own** grant on the
+**row in hand** — a fact that caller can already establish by attempting the write. It says nothing
+about any other caller, any other role, or any other row. What it actually resolves is an ambiguity
+that ADR-056's amendment *itself* named as its accepted cost: a client could not distinguish *"this
+bot has no system instruction"* from *"you may not see it"*, because both were `null`. That
+ambiguity was already on the wire; the flag splits it and adds nothing to it.
+
+**(2) "The role it already knows" answers a question about the session; the projection is resolved
+per record, per request.** The two are allowed to disagree — a role promoted mid-session, a cached
+detail row, any refetch skew — and when they did, the console's hand-written third spelling of the
+server's grant map seeded a **withheld `null`** into a form control. `sometimes|nullable|string`
+accepted it, and **saving a rename wrote `null` over both operator-authored prompts and returned
+200.** That is the finding, in full at `docs/22` § **M3**; it was live on the shipped console and it
+is the reason a documentation-level preference became a data-integrity rule.
+
+**The generalization, which is the part worth carrying:** a client that infers the *shape* of a body
+from a permission it believes it holds is deriving a per-record fact from a per-session one. The
+server knows the answer for free — it just applied it — and every spelling on the client is a copy
+that can be stale by one round trip.
+
+**Rejected:**
+
+- **Keep the derivation and fix the console's copy of the grant map.** Repairs the instance and
+  leaves the class: the grant map was already a *third* spelling, so this is a fourth, and the next
+  panel copies whichever one it finds. It also cannot be made correct — no client-side copy of a
+  role can answer a question the server resolved against a row.
+- **Drop the withheld keys rather than nulling them**, so their absence is the signal. That is the
+  shape-varies-by-caller problem ADR-056's amendment rejected on grounds that have **not** moved:
+  `packages/contracts/src/resources/bots.ts` types both as nullable, so a null costs no contract
+  change while an absent key does, and a per-caller key set is the thing `strictObject` and the
+  resource-drift suite exist to refuse.
+- **A sentinel string** (`"«withheld»"`). It is a legal value of a free-text column, so it is
+  indistinguishable from a prompt an operator typed, and the first bot whose instruction quotes it
+  is a support ticket nobody can reproduce.
+- **A conditional write guard alone** — an ETag or a `retrieval_configuration_version`-style
+  pre-image check that refuses the destructive PATCH server-side. That is the right **backstop** and
+  it is not this decision: it turns silent data loss into a 409 after the operator has already typed
+  the change, and it cannot tell the *panel* whether to render a control, which is the question that
+  has to be answered before the request exists.
+- **A per-field map** (`{"system_instruction": false, "answer_style_instruction": false}`). One flag
+  covers both fields because **one permission** does; a map invites a per-field permission model
+  nothing implements, and ADR-056's rejection of a separate `bots.view_instructions` still stands.
+
+**Trade-off, as the named cost.** The flag is now a required member of **two** contracts — the PHP
+resource's constructor and the client's form-source type — so a new call site cannot inherit the
+decision, but neither can it be written without stating one; that friction is deliberate and it will
+read as boilerplate to the next person who adds a bot-shaped response. Second, the wire now carries a
+key whose only consumer is our own console, so a third-party client generated from the OpenAPI
+document sees a field it will never use. Third, and this is the one that can actually bite:
+**nothing structurally binds `instructions_visible` to the two nulls it describes** — they are three
+independent expressions in one `toArray()`, and a future edit can move one without the others.
+`tests/Security/BotEndpointAccessTest.php` asserts the flag and the projection **together, per role,
+on both reads**, from a four-role dataset; that test is the only thing holding them, and a
+single-role fixture could not fail it.
+
+**Revisit when** a **second** field on any resource acquires a per-caller projection. One boolean per
+field does not scale, and the right shape at that point is a single `withheld: [...]` list on the
+envelope rather than N sibling booleans — a different decision needing its own number, into which
+`instructions_visible` becomes the first entry. The observable that says it is due is a second
+`*_visible` key appearing anywhere in `app/Http/Resources`.
+
+### ADR-061: A Withheld Field Is OMITTED From Client Form State, Never Seeded as `null`
+
+**Status: `Accepted`. Supersedes nothing; it is ADR-060's client half, and neither is sufficient
+alone.**
+
+**Decision:** the shared panel-defaults builder in `apps/web` **omits the key** for any field the
+server reported as withheld, rather than seeding it `null`. `instructions_visible: false` means the
+two instruction keys are **absent** from the form's `defaultValues`, and the flag is a **required**
+member of the form-source type so that a call site cannot inherit the decision. It is done **once, at
+the source**, so no panel has to remember it. Omission alone is not sufficient, and the panel carries
+a second line: the card body renders **conditionally** — either the two controls, or a sentence
+stating that the fields were not sent and are not empty.
+
+**Reason:** `sometimes` leaves an absent key alone; a **present `null` clears the column**. That
+asymmetry is the entire decision, and it is invisible at the call site — an omitted key and a `null`
+key look equally harmless in a defaults object, and only one of them is a destructive write. The
+second line exists because **React Hook Form submits a registered input's DOM value whether or not
+`defaultValues` named it**, and the app's clearable-text helper maps `""` to `null` — so a
+rendered-but-unseeded textarea walks straight back into the path omission just closed. Rendering
+*nothing* is also the only honest option available: for a caller without the grant, a bot with a
+4,000-character prompt and a bot with none are byte-identical on the wire, so any control at all
+would be asserting something the server declined to say.
+
+**Rejected:**
+
+- **A disabled textarea.** It is still registered, so RHF still submits its DOM value — `disabled` is
+  an affordance, not a guard. Worse, it renders an empty box, which a viewer reads as *"this bot has
+  no system prompt"*: the precise statement the projection refuses to make.
+- **Filtering the withheld keys out of the request body at submit time.** Correct, and one layer too
+  late. It is a fourth place to remember, it lives in the file most likely to be copied for the next
+  panel, and it is invisible from the defaults builder that caused the problem — so the same bug
+  ships again the first time somebody writes a panel without reading the submit handler.
+- **Seeding `undefined` instead of omitting the key.** Indistinguishable at the type level while
+  `Object.keys()`, every spread and every serializer disagree. The type has to say the key **may be
+  absent**, or a call site reads a value that is not there.
+- **Making the server reject a `null` on those two fields outright.** It converts silent data loss
+  into a 422, which is strictly better, and it belongs on the server's list rather than this one —
+  but it also forbids the legitimate *"clear this prompt"* write that the nullable column exists for,
+  so it is a narrowing of the API to compensate for a client defect.
+- **Refusing to render the panel at all without `bots.manage`.** Already true, structurally, since
+  commit `c9634d5`: without the permission the panel branches to a component that mounts no form, no
+  resolver and no defaults. It does **not** cover the case this ADR is about — a caller who *does*
+  hold `bots.manage` but whose row was fetched while the projection said otherwise.
+
+**Trade-off:** an operator without the grant is shown a sentence where a control would be, so the
+screen tells them a field exists and declines to say whether it is set; that is accepted, because the
+alternative is a guess. Second, form state and resource state now differ in **key set** and not only
+in value, so anything that diffs the two must compare keys — the phase's window tests assert on
+**keys and never on values** for exactly this reason, since a body carrying `system_instruction:
+null` is byte-identical to the destructive request and a value assertion would pass against the bug.
+Third, the rule is enforced by one builder and by review; nothing prevents a panel from constructing
+its own `defaultValues`.
+
+**Revisit when** a form field's value can be legitimately absent for a reason that is **not** a
+permission — a sparse read, a projection by cost rather than by grant. Omission would then mean two
+things and the form could not tell them apart. The observable is the first `?fields=` or
+sparse-fieldset parameter on any read endpoint in `services/core-api/routes`.
