@@ -1558,6 +1558,80 @@ see *some* bots and not others. `bots.view` is organization-wide; the first agen
 ("this member may see one client's bot") is a **scoping** change, not a permission change, and this
 permission cannot express it.
 
+**Amended 2026-08-19 — the grant as first implemented disclosed the operator-authored prompt to a
+reporting-only role, and the repair narrows the PROJECTION rather than the grant.** Everything above
+stands unchanged: both roles keep `bots.view`, and no permission moved.
+
+**What was found.** The security read of the same batch that shipped the bot endpoints (finding
+**L1**, `docs/22` § _The security read of the bots surface_) found `App\Http\Resources\BotResource` publishing `system_instruction` and
+`answer_style_instruction` **unconditionally** — no `when()`, no Gate call, nothing conditional in
+the file — while both read endpoints authorize `bots.view` and nothing more. `BotCollectionResource`
+maps that resource per row, so an **Analyst** (the role this ADR extended the grant to; it holds
+`bots.view` and *no other permission in the entire catalog*) could read every bot's full
+operator-authored system prompt with one `GET /organizations/{org}/bots?per_page=100`. That was
+**live, not latent**, from the moment the endpoints landed.
+
+**Why it is more than a mis-set flag: the codebase already contradicted itself about this exact
+string.** `App\Services\Audit\AuditLogger`'s bot allow-list **refuses** `system_instruction` from
+`details`, on the stated ground that it is *"the exact string a prompt-injection review is about"*
+and that the audit table is append-only, long-lived and exportable — a table read by the
+organization's own administrators. It is not defensible to withhold a string from *that* table on
+that reasoning and hand the same string, unredacted, to the narrowest role in the catalog over the
+API. And the grant's justification above never covered it: it argues from the assignment screen
+(*"the assignment screen is a list of bots"*) and from transcript review (*"the name, the model and
+the answer mode are what make it readable"*), and defends the width with *"a bot's configuration
+carries no credential … and no end-user content"* — true, and **silent about the prompt**. The
+widest read permission in this catalog acquired its width from a justification that never mentioned
+the field with the highest blast radius on the row.
+
+**Decision.** `system_instruction` and `answer_style_instruction` become a **management-only
+projection**: a caller holding `bots.manage` receives the stored value, every other caller receives
+`null`. **Both keys stay present in every response** — dropping one would make the response *shape*
+vary by caller, and `packages/contracts/src/resources/bots.ts` already types both as nullable, so a
+null costs no contract change while an absent key would. The flag is a **required** constructor
+argument on `BotResource` (a default would let a new call site inherit a decision it never made) and
+is computed **once per request** in `BotController`: `Gate::allows('update', $bot)` on `show`, the
+new `OrganizationPolicy::manageBots()` on `index`, and the literal `true` on `store`/`update`, where
+the `Gate::authorize()` one line above has already proved `bots.manage`. That placement is
+mechanical rather than stylistic — `OrgScopedPolicy::permit()` resolves membership per check and is
+deliberately never memoized across organizations, so the obvious spelling
+(`$request->user()->can('update', $bot)` inside `toArray()`) is one `organization_users` read **per
+row** on a hundred-row page, and no correctness test can see the difference. `manageBots` authorizes
+nothing and must never produce a 403; it carries `Permission::BotsManage` exactly as `createBot`
+does, because this is one permission with two call-site spellings. `consent_text` is **not** in
+scope: it is rendered to end users before their first message, so hiding it would be theatre.
+
+**Rejected — and the first one is what a reader reaches for.** **Revoking `bots.view` from the
+Knowledge Manager and the Analyst**, i.e. reverting this ADR. That re-reads the silence as a denial,
+which the section above rejected for reasons the disclosure does not touch: Phase C6's assignment
+screen and Phase E's per-bot transcript review still need the name, the model and the answer mode,
+and *none of that is the prompt*. One mis-projected field is not evidence that the other
+twenty-eight were wrong, and trading a real capability for a fix that a projection provides is how a
+defensible grant gets deleted by the next incident review. **A separate `bots.view_instructions`
+permission**: it would be granted to exactly the roles that already hold `bots.manage`, which is the
+failure this ADR's own rejection of `bots.publish` names — a permission nobody grants differently
+fails silently in both directions. **Dropping the keys rather than nulling them**, which is the
+shape-varies-by-caller problem above. **A second, narrower resource for the reading roles**
+(`BotSummaryResource`): two components in the generated client for one table, guaranteed to diverge
+at the next column, and it answers the *list* while leaving `show` — which the same roles reach —
+untouched. **Asking the Gate inside `toArray()`**, which is correct, is what every reviewer would
+have written, and is a hundred membership reads per page; it is rejected here in writing so the next
+person to "simplify" the flag away finds the reason first.
+
+**Trade-off, stated as the named cost.** A client cannot distinguish *"this bot has no system
+instruction"* from *"you may not see it"* — both are `null`. That is accepted rather than papered
+over: the majority of bots genuinely have no instruction, so the ambiguity exists on the wire
+regardless, and the alternative (a `*_visible` sibling flag) publishes the permission matrix to
+every caller for no gain the console cannot get from the role it already knows. Second, the
+permission is now consulted in **two** places for one field — the policy that authorizes the read
+and the projection that shapes it — so a future permission change has two call sites to move;
+`tests/Security/BotEndpointAccessTest.php` asserts the projection per role, on **both** reads, from
+a four-role dataset, because a single-role fixture cannot fail that test, and
+`tests/Feature/BotCrudTest.php` asserts the membership-read count does not scale with the page.
+**Revisit when** a role must read the prompt without being able to write it — the
+review-before-publish shape — at which point the flag stops being derived from `bots.manage` and
+becomes its own permission, and this projection is the seam it plugs into.
+
 ### ADR-057: The Evidence Threshold Ships Nullable, With No Default, Stored Beside Its Scale
 
 **Status: `Accepted`. Supersedes nothing; it is ADR-030's consequence reaching the control-plane

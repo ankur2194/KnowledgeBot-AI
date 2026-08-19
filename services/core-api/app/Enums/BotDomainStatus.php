@@ -37,6 +37,20 @@ enum BotDomainStatus: string
      *
      * Positively expressed on purpose. This is one term of the check the widget bootstrap performs;
      * the others are the bot's status, its access mode, and an EXACT match on the origin string.
+     *
+     * ── CARRY-FORWARD FOR WHOEVER WRITES THAT BOOTSTRAP: AN EMPTY LIST IS A DENIAL ────────────
+     *
+     * This predicate is per ROW, so the case it cannot express is the one to get right: a bot with
+     * NO `bot_domains` rows at all. That must deny every origin. "No allow-list configured" reads
+     * naturally as "unrestricted" — it is how allow-lists are misread everywhere — and here that
+     * reading is an embed on any site on the internet, because `published` + `access_mode = public`
+     * is precisely what makes a bot answerable ANONYMOUSLY, on the organization's credential and
+     * against its quota. Nothing upstream catches it: the publish guard (`BotService::
+     * assertPublishable()`) says nothing about `access_mode` and nothing about this table, by
+     * design — publishing a public bot with no origins yet is a legitimate intermediate state, and
+     * hosted chat serves it correctly. The refusal belongs at the embed check, expressed as "some
+     * active row matches this exact origin", which is false for an empty set by construction — and
+     * never as "no row forbids it", which is true for an empty set for the same reason.
      */
     public function permitsEmbedding(): bool
     {

@@ -18,6 +18,8 @@ use App\Models\User;
 use App\Services\Audit\AuditLogger;
 use App\Services\Bots\BotService;
 use App\Support\Http\ListQuery;
+use Illuminate\Database\Events\QueryExecuted;
+use Illuminate\Support\Facades\DB;
 
 use function Pest\Laravel\assertDatabaseHas;
 use function Pest\Laravel\assertDatabaseMissing;
@@ -633,6 +635,45 @@ it('refuses to create a bot in a suspended organization', function (): void {
     // organization's operator needs to do while working out why everything stopped.
     currentTest()->getJson("/api/v1/organizations/{$fixture['orgA']->id}/bots", spaHeaders())
         ->assertOk();
+});
+
+it('resolves the instruction projection ONCE for the page, not once per row', function (): void {
+    // THE COMMENT IN `BotController` SAYS "ONCE PER REQUEST"; THIS IS WHAT MAKES THAT ENFORCEABLE.
+    // `BotResource` nulls the two instruction fields for a caller without `bots.manage`, and the
+    // obvious way to write that — `$request->user()->can('update', $bot)` inside `toArray()` — is
+    // correct and costs one `organization_users` read PER ROW, because `OrgScopedPolicy::permit()`
+    // resolves membership per check and is deliberately never memoized across organizations. A
+    // correctness test cannot see the difference: both spellings return the same body.
+    $fixture = botCrudFixture();
+
+    // Twenty-four more, so one page carries twenty-five rows. A single-row page cannot distinguish
+    // "once" from "once per row" — which is the entire failure mode this asserts against.
+    Bot::factory()->recycle($fixture['orgA'])->count(24)->create();
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    $membershipReads = 0;
+
+    DB::listen(function (QueryExecuted $query) use (&$membershipReads): void {
+        if (str_contains($query->sql, 'organization_users')) {
+            $membershipReads++;
+        }
+    });
+
+    currentTest()->getJson(
+        "/api/v1/organizations/{$fixture['orgA']->id}/bots?per_page=25",
+        spaHeaders(),
+    )
+        ->assertOk()
+        ->assertJsonCount(25, 'data.bots');
+
+    // THE BOUND IS DELIBERATELY LOOSE AND STILL DECISIVE. Three reads are expected on this path —
+    // `org.member` re-reading current membership, `Gate::authorize('viewBots')` and
+    // `Gate::allows('manageBots')` — and the bound is set well above that so an added middleware or
+    // an extra authorization call is not a false failure. A per-row projection is twenty-five plus
+    // those three, which is nowhere near it: this test discriminates the two shapes, not a
+    // particular number.
+    expect($membershipReads)->toBeLessThanOrEqual(8);
 });
 
 // ── GET …/bots/{bot} ─────────────────────────────────────────────────────────────────────────────

@@ -136,6 +136,18 @@ function organizationBotAbilityMatrix(): array
             OrgRole::KnowledgeManager->value => false,
             OrgRole::Analyst->value => false,
         ],
+        // AUTHORIZES NOTHING — it decides whether `BotResource` renders the two instruction fields,
+        // and `BotController` asks it once per LIST rather than once per row. It is asserted here
+        // anyway, and with the same verdicts as `createBot`, because the day the two disagree is
+        // the day a reporting-only role reads every bot's system prompt again: an ability that
+        // controls a disclosure is a privilege boundary whatever its call site does with the
+        // answer. Both delegate to `Permission::BotsManage` and neither adds a condition.
+        'manageBots' => [
+            OrgRole::Owner->value => true,
+            OrgRole::Admin->value => true,
+            OrgRole::KnowledgeManager->value => false,
+            OrgRole::Analyst->value => false,
+        ],
     ];
 
     $rows = [];

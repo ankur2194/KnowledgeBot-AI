@@ -47,6 +47,22 @@ enum Permission: string
      * Neither grant leaks anything a member of the organization is not already entitled to: a bot's
      * configuration carries no credential (`provider_connection_id` is a reference, and the key
      * behind it never leaves the vault) and no end-user content.
+     *
+     * ── THAT SENTENCE WAS SILENT ABOUT THE PROMPT, AND THE SILENCE WAS A DISCLOSURE ───────────
+     *
+     * "No credential, no end-user content" is true and does not cover `system_instruction` or
+     * `answer_style_instruction`, which are OPERATOR-authored text and neither of those things. As
+     * first shipped, `BotResource` rendered both unconditionally, so this permission — held by an
+     * Analyst who holds nothing else — read every bot's full system prompt off one page of the list
+     * endpoint. Fixed by NARROWING THE PROJECTION, not this grant: both fields are rendered only to
+     * a caller holding `BotsManage` and are null otherwise, the keys stay present, and the flag is
+     * resolved once per request in `BotController`. `BotResource`'s docblock carries the reasoning
+     * — including the asymmetry that settles it, `AuditLogger` refusing the same string from
+     * `details` — and ADR-056 carries the amendment and the alternatives it rejected.
+     *
+     * The rule to take from it: this permission's justification is about a bot's CONFIGURATION.
+     * Adding a column that is operator-authored PROSE THE MODEL EXECUTES puts it on the other side
+     * of the line, and it belongs in the projection rather than in this sentence.
      */
     case BotsView = 'bots.view';
 

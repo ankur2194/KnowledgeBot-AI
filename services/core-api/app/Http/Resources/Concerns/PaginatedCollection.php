@@ -54,6 +54,11 @@ use Illuminate\Http\Request;
  *             ];
  *         }
  *
+ * (The shipped `BotCollectionResource` additionally carries a `$withInstructions` flag into each
+ * item, because `BotResource` projects two fields by permission and asking the Gate inside that
+ * `array_map` would be one membership read per row. That is the ITEM resource's concern, not this
+ * trait's, so the example above stays the minimal shape.)
+ *
  *         public static function openApiSchemas(): array
  *         {
  *             return BotResource::openApiSchemas() + self::listEnvelopeSchemas(

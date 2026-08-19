@@ -45,6 +45,16 @@ use Illuminate\Http\Resources\Json\JsonResource;
  * bodies when a component name appears twice, so an identical contribution is a no-op and a
  * divergent one is a build failure.
  *
+ * ── `$withInstructions` IS CARRIED, NOT RE-DECIDED ────────────────────────────────────────────
+ *
+ * `BotResource` renders the two instruction fields only to a caller holding `bots.manage`, and this
+ * class exists on the exact path where getting that wrong is expensive: asking the Gate inside the
+ * `array_map` below would be one `organization_users` read PER ROW — `OrgScopedPolicy::permit()`
+ * resolves membership per check and is deliberately never memoized — for an answer that cannot
+ * differ across rows, because every row on this page belongs to the one organization in the path.
+ * `BotController::index()` resolves it once through `Gate::allows('manageBots', $organization)` and
+ * hands it here. This class makes no authorization decision of its own and must not start.
+ *
  * @property-read LengthAwarePaginator<int, Bot> $resource
  */
 final class BotCollectionResource extends JsonResource implements ProvidesOpenApiSchema
@@ -53,10 +63,14 @@ final class BotCollectionResource extends JsonResource implements ProvidesOpenAp
 
     /**
      * @param  LengthAwarePaginator<int, Bot>  $resource
+     * @param  bool  $withInstructions  whether the caller holds `bots.manage` on the organization
+     *                                  every row on this page belongs to — resolved ONCE by the
+     *                                  controller. Required, never defaulted.
      */
     public function __construct(
         LengthAwarePaginator $resource,
         private readonly ListQuery $query,
+        private readonly bool $withInstructions,
     ) {
         parent::__construct($resource);
     }
@@ -71,7 +85,8 @@ final class BotCollectionResource extends JsonResource implements ProvidesOpenAp
             // key, and a paginator serialized directly would carry Laravel's own `links`/`meta`
             // shape, which is not the one this API publishes and not the one the console reads.
             'bots' => array_map(
-                static fn (Bot $bot): array => (new BotResource($bot))->toArray($request),
+                fn (Bot $bot): array => (new BotResource($bot, $this->withInstructions))
+                    ->toArray($request),
                 array_values($this->resource->items()),
             ),
             'meta' => $this->listMeta($this->resource, $this->query, $request),

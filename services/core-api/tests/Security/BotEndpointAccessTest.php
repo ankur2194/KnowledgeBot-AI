@@ -320,6 +320,141 @@ it('enforces bots.view on the reads and bots.manage on the writes, per action', 
     return $rows;
 });
 
+// ── the instruction projection: `bots.view` is not `bots.manage` ─────────────────────────────────
+
+/**
+ * The two operator-authored prompt strings, distinct so a projection that leaked one and hid the
+ * other cannot pass. Both are file-scope constants because Pest declares them globally and a name
+ * another test file already uses is a redeclaration fatal in a full run and only in a full run.
+ */
+const BOT_SYSTEM_INSTRUCTION_PROBE = 'PROMPTPROBE-SYSTEM answer only from the sealed handbook.';
+const BOT_ANSWER_STYLE_PROBE = 'PROMPTPROBE-STYLE reply in two sentences, never more.';
+
+it('renders the instruction fields only to a caller holding bots.manage, on show AND on index', function (
+    OrgRole $role,
+    bool $visible,
+): void {
+    // ASSERTED PER ROLE AND NOT FROM A UNIFORM FIXTURE, which is the whole point of this test: the
+    // defect it exists to catch was invisible to every fixture that used one actor, because the
+    // actor was always an owner or an admin. `bots.view` is the WIDEST permission in the catalog —
+    // ADR-056 extends it to knowledge_manager and analyst — and an ANALYST holds it and NOTHING
+    // ELSE, so the narrowest role in the product was reading every bot's full system prompt off
+    // `GET …/bots?per_page=100`. A single-role fixture cannot fail this test.
+    $t = tenantPair();
+
+    Bot::query()->withoutGlobalScopes()->whereKey($t->botA->id)->update([
+        'system_instruction' => BOT_SYSTEM_INSTRUCTION_PROBE,
+        'answer_style_instruction' => BOT_ANSWER_STYLE_PROBE,
+    ]);
+
+    $actor = User::factory()->recycle($t->a)->orgRole($role)
+        ->create(['email' => SpaSession::uniqueEmail('bot-instruction-'.$role->value)]);
+
+    SpaSession::establish(currentTest(), $actor);
+
+    $show = currentTest()->getJson(
+        "/api/v1/organizations/{$t->a->id}/bots/{$t->botA->id}",
+        spaHeaders(),
+    );
+
+    $index = currentTest()->getJson("/api/v1/organizations/{$t->a->id}/bots", spaHeaders());
+
+    // BOTH READS SUCCEED FOR EVERY ROLE. The projection narrows a FIELD, not the endpoint: all four
+    // roles hold `bots.view` and a 403 here would be a different — and wrong — fix for the same
+    // finding. Without this line every absence assertion below also passes when the read broke.
+    $show->assertOk()->assertJsonPath('data.id', $t->botA->id);
+    $index->assertOk()->assertJsonCount(1, 'data.bots')
+        ->assertJsonPath('data.bots.0.id', $t->botA->id);
+
+    $expectedSystem = $visible ? BOT_SYSTEM_INSTRUCTION_PROBE : null;
+    $expectedStyle = $visible ? BOT_ANSWER_STYLE_PROBE : null;
+
+    $show->assertJsonPath('data.system_instruction', $expectedSystem)
+        ->assertJsonPath('data.answer_style_instruction', $expectedStyle);
+
+    // AND THE LIST, WHICH IS THE ENDPOINT THAT MADE THE DISCLOSURE CHEAP. `BotCollectionResource`
+    // maps the item resource per row, so a projection wired only into `show` would look fixed and
+    // leak a hundred prompts per request.
+    $index->assertJsonPath('data.bots.0.system_instruction', $expectedSystem)
+        ->assertJsonPath('data.bots.0.answer_style_instruction', $expectedStyle);
+
+    // THE KEYS ARE PRESENT EITHER WAY, asserted separately because `assertJsonPath(..., null)` is
+    // satisfied by an ABSENT key just as well as by a null one — `data_get()` returns null for
+    // both. Dropping a key would change the response SHAPE by role, which is exactly what
+    // `packages/contracts/src/resources/bots.ts` cannot absorb; a null costs no contract change
+    // because both fields are already typed nullable there.
+    /** @var array<string, mixed> $detail */
+    $detail = (array) $show->json('data');
+    /** @var array<string, mixed> $row */
+    $row = (array) $index->json('data.bots.0');
+
+    foreach (['system_instruction', 'answer_style_instruction'] as $field) {
+        expect(array_key_exists($field, $detail))->toBeTrue("`{$field}` is missing from the detail body");
+        expect(array_key_exists($field, $row))->toBeTrue("`{$field}` is missing from the list row");
+    }
+
+    if ($visible) {
+        return;
+    }
+
+    // AND THE STRINGS ARE ABSENT FROM THE RAW BODIES, not merely null at the documented path. A
+    // projection that nulled the field and echoed the same text somewhere else — a `meta` block, a
+    // future `_debug` key — would satisfy every assertion above.
+    foreach (['detail' => $show, 'list' => $index] as $label => $response) {
+        $body = (string) $response->getContent();
+
+        expect(str_contains($body, BOT_SYSTEM_INSTRUCTION_PROBE))
+            ->toBeFalse("the system instruction reached a {$role->value} on the {$label} response");
+        expect(str_contains($body, BOT_ANSWER_STYLE_PROBE))
+            ->toBeFalse("the answer-style instruction reached a {$role->value} on the {$label} response");
+    }
+})->with(function (): array {
+    // EVERY ROLE, WITH ITS EXPECTED VERDICT CARRIED ON THE ROW rather than split into two datasets,
+    // so a role that vanished from the catalog fails tests/Unit/RolePermissionMatrixTest.php's
+    // totality check instead of quietly shrinking this one. The two `true` rows are the positive
+    // control for the two `false` rows: without them, a resource that nulled the fields for
+    // EVERYBODY would pass.
+    $visible = [OrgRole::Owner, OrgRole::Admin];
+
+    $rows = [];
+
+    foreach (OrgRole::cases() as $role) {
+        $rows[$role->value] = [$role, in_array($role, $visible, true)];
+    }
+
+    return $rows;
+});
+
+it('still returns the stored instruction to the caller who just wrote it', function (): void {
+    // THE WRITE PATHS PASS `withInstructions: true` AS A LITERAL, on the ground that
+    // `Gate::authorize('createBot'|'update', …)` has already proved `bots.manage` one line above.
+    // That reasoning is sound and invisible, so it is asserted: an echo that came back nulled would
+    // make the console's edit form show an empty prompt immediately after a successful save.
+    $t = tenantPair();
+
+    SpaSession::establish(currentTest(), $t->actorA);
+
+    currentTest()->postJson(
+        "/api/v1/organizations/{$t->a->id}/bots",
+        [
+            'name' => 'Instruction echo',
+            'slug' => 'instruction-echo',
+            'system_instruction' => BOT_SYSTEM_INSTRUCTION_PROBE,
+        ],
+        spaHeaders(),
+    )
+        ->assertStatus(201)
+        ->assertJsonPath('data.system_instruction', BOT_SYSTEM_INSTRUCTION_PROBE);
+
+    currentTest()->patchJson(
+        "/api/v1/organizations/{$t->a->id}/bots/{$t->botA->id}",
+        ['answer_style_instruction' => BOT_ANSWER_STYLE_PROBE],
+        spaHeaders(),
+    )
+        ->assertOk()
+        ->assertJsonPath('data.answer_style_instruction', BOT_ANSWER_STYLE_PROBE);
+});
+
 it('denies an owner of ANOTHER organization on every bot route', function (string $action): void {
     $t = tenantPair();
 

@@ -289,6 +289,32 @@ final readonly class BotService
      * removes with it, all of which are wholly owned by it: an origin allow-list, a set of starter
      * questions and a fallback chain are meaningless without the bot they belong to.
      *
+     * ── WHAT THIS DELETE DOES NOT REACH YET, AND MUST, BEFORE THOSE THINGS EXIST ──────────────
+     *
+     * Everything below is named NOW, while nothing is orphaned, because each item becomes a silent
+     * leftover the moment its producer ships and none of them raises when it is missed. Nothing
+     * here is a live defect today: a bot owns no vectors until Phase C, holds no answer or session
+     * state until the runtime surface exists, and ULIDs are never reused — so a stale payload term
+     * or a stranded counter is unaddressable rather than dangerous. That is exactly the window in
+     * which to widen the list, because after Phase C the same omission is a deleted bot whose
+     * corpus is still filtered on and whose quota is still counted.
+     *
+     * TODO(phase-c): the QDRANT PAYLOAD. `bot_ids` is one of the four mandatory filter terms
+     * (kb-tenancy-isolation), it is a LIST on each point rather than a row of its own, and a
+     * deleted bot's id has to be removed from the points that name it — a delete-by-filter on
+     * `bot_ids` would destroy chunks that other bots still answer from. Never by text match, and
+     * always VERIFIED afterwards (kb-deletion-and-verification): a filtered count that comes back
+     * non-zero is the only evidence that any of this happened, and there is no verification step on
+     * this path at all today.
+     *
+     * TODO(phase-c/d): the VALKEY FAMILIES, all of which key on `{org_id}:{bot_id}` and therefore
+     * strand on exactly this operation — `ans:{org}:{bot}:…` (answer cache) and its `ansidx:`
+     * index, `sess:{org}:{bot}:…` (chat sessions, which must be invalidated rather than left to
+     * expire, or a live widget keeps talking to a bot that no longer exists), and
+     * `rl:{org}:{bot}:…` (the per-bot rate-limit counters). Purge by FAMILY PREFIX from the
+     * catalog, never by `SCAN MATCH` — SCAN can miss a key written mid-iteration, which is
+     * precisely the read-repopulate case.
+     *
      * TODO(phase-e): `conversations` will reference `bots`, and at that point this path has a
      * decision to make that it does not have today — a hard delete would either orphan or cascade
      * an organization's transcript history, and neither is acceptable silently. `BotStatus::Archived`
@@ -297,6 +323,12 @@ final readonly class BotService
      * conversations and archiving becomes the only route. It is named here rather than left to be
      * discovered, because the wrong fix — adding `ON DELETE CASCADE` to the conversation key — is
      * the one that makes the data loss invisible.
+     *
+     * The shape of the answer is two-phase and is already doctrine: the relational delete is
+     * immediate and the derived stores are purged by a job that PROVES the removal. It is
+     * `deletion-engineer`'s seam and not this file's to invent — what this file owes is the
+     * enumeration above, so the job is written against a complete list rather than against
+     * whatever the author remembered.
      *
      * DELETE IS NOT IDEMPOTENT HERE, ON PURPOSE. An audit row exists for the first delete, and a
      * 200 for the second would claim this actor performed a deletion the trail does not record.
@@ -492,6 +524,14 @@ final readonly class BotService
      * published bot with no assigned source answers nothing and refuses every question, which is
      * indistinguishable from a broken retrieval pipeline from the console.
      *
+     * `access_mode` IS ALSO NOT GUARDED, and that too is deliberate — but it is the one omission a
+     * later reader is most likely to mistake for a check that exists. `published` + `public` is
+     * exactly what makes a bot answerable ANONYMOUSLY, and this guard never looks at it: publishing
+     * a public bot before its origin allow-list has any rows is a legitimate intermediate state,
+     * and hosted chat serves it correctly. The consequence lands on the runtime surface instead,
+     * and `BotDomainStatus::permitsEmbedding()` carries it: an EMPTY `bot_domains` list must deny
+     * every origin rather than read as "unrestricted".
+     *
      * `testing` is NOT guarded, and that is a decision rather than an oversight: it is reachable
      * only from the admin playground by a member of the owning organization, who is the person
      * configuring the bot and is the right audience for a data-plane resolution error. The guard
@@ -571,6 +611,19 @@ final readonly class BotService
                 // `subject_id` then resolves to nothing — so `name` and `slug` are load-bearing
                 // here rather than decorative. Both are tenant-controlled free text, bounded by
                 // MAX_VALUE_LENGTH and passing the shape backstop like any other echoed string.
+                //
+                // AND BECAUSE THEY ARE LOAD-BEARING, ONE DEGRADATION IS WORTH NAMING: a LEGAL slug
+                // can match the vendor-key pattern the log redactor and the audit sanitizer both
+                // carry — `sk-` followed by twelve characters is `sk-abcdefghijkl`, which is a
+                // valid slug — so such a value is FINGERPRINTED rather than echoed. On a
+                // `bot.deleted` row that can reduce the bot's only surviving description to
+                // `name_fingerprint` / `slug_fingerprint` and a set of ids — and a whole-value
+                // match leaves no `_redacted` sibling either, because the safe rendering would be
+                // the bare marker. This is tenant self-harm (the operator chose the
+                // slug), the degradation is the designed one (a fingerprint still answers "was it
+                // THIS bot", which is the question an investigation asks), and the alternative —
+                // exempting this field from the shape backstop — is how the backstop stops being
+                // one. Named, not fixed.
                 'name' => $bot->name,
                 'slug' => $bot->slug,
 

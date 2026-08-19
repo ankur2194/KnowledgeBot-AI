@@ -6100,3 +6100,40 @@ of the one this repo has been careful about, and it is no more true.
 
 The fix is to say what §6.2 and §6.3 say and to stop citing §6.4 for `manage`. ADR-056's Decision
 paragraph already carries the corrected wording and a pointer here.
+
+## The security read of the bots surface — L1–L6, 2026-08-19
+
+A read-only audit of the two commits that landed the bots schema and its endpoints. Verdict was
+**needs-changes**: two Should-fix, no Blocking. Recorded under **L** because `S1`–`S17` above are the
+second scaffolding audit round and mean something else entirely — an earlier draft of ADR-056's
+amendment cited "finding S2" and landed on the evidence-threshold-scale finding, which is the
+pointer-goes-somewhere-false failure ADR-036 exists to prevent.
+
+What the read did **not** find is worth stating, because an audit that reports only its hits reads as
+a list of defects rather than as coverage: no dropped tenant predicate, no unscoped binding, no role
+mapped to the wrong permission, and no credential or prompt reaching a response, an audit row or a
+log. The composite-key claim was checked against the **live schema** (`psql \d bots`) rather than the
+migration source, and the grouped-OR filter against **dumped SQL** — the tenant predicate is `AND`ed
+outside the disjunction, which is the spelling that does not drop it off the second arm.
+
+| # | Finding | State |
+| --- | --- | --- |
+| **L1** | `BotResource` published `system_instruction` and `answer_style_instruction` unconditionally, so an **Analyst** — a role holding `bots.view` and no other permission in the catalog — could read every bot's operator-authored system prompt. Live, not latent. The codebase already contradicted itself: `AuditLogger` refuses that same field from `details` because it is "the exact string a prompt-injection review is about", while the API handed it over unredacted. ADR-056's justification named "the name, the model and the answer mode" and never mentioned it | **Closed** by the management-only projection amended into ADR-056. Verified by mutation: reverting the field to unconditional turns the knowledge_manager and analyst rows red |
+| **L2** | Deleting a bot destroys its widget origin allow-list with no record of what it permitted — contradicting the reason `bot_domains` gives for its own `ON DELETE RESTRICT`, which is that a security review may later need to reconstruct it. Latent: no route creates a domain yet | **Open**, owned by the step that lands the bot-domains endpoints. It goes live exactly when it is easiest to forget, because the delete path is already written and green |
+| **L3** | The bot delete path's TODO named conversations but not the Qdrant `bot_ids` payload term, the four Valkey key families, or any verification step | **Closed** as an enumeration. The Qdrant step is a payload-term **removal**, not a delete-by-filter — `bot_ids` is a list on each point, so filtering on it would destroy chunks other bots still answer from |
+| **L4** | A legal slug can match the log redactor's vendor-key shape (`sk-` + 12 chars), so a `bot.deleted` row can degrade to two bare fingerprints with no `_redacted` sibling | **Documented, not fixed.** Tenant self-harm along the designed degradation path |
+| **L5** | FormRequest validation runs before `Gate::authorize`, so a `bots.view`-only member gets 422 rather than 403 on a malformed body | **Accepted.** Ordering hygiene, not a leak: no query runs and the rule sets deliberately carry no `unique:`/`exists:` |
+| **L6** | No per-organization bot quota; the admin throttle is the only bound, and every bot row is a retrieval scope | **Open**, owned by the quotas step |
+
+**Carried forward to whoever builds the public runtime surface.** The publish guard deliberately says
+nothing about `access_mode`, and `published` + `public` is what makes a bot answerable anonymously.
+When that surface lands, an **empty** `bot_domains` allow-list must deny every origin — expressed as
+"some active row matches this exact origin", which is false for the empty set, and never as "no row
+forbids it", which is true for it. `BotDomainStatus::permitsEmbedding()` now carries that rule and
+still has no consumer.
+
+**One thing the read judged and did not flag**, recorded so the judgement is reviewable rather than
+invisible: `provider_connection_id` and `provider_model_id` are visible to an Analyst, who holds no
+`providers.view` and therefore cannot resolve either ULID to a vendor, a label or a `last_four`
+through any endpoint. What they learn is configuration topology — which bots share a connection. It
+is the only remaining thing on the row that ADR-056's justification does not name.

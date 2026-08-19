@@ -96,6 +96,32 @@ use Illuminate\Validation\ValidationException;
  *    than a key that authenticates it. A confirmation belongs in the console, not in a second
  *    password prompt.
  *
+ * ── THE INSTRUCTION PROJECTION IS DECIDED HERE, ONCE PER REQUEST ──────────────────────────────
+ *
+ * `BotResource` renders `system_instruction` and `answer_style_instruction` only to a caller
+ * holding `bots.manage`, and nulls them for everyone else — `BotResource`'s own docblock carries
+ * the reasoning, and the short form is that `bots.view` is held by all four roles on a
+ * justification (ADR-056) that never mentioned the operator-authored prompt. The flag is decided
+ * in this file rather than inside the resource for one mechanical reason: `OrgScopedPolicy::
+ * permit()` resolves membership per check and is deliberately never memoized, so a `can()` inside
+ * `toArray()` is one `organization_users` read PER ROW on a hundred-row page.
+ *
+ * Each action asks the cheapest question that is still the RIGHT one:
+ *
+ *   show      `Gate::allows('update', $bot)` — the ROW, so membership resolves from the record's
+ *             organization, the same object the authorization above it used. One row, one read.
+ *   index     `Gate::allows('manageBots', $organization)` — the PARENT, once for the whole page.
+ *             Every row `BotService::list()` returns is scoped to this organization, so a per-row
+ *             answer could not differ from it.
+ *   store,    the literal `true`, and it is not an assumption: `Gate::authorize('createBot', …)`
+ *   update    and `Gate::authorize('update', $bot)` on the line above each of them carry
+ *             `bots.manage` and have already passed. A second Gate call there could only agree —
+ *             at the cost of a second membership read — or disagree, which would mean the
+ *             authorization that let the write happen was wrong.
+ *
+ * `Gate::allows()` and never `Gate::authorize()`: this question decides a field's value, and a 403
+ * out of it would refuse a read the caller is entitled to.
+ *
  * ── NO ACTION HERE CAN REACH A CREDENTIAL ─────────────────────────────────────────────────────
  *
  * This file imports no vault, `BotService` imports no vault, and `BotResource` renders no field of
@@ -138,7 +164,9 @@ final class BotController extends Controller
             .'an operator asking "where did that bot go" has to be able to find it. `page` is '
             .'1-based; `per_page`, `sort`, `dir` and `filter` are echoed AS APPLIED, which may '
             .'differ from what was asked for because the platform clamps the page size and falls '
-            .'back to the endpoint default sort.',
+            .'back to the endpoint default sort. `system_instruction` and '
+            .'`answer_style_instruction` are `null` on every row unless the caller holds '
+            .'`bots.manage`; both keys are present either way.',
         errors: [401, 403, 404, 422, 429, 500, 503],
     )]
     public function index(
@@ -153,8 +181,18 @@ final class BotController extends Controller
 
         $query = $request->toQuery();
 
+        // THE INSTRUCTION PROJECTION, RESOLVED ONCE FOR THE WHOLE PAGE — see the class docblock.
+        // `manageBots` authorizes nothing; it answers whether this caller may be shown the two
+        // prompt fields, and every row below belongs to this organization so a per-row check could
+        // only produce the same answer a hundred times over a hundred membership reads.
+        $withInstructions = Gate::allows('manageBots', $organization);
+
         // No 409 — see the class docblock, check 5.
-        return new BotCollectionResource($bots->list($organization, $query), $query);
+        return new BotCollectionResource(
+            $bots->list($organization, $query),
+            $query,
+            $withInstructions,
+        );
     }
 
     /**
@@ -171,10 +209,13 @@ final class BotController extends Controller
     #[ResponseShape(
         status: 200,
         properties: ['data' => BotResource::class],
-        description: 'One bot, wrapped in `data`, including its system instruction — this is an '
-            .'authenticated-only shape and the public chat surfaces publish their own, much '
-            .'smaller, resource. A foreign or unknown `{bot}` 404s at binding time, before this '
-            .'action runs, and the body is byte-identical to the 404 for a path with no route.',
+        description: 'One bot, wrapped in `data`. `system_instruction` and '
+            .'`answer_style_instruction` carry their stored values only for a caller holding '
+            .'`bots.manage` and are `null` for every other caller; both keys are always present, so '
+            .'the response shape does not vary by role. This is an authenticated-only shape either '
+            .'way — the public chat surfaces publish their own, much smaller, resource. A foreign '
+            .'or unknown `{bot}` 404s at binding time, before this action runs, and the body is '
+            .'byte-identical to the 404 for a path with no route.',
         errors: [401, 403, 404, 429, 500, 503],
     )]
     public function show(Organization $organization, Bot $bot): BotResource
@@ -183,7 +224,10 @@ final class BotController extends Controller
         // organization rather than of whichever one the session happens to name.
         Gate::authorize('view', $bot);
 
-        return new BotResource($bot);
+        // THE INSTRUCTION PROJECTION, asked of the ROW so membership resolves from the record's
+        // organization — the same object the authorization above it used. One row, so one
+        // membership read, which is what the list endpoint cannot afford per item.
+        return new BotResource($bot, Gate::allows('update', $bot));
     }
 
     /**
@@ -236,7 +280,10 @@ final class BotController extends Controller
         $bot = $bots->create($organization, $request->toData(), $this->actorId(), $request);
 
         return response()->json([
-            'data' => (new BotResource($bot))->toArray($request),
+            // `withInstructions: true` WITHOUT A SECOND GATE CALL: `createBot` above carries
+            // `bots.manage` and has already passed, so this caller provably holds it — and they
+            // wrote the instruction that is being echoed back. See the class docblock.
+            'data' => (new BotResource($bot, withInstructions: true))->toArray($request),
         ], 201);
     }
 
@@ -308,8 +355,11 @@ final class BotController extends Controller
             ]);
         }
 
+        // `withInstructions: true` WITHOUT A SECOND GATE CALL: `Gate::authorize('update', $bot)`
+        // above carries `bots.manage` and has already passed. See the class docblock.
         return new BotResource(
             $bots->update($organization, $bot, $edit, $this->actorId(), $request),
+            withInstructions: true,
         );
     }
 

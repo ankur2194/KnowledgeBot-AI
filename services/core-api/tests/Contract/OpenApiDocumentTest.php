@@ -510,29 +510,52 @@ it('publishes exactly the keys BotResource emits, unconfigured and fully configu
             ]),
     ];
 
-    foreach ($fixtures as $label => $bot) {
-        // THROUGH json_encode AND BACK, deliberately, and this is the only assertion in this file
-        // that does it. `toArray()` returns `theme` as a stdClass so the wire carries `{}` rather
-        // than `[]` for an unthemed bot, and schemaViolations() types a stdClass as its class name
-        // — so validating the PHP array would report a type violation for a body that is correct.
-        // Round-tripping validates the shape the client actually receives, which is the shape the
-        // document describes.
-        /** @var array<string, mixed> $emitted */
-        $emitted = (array) json_decode(
-            (string) json_encode((new BotResource($bot))->toArray(Request::create('/')), JSON_THROW_ON_ERROR),
-            true,
-            flags: JSON_THROW_ON_ERROR,
-        );
+    // BOTH SIDES OF THE INSTRUCTION PROJECTION, AGAINST ONE COMPONENT. `BotResource` nulls
+    // `system_instruction` and `answer_style_instruction` for a caller without `bots.manage`, and
+    // there is exactly ONE published component for both renderings — which is only sound because
+    // both fields are declared `["string", "null"]`. Validating only the management rendering would
+    // let the projection publish a value the schema forbids and nothing would say so until a
+    // generated client hit it.
+    foreach ([true, false] as $withInstructions) {
+        foreach ($fixtures as $label => $bot) {
+            // THROUGH json_encode AND BACK, deliberately, and this is the only assertion in this
+            // file that does it. `toArray()` returns `theme` as a stdClass so the wire carries `{}`
+            // rather than `[]` for an unthemed bot, and schemaViolations() types a stdClass as its
+            // class name — so validating the PHP array would report a type violation for a body
+            // that is correct. Round-tripping validates the shape the client actually receives,
+            // which is the shape the document describes.
+            /** @var array<string, mixed> $emitted */
+            $emitted = (array) json_decode(
+                (string) json_encode(
+                    (new BotResource($bot, $withInstructions))->toArray(Request::create('/')),
+                    JSON_THROW_ON_ERROR,
+                ),
+                true,
+                flags: JSON_THROW_ON_ERROR,
+            );
 
-        expect(schemaViolations($emitted, $components['BotResource'], $components))
-            ->toBe([], "the published schema disagrees with toArray() for: {$label}");
+            // THE KEYS ARE PRESENT IN BOTH RENDERINGS. `additionalProperties: false` plus the
+            // component's `required` list already forces this through schemaViolations(), but it is
+            // asserted directly too: a projection that DROPPED a key would make the response shape
+            // vary by caller, which is the one thing a generated client cannot absorb.
+            expect($emitted)->toHaveKeys(['system_instruction', 'answer_style_instruction']);
+
+            expect(schemaViolations($emitted, $components['BotResource'], $components))->toBe(
+                [],
+                sprintf(
+                    'the published schema disagrees with toArray() for: %s (withInstructions: %s)',
+                    $label,
+                    $withInstructions ? 'true' : 'false',
+                ),
+            );
+        }
     }
 
     // The null branch of the timestamps, which the factory cannot produce.
     /** @var array<string, mixed> $emitted */
     $emitted = (array) json_decode(
         (string) json_encode(
-            (new BotResource($fixtures['unconfigured draft']))->toArray(Request::create('/')),
+            (new BotResource($fixtures['unconfigured draft'], true))->toArray(Request::create('/')),
             JSON_THROW_ON_ERROR,
         ),
         true,
@@ -563,7 +586,7 @@ it('publishes the paginated envelope with `meta` beside the collection inside `d
         /** @var array<string, mixed> $emitted */
         $emitted = (array) json_decode(
             (string) json_encode(
-                (new BotCollectionResource($paginator, $query))->toArray(Request::create('/')),
+                (new BotCollectionResource($paginator, $query, true))->toArray(Request::create('/')),
                 JSON_THROW_ON_ERROR,
             ),
             true,

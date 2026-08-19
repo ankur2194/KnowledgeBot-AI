@@ -17,12 +17,49 @@ use Illuminate\Http\Resources\Json\JsonResource;
  *
  * This resource is reached only from `routes/api_admin.php`, behind `auth:sanctum`, `org.member`,
  * `verified` and a `bots.view` policy, and it renders the bot's whole configuration including its
- * SYSTEM INSTRUCTION. That is correct here — the operator wrote it and the edit form has to load it
- * — and it is exactly what the hosted-chat bootstrap, the widget bootstrap and the theme stylesheet
- * must never carry. Those surfaces are Phase B's runtime controllers and they get their OWN
- * resource with their own field list; reusing this one would put a bot's prompt on an
- * unauthenticated endpoint, which is the prompt-disclosure half of `kb-security-baseline`'s layered
- * injection defence.
+ * SYSTEM INSTRUCTION — to a caller holding `bots.manage`, and only then (next section). That is
+ * correct here — the operator wrote it and the edit form has to load it — and it is exactly what
+ * the hosted-chat bootstrap, the widget bootstrap and the theme stylesheet must never carry. Those
+ * surfaces are Phase B's runtime controllers and they get their OWN resource with their own field
+ * list; reusing this one would put a bot's prompt on an unauthenticated endpoint, which is the
+ * prompt-disclosure half of `kb-security-baseline`'s layered injection defence.
+ *
+ * ── `$withInstructions`: THE TWO INSTRUCTION FIELDS ARE A MANAGEMENT-ONLY PROJECTION ──────────
+ *
+ * `system_instruction` AND `answer_style_instruction` ARE THE REASON THIS FLAG EXISTS, and this
+ * paragraph is what a future reader deleting it has to answer first.
+ *
+ * `bots.view` is the widest permission in the catalog — all four roles hold it (ADR-056) — and the
+ * grant's own justification never mentions these two fields. `Permission::BotsView` defends it with
+ * "a bot's configuration carries no credential … and no end-user content", which is true and silent
+ * about the operator-authored PROMPT; `OrgRole::grants()` and `RolePermissionMatrixTest` justify it
+ * with "the assignment screen is a list of bots" and "the name, the model and the answer mode are
+ * what make a transcript readable". Rendered unconditionally, this resource handed the full system
+ * prompt of every bot in the organization to an ANALYST — a reporting-only role holding `bots.view`
+ * and nothing else in the entire catalog — through one `GET …/bots?per_page=100`.
+ *
+ * THE CODEBASE ALREADY CONTRADICTED ITSELF ABOUT EXACTLY THIS STRING, and the asymmetry is what
+ * settles it. `AuditLogger`'s bot allow-list REFUSES `system_instruction` from `details` on the
+ * stated ground that it is "the exact string a prompt-injection review is about", in a table that
+ * is append-only, long-lived and exportable — read by the organization's own administrators. It is
+ * not defensible to withhold a string from the audit table on that reasoning and hand the same
+ * string, unredacted, to the narrowest role in the catalog over the API.
+ *
+ * A NULL AND NOT A MISSING KEY. Both keys stay present in every response: dropping one changes the
+ * response SHAPE by caller, which is the one thing a generated client cannot absorb, and
+ * `packages/contracts/src/resources/bots.ts` already types both as nullable — so a null costs no
+ * contract change, while an absent key would. It is also the honest rendering, because null is
+ * already a real value here: the majority of bots have no instruction at all.
+ *
+ * THE FLAG IS DECIDED BY THE CALLER, NOT BY THIS CLASS. `toArray()` must not ask the Gate:
+ * `OrgScopedPolicy::permit()` resolves membership per check and is deliberately not memoized across
+ * organizations, so a `can()` inside this method is one `organization_users` read PER ROW on a
+ * hundred-row page, for an answer that cannot differ between rows of one organization.
+ * `BotController` computes it once and passes it in — through `BotCollectionResource` for the list.
+ *
+ * IT IS A REQUIRED ARGUMENT AND MUST STAY ONE. A default would let a new call site inherit a
+ * decision it never made; making it explicit is what forces the sixth caller to answer the question
+ * this paragraph is about.
  *
  * ── NOTHING HERE CAN REACH A CREDENTIAL ───────────────────────────────────────────────────────
  *
@@ -51,7 +88,12 @@ use Illuminate\Http\Resources\Json\JsonResource;
  */
 final class BotResource extends JsonResource implements ProvidesOpenApiSchema
 {
-    public function __construct(Bot $resource)
+    /**
+     * @param  bool  $withInstructions  whether the caller holds `bots.manage` on THIS bot's
+     *                                  organization — see the class docblock. Required, never
+     *                                  defaulted.
+     */
+    public function __construct(Bot $resource, private readonly bool $withInstructions)
     {
         parent::__construct($resource);
     }
@@ -72,8 +114,13 @@ final class BotResource extends JsonResource implements ProvidesOpenApiSchema
 
             'welcome_message' => $bot->welcome_message,
             'placeholder_text' => $bot->placeholder_text,
-            'system_instruction' => $bot->system_instruction,
-            'answer_style_instruction' => $bot->answer_style_instruction,
+            // MANAGEMENT-ONLY, AND NULLED RATHER THAN DROPPED. See the class docblock: `bots.view`
+            // is held by all four roles and its justification never covered the operator-authored
+            // prompt, and `AuditLogger` already refuses the same string from `details`.
+            'system_instruction' => $this->withInstructions ? $bot->system_instruction : null,
+            'answer_style_instruction' => $this->withInstructions
+                ? $bot->answer_style_instruction
+                : null,
 
             'status' => $bot->status->value,
             'access_mode' => $bot->access_mode->value,
@@ -137,10 +184,13 @@ final class BotResource extends JsonResource implements ProvidesOpenApiSchema
                 'additionalProperties' => false,
                 'description' => 'One bot as the ADMIN surface sees it: identity, voice, lifecycle, '
                     .'model selection, retrieval configuration, appearance, limits and consent. It '
-                    .'carries the bot\'s SYSTEM INSTRUCTION and is therefore an authenticated-only '
-                    .'shape — the hosted-chat, widget and stylesheet surfaces publish their own, '
-                    .'much smaller, resource. Nothing of the parent provider connection appears '
-                    .'here beyond its ULID: no vendor, no label, and no masked credential.',
+                    .'can carry the bot\'s SYSTEM INSTRUCTION and is therefore an '
+                    .'authenticated-only shape — the hosted-chat, widget and stylesheet surfaces '
+                    .'publish their own, much smaller, resource. The two instruction fields are '
+                    .'further narrowed to callers holding `bots.manage` and are `null` for the '
+                    .'rest; every key is present in every response, so the shape does not vary by '
+                    .'caller. Nothing of the parent provider connection appears here beyond its '
+                    .'ULID: no vendor, no label, and no masked credential.',
                 'required' => [
                     'id', 'public_bot_id', 'name', 'slug', 'description',
                     'welcome_message', 'placeholder_text', 'system_instruction',
@@ -197,15 +247,22 @@ final class BotResource extends JsonResource implements ProvidesOpenApiSchema
                     ],
                     'system_instruction' => [
                         'type' => ['string', 'null'],
-                        'description' => 'The bot\'s own system prompt. AUTHENTICATED SURFACES ONLY: '
-                            .'it never appears on the hosted-chat, widget or stylesheet endpoints, '
-                            .'and retrieved source text can never alter it — that boundary is the '
-                            .'data plane\'s and is not expressible in this document.',
+                        'description' => 'The bot\'s own system prompt. AUTHENTICATED SURFACES '
+                            .'ONLY, and within them MANAGEMENT ONLY: it is rendered to a caller '
+                            .'holding `bots.manage` and is `null` for every other caller, so a '
+                            .'client cannot read a null as "this bot has no instruction" — the '
+                            .'majority of bots genuinely have none, and a reporting-only role sees '
+                            .'the same null either way. It never appears on the hosted-chat, widget '
+                            .'or stylesheet endpoints at all, and retrieved source text can never '
+                            .'alter it — that boundary is the data plane\'s and is not expressible '
+                            .'in this document.',
                     ],
                     'answer_style_instruction' => [
                         'type' => ['string', 'null'],
                         'description' => 'Tone and formatting guidance, kept apart from the system '
-                            .'instruction so a voice change is not a change to the grounding rules.',
+                            .'instruction so a voice change is not a change to the grounding rules. '
+                            .'Carries the same management-only projection as `system_instruction` '
+                            .'and for the same reason: it is operator-authored prompt text.',
                     ],
                     'status' => [
                         'type' => 'string',
