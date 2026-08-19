@@ -81,8 +81,11 @@ import { BotPublishingPanel } from './bot-publishing-panel';
  *     BOT_MODEL_FIELDS       provider_connection_id, provider_model_id, answer_mode,
  *                            allow_general_answers, dense_top_k, sparse_top_k, rerank_candidates,
  *                            rerank_retain, evidence_threshold, evidence_threshold_scale
- *     BOT_PUBLISHING_FIELDS  status, access_mode, rate_limit_per_minute, rate_limit_per_day,
+ *     BOT_PUBLISHING_FIELDS  access_mode, rate_limit_per_minute, rate_limit_per_day,
  *                            retention_days, collect_end_user_data, consent_text
+ *
+ * `status` is deliberately in NO partition: it is not a PATCH field. A transition is
+ * `PUT /bots/{bot}/status` via `updateBotStatus`, and the bot PATCH rules the key `prohibited`.
  *
  * All three are exported from `./api`. They are DISJOINT and their union is exactly
  * `botSettingsSchema`'s key set, asserted by `tests/unit/bot-editor.test.ts`. Render a field outside

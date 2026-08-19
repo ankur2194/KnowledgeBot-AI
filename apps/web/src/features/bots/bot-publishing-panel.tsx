@@ -33,20 +33,21 @@ import { useBotEditor } from './bot-editor-context';
  * in `./api` is the one mapping — do not write a second one here.
  *
  * ── READ THIS BEFORE BUILDING THE `status` CONTROL: THE SERVER IS MOVING IT (2026-08-19) ────────
- * The control plane is landing `PUT /bots/{bot}/status` as its own endpoint and making `status`
- * `prohibited` on the PATCH — its refusal message reads "A lifecycle transition is PUT
- * /bots/{bot}/status, not a field beside a rename." That work was UNCOMMITTED in
- * `services/core-api/` when this shell was written, so nothing here has moved yet: the committed
- * `packages/contracts/rules/UpdateBotRequest.json` still rules `status`, `botSettingsSchema` still
- * declares it, and `BOT_PUBLISHING_FIELDS` therefore still carries it — which is what keeps
- * `tests/unit/bot-editor.test.ts`'s partition assertions honest against the contract that exists.
+ * `status` IS NOT A FIELD OF THIS TAB'S FORM, and that is the one thing to get right here.
+ * A lifecycle transition is `PUT /bots/{bot}/status`; the bot PATCH rules `status` as
+ * `prohibited`, whose refusal message says so. `prohibited` rather than an absent rule is
+ * deliberate: an absent rule makes `validated()` discard the key, so a client would publish a bot,
+ * receive a 200, and find it still in `draft`.
  *
- * THE CONSEQUENCE FOR WHOEVER BUILDS THIS TAB: check the manifest first. If `status` reads
- * `["prohibited"]`, `useBotSave` is the WRONG path for it — the control needs its own mutation
- * against the new endpoint, `status` comes OUT of `BOT_PUBLISHING_FIELDS` (a change to `./api.ts`,
- * which means the shell's owner, not this file's), and the partition test fails by name until it
- * does. That failure is the mechanism working, not a broken test. The other six fields are
- * unaffected.
+ * This block used to PREDICT that change while it was uncommitted, and told its reader the
+ * partition test "fails by name until it does". It has since landed, so both halves of that
+ * sentence are now false and it has been rewritten rather than left to be read as current.
+ *
+ * THE CONSEQUENCE FOR WHOEVER BUILDS THIS TAB: this tab owns TWO saves. `useBotSave` covers the
+ * six remaining fields; the status control calls `updateBotStatus` with
+ * `botStatusTransitionSchema`, and `botStatusTransitionDefaults(bot)` opens on the bot's CURRENT
+ * status — which the server refuses as a no-op, deliberately, so the control cannot submit
+ * unchanged.
  *
  * Two new child collections arrived in the same effort — `/bots/{bot}/domains` and
  * `/bots/{bot}/starter-questions`. Neither is a `botSettingsSchema` field, so neither belongs in any

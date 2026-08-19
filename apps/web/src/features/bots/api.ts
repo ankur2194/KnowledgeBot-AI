@@ -11,10 +11,12 @@ import {
   type BotFormSource,
   type BotSettingsIn,
   type BotSettingsOut,
+  type BotStatusTransitionOut,
 } from '@kb/contracts/forms';
 import indexBotsRules from '@kb/contracts/rules/IndexBotsRequest.json';
 import storeBotRules from '@kb/contracts/rules/StoreBotRequest.json';
 import updateBotRules from '@kb/contracts/rules/UpdateBotRequest.json';
+import updateBotStatusRules from '@kb/contracts/rules/UpdateBotStatusRequest.json';
 
 import type { StatusKind } from '@/components/status-pill';
 import { organizationPath } from '@/features/providers/api';
@@ -338,6 +340,56 @@ export const updateBot = async (
     credential: await sessionCredential(),
   });
 
+/** `PUT`, not `PATCH`: the body is the whole of the resource this endpoint owns. */
+export const botStatusPath = (orgId: string, botId: string): string =>
+  `${botPath(orgId, botId)}/status`;
+
+/**
+ * `PUT .../bots/{bot}/status` -> 200 `{data: …}` | 403 | 404 | 409 | 422.
+ *
+ * ── A LIFECYCLE MOVE IS NOT A FIELD, AND THE SERVER MADE THAT A RULE RATHER THAN A CONVENTION ───
+ * `UpdateBotRequest` rules `status` as `["prohibited"]`, so sending it on the PATCH is a 422 keyed
+ * `status`. The rule is there rather than the field simply being dropped from `rules()`, and the
+ * difference is the whole reason this function exists: an ABSENT rule makes `validated()` discard
+ * the key in silence, so the console would publish a bot, get a 200, and find it still in draft.
+ *
+ * `status` is therefore OUT of `BOT_PUBLISHING_FIELDS`, out of `botSettingsSchema` and out of
+ * `botFormDefaults`. The Publishing tab calls this instead of `useBotSave`, with its own
+ * `useMutation` — one that never carries a `retry`, exactly as every other mutation in this app.
+ *
+ * ── FOUR REFUSALS, AND ONLY ONE OF THEM IS A VALIDATION ERROR ───────────────────────────────────
+ * `archived` is TERMINAL — an archived bot is read-only, including its status, so there is no
+ * un-archive transition — and the PUBLISH GUARD refuses a move to `published` for a bot with no
+ * provider connection and model, or with `answer_mode: 'rag_first'` and `allow_general_answers`
+ * still false. Both are 409. A NO-OP is a 422: this is a transition rather than a state assertion,
+ * and re-asserting the status a bot already holds would write an audit row describing a change that
+ * did not happen. And 403/404 are the usual `authorization` pair, byte-identical on the wire.
+ *
+ * None of the first three is computable from a cached row, so the control must not pre-judge the
+ * move: render every member of `BOT_STATUSES`, submit, and put the server's answer under the
+ * control (`BOT_STATUS_KNOWN_PATHS`) or in the banner. Greying out the options a client BELIEVES
+ * are unreachable is the publish guard reimplemented in the browser, and it fails by hiding a move
+ * the server would have allowed.
+ *
+ * ── THE 200 BODY IS THE BOT, NOT AN ACKNOWLEDGEMENT ─────────────────────────────────────────────
+ * Same `{data: BotResource}` shape as `updateBot`, with `system_instruction` and
+ * `answer_style_instruction` populated — reaching this endpoint requires `bots.manage`, which is the
+ * permission that projection is gated on. Write it into the detail key and invalidate the list
+ * prefix, exactly as `useBotSave` does: a status change moves rows in a list this screen is not
+ * looking at.
+ */
+export const updateBotStatus = async (
+  orgId: string,
+  botId: string,
+  body: BotStatusTransitionOut,
+): Promise<BotResource> =>
+  browserFetchData<BotResource>({
+    path: botStatusPath(orgId, botId),
+    method: 'PUT',
+    body,
+    credential: await sessionCredential(),
+  });
+
 // ── THE FIELD PARTITION THE EDITOR'S THREE TABS ARE BUILT FROM ──────────────────────────────────
 
 /**
@@ -372,6 +424,24 @@ export type BotSettingsField = keyof BotSettingsIn;
  * `theme` is IDENTITY rather than PUBLISHING: it is the bot's appearance in the same sense its
  * welcome message is, and its three sub-paths (`theme.primary`, `theme.accent`, `theme.radius`) come
  * with it through `botPanelKnownPaths`.
+ *
+ * ── `status` IS IN NO TUPLE, AND ITS ABSENCE IS THE PARTITION WORKING RATHER THAN A HOLE ────────
+ * It used to be the first entry of `BOT_PUBLISHING_FIELDS`. `UpdateBotRequest` now rules it
+ * `["prohibited"]` — a lifecycle move is `PUT .../bots/{bot}/status`, and `updateBotStatus` above is
+ * the call — so it is not a `botSettingsSchema` key, `keyof BotSettingsIn` no longer admits it, and
+ * the `satisfies` on this tuple is what reported that rather than a reviewer. The union below is
+ * still EXACTLY the PATCH's key set; what changed is the key set.
+ *
+ * The Publishing tab therefore owns TWO saves: `useBotSave` for its six fields and its own mutation
+ * over `updateBotStatus` for the transition. They are different requests with different failure
+ * vocabularies — a transition can 409 where a field save cannot — and merging them into one submit
+ * would put a publish attempt behind a button whose label says "Save changes".
+ *
+ * THE TWO CHILD COLLECTIONS (`.../domains`, `.../starter-questions`) are in no tuple either, for a
+ * different reason: they are separate resources with their own endpoints and their own manifests,
+ * not fields of this one. `packages/contracts` mirrors both — schemas behind `@kb/contracts/forms`,
+ * resource types on the root entry — so whichever surface renders them has types and a resolver
+ * without hand-writing either.
  */
 export const BOT_IDENTITY_FIELDS = [
   'name',
@@ -398,7 +468,6 @@ export const BOT_MODEL_FIELDS = [
 ] as const satisfies readonly BotSettingsField[];
 
 export const BOT_PUBLISHING_FIELDS = [
-  'status',
   'access_mode',
   'rate_limit_per_minute',
   'rate_limit_per_day',
@@ -448,9 +517,37 @@ export const botPanelDefaults = (
  * operator clicks again. A caller may SUBTRACT from the derived set; it may never hand-type a
  * replacement for it.
  */
+/**
+ * A path the FormRequest declares only in order to REFUSE it. `UpdateBotRequest.status` is the one
+ * instance: `["prohibited"]`, because a lifecycle move is `PUT .../bots/{bot}/status`.
+ *
+ * SUBTRACTED FROM THE DERIVED SET, and the reason is what `knownPaths` means. It is "the paths this
+ * form RENDERS", and no panel renders a control for a field it may not send — so a 422 keyed
+ * `status` on the PATCH has no control to land on, and `setError` against a name that displays
+ * nowhere is a save where the server rejects, nothing changes on screen, and the operator clicks
+ * again. It belongs in the banner, which is where `applyServerErrors` routes an unknown key.
+ *
+ * It should never arrive at all: the schema cannot express the field and the partition does not name
+ * it, so a `status` 422 on the PATCH means a caller bypassed both. The banner is the honest place
+ * for a failure nobody rendered a control for.
+ *
+ * DERIVED FROM THE MANIFEST, not a hard-coded `'status'`: a second prohibited field added
+ * server-side is subtracted the day it is dumped. The subtraction is local to this module rather
+ * than in `lib/forms/known-paths.ts` because this is the only manifest in the repo carrying the rule
+ * today; the second one is the case for lifting it.
+ */
+const PROHIBITED_UPDATE_BOT_PATHS: ReadonlySet<string> = new Set(
+  // `Object.entries` rather than `rules[path]` in a predicate, for the reason `botPanelDefaults`
+  // gives: indexing an object by a variable is `security/detect-object-injection`'s sink and reports
+  // as a warning nobody can act on.
+  Object.entries((updateBotRules as FormRulesManifest).rules)
+    .filter(([, rules]) => rules.some((rule) => rule.split(':')[0] === 'prohibited'))
+    .map(([path]) => path),
+);
+
 const UPDATE_BOT_PATHS: readonly string[] = knownPathsFromRules(
   updateBotRules as FormRulesManifest,
-);
+).filter((path) => !PROHIBITED_UPDATE_BOT_PATHS.has(path));
 
 const STORE_BOT_PATHS: readonly string[] = knownPathsFromRules(storeBotRules as FormRulesManifest);
 
@@ -491,6 +588,23 @@ export const BOT_CREATE_RENDERED_FIELDS: readonly string[] = ['name', 'slug', 'd
 
 export const BOT_CREATE_KNOWN_PATHS: readonly string[] = STORE_BOT_PATHS.filter((path) =>
   BOT_CREATE_RENDERED_FIELDS.includes(rootSegment(path)),
+);
+
+/**
+ * `UpdateBotStatusRequest`'s vocabulary — the ONE name a transition 422 can be keyed to, and the
+ * argument the Publishing tab's status mutation passes to `applyAuthError`.
+ *
+ * Derived like every other set here rather than typed out as `['status']`, so this stays a read of
+ * the server's own dumped `rules()`. It is a one-element set today and the derivation costs nothing.
+ *
+ * A 422 on this endpoint is the NO-OP case — re-asserting the status a bot already holds, which
+ * would write an audit row describing a change that did not happen — and it lands under the control.
+ * The publish guard's refusals are 409s with no `errors` map at all, so they carry no field key and
+ * reach the banner as a class-mapped sentence plus the `request_id`, which is the only honest place
+ * for a refusal computed against a row the browser cannot see.
+ */
+export const BOT_STATUS_KNOWN_PATHS: readonly string[] = knownPathsFromRules(
+  updateBotStatusRules as FormRulesManifest,
 );
 
 /**

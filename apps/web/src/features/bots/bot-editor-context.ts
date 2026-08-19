@@ -119,8 +119,9 @@ export function useBotEditor(): BotEditorContextValue {
  * ── NOTHING HERE IS OPTIMISTIC ──────────────────────────────────────────────────────────────────
  * `onSuccess` writes the SERVER'S OWN 200 body into the detail key. That is not an optimistic write:
  * it is the row the server derived, including the fields it computed rather than accepted
- * (`retrieval_configuration_version` moves only when a knob's VALUE changes, `updated_at`, and a
- * `status` the publish guard may have refused to move). `form.reset` re-seeds from the same row, so
+ * (`retrieval_configuration_version` moves only when a knob's VALUE changes, and `updated_at`).
+ * It once also said "a `status` the publish guard may have refused to move", which describes a
+ * PATCH that can no longer carry one — a transition is its own endpoint now. `form.reset` re-seeds from the same row, so
  * the panel's dirty flag clears against what was actually stored rather than against what was typed.
  *
  * ── THE INVALIDATION IS THE LIST PREFIX, AND IT DELIBERATELY CATCHES THE DETAIL TOO ─────────────

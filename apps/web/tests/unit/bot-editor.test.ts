@@ -10,10 +10,12 @@ import {
   BOT_IDENTITY_FIELDS,
   BOT_MODEL_FIELDS,
   BOT_PUBLISHING_FIELDS,
+  BOT_STATUS_KNOWN_PATHS,
   botPanelDefaults,
   botPanelKnownPaths,
   botPath,
   botStatusDisplay,
+  botStatusPath,
   botsPath,
   canManageBots,
   type BotSettingsField,
@@ -50,13 +52,39 @@ interface Manifest {
 /** `theme.primary` -> `theme`. The tuples name top-level fields; the manifest keys nested ones. */
 const root = (path: string): string => path.split('.')[0] ?? path;
 
+/**
+ * A path the FormRequest declares ONLY IN ORDER TO REFUSE IT — `prohibited`.
+ *
+ * `UpdateBotRequest.status` is the one instance in this repo: a lifecycle move became
+ * `PUT .../bots/{bot}/status`, and the rule is present rather than the field being deleted from
+ * `rules()` because an ABSENT rule makes `validated()` discard the key in silence — the console
+ * would publish a bot, get a 200, and find it still in draft.
+ *
+ * SUBTRACTED FROM THE MANIFEST SIDE OF EVERY ASSERTION BELOW, and this is a STRENGTHENING rather
+ * than a loophole. The partition is "the fields the three tabs may send", and a prohibited field is
+ * one no tab may send: a tuple naming it would be a control whose every use is a 422. So the union
+ * must equal the manifest's VALIDATED key set, and it stays closed in both directions — a tuple that
+ * re-acquired `status` would be a superset and fail here, exactly as it fails the `satisfies` in
+ * `api.ts` and the schema-side assertion below.
+ */
+const prohibited = (rules: readonly string[]): boolean =>
+  rules.some((rule) => rule.split(':')[0] === 'prohibited');
+
 const manifestFields = (manifest: Manifest): readonly string[] => [
-  ...new Set(Object.keys(manifest.rules).map(root)),
+  ...new Set(
+    Object.entries(manifest.rules)
+      .filter(([, rules]) => !prohibited(rules))
+      .map(([path]) => root(path)),
+  ),
 ];
 
 /**
  * A complete row. Every field the resource publishes is present, because `botFormDefaults` reads
- * twenty-five of them and a partial fixture would make the union assertion pass for the wrong reason.
+ * twenty-four of them and a partial fixture would make the union assertion pass for the wrong reason.
+ *
+ * `status` IS ON THE FIXTURE AND IS READ BY NOTHING HERE, deliberately: a real `BotResource` has one,
+ * and the pick dropping it is a property worth exercising against a row that could have leaked it
+ * rather than against a fixture that never had it.
  *
  * The two instruction fields carry canary text: they are a MANAGEMENT-ONLY PROJECTION, so a caller
  * without `bots.manage` receives `null` for both — which means "not shown to you", not "not set".
@@ -120,6 +148,30 @@ describe('the three panels partition the PATCH exactly once', () => {
     // this is the assertion that catches a field added to `rules()` and mirrored into the schema
     // while the console gained no control for it.
     expect([...union].sort()).toEqual([...manifestFields(updateBotRules as Manifest)].sort());
+  });
+
+  it('names no field the PATCH prohibits, which is where `status` went', () => {
+    // The positive control on the subtraction above: with no prohibited key in the manifest the
+    // filter is a no-op and every assertion in this block would pass whether or not it existed.
+    const forbidden = Object.entries((updateBotRules as Manifest).rules)
+      .filter(([, rules]) => prohibited(rules))
+      .map(([path]) => path);
+
+    expect(forbidden, 'UpdateBotRequest must still prohibit at least one path').toContain('status');
+    for (const field of union) expect(forbidden).not.toContain(field);
+  });
+
+  it('leaves the transition its own endpoint, its own body and its own 422 key', () => {
+    // A lifecycle move is `PUT .../bots/{bot}/status` and `updateBotStatus`, not a field beside a
+    // rename — so the Publishing tab owns TWO saves, and the one name a transition 422 can be keyed
+    // to comes from that request's own manifest rather than from `UpdateBotRequest`'s.
+    expect(botStatusPath('01JORGAAAAAAAAAAAAAAAAAAAA', BOT.id)).toBe(
+      `${botPath('01JORGAAAAAAAAAAAAAAAAAAAA', BOT.id)}/status`,
+    );
+    expect([...BOT_STATUS_KNOWN_PATHS]).toEqual(['status']);
+    // …and that key is reachable from NO panel's set, which is what routes a `status` 422 on the
+    // PATCH to the banner instead of to a control that displays nowhere.
+    for (const tuple of tuples) expect(botPanelKnownPaths(tuple)).not.toContain('status');
   });
 
   it('keeps every cross-field rule inside one panel', () => {
@@ -205,7 +257,14 @@ describe('knownPaths decide which 422 keys can reach a control', () => {
       ...botPanelKnownPaths(BOT_PUBLISHING_FIELDS),
     ];
     expect(all).toHaveLength(new Set(all).size);
-    expect([...all].sort()).toEqual(Object.keys((updateBotRules as Manifest).rules).sort());
+    // The manifest's VALIDATED key set: a prohibited path is one no form renders, so it is not a
+    // `knownPath` on any panel and a 422 keyed to it goes to the banner. See `prohibited` above.
+    expect([...all].sort()).toEqual(
+      Object.entries((updateBotRules as Manifest).rules)
+        .filter(([, rules]) => !prohibited(rules))
+        .map(([path]) => path)
+        .sort(),
+    );
   });
 
   it('gives the create dialog only the three names it actually renders', () => {

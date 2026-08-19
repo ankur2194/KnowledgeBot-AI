@@ -8,7 +8,9 @@ import type {
   BotAccessMode,
   BotAnswerMode,
   BotCollectionResource,
+  BotDomainResource,
   BotResource,
+  BotStarterQuestionResource,
   BotStatus,
   BotTheme,
   BotThemeRadius,
@@ -803,6 +805,26 @@ describe('every published component is mirrored here or exempt with a reason', (
     ],
     BotCollectionResource: ['bots', 'meta'],
     ListMetaResource: ['page', 'per_page', 'total', 'total_pages', 'sort', 'dir', 'filter'],
+
+    // ── the two child collections under a bot ──────────────────────────────────────────────────
+    // MIRRORED RATHER THAN EXEMPTED WITH A CLAIMANT, and the decision is worth stating because the
+    // usual test — "is there a reader today?" — answers no: the editor tab that renders these is
+    // being written in parallel with this entry, by an agent that cannot edit this package.
+    //
+    // That is exactly why they are mirrored. The failure this suite was rewritten to catch is a
+    // client hand-writing a resource type from the PHP by eye (`MemberResource`, 6B), and the
+    // surest way to produce one is to ship the REQUEST schemas — `botDomainCreateSchema`,
+    // `starterQuestionUpdateSchema` and their siblings are MIRRORS entries in form-drift.test.ts as
+    // of this change — while leaving the RESPONSE shapes unmirrored. A form whose 201 body has no
+    // type is a form whose caller declares one locally.
+    //
+    // `permits_embedding` is the field worth naming twice. It is DERIVED (`status === 'active'` and
+    // nothing else) and it is published anyway, because a client computing it writes the check as
+    // "not disabled" — which admits `pending`, and would admit any status added later.
+    BotDomainResource: ['id', 'origin', 'status', 'permits_embedding', 'created_at', 'updated_at'],
+    BotDomainCollectionResource: ['domains'],
+    BotStarterQuestionResource: ['id', 'question', 'sort_order', 'created_at', 'updated_at'],
+    BotStarterQuestionCollectionResource: ['starter_questions'],
   };
 
   /**
@@ -965,6 +987,22 @@ describe('every published component is mirrored here or exempt with a reason', (
         created_at: true,
         updated_at: true,
       } satisfies Record<NullableKeys<BotResource>, true>,
+
+      // Both child collections carry the same nullable pair as every other row in this document:
+      // timestamps that are null only for a record whose timestamp was never set. `origin`,
+      // `question` and `sort_order` are NOT nullable and that is load-bearing on all three —
+      // an allow-list row with no origin grants nothing anyone can reason about, a chip with no
+      // label is a control an end user can see and cannot read, and a null position would put a
+      // gap in a sequence the server guarantees is 0..n-1.
+      BotDomainResource: {
+        created_at: true,
+        updated_at: true,
+      } satisfies Record<NullableKeys<BotDomainResource>, true>,
+
+      BotStarterQuestionResource: {
+        created_at: true,
+        updated_at: true,
+      } satisfies Record<NullableKeys<BotStarterQuestionResource>, true>,
 
       // `filter` is null rather than `''`, because an empty filter is no filter and two spellings of
       // "unfiltered" would make an unfiltered list's cache key depend on whether the client sent the

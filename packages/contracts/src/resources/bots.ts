@@ -259,3 +259,116 @@ export interface BotCollectionResource {
   readonly bots: readonly BotResource[];
   readonly meta: ListMetaResource;
 }
+
+/**
+ * Lifecycle of one origin allow-list entry.
+ *
+ * `pending` is where every row starts and it grants nothing — whether an origin is under the
+ * operator's control is not something the entry form knows. `active` is the ONE value that permits
+ * an embed. `disabled` is a withdrawn row, kept so it can be turned back on without retyping and so
+ * audit entries naming it still resolve.
+ *
+ * A union here and a tuple (`BOT_DOMAIN_STATUSES`) behind `@kb/contracts/forms`, for the reason
+ * every vocabulary in this module is: this file is re-exported from the ROOT entry and must emit no
+ * runtime value at all.
+ */
+export type BotDomainStatus = 'pending' | 'active' | 'disabled';
+
+/**
+ * One origin on a bot's widget allow-list.
+ *
+ * THE ROW IS A SECURITY CONTROL RATHER THAN A PREFERENCE: it is what lets a page on the public
+ * internet boot a chat widget that speaks with this organization's credential, on its corpus,
+ * against its quota.
+ */
+export interface BotDomainResource {
+  /** ULID of the allow-list entry. */
+  readonly id: string;
+  /**
+   * The exact origin in the serialisation a browser sends: scheme, host and non-default port,
+   * lower-cased, with no path, no query, no fragment and no trailing slash.
+   *
+   * RENDER THIS, NEVER THE VALUE THAT WAS SUBMITTED. The server normalises on write — the scheme and
+   * host are lower-cased, a single trailing slash is dropped, and a default port (`:80` for http,
+   * `:443` for https) is dropped because the browser omits it — so echoing the input shows the
+   * operator a string that is not what was stored, on the one screen where "what was stored" is the
+   * whole question. A non-empty path is REFUSED rather than trimmed, because trimming it would widen
+   * the grant from one page to a whole host.
+   *
+   * THERE IS NO WILDCARD GRAMMAR. The comparison is byte equality; a pattern would turn it into a
+   * matcher, and a matcher is where the bypasses live.
+   */
+  readonly origin: string;
+  readonly status: BotDomainStatus;
+  /**
+   * Whether a widget served from this origin may boot, as far as THIS ROW is concerned. True for
+   * `active` and nothing else.
+   *
+   * READ THIS FIELD RATHER THAN COMPARING `status` YOURSELF: a check written as "not disabled"
+   * admits `pending`, and a status added later would be admitted by every negative test in every
+   * client. It is also only one term of the runtime decision — the bot's status, its access mode and
+   * an exact match on the origin are the others, and an EMPTY allow-list denies every origin.
+   */
+  readonly permits_embedding: boolean;
+  /** ISO 8601 with offset. Null only for a record whose timestamp was never set. */
+  readonly created_at: string | null;
+  /** Moves when the status changes; the origin itself is immutable. */
+  readonly updated_at: string | null;
+}
+
+/**
+ * One bot's widget origin allow-list. An OBJECT wrapping the array, the same forced nesting every
+ * collection in this package carries, so pagination fields can join it later without moving the list
+ * or versioning the endpoint.
+ *
+ * PENDING AND DISABLED ROWS ARE INCLUDED. Filtering them out would make "why is my widget refused on
+ * this site" unanswerable from the console while the row sat in the table.
+ *
+ * AN EMPTY ARRAY DENIES EVERY ORIGIN. The embed decision is "some active row matches this exact
+ * origin", which is false for the empty set — never read it as "unrestricted".
+ */
+export interface BotDomainCollectionResource {
+  readonly domains: readonly BotDomainResource[];
+}
+
+/** One suggested starter question, at the position the operator set. */
+export interface BotStarterQuestionResource {
+  /** ULID of the question. */
+  readonly id: string;
+  /**
+   * The chip label, exactly as the operator typed it. TENANT-AUTHORED TEXT: interpolate it as a JSX
+   * child and escape it at render in every client, because only the renderer knows the context it is
+   * entering. Never blank — the database refuses a whitespace-only value, since a chip with no label
+   * is a control an end user can see, can click, and cannot read.
+   */
+  readonly question: string;
+  /**
+   * Zero-based position, unique within the bot. The set of positions is always 0..n-1 with no gaps:
+   * every write re-sequences the whole list inside one transaction, so render straight from this and
+   * treat a gap as a defect rather than as a state.
+   *
+   * THE CONSEQUENCE FOR A CLIENT: re-read the collection after a move or a delete. A client-side
+   * splice desynchronises `sort_order` against a list the server has already re-sequenced, and the
+   * symptom is a chip order that is right until the next reload.
+   */
+  readonly sort_order: number;
+  /** ISO 8601 with offset. */
+  readonly created_at: string | null;
+  /**
+   * Moves when the text or the position changes — INCLUDING when another question was moved past
+   * this one, because a reorder rewrites every row in the list.
+   */
+  readonly updated_at: string | null;
+}
+
+/**
+ * One bot's starter questions, ordered by `sort_order` ascending, which is the order they render in.
+ *
+ * At most six, matching the ceiling the chat surface renders (kb-ai-chat-ux: three to six chips), so
+ * what is stored is what is shown and the console cannot promise a seventh chip no client draws. An
+ * empty array is the default state of every new bot and simply means the first-run screen shows no
+ * suggestions.
+ */
+export interface BotStarterQuestionCollectionResource {
+  readonly starter_questions: readonly BotStarterQuestionResource[];
+}

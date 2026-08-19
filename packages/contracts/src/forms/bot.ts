@@ -3,31 +3,45 @@ import { z } from 'zod';
 import { ULID_PATTERN } from './laravel-rules.js';
 
 /**
- * Mirrors `App\Http\Requests\StoreBotRequest` and `App\Http\Requests\UpdateBotRequest`
- * (POST and PATCH `/api/v1/organizations/{organization}/bots`).
+ * Mirrors `App\Http\Requests\StoreBotRequest`, `App\Http\Requests\UpdateBotRequest` and
+ * `App\Http\Requests\UpdateBotStatusRequest` (POST and PATCH
+ * `/api/v1/organizations/{organization}/bots`, and PUT `…/bots/{bot}/status`).
  *
  * They MIRROR the FormRequests; they do not enforce them. Client validation is a UX affordance and
- * the FormRequest is the authority (rhf-zod-forms NN2). `test/form-drift.test.ts` probes both
- * schemas against `rules/StoreBotRequest.json` and `rules/UpdateBotRequest.json` — dumped from
- * Laravel's own `rules()` by `php artisan kb:dump-form-rules` — which is what keeps that claim
- * honest rather than aspirational.
+ * the FormRequest is the authority (rhf-zod-forms NN2). `test/form-drift.test.ts` probes all three
+ * schemas against `rules/StoreBotRequest.json`, `rules/UpdateBotRequest.json` and
+ * `rules/UpdateBotStatusRequest.json` — dumped from Laravel's own `rules()` by
+ * `php artisan kb:dump-form-rules` — which is what keeps that claim honest rather than aspirational.
  *
- * ── TWO SCHEMAS, NOT ONE WITH `.partial()`, AND THE TWO REQUESTS DIFFER IN EXACTLY THREE PLACES ──
+ * ── TWO SCHEMAS FOR THE BOT BODY, NOT ONE WITH `.partial()`, AND THEY DIFFER IN EXACTLY ONE PLACE ─
  *
  * `botCreateSchema` mirrors the POST and `botSettingsSchema` mirrors the PATCH. Field for field they
- * are the same form, and every difference between them is a difference the server declares:
+ * are now the same key set, and the one difference between them is a difference the server declares:
+ * `name` and `slug` are `required` on create and `sometimes|required` on update. Those are not the
+ * same rule, and reading the second as the first is the mistake `form-drift.test.ts` devotes a whole
+ * `describe` block to: `sometimes|required` means "if you sent it, it must not be empty", NOT "you
+ * must send it". A schema that made them mandatory would remove the ability to PATCH one field
+ * without re-sending the rest — functionality gone, nothing reported. Every other field is
+ * optional-or-nullable on both requests, so the shared declarations below are shared rather than
+ * duplicated.
  *
- *   1. `name` and `slug` are `required` on create and `sometimes|required` on update. Those are not
- *      the same rule, and reading the second as the first is the mistake `form-drift.test.ts`
- *      devotes a whole `describe` block to: `sometimes|required` means "if you sent it, it must not
- *      be empty", NOT "you must send it". A schema that made them mandatory would remove the ability
- *      to PATCH one field without re-sending the rest — functionality gone, nothing reported.
- *   2. `status` exists ONLY on update. A bot is created `draft`, always: creating one directly into
- *      `published` would run the publish guard against a source assignment that cannot exist yet, so
- *      `StoreBotRequest` declares no rule for it and `strictObject` makes sending one a parse
- *      failure rather than a silent strip.
- *   3. Nothing else. Every other field is optional-or-nullable on both requests, so the shared
- *      declarations below are shared rather than duplicated.
+ * ── `status` IS ON NEITHER OF THEM, AND THAT IS THE INTERESTING HALF ────────────────────────────
+ *
+ * A lifecycle move is `PUT …/bots/{bot}/status` and nothing else. `UpdateBotRequest` now rules the
+ * field `["prohibited"]` — a rule rather than a deletion, and the difference is the whole point: an
+ * ABSENT rule makes `validated()` discard the key in silence, so a console would publish a bot, get
+ * a 200, and find it still in draft. `prohibited` turns that into a 422 keyed `status`.
+ *
+ * The mirror of "the server prohibits this key" is "no schema declares this path", which is what
+ * `strictObject` turns into a parse failure. So `status` appears in exactly one schema here —
+ * `botStatusTransitionSchema` at the bottom of this file, against the transition endpoint's own
+ * FormRequest — and `botSettingsSchema` cannot express a lifecycle move at all. `botFormDefaults`
+ * therefore does not read `bot.status` either: a settings form that seeded it would send it back.
+ *
+ * WHY THE SERVER SPLIT IT. A transition is judged against the row as it stands — `archived` is
+ * TERMINAL, and the publish guard refuses a move to `published` for a bot with no provider
+ * connection and model, or with `rag_first` and `allow_general_answers` still false — and none of
+ * that is a property of the submitted value, which is all a field rule can see.
  *
  * ── THE FIELDS THAT ARE UNREPRESENTABLE, AND WHY EACH ONE IS ────────────────────────────────────
  *
@@ -120,6 +134,12 @@ const RETENTION_DAYS_MAX = 3650;
  * can iterate; a resource type needs a union it can narrow. The two spellings are pinned to the
  * server independently — these by the `in:` probes in test/form-drift.test.ts, the unions by the
  * enum comparison in test/resource-drift.test.ts — so neither can drift without a red suite.
+ *
+ * `BOT_STATUSES` IS STILL EXPORTED AND ITS PIN MOVED RATHER THAN DISAPPEARING. It left
+ * `botSettingsSchema` with the field, and if it had left the package with it the tuple would have
+ * become a list nothing compares to the server — every status pill and every transition menu reads
+ * it. `botStatusTransitionSchema` is now the one schema the `in:` probes reach it through, which is
+ * exactly the vocabulary `UpdateBotStatusRequest` declares.
  */
 export const BOT_STATUSES = ['draft', 'testing', 'published', 'paused', 'archived'] as const;
 export const BOT_ACCESS_MODES = ['public', 'private'] as const;
@@ -544,11 +564,12 @@ export const botSettingsSchema = z
     name: name.optional(),
     slug: slug.optional(),
     /**
-     * ONLY ON THE PATCH. `archived` is TERMINAL server-side — an archived bot is read-only,
-     * including its status — which is a transition rule rather than a value rule and is enforced
-     * where the current row is known. This mirrors the value set the FormRequest accepts.
+     * NO `status`, AND ITS ABSENCE IS THE MIRROR OF A RULE RATHER THAN AN OMISSION.
+     * `UpdateBotRequest` rules it `["prohibited"]`, so a body carrying one is a 422 keyed `status` —
+     * and the client-side spelling of "this key may not be sent" is a `strictObject` that does not
+     * declare the path. See the module docblock; the transition lives in
+     * `botStatusTransitionSchema`.
      */
-    status: z.enum(BOT_STATUSES).optional(),
     ...sharedBotFields,
   })
   .superRefine(crossField);
@@ -569,7 +590,13 @@ export type BotSettingsOut = z.output<typeof botSettingsSchema>;
 export interface BotFormSource {
   readonly name: string;
   readonly slug: string;
-  readonly status: (typeof BOT_STATUSES)[number];
+  /**
+   * NO `status`. `UpdateBotRequest` prohibits it, `botSettingsSchema` therefore does not declare it,
+   * and a source shape that still carried it would be a shape whose only reader was a pick that must
+   * not make one — the two would then disagree silently rather than at the typecheck. A screen
+   * rendering the current lifecycle state reads it off `BotResource` directly; only a form's state
+   * is narrowed here.
+   */
   readonly description: string | null;
   readonly welcome_message: string | null;
   readonly placeholder_text: string | null;
@@ -618,7 +645,6 @@ export interface BotFormSource {
 export const botFormDefaults = (bot: BotFormSource): BotSettingsIn => ({
   name: bot.name,
   slug: bot.slug,
-  status: bot.status,
   description: bot.description,
   welcome_message: bot.welcome_message,
   placeholder_text: bot.placeholder_text,
@@ -687,3 +713,55 @@ export const botCreateDefaults = (): BotCreateIn => ({
   collect_end_user_data: false,
   consent_text: '',
 });
+
+/**
+ * PUT `…/bots/{bot}/status` — mirrors `App\Http\Requests\UpdateBotStatusRequest`.
+ *
+ * ── ONE FIELD, AND IT IS THE ONLY SCHEMA IN THIS PACKAGE THAT MAY NAME IT ──────────────────────
+ *
+ * `status` is `prohibited` on the PATCH, so this is where the vocabulary is submitted from and the
+ * only place `BOT_STATUSES` is compared against the server: `test/form-drift.test.ts` probes
+ * `in:"draft","testing","published","paused","archived"` member by member against this schema, which
+ * is what keeps the tuple every status pill and transition menu iterates honest.
+ *
+ * ── IT MIRRORS THE VALUE SET AND CANNOT MIRROR THE TRANSITION, WHICH IS MOST OF THE RULE ───────
+ *
+ * The server judges the move against the row as it stands, and three of its four refusals are
+ * invisible to any schema:
+ *
+ *   `archived` is TERMINAL — an archived bot is read-only, including its status, so there is no
+ *   un-archive transition and no value this enum could add to express one.
+ *
+ *   the PUBLISH GUARD refuses a move to `published` for a bot with no provider connection and model,
+ *   or with `answer_mode: 'rag_first'` and `allow_general_answers` still false. Both are 409.
+ *
+ *   a NO-OP is a 422: this is a transition rather than a state assertion, and re-asserting the
+ *   status a bot already holds would write an audit row describing a change that did not happen.
+ *
+ * So a refused move arrives as a 409 or a 422 keyed `status` carrying Laravel's own translated
+ * sentence, and the control renders it under itself rather than pre-judging the move. A client that
+ * greyed out the options it believed were unreachable would be computing the publish guard from a
+ * cached row.
+ */
+export const botStatusTransitionSchema = z.strictObject({
+  status: z.enum(BOT_STATUSES),
+});
+
+export type BotStatusTransitionIn = z.input<typeof botStatusTransitionSchema>;
+export type BotStatusTransitionOut = z.output<typeof botStatusTransitionSchema>;
+
+/**
+ * What the transition control opens on: the status the bot is IN.
+ *
+ * DELIBERATELY A VALUE THE SERVER REFUSES. Submitting it unchanged is the no-op 422 above, which is
+ * correct rather than awkward — the control is a `<Select>` showing where the bot stands, and "save
+ * without choosing anything" is not a transition. Seeding it with some other member instead would
+ * put a lifecycle move one mis-click away and would misreport the current state while it sat there.
+ *
+ * A NARROW PICK LIKE EVERY OTHER DEFAULTS FACTORY HERE, not `reset(bot)`: `BotResource` carries
+ * `public_bot_id` and four more server-owned fields, and a `strictObject` of one key is what turns
+ * the spread that skips this into a parse failure rather than a silent strip.
+ */
+export const botStatusTransitionDefaults = (bot: {
+  readonly status: (typeof BOT_STATUSES)[number];
+}): BotStatusTransitionIn => ({ status: bot.status });
