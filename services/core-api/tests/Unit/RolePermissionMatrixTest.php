@@ -49,6 +49,8 @@ function rolePermissionMatrix(): array
         OrgRole::Owner->value => [
             'providers.view' => true,
             'providers.manage' => true,
+            'bots.view' => true,
+            'bots.manage' => true,
             'members.view' => true,
             'members.manage' => true,
             'members.manage_owner' => true,
@@ -59,6 +61,12 @@ function rolePermissionMatrix(): array
         OrgRole::Admin->value => [
             'providers.view' => true,
             'providers.manage' => true,
+            // §6.3, "Manage bots", verbatim. The only bot permission an admin does not hold is one
+            // that does not exist: publish and delete are both `bots.manage`, because a separate
+            // case would be granted to exactly these two roles and a permission nobody grants
+            // differently fails silently in both directions.
+            'bots.view' => true,
+            'bots.manage' => true,
             'members.view' => true,
             'members.manage' => true,
             'members.manage_owner' => false,
@@ -66,20 +74,36 @@ function rolePermissionMatrix(): array
 
         // Reads the provider configuration because an ingestion operator has to know whether the
         // organization can embed at all — and changes nothing.
+        //
+        // `bots.view` IS AN EXTENSION OF THE SPECIFICATION, NOT A READING OF IT. §6.4 never mentions
+        // bots in either direction; the grant was decided with the repo owner against Phase C6,
+        // which has this role assign knowledge sources TO bots — an assignment screen is a list of
+        // bots, so a role that cannot read one cannot do the job §6.4 does give them. Stated here
+        // as well as in Permission::BotsView because this file is the INDEPENDENT statement of the
+        // matrix, and an extension recorded only in the code it justifies is not independent.
         OrgRole::KnowledgeManager->value => [
             'providers.view' => true,
             'providers.manage' => false,
+            'bots.view' => true,
+            'bots.manage' => false,
             'members.view' => false,
             'members.manage' => false,
             'members.manage_owner' => false,
         ],
 
-        // Reporting only. Holds no permission in this catalog at all, which is a deliberate row rather
-        // than an oversight: an analyst reads conversations and analytics, and neither is gated by a
-        // Permission case that exists yet.
+        // Reporting only, and NO LONGER AN ALL-FALSE ROW — which is the single most surprising line
+        // in this file for anyone who read the previous version.
+        //
+        // `bots.view` is an EXTENSION OF THE SPECIFICATION decided with the repo owner: §6.5 never
+        // mentions bots in either direction, and Phase E has an analyst review conversations PER
+        // BOT. A transcript is uninterpretable without the bot that produced it — the name, the
+        // model and the answer mode are what make it readable. Nothing else in this catalog moves:
+        // an analyst still reaches no credential, no member and no write.
         OrgRole::Analyst->value => [
             'providers.view' => false,
             'providers.manage' => false,
+            'bots.view' => true,
+            'bots.manage' => false,
             'members.view' => false,
             'members.manage' => false,
             'members.manage_owner' => false,
@@ -173,5 +197,5 @@ it('keeps the role catalog fixed at four, because there is no per-tenant role CR
     // announces itself.
     expect(OrgRole::values())->toBe(['owner', 'admin', 'knowledge_manager', 'analyst']);
 
-    expect(Permission::cases())->toHaveCount(5);
+    expect(Permission::cases())->toHaveCount(7);
 });

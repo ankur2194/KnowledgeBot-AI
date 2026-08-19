@@ -55,6 +55,38 @@ final class OrganizationPolicy extends OrgScopedPolicy
     }
 
     /**
+     * LIST the organization's bots.
+     *
+     * Here and not on BotPolicy because a list has no row to take an organization from — the same
+     * reason `viewProviderConnections` and `viewMembers` live here. `BotPolicy::view()` is the
+     * per-row half and carries the identical permission, so the two never disagree about who may
+     * read a bot; what differs is only which record supplied the organization.
+     *
+     * A `viewAny` on BotPolicy would be the alternative spelling and is not used, for the reason
+     * `viewProviderConnections` records: Laravel resolves `viewAny` from a CLASS NAME rather than an
+     * instance, so the organization would have to come from somewhere other than a record — which
+     * is precisely the shape OrgScopedPolicy exists to make unrepresentable.
+     */
+    public function viewBots(?User $user, Organization $organization): Response
+    {
+        return $this->permit($user, $organization, Permission::BotsView);
+    }
+
+    /**
+     * Create a bot.
+     *
+     * The record is the ORGANIZATION and not a bot, because there is no bot yet — the same split
+     * `ProviderConnectionPolicy::createModel()` makes one level down, except that there the parent
+     * is a connection and here the organization IS the parent. `Organization` already implements
+     * OrgOwned, so `Gate::authorize('createBot', $organization)` resolves to this class with no
+     * OrgContext shim.
+     */
+    public function createBot(?User $user, Organization $organization): Response
+    {
+        return $this->permit($user, $organization, Permission::BotsManage);
+    }
+
+    /**
      * The three membership abilities have no MODEL of their own — listing members and creating an
      * invitation both act on the organization itself — so they live here rather than on
      * OrganizationInvitationPolicy, which can only authorize a row that already exists. `Organization`

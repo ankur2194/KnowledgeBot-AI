@@ -25,6 +25,27 @@ enum OrgRole: string
      * KnowledgeManager may NOT reach provider credentials (§6.4 lists them as excluded) — and the
      * embedding designation is on the credential side of that line for the reason Permission
      * records: it selects which credential pays and which vector space a corpus lands in.
+     *
+     * ── THE BOT GRANTS ARE AN EXTENSION OF THE SPEC, NOT A READING OF IT ──────────────────────
+     *
+     * `bots.manage` goes to Owner and Admin, and that IS the spec: §6.3 lists "Manage bots" as an
+     * Organization Administrator capability and §6.4 excludes bot publish from the Knowledge
+     * Manager.
+     *
+     * `bots.view` ADDITIONALLY goes to Knowledge Manager and Analyst, and §6.4 and §6.5 NEVER
+     * MENTION BOTS — in either direction. This is therefore an extension of the specification
+     * decided with the repo owner, and it is said plainly here rather than left to read like
+     * something §6.4 implied:
+     *
+     *   Knowledge Manager  Phase C6 has them assign sources to bots. The assignment screen is a
+     *                      list of bots, so a role that cannot read one cannot do the job §6.4
+     *                      does give them.
+     *   Analyst            Phase E has them review conversations per bot. A transcript is
+     *                      uninterpretable without the bot that produced it.
+     *
+     * The Analyst arm consequently stops being a blanket `false`, and that is the change most
+     * likely to surprise a reader of the old file: `analyst` now holds exactly one permission, and
+     * `RolePermissionMatrixTest` states the whole row independently so the two have to agree.
      */
     public function grants(Permission $permission): bool
     {
@@ -35,8 +56,18 @@ enum OrgRole: string
             // performed it cannot undo: the new owner may immediately demote or remove them. An
             // admin who needs another owner asks an owner.
             self::Admin => $permission !== Permission::MembersManageOwner,
-            self::KnowledgeManager => $permission === Permission::ProvidersView,
-            self::Analyst => false,
+            // Written as an explicit `in_array` over a NAMED SET rather than as a chain of `===`
+            // comparisons: the set is about to keep growing (sources, conversations, evaluation
+            // datasets all land on this role in later phases) and a growing `||` chain is where a
+            // reviewer stops reading. Strict comparison, so no enum coerces into another.
+            self::KnowledgeManager => in_array(
+                $permission,
+                [Permission::ProvidersView, Permission::BotsView],
+                true,
+            ),
+            // NO LONGER A BLANKET FALSE. §6.5 is reporting-only and this is the one permission
+            // reporting needs: Phase E's conversation review is per bot.
+            self::Analyst => $permission === Permission::BotsView,
         };
     }
 
