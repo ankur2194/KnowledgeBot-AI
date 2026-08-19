@@ -281,6 +281,58 @@ final readonly class BotService
     }
 
     /**
+     * Move one bot to a lifecycle state.
+     *
+     * ── IT IS `update()` WITH A ONE-COLUMN EDIT, AND THAT IS THE WHOLE DESIGN ──────────────────
+     *
+     * The transition endpoint exists because `status` is the one field on a bot that decides
+     * whether an END USER can reach it, and two doors to that column are two places a check has to
+     * be. What it must NOT become is a second implementation of the guard: `assertPublishable()` is
+     * subtle — it runs on the state the write LEAVES the bot in rather than on the transition, which
+     * is what makes "clear the model on an already-published bot" refuse by the same check that
+     * refuses "publish a model-less draft" — and a copy of it here would be the copy that drifts.
+     *
+     * So this method builds a `BotEdit` naming exactly one column and hands it to `update()`. Every
+     * refusal, the archived read-only rule, the row lock, the version-bump decision and the
+     * `bot.updated` audit row are the same code on both paths, by construction.
+     *
+     * ── THE ONE THING IT ADDS: A NO-OP TRANSITION IS REFUSED ───────────────────────────────────
+     *
+     * `PUT status: paused` on an already-paused bot changes nothing, and letting it succeed would
+     * write a `bot.updated` audit row describing an edit that did not happen — the trail wrong in
+     * the one direction nobody checks it in, which is the same defect `BotController::update()`
+     * refuses an empty body for. It costs strict PUT idempotency and the trade is deliberate: this
+     * is a TRANSITION endpoint rather than a state assertion, and a no-op means the console was
+     * looking at a stale row, which is worth saying out loud.
+     *
+     * A 422 KEYED ON `status` and not a 409, for the reason `duplicateSlug()` records: there IS a
+     * field to key it on, so the message lands under the control the operator pressed rather than
+     * as a banner about a request that is plainly about one field.
+     *
+     * @throws ValidationException 422 when the bot already holds this status
+     * @throws ConflictHttpException 409 for an archived bot or a publish the guard refuses
+     * @throws NotFoundHttpException when the row disappeared between the binding and the write
+     */
+    public function transition(
+        Organization $organization,
+        Bot $bot,
+        BotStatus $status,
+        ?string $actorId = null,
+        ?Request $request = null,
+    ): Bot {
+        if ($bot->status === $status) {
+            throw ValidationException::withMessages([
+                'status' => 'This bot is already `'.$status->value.'`. A transition that changes '
+                    .'nothing would still return 200 and would still write a `bot.updated` audit '
+                    .'row describing a change that did not happen. If the console showed a '
+                    .'different state, it is looking at a stale row — re-read the bot.',
+            ]);
+        }
+
+        return $this->update($organization, $bot, new BotEdit(['status' => $status]), $actorId, $request);
+    }
+
+    /**
      * Hard-delete one bot and everything that exists only to describe it.
      *
      * ── WHY THIS IS A HARD DELETE AND WHAT WILL HAVE TO CHANGE ────────────────────────────────
@@ -570,6 +622,11 @@ final readonly class BotService
      * than of the caller's discipline. A `Bot` has no credential to offer: it holds a connection
      * ULID and the key behind it is not reachable from this object.
      *
+     * The child summary at the end is read from the DATABASE for the same reason, through
+     * `BotRepositoryInterface::childSummary()` — never from a relation the caller happened to have
+     * loaded, which would report whatever was true when the request started rather than what is
+     * true inside the transaction that is about to destroy it.
+     *
      * ── WHAT IS DELIBERATELY ABSENT, AND IT IS MOSTLY PROSE ───────────────────────────────────
      *
      * `system_instruction` and `answer_style_instruction` are absent and their absence is the one
@@ -670,6 +727,21 @@ final readonly class BotService
                 // not echoed — it is prose, and `bots_consent_text_present_when_collecting` already
                 // guarantees it exists whenever this is true.
                 'collect_end_user_data' => $bot->collect_end_user_data,
+                // ── THE THREE CHILD COLLECTIONS. THIS IS FINDING L2. ──────────────────────────
+                //
+                // A hard delete takes the origin allow-list, the starter questions and the fallback
+                // chain with it, and `bot_domains` justifies its own ON DELETE RESTRICT by saying a
+                // security review may later need to RECONSTRUCT the allow-list. Until this line the
+                // trail could not: `bot.deleted` described the bot in full and said nothing about
+                // what it permitted. `BotChildSummary::toAuditDetails()` decides what may be
+                // recorded and states why the origins are echoed while the questions are only
+                // counted; `AuditLogger`'s allow-list is what enforces it.
+                //
+                // READ THROUGH THE REPOSITORY AND FROM INSIDE THE AUDIT CLOSURE, which is what
+                // makes the numbers true: on the delete path this closure runs BEFORE the children
+                // are removed, so the read sees the list that is about to be destroyed. A read
+                // taken anywhere else would record zeroes for exactly the row that needs them most.
+                ...$this->bots->childSummary($organizationId, $bot->id)->toAuditDetails(),
             ],
             subjectType: Bot::class,
             subjectId: $bot->id,

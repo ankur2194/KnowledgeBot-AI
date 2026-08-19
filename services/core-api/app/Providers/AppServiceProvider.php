@@ -5,14 +5,18 @@ declare(strict_types=1);
 namespace App\Providers;
 
 use App\Enums\Surface;
+use App\Repositories\Contracts\BotDomainRepositoryInterface;
 use App\Repositories\Contracts\BotRepositoryInterface;
+use App\Repositories\Contracts\BotStarterQuestionRepositoryInterface;
 use App\Repositories\Contracts\EmbeddingCandidateRepositoryInterface;
 use App\Repositories\Contracts\MembershipRepositoryInterface;
 use App\Repositories\Contracts\OrganizationRepositoryInterface;
 use App\Repositories\Contracts\ProviderConnectionRepositoryInterface;
 use App\Repositories\Contracts\ProviderModelRepositoryInterface;
 use App\Repositories\Contracts\SparseCorpusStatisticsRepositoryInterface;
+use App\Repositories\Eloquent\EloquentBotDomainRepository;
 use App\Repositories\Eloquent\EloquentBotRepository;
+use App\Repositories\Eloquent\EloquentBotStarterQuestionRepository;
 use App\Repositories\Eloquent\EloquentEmbeddingCandidateRepository;
 use App\Repositories\Eloquent\EloquentMembershipRepository;
 use App\Repositories\Eloquent\EloquentOrganizationRepository;
@@ -84,6 +88,24 @@ final class AppServiceProvider extends ServiceProvider
         $this->app->bind(
             BotRepositoryInterface::class,
             EloquentBotRepository::class,
+        );
+
+        // THE TWO CHILD COLLECTIONS GET THEIR OWN INTERFACES rather than more methods on the bot
+        // repository, and the reason is not symmetry. `bot_domains` is a SECURITY CONTROL — every
+        // row is a standing grant to a page on the public internet — and its repository is the one
+        // seam where a write has to be inseparable from the audit row that records it (finding L2).
+        // `bot_starter_questions` is a rendering list whose whole difficulty is a non-deferrable
+        // unique index on `sort_order`. Neither has anything to say to the other, and folding them
+        // into `BotRepositoryInterface` would put the allow-list's write path behind the same seam
+        // as a bot rename.
+        $this->app->bind(
+            BotDomainRepositoryInterface::class,
+            EloquentBotDomainRepository::class,
+        );
+
+        $this->app->bind(
+            BotStarterQuestionRepositoryInterface::class,
+            EloquentBotStarterQuestionRepository::class,
         );
 
         $this->app->bind(

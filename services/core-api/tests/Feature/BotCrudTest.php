@@ -848,18 +848,48 @@ it('replaces the theme wholesale rather than merging it', function (): void {
         ->toBeTrue('an unthemed bot serialized as a JSON array rather than an object');
 });
 
+it('refuses `status` on the PATCH and points at the transition endpoint', function (): void {
+    // A 422 AND NOT A SILENT DROP, which is the whole reason `UpdateBotRequest` declares the field
+    // `prohibited` rather than simply omitting the rule. An omitted rule means `validated()`
+    // discards the key, so a client written against the old contract would publish a bot, receive a
+    // 200 with `status: draft` in the body, and have to notice the discrepancy itself.
+    $fixture = botCrudFixture();
+
+    $bot = $fixture['botA'];
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    currentTest()->patchJson(
+        "/api/v1/organizations/{$fixture['orgA']->id}/bots/{$bot->id}",
+        ['name' => 'ALPHA renamed', 'status' => BotStatus::Published->value],
+        spaHeaders(),
+    )
+        ->assertStatus(422)
+        ->assertJsonPath('error_class', 'validation')
+        ->assertJsonValidationErrors('status');
+
+    // AND THE REST OF THE BODY IS NOT APPLIED EITHER. Validation fails whole, so a caller cannot
+    // half-succeed: the rename did not happen and neither did the transition.
+    assertDatabaseHas('bots', [
+        'id' => $bot->id,
+        'name' => 'ALPHA support bot',
+        'status' => BotStatus::Draft->value,
+    ]);
+});
+
 it('refuses to publish a bot that could not answer, and refuses every edit to an archived one', function (): void {
     $fixture = botCrudFixture();
 
     $bot = $fixture['botA'];
     $url = "/api/v1/organizations/{$fixture['orgA']->id}/bots/{$bot->id}";
+    $statusUrl = $url.'/status';
 
     SpaSession::establish(currentTest(), $fixture['ownerA']);
 
     // NO MODEL. A published bot with none does not fail at publish time — it fails at the first
     // end-user question, as a resolution error in the data plane, on a customer's website, days
     // after the action that caused it.
-    currentTest()->patchJson($url, ['status' => BotStatus::Published->value], spaHeaders())
+    currentTest()->putJson($statusUrl, ['status' => BotStatus::Published->value], spaHeaders())
         ->assertStatus(409)
         ->assertJsonPath('error_class', 'internal_dependency')
         ->assertJsonPath('message', BotService::PUBLISH_NEEDS_MODEL);
@@ -873,23 +903,34 @@ it('refuses to publish a bot that could not answer, and refuses every edit to an
     // RAG-FIRST WITH THE ESCAPE HATCH CLOSED. The pair is a contradiction once published: the bot
     // answers exactly like `strict` while its configuration screen says otherwise, and the only
     // symptom is a refusal rate nobody can explain from the console.
-    currentTest()->patchJson($url, ['status' => BotStatus::Published->value], spaHeaders())
+    currentTest()->putJson($statusUrl, ['status' => BotStatus::Published->value], spaHeaders())
         ->assertStatus(409)
         ->assertJsonPath('message', BotService::PUBLISH_RAG_FIRST_NEEDS_ESCAPE_HATCH);
 
-    // BOTH HALVES SATISFIED IN ONE REQUEST: the guard reads the state this edit LEAVES the bot in,
-    // not the state it was in.
-    currentTest()->patchJson(
-        $url,
-        ['status' => BotStatus::Published->value, 'allow_general_answers' => true],
-        spaHeaders(),
-    )
+    // TWO REQUESTS, NOT ONE, AND THAT IS THE COST OF THE SPLIT — stated here rather than left to be
+    // rediscovered. The configuration and the transition are separate endpoints now, so "open the
+    // escape hatch AND publish" cannot be one atomic request. What it does not cost is the property
+    // that matters: the guard still reads the state the write LEAVES the bot in, which is what the
+    // next block proves against a request that does not mention `status` at all.
+    currentTest()->patchJson($url, ['allow_general_answers' => true], spaHeaders())->assertOk();
+
+    currentTest()->putJson($statusUrl, ['status' => BotStatus::Published->value], spaHeaders())
         ->assertOk()
         ->assertJsonPath('data.status', 'published');
 
+    // A NO-OP TRANSITION IS REFUSED. Re-publishing an already-published bot would return 200 and
+    // write a `bot.updated` audit row describing a change that did not happen — the trail wrong in
+    // the one direction nobody checks it in. It costs strict PUT idempotency deliberately.
+    currentTest()->putJson($statusUrl, ['status' => BotStatus::Published->value], spaHeaders())
+        ->assertStatus(422)
+        ->assertJsonPath('error_class', 'validation')
+        ->assertJsonValidationErrors('status');
+
     // AND THE CASE A TRANSITION-ONLY GUARD WOULD MISS ENTIRELY: clearing the model on an ALREADY
-    // published bot is exactly as dangerous as publishing a model-less draft, and the request does
-    // not mention `status` at all.
+    // published bot is exactly as dangerous as publishing a model-less draft, and the request goes
+    // to the PATCH and does not mention `status` at all. This is the assertion that proves the
+    // guard runs on the RESULTING STATE rather than on a transition, and it is the reason the
+    // guard did not move to the status endpoint with the field.
     currentTest()->patchJson(
         $url,
         ['provider_connection_id' => null, 'provider_model_id' => null],
@@ -901,13 +942,18 @@ it('refuses to publish a bot that could not answer, and refuses every edit to an
     // ARCHIVED IS TERMINAL AND READ-ONLY, INCLUDING ITS STATUS. An archived bot's configuration is
     // the record of what answered the conversations it produced; editing it rewrites the
     // explanation of those conversations without changing them.
-    currentTest()->patchJson($url, ['status' => BotStatus::Archived->value], spaHeaders())->assertOk();
+    currentTest()->putJson($statusUrl, ['status' => BotStatus::Archived->value], spaHeaders())
+        ->assertOk()
+        ->assertJsonPath('data.status', 'archived');
 
     currentTest()->patchJson($url, ['name' => 'ALPHA resurrected'], spaHeaders())
         ->assertStatus(409)
         ->assertJsonPath('message', BotService::ARCHIVED_IS_READ_ONLY);
 
-    currentTest()->patchJson($url, ['status' => BotStatus::Paused->value], spaHeaders())
+    // AND THERE IS NO UN-ARCHIVE, on the transition endpoint either. The refusal comes from
+    // `BotService::update()`, which both paths go through, so the archived rule cannot hold on one
+    // and not the other.
+    currentTest()->putJson($statusUrl, ['status' => BotStatus::Paused->value], spaHeaders())
         ->assertStatus(409)
         ->assertJsonPath('message', BotService::ARCHIVED_IS_READ_ONLY);
 });

@@ -1,0 +1,11 @@
+{
+    "class": "App\\Http\\Requests\\UpdateBotStatusRequest",
+    "rules": {
+        "status": [
+            "bail",
+            "required",
+            "string",
+            "in:\"draft\",\"testing\",\"published\",\"paused\",\"archived\""
+        ]
+    }
+}

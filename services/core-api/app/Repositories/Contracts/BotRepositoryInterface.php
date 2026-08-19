@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Repositories\Contracts;
 
 use App\Models\Bot;
+use App\Services\Bots\BotChildSummary;
 use App\Services\Bots\BotEdit;
 use App\Services\Bots\NewBot;
 use App\Support\Http\ListQuery;
@@ -83,6 +84,26 @@ interface BotRepositoryInterface
      *                                    slug is not a duplicate of itself
      */
     public function slugExists(string $organizationId, string $slug, ?string $exceptBotId = null): bool;
+
+    /**
+     * What this bot's three child collections hold right now.
+     *
+     * ── IT EXISTS FOR THE AUDIT ROW, AND THAT IS WHY IT IS ON THIS INTERFACE ──────────────────
+     *
+     * Finding L2: deleting a bot destroyed its widget origin allow-list with no record of what it
+     * permitted, contradicting the reason `bot_domains` gives for its own `ON DELETE RESTRICT`.
+     * `BotService::record()` closes half of that by carrying a scalar summary of all three
+     * collections onto every `bot.created`, `bot.updated` and `bot.deleted` row — and `BotService`
+     * cannot read them itself, because Eloquent is arch-pinned to `App\Repositories\Eloquent`.
+     *
+     * ── IT IS CALLED FROM INSIDE THE AUDIT CLOSURE, AND THEREFORE INSIDE THE TRANSACTION ──────
+     *
+     * Which is the whole reason the numbers are true. On the delete path the closure runs BEFORE
+     * the children are removed, so this read sees the list that is about to be destroyed; a read
+     * taken after the fact would report zeroes for every collection and record the absence of the
+     * thing the finding is about.
+     */
+    public function childSummary(string $organizationId, string $botId): BotChildSummary;
 
     /**
      * Store one bot, in one transaction.

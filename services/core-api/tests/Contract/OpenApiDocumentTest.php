@@ -2,16 +2,23 @@
 
 declare(strict_types=1);
 
+use App\Enums\BotDomainStatus;
 use App\Enums\EvidenceThresholdScale;
 use App\Exceptions\KbException;
 use App\Http\Resources\BotCollectionResource;
+use App\Http\Resources\BotDomainCollectionResource;
+use App\Http\Resources\BotDomainResource;
 use App\Http\Resources\BotResource;
+use App\Http\Resources\BotStarterQuestionCollectionResource;
+use App\Http\Resources\BotStarterQuestionResource;
 use App\Http\Resources\EmbeddingReadinessResource;
 use App\Http\Resources\ProviderConnectionCollectionResource;
 use App\Http\Resources\ProviderConnectionResource;
 use App\Http\Resources\ProviderModelCollectionResource;
 use App\Http\Resources\ProviderModelResource;
 use App\Models\Bot;
+use App\Models\BotDomain;
+use App\Models\BotStarterQuestion;
 use App\Models\Organization;
 use App\Models\ProviderConnection;
 use App\Models\ProviderModelEntry;
@@ -565,6 +572,98 @@ it('publishes exactly the keys BotResource emits, unconfigured and fully configu
     $emitted['updated_at'] = null;
 
     expect(schemaViolations($emitted, $components['BotResource'], $components))->toBe([]);
+});
+
+it('publishes exactly the keys BotDomainResource emits, on all three statuses', function (): void {
+    $org = Organization::factory()->create();
+    $bot = Bot::factory()->recycle($org)->create();
+
+    $components = BotDomainResource::openApiSchemas();
+
+    // ONE FIXTURE PER STATUS, BECAUSE `permits_embedding` IS THE FIELD THAT MATTERS AND IT IS TRUE
+    // FOR EXACTLY ONE OF THEM. A single-status fixture would validate the schema against whichever
+    // branch the factory happened to default to, and the branch a client actually gates on — the
+    // one that decides whether a widget may boot — is the one that would go unchecked.
+    $fixtures = [
+        'pending, and grants nothing' => BotDomain::factory()->recycle($org)->recycle($bot)
+            ->origin('http://localhost:3000')->create(),
+        'active, the one status that permits an embed' => BotDomain::factory()->recycle($org)->recycle($bot)
+            ->active()->origin('https://alpha.example.com')->create(),
+        'disabled, retained so audit entries still resolve' => BotDomain::factory()->recycle($org)->recycle($bot)
+            ->disabled()->origin('https://bravo.example.com:8443')->create(),
+    ];
+
+    foreach ($fixtures as $label => $row) {
+        $emitted = (new BotDomainResource($row))->toArray(Request::create('/'));
+
+        expect(schemaViolations($emitted, $components['BotDomainResource'], $components))
+            ->toBe([], "the published schema disagrees with toArray() for: {$label}");
+
+        // AND THE PUBLISHED PREDICATE AGREES WITH THE ENUM'S, per row. A resource that recomputed
+        // it as `status !== 'disabled'` would validate against this schema perfectly and hand a
+        // client the wrong answer for `pending` — the exact negative-test hole
+        // `BotDomainStatus::permitsEmbedding()` is written positively to avoid.
+        expect($emitted['permits_embedding'])
+            ->toBe($row->status === BotDomainStatus::Active, "permits_embedding is wrong for: {$label}");
+    }
+
+    // The null branch of the two timestamps, which the factory cannot produce.
+    $emitted = (new BotDomainResource($fixtures['pending, and grants nothing']))->toArray(Request::create('/'));
+    $emitted['created_at'] = null;
+    $emitted['updated_at'] = null;
+
+    expect(schemaViolations($emitted, $components['BotDomainResource'], $components))->toBe([]);
+
+    // AND THE COLLECTION WRAPPER, over the populated set AND the empty one. The empty case is not a
+    // formality here: an empty allow-list DENIES EVERY ORIGIN, so it is a state clients must be
+    // able to receive and describe rather than one they only meet as a bug.
+    $collection = BotDomainCollectionResource::openApiSchemas();
+
+    foreach ([[], array_values($fixtures)] as $index => $rows) {
+        $emitted = (new BotDomainCollectionResource($rows))->toArray(Request::create('/'));
+
+        expect(schemaViolations($emitted, $collection['BotDomainCollectionResource'], $collection))
+            ->toBe([], "the collection schema disagrees with toArray() for fixture set {$index}");
+    }
+});
+
+it('publishes exactly the keys BotStarterQuestionResource emits', function (): void {
+    $org = Organization::factory()->create();
+    $bot = Bot::factory()->recycle($org)->create();
+
+    $components = BotStarterQuestionResource::openApiSchemas();
+
+    $rows = [
+        BotStarterQuestion::factory()->recycle($org)->recycle($bot)
+            ->at(0)->asking('How do I get a refund?')->create(),
+        BotStarterQuestion::factory()->recycle($org)->recycle($bot)
+            ->at(1)->asking('What are your opening hours?')->create(),
+    ];
+
+    foreach ($rows as $row) {
+        $emitted = (new BotStarterQuestionResource($row))->toArray(Request::create('/'));
+
+        expect(schemaViolations($emitted, $components['BotStarterQuestionResource'], $components))
+            ->toBe([], 'the published schema disagrees with toArray()');
+    }
+
+    // The null branch of the two timestamps, which the factory cannot produce.
+    $emitted = (new BotStarterQuestionResource($rows[0]))->toArray(Request::create('/'));
+    $emitted['created_at'] = null;
+    $emitted['updated_at'] = null;
+
+    expect(schemaViolations($emitted, $components['BotStarterQuestionResource'], $components))->toBe([]);
+
+    $collection = BotStarterQuestionCollectionResource::openApiSchemas();
+
+    // THE EMPTY CASE IS THE DEFAULT STATE OF EVERY BOT, so a schema validated only against a
+    // populated list would describe the shape almost no bot is actually in.
+    foreach ([[], $rows] as $index => $set) {
+        $emitted = (new BotStarterQuestionCollectionResource($set))->toArray(Request::create('/'));
+
+        expect(schemaViolations($emitted, $collection['BotStarterQuestionCollectionResource'], $collection))
+            ->toBe([], "the collection schema disagrees with toArray() for fixture set {$index}");
+    }
 });
 
 it('publishes the paginated envelope with `meta` beside the collection inside `data`', function (): void {

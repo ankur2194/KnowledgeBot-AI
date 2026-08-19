@@ -111,7 +111,15 @@ final class UpdateBotRequest extends FormRequest
             'system_instruction' => ['bail', 'sometimes', 'nullable', 'string', 'max:8000'],
             'answer_style_instruction' => ['bail', 'sometimes', 'nullable', 'string', 'max:4000'],
 
-            'status' => ['bail', 'sometimes', 'required', 'string', Rule::in(BotStatus::values())],
+            // `prohibited` AND NOT AN ABSENT RULE. A transition moved to
+            // PUT /bots/{bot}/status, which is where CHECK 5 is impossible to miss — `status` is
+            // the one field on a bot that decides whether an END USER can reach it, and two doors
+            // to that column are two places a check has to be. Simply deleting the rule would make
+            // `validated()` SILENTLY DISCARD the field, so a client that had not been updated
+            // would publish a bot, receive a 200, and find it still in `draft`. This is a 422
+            // naming the endpoint instead, and it appears in
+            // packages/contracts/rules/UpdateBotRequest.json so a generated client is told.
+            'status' => ['prohibited'],
             'access_mode' => ['bail', 'sometimes', 'required', 'string', Rule::in(BotAccessMode::values())],
 
             // BOTH NULLABLE, because clearing the model selection is a legitimate edit — a bot
@@ -203,6 +211,13 @@ final class UpdateBotRequest extends FormRequest
                 .'`{}` to restore the platform theme; omit the field to leave the current one.',
             'theme.radius.in' => 'A radius is one of the six values the design tokens publish. The '
                 .'renderer matches this string exactly against that set and drops anything else.',
+            'status.prohibited' => 'A lifecycle transition is PUT /bots/{bot}/status, not a field '
+                .'on this edit. It is separate because publishing is the one change here that '
+                .'decides whether an end user can reach the bot at all, and it is refused for a '
+                .'bot with no provider model or for one in `rag_first` mode with '
+                .'`allow_general_answers` still false — checks that belong on a transition rather '
+                .'than beside a rename. Send the rest of this body without `status`, then call '
+                .'that endpoint.',
         ];
     }
 
@@ -254,6 +269,12 @@ final class UpdateBotRequest extends FormRequest
         }
 
         return match ($column) {
+            // UNREACHABLE TODAY AND KEPT DELIBERATELY. `status` is `prohibited` above, so it never
+            // survives `validated()` and this arm never runs. It stays because deleting it makes
+            // the FAILURE MODE of re-adding the rule silent: an uncoerced raw string reaching
+            // `BotEdit` is not a `BotStatus`, so `statusAfter()` falls back to the STORED status
+            // and the publish guard evaluates the wrong resulting state while every test that
+            // asserts on the response body still passes.
             'status' => BotStatus::from((string) $value),
             'access_mode' => BotAccessMode::from((string) $value),
             'answer_mode' => BotAnswerMode::from((string) $value),

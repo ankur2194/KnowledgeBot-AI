@@ -66,6 +66,19 @@ function botEndpoints(): array
         'show' => ['getJson', '/api/v1/organizations/{org}/bots/{bot}', []],
         'update' => ['patchJson', '/api/v1/organizations/{org}/bots/{bot}', ['name' => 'Probe rename']],
         'destroy' => ['deleteJson', '/api/v1/organizations/{org}/bots/{bot}', []],
+        // THE LIFECYCLE TRANSITION, WHICH LEFT THE PATCH. `status` used to be one of twenty-five
+        // optional fields on `update` and is now its own route, because it is the only field on a
+        // bot that decides whether an END USER can reach it. It is in this list rather than in a
+        // file of its own precisely so the binding, deny-oracle and role assertions below cover it
+        // without anybody having to remember: a sixth route added without a line here is a route no
+        // isolation test touches.
+        //
+        // `testing` AND NOT `published` AS THE PROBE VALUE. Publishing runs the publish guard, which
+        // refuses a bot with no provider model — and the fixture bots deliberately have none — so a
+        // `published` probe would 409 for every role and the matrix below would prove nothing.
+        // `testing` is unguarded by design: it is reachable only from the admin playground by a
+        // member of the owning organization.
+        'status' => ['putJson', '/api/v1/organizations/{org}/bots/{bot}/status', ['status' => 'testing']],
     ];
 }
 
@@ -175,7 +188,7 @@ it('404s a foreign or unknown bot on every route that takes one, before any poli
 
     // POSITIVE CONTROL FIRST: org A's OWN bot is reachable on all three, so the 404s below are
     // about the identifier rather than about the routes being broken.
-    foreach (['show', 'update', 'destroy'] as $action) {
+    foreach (['show', 'update', 'status', 'destroy'] as $action) {
         [$method, $template, $payload] = botEndpoints()[$action];
 
         callBotEndpoint(
@@ -197,7 +210,7 @@ it('404s a foreign or unknown bot on every route that takes one, before any poli
 
     $bodies = [];
 
-    foreach (['show', 'update', 'destroy'] as $action) {
+    foreach (['show', 'update', 'status', 'destroy'] as $action) {
         [$method, $template, $payload] = botEndpoints()[$action];
 
         $response = callBotEndpoint(
@@ -307,6 +320,12 @@ it('enforces bots.view on the reads and bots.manage on the writes, per action', 
         'store' => [OrgRole::Owner, OrgRole::Admin],
         'update' => [OrgRole::Owner, OrgRole::Admin],
         'destroy' => [OrgRole::Owner, OrgRole::Admin],
+        // THE TRANSITION IS `bots.manage`, THE SAME PERMISSION AS A RENAME, and that is not an
+        // oversight: a `bots.publish` case would be granted to exactly the same two roles, and a
+        // permission nobody grants differently is one that fails silently in both directions
+        // (App\Enums\Permission). What makes publishing stricter than a rename is CHECK 5, the
+        // publish guard, which `OrgScopedPolicy::permit()` has no argument position for.
+        'status' => [OrgRole::Owner, OrgRole::Admin],
     ];
 
     $rows = [];

@@ -159,11 +159,7 @@
             "max:200"
         ],
         "status": [
-            "bail",
-            "sometimes",
-            "required",
-            "string",
-            "in:\"draft\",\"testing\",\"published\",\"paused\",\"archived\""
+            "prohibited"
         ],
         "system_instruction": [
             "bail",

@@ -1,0 +1,18 @@
+{
+    "class": "App\\Http\\Requests\\UpdateBotStarterQuestionRequest",
+    "rules": {
+        "question": [
+            "bail",
+            "required_without:sort_order",
+            "string",
+            "max:200"
+        ],
+        "sort_order": [
+            "bail",
+            "required_without:question",
+            "integer",
+            "min:0",
+            "max:5"
+        ]
+    }
+}

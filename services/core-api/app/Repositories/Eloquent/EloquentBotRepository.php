@@ -10,6 +10,7 @@ use App\Models\BotDomain;
 use App\Models\BotFallbackEntry;
 use App\Models\BotStarterQuestion;
 use App\Repositories\Contracts\BotRepositoryInterface;
+use App\Services\Bots\BotChildSummary;
 use App\Services\Bots\BotEdit;
 use App\Services\Bots\NewBot;
 use App\Support\Http\ListQuery;
@@ -85,6 +86,65 @@ final class EloquentBotRepository implements BotRepositoryInterface
                 fn (Builder $builder): Builder => $builder->whereKeyNot($exceptBotId),
             )
             ->exists();
+    }
+
+    /**
+     * What this bot's three child collections hold, read with both tenant predicates.
+     *
+     * ── THREE QUERIES ON EVERY BOT WRITE, AND THAT IS THE RIGHT PRICE ─────────────────────────
+     *
+     * They run inside the audit closure, which runs inside the mutating transaction, on a path an
+     * administrator takes by hand — a bot is created, edited or deleted a handful of times in a
+     * bot's life, not per request. The alternative was to read the collections in `BotService`,
+     * which cannot: `Illuminate\Support\Facades\DB` and `App\Models` are both arch-pinned away from
+     * the service layer, and a repository method is what keeps the organization predicate a typed
+     * argument rather than an ambient assumption.
+     *
+     * THE ORIGINS ARE FILTERED TO `Active` THROUGH THE ENUM'S OWN PREDICATE and not by a literal
+     * `where('status', 'active')`. `BotDomainStatus::permitsEmbedding()` is the one place that
+     * decides what "grants an embed" means, and it is written positively on purpose — a negative
+     * test (`status <> 'disabled'`) admits `pending` today and admits whatever is added tomorrow.
+     * Reading every row and partitioning in PHP costs nothing on a list bounded at
+     * `BotDomainService::MAX_PER_BOT` and keeps that decision in one file.
+     */
+    public function childSummary(string $organizationId, string $botId): BotChildSummary
+    {
+        $domains = array_values(BotDomain::query()
+            ->where('organization_id', '=', $organizationId)
+            ->where('bot_id', '=', $botId)
+            ->orderBy('origin')
+            ->get()
+            ->all());
+
+        $activeOrigins = [];
+
+        foreach ($domains as $domain) {
+            if ($domain->status->permitsEmbedding()) {
+                $activeOrigins[] = $domain->origin;
+            }
+        }
+
+        /** @var array<int, string> $chain */
+        $chain = BotFallbackEntry::query()
+            ->where('organization_id', '=', $organizationId)
+            ->where('bot_id', '=', $botId)
+            ->orderBy('position')
+            ->pluck('provider_model_id')
+            ->all();
+
+        $fallbackModelIds = array_values($chain);
+
+        return new BotChildSummary(
+            domainCount: count($domains),
+            activeDomainCount: count($activeOrigins),
+            activeOrigins: $activeOrigins,
+            starterQuestionCount: BotStarterQuestion::query()
+                ->where('organization_id', '=', $organizationId)
+                ->where('bot_id', '=', $botId)
+                ->count(),
+            fallbackModelCount: count($fallbackModelIds),
+            fallbackModelIds: $fallbackModelIds,
+        );
     }
 
     /**

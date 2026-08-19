@@ -578,6 +578,27 @@ it('declares a complete, well-formed rule for every operation constant', functio
         'bot.created',
         'bot.updated',
         'bot.deleted',
+        // THE ORIGIN ALLOW-LIST, AND THESE THREE ARE FINDING L2 BEING CLOSED RATHER THAN A GENERAL
+        // PRINCIPLE. A bot delete is a HARD delete that destroys `bot_domains` with it, and that
+        // table justifies its own ON DELETE RESTRICT by saying a security review may later need to
+        // RECONSTRUCT the allow-list — which the trail could not do, because `bot.deleted`
+        // described the bot in full and said nothing about what it permitted. It was latent only
+        // while no route created a domain. These rows carry ONE ORIGIN EACH, verbatim, with the
+        // actor and the time; they are append-only and they outlive the bot, so they are what
+        // actually answers "what could embed this, and who allowed it". The scalar summaries added
+        // to the three `bot.*` allow-lists above are the tripwire that sends a reader here.
+        'bot.domain.created',
+        'bot.domain.status_changed',
+        'bot.domain.deleted',
+        // THE STARTER QUESTIONS, on §18.11's "bot config changes" rather than on a security
+        // argument — and without the question TEXT, which is unbounded tenant prose of exactly the
+        // kind the `bot.*` allow-lists refuse. Without these rows, editing the suggestion chips
+        // would be the one bot configuration change that left no trace anywhere: `bots` is
+        // untouched by it, so not even `bot.updated` fires. The asymmetry with the three above is
+        // deliberate — an origin string IS a security fact, a chip label is text on a button.
+        'bot.starter_question.created',
+        'bot.starter_question.updated',
+        'bot.starter_question.deleted',
     ];
 
     expect($operations)->toEqualCanonicalizing($expected)
@@ -647,6 +668,17 @@ it('declares a complete, well-formed rule for every operation constant', functio
         'bot.created' => AuditLogger::ON_FAILURE_ABORT,
         'bot.updated' => AuditLogger::ON_FAILURE_ABORT,
         'bot.deleted' => AuditLogger::ON_FAILURE_ABORT,
+        // ALL SIX CHILD OPERATIONS ARE ABORT, on the same test with the same answer: each is
+        // written inside its repository's transaction, so the change can still be rolled back when
+        // the row cannot be written. `bot.domain.created` is the one where a LOG policy would be a
+        // real defect rather than an inconsistency — it would permit a GRANT to a page on the
+        // public internet to exist with no record of who made it, which is the whole of finding L2.
+        'bot.domain.created' => AuditLogger::ON_FAILURE_ABORT,
+        'bot.domain.status_changed' => AuditLogger::ON_FAILURE_ABORT,
+        'bot.domain.deleted' => AuditLogger::ON_FAILURE_ABORT,
+        'bot.starter_question.created' => AuditLogger::ON_FAILURE_ABORT,
+        'bot.starter_question.updated' => AuditLogger::ON_FAILURE_ABORT,
+        'bot.starter_question.deleted' => AuditLogger::ON_FAILURE_ABORT,
     ];
 
     $actualPolicy = array_map(
