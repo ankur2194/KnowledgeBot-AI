@@ -43,8 +43,35 @@ export type {
   ResetPasswordOut,
 } from './auth.js';
 
-export { botFormDefaults, botSettingsSchema } from './bot.js';
-export type { BotFormSource, BotSettingsIn, BotSettingsOut } from './bot.js';
+/**
+ * BOTH bot schemas, plus the five closed vocabularies as runtime tuples.
+ *
+ * The tuples are the third, fourth, fifth, sixth and seventh runtime values in this barrel that are
+ * not a schema or a defaults factory (after `ORG_ROLES` and `PROVIDER_CONNECTION_STATUSES`), and
+ * they are here for the identical reason: `src/resources/bots.ts` declares each of them as a UNION
+ * with zero runtime values, because it is re-exported from the ROOT entry and budgeted at <=1 kB
+ * brotli inside apps/widget's app shell. A `<Select>` needs a list it can iterate; the resource type
+ * needs a union it can narrow. Neither spelling is the other's source — each is pinned to the server
+ * by its own drift suite.
+ */
+export {
+  BOT_ACCESS_MODES,
+  BOT_ANSWER_MODES,
+  BOT_STATUSES,
+  botCreateDefaults,
+  botCreateSchema,
+  botFormDefaults,
+  botSettingsSchema,
+  EVIDENCE_THRESHOLD_SCALES,
+  THEME_RADII,
+} from './bot.js';
+export type {
+  BotCreateIn,
+  BotCreateOut,
+  BotFormSource,
+  BotSettingsIn,
+  BotSettingsOut,
+} from './bot.js';
 
 export {
   embeddingDesignationDefaults,

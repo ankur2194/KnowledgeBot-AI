@@ -14,7 +14,17 @@ import {
   registerSchema,
   resetPasswordSchema,
 } from '../src/forms/auth.js';
-import { botSettingsSchema } from '../src/forms/bot.js';
+import {
+  BOT_ACCESS_MODES,
+  BOT_ANSWER_MODES,
+  BOT_STATUSES,
+  botCreateDefaults,
+  botCreateSchema,
+  botFormDefaults,
+  botSettingsSchema,
+  EVIDENCE_THRESHOLD_SCALES,
+  THEME_RADII,
+} from '../src/forms/bot.js';
 import { embeddingDesignationSchema } from '../src/forms/embedding-designation.js';
 import { OWNERSHIP_KEYS, isOwnershipPath } from '../src/forms/ownership.js';
 import {
@@ -129,6 +139,99 @@ const passwordOfLength: Sizer = (size) =>
  * author verified it against the dumped rule, rather than inferred in the harness from a rule string.
  */
 const capabilityFlagOfLength: Sizer = (size) => 'a'.repeat(size);
+
+/**
+ * A `Sizer` for `slug` on both bot manifests, and the third worked example of the hook.
+ *
+ * The rule is `max:64|regex:/^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/` — `bots_slug_shape` verbatim —
+ * and `regex` is a `FORMAT_RULES` member, so without this both `max:64` probes vanish: not reported,
+ * not failed, simply absent. `missingSizeProbes()` is what turns that into a red build.
+ *
+ * `'a'.repeat(n)` is length-exact AND matches the pattern for every n in 1…64 (one leading
+ * alphanumeric, up to 62 middle characters, one trailing alphanumeric), so `serverAccepts: true` at
+ * the boundary is a true claim about the server rather than a convenient one. At 65 it matches
+ * nothing, which is fine: the rejection probe only needs the server to say no, and it says no twice.
+ */
+const slugOfLength: Sizer = (size) => 'a'.repeat(size);
+
+/**
+ * A `Sizer` for `theme.primary` and `theme.accent`, and the only one in this file whose claim about
+ * the server was MEASURED AGAINST THE SERVER rather than reasoned about.
+ *
+ * Both paths carry `max:64` beside `App\Rules\ReadableThemeColor`, which demands a well-formed
+ * `oklch()` triple that can be given readable text. The generic `'a'.repeat(64)` satisfies neither
+ * half, so the boundary probe would claim an acceptance that does not happen — the exact false red
+ * `passwordOfLength` exists for, and the repair it invites is to delete the length bound from the
+ * schema.
+ *
+ * The padding goes BETWEEN the components, because that is the only axis with room: the grammar caps
+ * each component at three integer digits and six decimals, so all three plus an alpha reach nowhere
+ * near 64, while `\s+` between them matches a run of any length. `oklch(0.525 … 0.235 264)` is
+ * therefore length-exact and legal.
+ *
+ * VERIFIED, NOT REASONED: `php` against `services/core-api/vendor` ran `App\Rules\ReadableThemeColor`
+ * over the generated values and reported ACCEPT at 22, at 64 and at 65 — 65 is rejected by `max:64`
+ * alone, which is what the rejection probe needs — and REJECT for `'a'.repeat(64)`, which is the
+ * false red this generator removes. The same run confirmed the contrast half is live:
+ * `oklch(0.58 0.2 264)` is a legal colour and is refused, because L in [0.538, 0.634] is the band
+ * where neither platform foreground clears 4.5:1.
+ *
+ * L = 0.525 is deliberately just BELOW that band: it is the example the server's own error message
+ * gives, so a probe built on it is asserting against the value the rule's author had in mind.
+ */
+const THEME_COLOR_HEAD = 'oklch(0.525 0.235 264)';
+
+const themeColorOfLength: Sizer = (size) =>
+  size < THEME_COLOR_HEAD.length
+    ? undefined
+    : `oklch(0.525${' '.repeat(size - THEME_COLOR_HEAD.length + 1)}0.235 264)`;
+
+/**
+ * The bot body both requests share, and a FUNCTION rather than a constant because `mutate` clones it
+ * per probe and `theme` is a nested object — a shared literal would let one probe's `structuredClone`
+ * source be a previous probe's mutation if anything ever wrote through.
+ *
+ * Every value here is one the SERVER accepts: the retrieval depths sit inside docs/07 §12.7-12.12's
+ * bands (note `rerank_candidates` starts at 20 and `rerank_retain` at 6, so a plausible-looking 5
+ * would fail the baseline before a single probe ran), the theme colours are legal `oklch()` triples
+ * outside the unreadable band, and the evidence pair is the one argued for in the MIRRORS note below.
+ *
+ * `consent_text` IS SET WHILE `collect_end_user_data` IS FALSE, deliberately: that is a legal row —
+ * an operator who wrote the disclosure before switching collection on — and it keeps the baseline
+ * clear of the one pairing rule that is NOT in either manifest. `BotService` owns that check against
+ * the resulting row on both paths, and neither schema mirrors it; see the note on
+ * `collect_end_user_data` in src/forms/bot.ts.
+ */
+const botBaseline = (): Candidate => ({
+  name: 'Support desk',
+  slug: 'support-desk',
+  description: 'Answers questions about the employee handbook.',
+  welcome_message: 'Hi — ask me anything about the handbook.',
+  placeholder_text: 'Ask a question',
+  system_instruction: 'Answer only from the handbook, and say so when it does not cover something.',
+  answer_style_instruction: 'Be concise and use the reader’s own vocabulary.',
+  access_mode: 'private',
+  provider_connection_id: ULID,
+  provider_model_id: ULID,
+  answer_mode: 'strict',
+  dense_top_k: 20,
+  sparse_top_k: 20,
+  rerank_candidates: 20,
+  rerank_retain: 6,
+  evidence_threshold: 0.5,
+  evidence_threshold_scale: 'logit',
+  allow_general_answers: false,
+  theme: {
+    primary: 'oklch(0.525 0.235 264)',
+    accent: 'oklch(0.97 0.005 264)',
+    radius: '0.625rem',
+  },
+  rate_limit_per_minute: 60,
+  rate_limit_per_day: 5000,
+  retention_days: 90,
+  collect_end_user_data: false,
+  consent_text: 'We keep your email so we can follow up on this conversation.',
+});
 
 /**
  * Manifest class → the schema in src/forms/ that mirrors it. Every dumped manifest must appear
@@ -261,6 +364,86 @@ const MIRRORS: Readonly<Record<string, Mirror>> = {
     sized: { 'supported.*': capabilityFlagOfLength },
   },
 
+  /**
+   * THE TWO BOT REQUESTS, and the longest note in this map because three separate things about them
+   * are load-bearing and none is visible at the call site.
+   *
+   * ── THE BASELINE'S EVIDENCE PAIR IS CHOSEN, NOT ARBITRARY ──────────────────────────────────────
+   * `{evidence_threshold: 0.5, evidence_threshold_scale: 'logit'}` is the ONE combination that keeps
+   * both probe sets honest, and every other plausible pair makes one of them a false claim about the
+   * server:
+   *
+   *   the probes on `evidence_threshold` mutate the number and keep the baseline's SCALE. `min:-100`
+   *   and `max:100` claim the server ACCEPTS -100 and 100 — true on `logit`, which is unbounded, and
+   *   FALSE on either bounded scale, where `App\Rules\EvidenceThresholdWithinScale` refuses anything
+   *   outside [0, 1]. A `sigmoid` baseline reports the correct schema as blocking input the server
+   *   accepts, and the repair it invites is to delete the range mirror.
+   *
+   *   the probes on `evidence_threshold_scale` mutate the scale and keep the baseline's NUMBER. The
+   *   `in:` case claims the server accepts each of the three members in turn, which is true only for
+   *   a number inside [0, 1] — so a logit-shaped baseline like `-3.0` would assert an acceptance that
+   *   does not happen on two of the three members.
+   *
+   * 0.5 is inside [0, 1] and `logit` is unbounded, so both claims hold. This is the same burden a
+   * `sized` entry takes on, made here beside the mirror rather than inferred in the harness.
+   *
+   * VERIFIED, NOT REASONED, like `emailOfLength`'s: `php` against `services/core-api/vendor` ran
+   * `App\Rules\EvidenceThresholdWithinScale` over the whole probe matrix and reported ACCEPT for 0.5
+   * on all three scales, ACCEPT for -100 and 100 on `logit`, and REJECT for 1.7 on `sigmoid` and
+   * -0.1 on `unit_interval` — which is every claim this baseline makes about the server, in both
+   * directions. The same run reported ACCEPT from `App\Rules\ReadableThemeColor` for both baseline
+   * theme colours.
+   *
+   * ── TWO `sized` OVERRIDES EACH, FOR TWO DIFFERENT FORMAT COLLISIONS ────────────────────────────
+   * `slug` carries a `regex:`, which is a `FORMAT_RULES` member; `theme.primary` and `theme.accent`
+   * carry a rule OBJECT that is one by declaration (see FORMAT_RULES). Without the overrides the
+   * first pair of probes disappears and the second pair lies. `missingSizeProbes()` catches the
+   * disappearance; only a reader catches the lie, which is why `themeColorOfLength`'s claim was
+   * measured against the installed PHP rather than argued.
+   *
+   * ── THE BASELINE CARRIES EVERY KEY THE MANIFEST DECLARES ───────────────────────────────────────
+   * Including the ones a real form would omit. An `omitted` probe deletes a key, so a baseline
+   * missing that key makes the probe a no-op that passes while asserting nothing — the quiet
+   * variant of the suppression this file's two gates exist to prevent.
+   *
+   * ── ONE DIFFERENCE BETWEEN THE TWO BASELINES, AND IT IS THE WHOLE DIFFERENCE BETWEEN THE
+   *    REQUESTS ────────────────────────────────────────────────────────────────────────────────────
+   * `status` is on the PATCH and not on the POST: a bot is created `draft`, always. The create
+   * baseline therefore cannot carry one, and `strictObject` makes that a parse failure rather than a
+   * silent strip — which is what the `the schema declares exactly the fields the FormRequest
+   * validates` assertion turns into a red build the day somebody adds it to the wrong schema.
+   */
+  'App\\Http\\Requests\\StoreBotRequest': {
+    schema: botCreateSchema,
+    baseline: () => botBaseline(),
+    sized: {
+      slug: slugOfLength,
+      'theme.primary': themeColorOfLength,
+      'theme.accent': themeColorOfLength,
+    },
+  },
+
+  /**
+   * THE FIRST REAL `sometimes|required` MANIFEST IN THIS REPO, and the reason the fixture block near
+   * the bottom of this file was written before one existed. Twelve of its fields carry that pair, and
+   * reading it as `required` would make the whole settings form a replace: the schema would demand
+   * `name`, `slug`, `status` and nine more on every save, so editing one welcome message would be
+   * impossible — functionality removed, nothing reported, every probe green because both sides would
+   * "agree" the omission is a rejection.
+   *
+   * The fixture suite proves the harness answers that correctly; this entry is the first place it
+   * answers it about a schema that ships.
+   */
+  'App\\Http\\Requests\\UpdateBotRequest': {
+    schema: botSettingsSchema,
+    baseline: () => ({ ...botBaseline(), status: 'draft' }),
+    sized: {
+      slug: slugOfLength,
+      'theme.primary': themeColorOfLength,
+      'theme.accent': themeColorOfLength,
+    },
+  },
+
   'App\\Http\\Requests\\UpdateProviderModelRequest': {
     schema: providerModelEditSchema,
     // NO `model` KEY, and `strictObject` is what makes that a parse failure rather than a silent
@@ -328,6 +511,35 @@ const NO_CLIENT_FORM: Readonly<Record<string, string>> = {
   // those schemas existed, deliberately, so a schema with no scale check could not "agree" with the
   // server by being unprobed. It could not have gained them afterwards without somebody noticing
   // they were missing, which nobody would have.
+
+  // THE ONE MANIFEST THAT IS NOT A FORM AT ALL: it validates a QUERY STRING, and the client's
+  // correct behaviour on every one of its five fields is the OPPOSITE of what a mirroring schema
+  // would do.
+  //
+  // `page`, `per_page`, `sort`, `dir` and `filter` are read out of the URL by
+  // `apps/web/src/lib/table/params.ts`, which is the table's state and the request in one value. A
+  // query string is user input that somebody may simply have typed or bookmarked from a previous
+  // release, and it reaches two places that must not take unbounded values: the request Laravel
+  // validates, and the TanStack Query cache key. So that module CLAMPS — a `sort` outside the
+  // endpoint's sortable set degrades to the default, a `per_page` outside the declared page sizes
+  // degrades to the default, and a filter longer than `MAX_FILTER_LENGTH` is truncated.
+  //
+  // A Zod mirror of these rules would have to REJECT each of those, and rejecting is the wrong
+  // answer twice over: there is no field, no control and no per-field error to key a message to, and
+  // the visible result would be an error screen where the correct one is the default view. The drift
+  // harness cannot express "degrades to the default" — its whole vocabulary is accept/reject — so a
+  // mirror would either report the clamping module as drift or force it to start 422ing its own
+  // users.
+  //
+  // WHAT REPLACES IT: the server clamps too (`ListQuery::fromValidated()`), and `params.ts` mirrors
+  // `MAX_PER_PAGE` and `MAX_FILTER_LENGTH` as NUMBERS with the server named as the authority — a
+  // config whose `pageSizes` exceed the cap fail loudly at the call site instead of producing a
+  // response whose applied page size differs from the one the pager is doing arithmetic with. The
+  // one thing genuinely owed here is the SORTABLE SET (`id`, `name`, `slug`, `status`), which each
+  // table declares locally today; if a third list endpoint arrives, that is the piece worth lifting
+  // into this package — as a tuple, not as a schema.
+  'App\\Http\\Requests\\IndexBotsRequest':
+    'a query-string manifest, not a form: no control, no resolver and no per-field error, and the client CLAMPS every one of these five values to a declared set (apps/web/src/lib/table/params.ts) where a mirroring schema would have to reject — see the comment above',
 
   // THE ONE ENDPOINT WHOSE SUBJECT *IS* THE OWNERSHIP RELATION, and therefore the one that cannot
   // have a form schema at all. Its only field is `organization_id`, which is the first entry in
@@ -546,7 +758,27 @@ const sized = (kind: Kind, size: number): unknown => {
  * so on a field carrying one of these AND a `min:`/`max:`, the generic sizer produces a value the
  * SERVER rejects while the probe claims the server accepts it — see `sizerFor`.
  */
-const FORMAT_RULES = new Set([...VALUE_EXEMPT, 'regex']);
+const FORMAT_RULES = new Set([
+  ...VALUE_EXEMPT,
+  'regex',
+  /**
+   * A RULE OBJECT, listed by the class name `kb:dump-form-rules` records it under, and the reason it
+   * belongs in this set is that it is a format rule wearing a different spelling: it demands a
+   * well-formed `oklch()` triple that can be given readable text, and `'a'.repeat(64)` is neither.
+   *
+   * Both fields carrying it already declare a `sized` generator in their Mirror, so `sizerFor`
+   * returns that first and this membership changes nothing today. It is here for the NEXT field: a
+   * manifest that grows this rule without an override would otherwise get the generic sizer, whose
+   * boundary probe claims an acceptance the server does not give — a false red on a correct schema,
+   * which is the harder failure to diagnose. With this entry the probe is suppressed instead and
+   * `missingSizeProbes()` reports it by name.
+   *
+   * `App\Rules\EvidenceThresholdWithinScale` is deliberately NOT here. It constrains a number's
+   * RANGE against a sibling, not its form, and the generic numeric sizer answers its co-declared
+   * `min:-100`/`max:100` honestly for a `logit` baseline — see the MIRRORS note.
+   */
+  'App\\Rules\\ReadableThemeColor',
+]);
 
 /**
  * Egulias measures a non-leading domain label WITH the dot that precedes it, so a 63-character label
@@ -809,20 +1041,46 @@ function driftFailures(manifest: Manifest, mirror: Mirror): string[] {
  * and `supported.*` carries the element rules, and they are different questions.
  *
  * `.element` rather than a `def` walk because that is ZodArray's public accessor and it survives
- * `.max()` (which returns a new ZodArray carrying the same element). `ZodOptional`/`ZodNullable`
- * wrappers expose neither `.shape` nor `.element`, so a wrapped array reads as a leaf — no manifest
- * in this repo has one, and the day one does, this assertion goes red naming the field rather than
- * passing with the element rules unprobed.
+ * `.max()` (which returns a new ZodArray carrying the same element).
+ *
+ * ── THE UNWRAPPING LOOP, AND THE DAY THIS FILE SAID IT WOULD BE NEEDED ──────────────────────────
+ * This docblock used to end "`ZodOptional`/`ZodNullable` wrappers expose neither `.shape` nor
+ * `.element`, so a wrapped array reads as a leaf — no manifest in this repo has one, and the day one
+ * does, this assertion goes red naming the field rather than passing with the element rules
+ * unprobed." That day is the bot manifests: `theme` is `sometimes`, so its mirror is an OPTIONAL
+ * object, and read as a leaf it contributes one path where the manifest declares four.
+ *
+ * The red was the design working; the repair is unwrapping rather than either of the two the failure
+ * invites. Subtracting the `theme.*` keys from the manifest side would stop probing the colour rules
+ * altogether, and making `theme` mandatory to keep it unwrapped would be a form that cannot save a
+ * bot without re-sending its appearance.
+ *
+ * ONLY `ZodOptional` AND `ZodNullable`. `ZodDefault` also has `.unwrap()` and is deliberately absent:
+ * nothing in this package uses `.default()`, and if something starts to, this assertion goes red
+ * naming the field — which is the same property the paragraph above is a record of.
+ *
+ * ── A NESTED OBJECT CONTRIBUTES ITS OWN PATH TOO ────────────────────────────────────────────────
+ * Exactly as an array does, and for the same reason: Laravel dumps `theme` (carrying
+ * `array:primary,accent,radius`) and `theme.primary` as separate keys with different rules, so a
+ * schema that produced only the leaves would be missing one. The ROOT object is the exception —
+ * `prefix === ''` names nothing — which is why the branch is conditional rather than unconditional.
  */
 function schemaPaths(schema: z.ZodType, prefix = ''): string[] {
-  const shape = (schema as unknown as { shape?: Record<string, z.ZodType> }).shape;
-  if (shape) {
-    return Object.entries(shape).flatMap(([key, child]) =>
-      schemaPaths(child, prefix === '' ? key : `${prefix}.${key}`),
-    );
+  let node: z.ZodType = schema;
+  while (node instanceof z.ZodOptional || node instanceof z.ZodNullable) {
+    node = node.unwrap() as z.ZodType;
   }
 
-  const element = (schema as unknown as { element?: z.ZodType }).element;
+  const shape = (node as unknown as { shape?: Record<string, z.ZodType> }).shape;
+  if (shape) {
+    const children = Object.entries(shape).flatMap(([key, child]) =>
+      schemaPaths(child, prefix === '' ? key : `${prefix}.${key}`),
+    );
+
+    return prefix === '' ? children : [prefix, ...children];
+  }
+
+  const element = (node as unknown as { element?: z.ZodType }).element;
   if (element !== undefined && prefix !== '') {
     return [prefix, ...schemaPaths(element, `${prefix}.*`)];
   }
@@ -915,6 +1173,23 @@ describe('what the harness declines to probe', () => {
       'no generic generator satisfies an arbitrary pattern. A field carrying one supplies a `sized` generator in its Mirror so its size rules stay probed, and the patterns themselves are asserted in test/auth-schemas.test.ts — the one residual gap is proved and named in `the sizers` below',
     not_regex:
       'the negative form of `regex`, and unprobeable for the same reason plus one: a REJECTION probe would have to synthesize a value that MATCHES an arbitrary pattern. The only `not_regex` in the tree guards the masked display string (`^…`) on the two credential requests, neither of which has a client schema at all — and the client-side property that matters there is structural rather than validated: no type in this package puts `masked_key` and `credential` in one shape, so there is nothing to seed the input from. See NO_CLIENT_FORM',
+    /**
+     * ── THE TWO RULE OBJECTS, WHICH ARE THE FIRST NON-STRING RULES THIS FILE HAS SEEN ────────────
+     *
+     * `kb:dump-form-rules` records a rule OBJECT by class name and a closure as the bare string
+     * `Closure`, and both server classes say in their own docblocks that they are objects rather than
+     * closures FOR THIS FILE — a class name is something a generated client and this harness can key
+     * on, where a closure is "a rule no client can be generated from". So an entry here is the answer
+     * they were written to make possible, and it has to be a real answer.
+     *
+     * Both entries are narrower than they look: neither says "cannot be checked", both say "cannot be
+     * PROBED GENERICALLY", and each names where the check actually lives instead.
+     */
+    'App\\Rules\\EvidenceThresholdWithinScale':
+      'a DataAwareRule: the bound is [0, 1] on a bounded scale and unbounded on `logit`, so the verdict depends on the VALUE of `evidence_threshold_scale` rather than on this field alone. `probesFor` builds every probe from one field\'s rule list and has no vocabulary for "accepted with this sibling, rejected with that one" — the CROSS_FIELD set is the nearest thing and it only SUPPRESSES presence probes, which are already suppressed here by the mutual `required_with`. Teaching a generic probe would mean synthesizing a second field per rule, which is the sibling-aware generator this harness deliberately does not have. IT IS MIRRORED ANYWAY (`thresholdWithinScale` in src/forms/bot.ts) and asserted BY HAND in the bot cross-field section below, in both directions and on both schemas — an entry here suppresses the PROBE, not the check',
+    'App\\Rules\\ReadableThemeColor':
+      'two rules in one object, and neither can be probed. The GRAMMAR half needs a generator for an arbitrary pattern, which is `regex`\'s reason one line above. The CONTRAST half needs a value that is a legal `oklch()` triple AND lands in the band where neither platform foreground clears 4.5:1 — synthesizing one means implementing CSS Color 4 §13.2 gamut mapping and WCAG relative luminance inside this file, which is a second copy of `App\\Support\\Theme\\OklchColor` and would be asserting its own arithmetic. THE SCHEMA DOES NOT MIRROR THIS RULE EITHER, which is the residual and is stated in src/forms/bot.ts: the grammar already exists twice on purpose (apps/web/src/lib/color.ts at render time, OklchColor at write time, held together by tests/Contract/ThemeGrammarParityTest.php), a third spelling here would be the one that parity test does not read, and the console composes its field check from the copy that IS watched. The consequence is bounded and is the tolerable direction: an unreadable-but-legal colour submits and comes back a 422 keyed to `theme.primary`. What IS probed is the co-declared `max:64`, through the `themeColorOfLength` generator, whose acceptance claim was measured against the installed PHP rule rather than reasoned about',
+
     size: 'the `size:` fields are the 64-hex invitation/verification token and `price_currency`\'s `size:3`, and NEITHER can be probed generically. The token: registerSchema mirrors it DELIBERATELY LOOSER (src/forms/auth.ts), because a wrong-LENGTH token must reach the server and come back as the byte-identical "no longer valid" refusal rather than being rejected locally by a check that tells its holder the token is the wrong SHAPE — probing it would report that decision as drift. `price_currency` NOW HAS A MIRROR (providerModelCreateSchema/providerModelEditSchema) and is still unprobed, which is a narrower claim than the one that used to stand here: `size:3` is co-declared with `regex:/^[A-Z]{3}$/`, so the only honest acceptance value at length 3 is a three-letter UPPER-CASE code and the only honest rejection is a value of another length that also matches nothing — teaching `probesFor` a `size` case to reach it would apply that case to the four token manifests too, where the deliberate looseness above would then read as drift. The schema mirrors both halves as one regex and the cross-field section asserts it by hand',
   };
 
@@ -1681,6 +1956,370 @@ describe('the model catalog: the rules a single-field probe cannot express', () 
   });
 });
 
+/**
+ * The bot requests' own unprobeable rules, and there are FIVE kinds here — one more than the model
+ * catalog, which is why this is now the longest block in the file.
+ *
+ *   1. `required_with` in BOTH directions on the evidence pair. Every presence probe on a CROSS_FIELD
+ *      field is suppressed, so the whole rule is here.
+ *   2. `required_with` in ONE direction from `provider_model_id` to `provider_connection_id`. Same
+ *      suppression, opposite asymmetry to the model catalog's currency rule.
+ *   3. `App\Rules\EvidenceThresholdWithinScale` — a sibling-dependent RANGE, which `probesFor` has no
+ *      vocabulary for at all. `UNPROBED_RULES` records the suppression; this is the check.
+ *   4. `App\Rules\ReadableThemeColor` — the one rule in this file that is unprobed AND unmirrored.
+ *      What is asserted here is the boundary of that decision, so the residual is a test rather than
+ *      a paragraph.
+ *   5. The `sometimes|required` READING, on a schema that ships. The fixture suite above proves the
+ *      harness answers it correctly; these prove the settings form actually is a PATCH.
+ */
+describe('the bot requests: the rules a single-field probe cannot express', () => {
+  const create = (value: unknown) => botCreateSchema.safeParse(value);
+  const settings = (value: unknown) => botSettingsSchema.safeParse(value);
+
+  const CREATE_BASE = { name: 'Support desk', slug: 'support-desk' };
+
+  it('is a PATCH: the settings schema accepts a body carrying ONE field', () => {
+    // The assertion the whole `sometimes` block exists for, on a real schema. Twelve fields carry
+    // `sometimes|required`, and reading that as `required` would make every one of these a 422 that
+    // the drift harness would call agreement.
+    expect(settings({ welcome_message: 'Hi there' }).success).toBe(true);
+    expect(settings({ status: 'published' }).success).toBe(true);
+    expect(settings({ name: 'Support desk' }).success).toBe(true);
+    // …and the empty body, which is what a form submitted with nothing changed produces. The server
+    // accepts it (every field is `sometimes`) and answers 200 with no change; refusing it here would
+    // be this package inventing a rule.
+    expect(settings({}).success).toBe(true);
+  });
+
+  it('…but `sometimes|required` still refuses the value it calls empty', () => {
+    // The other half of the pair, and the one a schema that merely made everything `.optional()`
+    // would lose: sending `name` means sending a name. `TrimStrings` runs before `min:1`, so a field
+    // of spaces is empty server-side and must be empty here.
+    expect(settings({ name: '' }).success).toBe(false);
+    expect(settings({ name: '   ' }).success).toBe(false);
+    expect(settings({ slug: '' }).success).toBe(false);
+    // An explicit null is PRESENT, so `sometimes` does not fire and `nullable` was never declared.
+    expect(settings({ name: null }).success).toBe(false);
+  });
+
+  it('the create schema demands `name` and `slug` and nothing else', () => {
+    expect(create(CREATE_BASE).success).toBe(true);
+    expect(create({ name: 'Support desk' }).success).toBe(false);
+    expect(create({ slug: 'support-desk' }).success).toBe(false);
+    expect(create({}).success).toBe(false);
+  });
+
+  it('carries no `status` on create, and refuses one rather than stripping it', () => {
+    // A bot is created `draft`, always: creating one directly into `published` would run the publish
+    // guard against a source assignment that cannot exist yet. `StoreBotRequest` declares no rule for
+    // the field, so `strictObject` is what turns `create({...settingsValues})` into a parse failure
+    // instead of a body whose extra key is dropped in silence.
+    expect(create({ ...CREATE_BASE, status: 'draft' }).success).toBe(false);
+    expect(settings({ status: 'draft' }).success).toBe(true);
+  });
+
+  it('refuses every server-owned identifier on both schemas', () => {
+    // `public_bot_id` is the one that would not be harmless: it is the token every live embed on the
+    // customer's own site carries, server-minted once, and a form that round-tripped it could break
+    // all of them with a 200.
+    for (const key of [
+      'id',
+      'public_bot_id',
+      'retrieval_configuration_version',
+      'created_at',
+      'updated_at',
+    ]) {
+      expect(create({ ...CREATE_BASE, [key]: 'x' }).success, `create ${key}`).toBe(false);
+      expect(settings({ [key]: 'x' }).success, `settings ${key}`).toBe(false);
+    }
+  });
+
+  it('refuses half an evidence pair in both directions, and accepts both or neither', () => {
+    // `bots_evidence_threshold_paired` CHECKs `num_nonnulls(threshold, scale) <> 1` one layer down.
+    // The pair is not tidiness: the same float is an unbounded logit on one provider and a bounded
+    // relevance score on another, so half a pair is a number in no units at all.
+    expect(create({ ...CREATE_BASE, evidence_threshold: 0.5 }).success).toBe(false);
+    expect(create({ ...CREATE_BASE, evidence_threshold_scale: 'logit' }).success).toBe(false);
+    expect(
+      create({ ...CREATE_BASE, evidence_threshold: 0.5, evidence_threshold_scale: 'sigmoid' })
+        .success,
+    ).toBe(true);
+    // Neither is the unset state, and clearing BOTH is how an operator gets back to it on a PATCH.
+    expect(create(CREATE_BASE).success).toBe(true);
+    expect(
+      settings({ evidence_threshold: null, evidence_threshold_scale: null }).success,
+    ).toBe(true);
+    // A cleared number input posts "" and `ConvertEmptyStringsToNull` makes it null before any rule
+    // runs, so a half-cleared pair must be refused rather than posted as an empty string.
+    expect(settings({ evidence_threshold: '', evidence_threshold_scale: 'logit' }).success).toBe(
+      false,
+    );
+  });
+
+  it('keys that refusal to the field the operator still has to fill in', () => {
+    const refused = create({ ...CREATE_BASE, evidence_threshold: 0.5 });
+    expect(refused.success).toBe(false);
+    expect(refused.success === false && refused.error.issues[0]?.path).toEqual([
+      'evidence_threshold_scale',
+    ]);
+  });
+
+  /**
+   * `App\Rules\EvidenceThresholdWithinScale`, which `UNPROBED_RULES` declines to probe and this
+   * mirrors. Both directions matter and they are different failures: `1.7` on a bounded scale is the
+   * catchable half, and `1.7` on `logit` is a perfectly ordinary threshold that a schema which
+   * clamped everything to [0, 1] would refuse — functionality removed, nothing reported.
+   */
+  it('bounds the threshold by its own scale, and only when that scale is bounded', () => {
+    const withScale = (evidence_threshold: number, evidence_threshold_scale: string) =>
+      create({ ...CREATE_BASE, evidence_threshold, evidence_threshold_scale }).success;
+
+    for (const scale of ['sigmoid', 'unit_interval']) {
+      expect(withScale(0, scale), `${scale} lower bound`).toBe(true);
+      expect(withScale(1, scale), `${scale} upper bound`).toBe(true);
+      expect(withScale(1.7, scale), `${scale} above`).toBe(false);
+      expect(withScale(-0.1, scale), `${scale} below`).toBe(false);
+    }
+
+    // `logit` is unbounded and signed — NVIDIA's ranking endpoint returns one — so the only bounds
+    // are the absurdity pair the manifest declares, which the generated probes already cover.
+    expect(withScale(1.7, 'logit')).toBe(true);
+    expect(withScale(-3.2, 'logit')).toBe(true);
+    expect(withScale(-100, 'logit')).toBe(true);
+    expect(withScale(-101, 'logit')).toBe(false);
+
+    // The same rule on the PATCH, because the refinement is shared and a second copy is how the two
+    // schemas start to disagree.
+    expect(
+      settings({ evidence_threshold: 1.7, evidence_threshold_scale: 'unit_interval' }).success,
+    ).toBe(false);
+  });
+
+  it('the scale tuple is exactly the enum both schemas accept', () => {
+    // The tuple is what a `<Select>` iterates and the enum is what the resolver checks; two
+    // spellings of one list is how an option that cannot be submitted gets rendered. There is
+    // deliberately no `uncalibrated` member: that would be the statement that no characterization
+    // exists, which makes a stored threshold a contradiction rather than a value.
+    for (const scale of EVIDENCE_THRESHOLD_SCALES) {
+      expect(create({ ...CREATE_BASE, evidence_threshold: 0.5, evidence_threshold_scale: scale })
+        .success).toBe(true);
+    }
+    expect(EVIDENCE_THRESHOLD_SCALES).toHaveLength(3);
+    expect(EVIDENCE_THRESHOLD_SCALES).not.toContain('uncalibrated');
+  });
+
+  it('refuses a model with no connection, and permits a connection with no model', () => {
+    // ONE DIRECTION ONLY, and the asymmetry is the rule. A connection with no model is a real and
+    // common state — "I have chosen the vendor, not the model yet" — and both columns are nullable
+    // with MATCH SIMPLE foreign keys precisely so a half-configured draft is expressible. A MODEL
+    // with no connection is not a state at all: a catalog row names a credential only through its
+    // parent, so the pair would name no credential.
+    expect(create({ ...CREATE_BASE, provider_model_id: ULID }).success).toBe(false);
+    expect(create({ ...CREATE_BASE, provider_connection_id: ULID }).success).toBe(true);
+    expect(
+      create({ ...CREATE_BASE, provider_connection_id: ULID, provider_model_id: ULID }).success,
+    ).toBe(true);
+
+    const refused = create({ ...CREATE_BASE, provider_model_id: ULID });
+    // Keyed to the connection, because the model the operator picked is not the mistake.
+    expect(refused.success === false && refused.error.issues[0]?.path).toEqual([
+      'provider_connection_id',
+    ]);
+  });
+
+  it('treats a cleared model select ("") as null, exactly as ConvertEmptyStringsToNull does', () => {
+    const cleared = create({
+      ...CREATE_BASE,
+      provider_connection_id: '',
+      provider_model_id: '',
+    });
+    expect(cleared.success).toBe(true);
+    expect(cleared.success && cleared.data.provider_connection_id).toBeNull();
+    // …and therefore clearing the connection while a model is selected is refused rather than posted
+    // as an empty string, which the server would read as null and refuse anyway.
+    expect(create({ ...CREATE_BASE, provider_connection_id: '', provider_model_id: ULID }).success)
+      .toBe(false);
+  });
+
+  it('closes the theme key set and rejects an explicit null theme', () => {
+    // `array:primary,accent,radius` closes the key set, which is what makes an unknown key a 422
+    // instead of a value stored forever and rendered nowhere. Every other custom property the
+    // renderer writes — the whole `-foreground` and accent-ramp family — is DERIVED at render time
+    // and is never form-settable, because contrast is derived and never chosen.
+    expect(create({ ...CREATE_BASE, theme: {} }).success).toBe(true);
+    expect(create({ ...CREATE_BASE, theme: { radius: '0rem' } }).success).toBe(true);
+    expect(create({ ...CREATE_BASE, theme: { foreground: 'oklch(1 0 0)' } }).success).toBe(false);
+    expect(create({ ...CREATE_BASE, theme: { primary_foreground: 'x' } }).success).toBe(false);
+    // Neither request declares `nullable` on this path: absent leaves the stored theme alone, `{}` is
+    // the unthemed state, and null is neither.
+    expect(create({ ...CREATE_BASE, theme: null }).success).toBe(false);
+    // A cleared colour input posts "", which the server reads as null and then refuses with the
+    // `string` rule — so the lower bound here is mirroring a behaviour rather than a `min:` rule.
+    expect(create({ ...CREATE_BASE, theme: { primary: '' } }).success).toBe(false);
+  });
+
+  it('the radius tuple is exactly the six values the design tokens publish', () => {
+    for (const radius of THEME_RADII) {
+      expect(create({ ...CREATE_BASE, theme: { radius } }).success, radius).toBe(true);
+    }
+    expect(THEME_RADII).toHaveLength(6);
+    // The renderer matches this string EXACTLY against that set and drops anything else, so an
+    // arbitrary CSS length is refused on write rather than silently ignored on render.
+    expect(create({ ...CREATE_BASE, theme: { radius: '0.5em' } }).success).toBe(false);
+    expect(create({ ...CREATE_BASE, theme: { radius: '8px' } }).success).toBe(false);
+  });
+
+  /**
+   * THE RESIDUAL, AS A TEST RATHER THAN A PARAGRAPH. `App\Rules\ReadableThemeColor` is the one rule
+   * this package neither probes nor mirrors, and the reason is written out in `UNPROBED_RULES` and in
+   * src/forms/bot.ts. What can be asserted is the SHAPE of the gap, so it stays the gap that was
+   * argued for rather than quietly widening into "the client checks nothing about a theme".
+   */
+  it('does NOT mirror the oklch grammar or the contrast floor — the named residual', () => {
+    // Measured against the installed `App\Rules\ReadableThemeColor`: the first is refused for its
+    // grammar, the second is a legal colour refused for landing in the band where neither platform
+    // foreground clears 4.5:1. Both are accepted here, and both are a visible 422 keyed to the field.
+    expect(create({ ...CREATE_BASE, theme: { primary: 'rebeccapurple' } }).success).toBe(true);
+    expect(create({ ...CREATE_BASE, theme: { primary: 'oklch(0.58 0.2 264)' } }).success).toBe(true);
+    // What IS mirrored is the length, which is the half a generated probe can keep honest.
+    expect(create({ ...CREATE_BASE, theme: { primary: 'a'.repeat(65) } }).success).toBe(false);
+    expect(create({ ...CREATE_BASE, theme: { primary: 'a'.repeat(64) } }).success).toBe(true);
+  });
+
+  it('does NOT mirror the consent pairing, because neither manifest declares it', () => {
+    // The server's own note on `consent_text`: the rule would be correct on the POST and WRONG on the
+    // PATCH, where enabling collection on a bot that already carries a disclosure would be refused
+    // for a field the caller had no reason to resend. So the whole check lives in `BotService`,
+    // evaluated against the RESULTING row, with `bots_consent_text_present_when_collecting` as the
+    // database's copy — and a client-side version would block a body the server accepts.
+    expect(create({ ...CREATE_BASE, collect_end_user_data: true }).success).toBe(true);
+    expect(settings({ collect_end_user_data: true }).success).toBe(true);
+    // The other direction is a legal row and not a special case: an operator who wrote the disclosure
+    // before switching collection on.
+    expect(
+      create({ ...CREATE_BASE, collect_end_user_data: false, consent_text: 'We keep your email.' })
+        .success,
+    ).toBe(true);
+  });
+
+  it('the status and mode tuples are exactly the enums the settings schema accepts', () => {
+    for (const status of BOT_STATUSES) expect(settings({ status }).success, status).toBe(true);
+    expect(BOT_STATUSES).toHaveLength(5);
+    expect(settings({ status: 'deleted' }).success).toBe(false);
+
+    for (const access_mode of BOT_ACCESS_MODES) {
+      expect(settings({ access_mode }).success, access_mode).toBe(true);
+    }
+    for (const answer_mode of BOT_ANSWER_MODES) {
+      expect(settings({ answer_mode }).success, answer_mode).toBe(true);
+    }
+    expect(BOT_ACCESS_MODES).toHaveLength(2);
+    expect(BOT_ANSWER_MODES).toHaveLength(2);
+  });
+
+  it('clears a nullable number rather than coercing the empty input to zero', () => {
+    // `Number('')` is 0, and a rate limit of ZERO is not a limit — it is a bot that answers nobody,
+    // and it is a plausible typo for "no limit", which is spelled null. `min:1` here and
+    // `bots_rate_limits_positive` in the database both refuse the zero; this asserts the CLEARED
+    // input does not become one on the way past.
+    const cleared = settings({ rate_limit_per_minute: '', retention_days: '' });
+    expect(cleared.success).toBe(true);
+    expect(cleared.success && cleared.data.rate_limit_per_minute).toBeNull();
+    expect(cleared.success && cleared.data.retention_days).toBeNull();
+    expect(settings({ rate_limit_per_minute: 0 }).success).toBe(false);
+    expect(settings({ rate_limit_per_minute: null }).success).toBe(true);
+  });
+
+  it('clears a nullable text field to null rather than to the blank string', () => {
+    // `TrimStrings` then `ConvertEmptyStringsToNull` run before every rule, so a cleared textarea is
+    // null server-side. A schema that kept `''` would round-trip a value `bots_text_not_blank`
+    // refuses for every writer that is not an HTTP request.
+    const cleared = settings({ welcome_message: '   ', description: '' });
+    expect(cleared.success).toBe(true);
+    expect(cleared.success && cleared.data.welcome_message).toBeNull();
+    expect(cleared.success && cleared.data.description).toBeNull();
+  });
+
+  it('the defaults factory reaches exactly the 25 mutable fields, and no identifier', () => {
+    // The ONLY path from server data into this form's state. A `reset({...bot})` would keep `id`,
+    // `public_bot_id`, `retrieval_configuration_version`, `created_at` and `updated_at`, and the
+    // second of those is the one that matters: it is the token every live embed carries.
+    const source = {
+      name: 'Support desk',
+      slug: 'support-desk',
+      status: 'published',
+      description: null,
+      welcome_message: 'Hi',
+      placeholder_text: null,
+      system_instruction: null,
+      answer_style_instruction: null,
+      access_mode: 'public',
+      answer_mode: 'rag_first',
+      allow_general_answers: true,
+      provider_connection_id: ULID,
+      provider_model_id: ULID,
+      dense_top_k: 30,
+      sparse_top_k: 25,
+      rerank_candidates: 24,
+      rerank_retain: 8,
+      evidence_threshold: 0.42,
+      evidence_threshold_scale: 'sigmoid',
+      theme: { primary: 'oklch(0.525 0.235 264)', radius: '1rem' },
+      rate_limit_per_minute: 60,
+      rate_limit_per_day: null,
+      retention_days: 30,
+      collect_end_user_data: true,
+      consent_text: 'We keep your email.',
+    } as const;
+
+    const seeded = botFormDefaults(source);
+
+    expect(Object.keys(seeded)).toHaveLength(25);
+    for (const banned of [
+      'id',
+      'public_bot_id',
+      'retrieval_configuration_version',
+      'created_at',
+      'updated_at',
+      'organization_id',
+    ]) {
+      expect(Object.keys(seeded), banned).not.toContain(banned);
+    }
+
+    // It is a value the schema itself accepts — the property a settings form depends on, and the one
+    // a pick that dropped a required-shaped field would break.
+    expect(settings(seeded).success).toBe(true);
+
+    // THE THEME IS COPIED, not passed through: the resource's object is shared with the query cache,
+    // and handing it to a form that then edits a colour would mutate the cached row in place —
+    // TanStack Query would then compare the "new" data against a value that had already changed.
+    expect(seeded.theme).toEqual(source.theme);
+    expect(seeded.theme).not.toBe(source.theme);
+  });
+
+  it('the create defaults are a value the schema accepts once the two identifiers are typed', () => {
+    const empty = botCreateDefaults();
+    // NOT accepted as-is: `name` and `slug` are `required`, and an empty create form is not a
+    // submittable body. That is the point of rendering it.
+    expect(create(empty).success).toBe(false);
+    expect(create({ ...empty, ...CREATE_BASE }).success).toBe(true);
+
+    // The blank text inputs become nulls rather than empty strings: "not set", not "set to blank".
+    const filled = create({ ...empty, ...CREATE_BASE });
+    expect(filled.success && filled.data.description).toBeNull();
+    expect(filled.success && filled.data.consent_text).toBeNull();
+    // The four retrieval depths are seeded with the server's own defaults rather than left empty,
+    // because `rerank_retain`'s band starts at 6 — a blank control there is outside the range, not
+    // merely unhelpful.
+    expect(empty.rerank_retain).toBe(6);
+    expect(empty.rerank_candidates).toBe(20);
+    // The unthemed state is `{}`, which renders the platform theme and is the normal one.
+    expect(empty.theme).toEqual({});
+    // No `status`: a bot is created `draft` and the field is not in the create body at all.
+    expect(Object.keys(empty)).not.toContain('status');
+  });
+});
+
 describe('ownership columns are unrepresentable', () => {
   /**
    * DERIVED FROM `MIRRORS`, NOT A HAND-WRITTEN LIST, and that is the whole repair.
@@ -1693,8 +2332,14 @@ describe('ownership columns are unrepresentable', () => {
    *
    * Iterating `MIRRORS` means the next mirrored schema is covered the moment its entry lands, with no
    * second list to remember — the same closure argument the manifest set-equality assertion above makes.
-   * The two non-mirrored schemas are named explicitly because they have no manifest yet and therefore
-   * cannot be reached through `MIRRORS`; when they get one, they move and these lines go away.
+   * The one non-mirrored schema is named explicitly because it has no manifest yet and therefore
+   * cannot be reached through `MIRRORS`; when it gets one, it moves and these lines go away.
+   *
+   * `botSettingsSchema` USED TO BE THE SECOND NAME HERE, carrying the label "(no manifest yet)". It
+   * has two now — `StoreBotRequest` and `UpdateBotRequest` — so it is reached through `MIRRORS` like
+   * every other real schema, and it arrived with a sibling (`botCreateSchema`) that this list would
+   * have had no reason to know about. That is the closure argument working: the hand-written half
+   * shrinks as the mechanical half grows.
    *
    * `uploadSchema` is a FACTORY over `OrgUploadLimits` (§8.10 makes the size and MIME limits
    * per-organization, so no byte or MIME constant may exist in this package), which is why it is
@@ -1707,7 +2352,6 @@ describe('ownership columns are unrepresentable', () => {
     ...Object.entries(MIRRORS).map(
       ([className, mirror]) => [className, mirror.schema] as readonly [string, z.ZodType],
     ),
-    ['botSettingsSchema (no manifest yet)', botSettingsSchema],
     [
       'uploadSchema (no manifest yet; a factory, so instantiated)',
       uploadSchema({ max_bytes: 1, allowed_mime: ['application/pdf'], max_batch: 1 }),
@@ -1718,12 +2362,14 @@ describe('ownership columns are unrepresentable', () => {
     const checked = everySchema();
 
     // A positive control on the LOOP, not on the schemas: an empty or truncated list would make every
-    // assertion below vacuous, and `toEqual([])` on nothing passes. Eleven is the whole package today
-    // — the nine MIRRORS plus the two schemas with no manifest. It is asserted rather than commented
-    // because the number is the only thing standing between this loop and passing on an empty list;
-    // when MIRRORS grows, this goes red once and the new count is a one-character edit with a diff that
-    // says which schema arrived. It just did, twice: the two model-catalog schemas took it from 9.
-    expect(checked.length, 'every schema in the package must be reached').toBe(11);
+    // assertion below vacuous, and `toEqual([])` on nothing passes. Twelve is the whole package today
+    // — the eleven MIRRORS plus `uploadSchema`, which has no manifest. It is asserted rather than
+    // commented because the number is the only thing standing between this loop and passing on an
+    // empty list; when MIRRORS grows, this goes red once and the new count is a one-character edit
+    // with a diff that says which schema arrived. It just did, twice: the two model-catalog schemas
+    // took it from 9 to 11, and the two bot schemas took it to 12 while REMOVING a hand-written line
+    // — `botSettingsSchema` stopped being named here and became a MIRRORS entry, so the net is +1.
+    expect(checked.length, 'every schema in the package must be reached').toBe(12);
 
     for (const [label, schema] of checked) {
       expect(schemaPaths(schema).filter(isOwnershipPath), label).toEqual([]);
@@ -1731,16 +2377,33 @@ describe('ownership columns are unrepresentable', () => {
   });
 
   it('a strictObject rejects an ownership key instead of silently stripping it', () => {
+    // THE BODY WITHOUT THE OWNERSHIP KEY MUST PARSE, and that half is new. The fixture this replaced
+    // carried `starter_questions` and `retrieval.top_k` — two fields the shipped FormRequests do not
+    // have — so after the schema was expanded it would have failed for the unknown keys rather than
+    // for `organization_id`, and asserted nothing about ownership at all. A negative control needs a
+    // positive one beside it or it is only a claim that SOMETHING was wrong.
+    const legitimate = { name: 'Support bot', status: 'draft', welcome_message: 'Hi' };
+    expect(botSettingsSchema.safeParse(legitimate).success).toBe(true);
+
     const result = botSettingsSchema.safeParse({
-      name: 'Support bot',
-      status: 'draft',
-      welcome_message: 'Hi',
-      starter_questions: [],
-      retrieval: { top_k: 5 },
+      ...legitimate,
       organization_id: '01JSOMEONEELSE',
     });
     // z.object() would strip it and hide the escalation attempt until something bypasses the parse.
     expect(result.success).toBe(false);
+
+    // The create schema is a separate object and gets the same treatment: `strictObject` is a
+    // property of each schema, not of the package.
+    expect(
+      botCreateSchema.safeParse({ name: 'Support bot', slug: 'support-bot' }).success,
+    ).toBe(true);
+    expect(
+      botCreateSchema.safeParse({
+        name: 'Support bot',
+        slug: 'support-bot',
+        organization_id: '01JSOMEONEELSE',
+      }).success,
+    ).toBe(false);
 
     expect(
       embeddingDesignationSchema.safeParse({

@@ -87,6 +87,25 @@ export type {
 } from './resources/providers.js';
 
 /**
+ * The bot admin surface, plus `ListMetaResource` — which is not bot-specific and is here because
+ * bots is the first paginated list this package mirrors. Same `export type` discipline, and the same
+ * reason this module holds no runtime value: the five closed vocabularies are UNIONS, and their
+ * iterable tuples live behind `@kb/contracts/forms` where a `<Select>` can reach them without
+ * putting them in apps/widget's app shell.
+ */
+export type {
+  BotAccessMode,
+  BotAnswerMode,
+  BotCollectionResource,
+  BotResource,
+  BotStatus,
+  BotTheme,
+  BotThemeRadius,
+  EvidenceThresholdScale,
+  ListMetaResource,
+} from './resources/bots.js';
+
+/**
  * The model catalog under one connection. Same `export type` discipline, and the same reason this
  * module holds no runtime value: `supported` is an OPEN string array because the capability
  * vocabulary belongs to the data plane and the control plane publishes no enum for it, so there is

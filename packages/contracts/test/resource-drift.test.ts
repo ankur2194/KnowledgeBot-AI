@@ -4,6 +4,17 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
+import type {
+  BotAccessMode,
+  BotAnswerMode,
+  BotCollectionResource,
+  BotResource,
+  BotStatus,
+  BotTheme,
+  BotThemeRadius,
+  EvidenceThresholdScale,
+  ListMetaResource,
+} from '../src/resources/bots.js';
 import type { InvitationResource, MemberResource } from '../src/resources/members.js';
 import type {
   ProviderModelCollectionResource,
@@ -55,7 +66,15 @@ const distEntry = join(here, '..', 'dist', 'index.js');
  */
 interface OpenApiSchemaNode {
   readonly properties?: Readonly<Record<string, OpenApiSchemaNode>>;
-  readonly enum?: readonly string[];
+  /**
+   * `string | null`, not `string`, and the null is the document's rather than this file's invention:
+   * a NULLABLE enum is emitted as `{"type": ["string","null"], "enum": [..., null]}`, which
+   * `BotResource.evidence_threshold_scale` is the first instance of. Typed `readonly string[]` the
+   * comparison against a TypeScript union — which spells the same fact as `| null` on the property —
+   * fails on a correct type, and the repair that suggests itself is to add a `null` member to the
+   * union, which is a second spelling of the nullability the `NULLABLE` map already owns.
+   */
+  readonly enum?: readonly (string | null)[];
   /**
    * The three fields the property-NAME comparison used to ignore, and finding N3 is that it did.
    *
@@ -423,6 +442,211 @@ describe('the hand-written provider-model types', () => {
   });
 });
 
+/**
+ * The bot types, pinned the same three ways, plus one pin nothing else in this file needs: five
+ * closed vocabularies that exist TWICE in this package on purpose — as unions here and as tuples
+ * behind `@kb/contracts/forms` — because `src/resources/` may hold no runtime value and a `<Select>`
+ * needs something it can iterate. Each spelling is pinned to the server independently, so the pair
+ * cannot drift together silently: these against the document's inlined enums, the tuples against the
+ * `in:` probes in test/form-drift.test.ts.
+ */
+describe('the hand-written bot types', () => {
+  it('BotResource declares exactly thirty keys and no credential-shaped one', () => {
+    const keys: Record<keyof BotResource, true> = {
+      id: true,
+      public_bot_id: true,
+      name: true,
+      slug: true,
+      description: true,
+      welcome_message: true,
+      placeholder_text: true,
+      system_instruction: true,
+      answer_style_instruction: true,
+      status: true,
+      access_mode: true,
+      provider_connection_id: true,
+      provider_model_id: true,
+      answer_mode: true,
+      dense_top_k: true,
+      sparse_top_k: true,
+      rerank_candidates: true,
+      rerank_retain: true,
+      evidence_threshold: true,
+      evidence_threshold_scale: true,
+      retrieval_configuration_version: true,
+      allow_general_answers: true,
+      theme: true,
+      rate_limit_per_minute: true,
+      rate_limit_per_day: true,
+      retention_days: true,
+      collect_end_user_data: true,
+      consent_text: true,
+      created_at: true,
+      updated_at: true,
+    };
+    expect(Object.keys(keys)).toHaveLength(30);
+
+    // Nothing of the parent connection beyond its ULID: no vendor, no label, no masked credential.
+    // The same property `ProviderModelResource` holds, and for the same reason — a client that could
+    // read key material is a client that could put it in a form.
+    for (const banned of ['credential', 'masked_key', 'provider', 'key_version', 'organization_id']) {
+      expect(Object.keys(keys)).not.toContain(banned);
+    }
+  });
+
+  it('separates the ADMIN id from the public one, and carries the system instruction', () => {
+    // The two identifier fields are the reason this resource is authenticated-only, and they are not
+    // interchangeable. `id` is a term in every vector query issued on this bot's behalf;
+    // `public_bot_id` is the token a widget snippet on a stranger's page carries and authorizes
+    // nothing. A shape with one field serving both purposes is the leak this split prevents.
+    const published = Object.keys(schemas['BotResource']?.properties ?? {});
+    expect(published).toContain('id');
+    expect(published).toContain('public_bot_id');
+    // `system_instruction` is the bot's own prompt. Its presence here is what makes the whole shape
+    // admin-only: the hosted-chat, widget and stylesheet surfaces publish their own, smaller
+    // resources, and none of them may carry it.
+    expect(published).toContain('system_instruction');
+  });
+
+  it('publishes no form-settable spelling of the two derived fields', () => {
+    // `retrieval_configuration_version` is DERIVED — it moves only when a retrieval knob's VALUE
+    // changes, and it travels into every retrieval trace, so a client that could set it could make
+    // two different configurations claim the same identity. `public_bot_id` is server-minted once.
+    // Both are on the resource and in NEITHER form schema, which is the asymmetry this asserts:
+    // readable, never writable.
+    const rules = JSON.parse(
+      readFileSync(join(here, '..', 'rules', 'UpdateBotRequest.json'), 'utf8'),
+    ) as { rules: Readonly<Record<string, unknown>> };
+
+    for (const derived of ['retrieval_configuration_version', 'public_bot_id', 'id']) {
+      expect(Object.keys(rules.rules), `${derived} must not be validatable`).not.toContain(derived);
+    }
+  });
+
+  it('BotTheme is the only type here with optional members, because the wire says so', () => {
+    const keys: Record<keyof Required<BotTheme>, true> = {
+      primary: true,
+      accent: true,
+      radius: true,
+    };
+    expect(Object.keys(keys).sort()).toEqual(['accent', 'primary', 'radius']);
+
+    // The published `theme` object lists all three and REQUIRES none — the one place
+    // `DumpOpenApiCommand` emits a partial object, and the reason the `declares every property
+    // required` loop below cannot reach it: `theme` is inlined into `BotResource` rather than being a
+    // named component, so this is the assertion.
+    const wireTheme = schemas['BotResource']?.properties?.['theme'];
+    expect(new Set(Object.keys(wireTheme?.properties ?? {}))).toEqual(new Set(Object.keys(keys)));
+    expect(wireTheme?.required ?? []).toEqual([]);
+
+    // Every other custom property the renderer writes — the whole `-foreground` and accent-ramp
+    // family — is DERIVED at render time and never settable, because contrast is derived and never
+    // chosen. A fourth key here would be a value stored forever and rendered nowhere.
+    for (const derived of ['primary_foreground', 'accent_foreground', 'ring', 'foreground']) {
+      expect(Object.keys(wireTheme?.properties ?? {})).not.toContain(derived);
+    }
+  });
+
+  it('agrees with the document about all five closed vocabularies, member for member', () => {
+    const statuses: Record<BotStatus, true> = {
+      draft: true,
+      testing: true,
+      published: true,
+      paused: true,
+      archived: true,
+    };
+    const accessModes: Record<BotAccessMode, true> = { public: true, private: true };
+    const answerModes: Record<BotAnswerMode, true> = { strict: true, rag_first: true };
+    const scales: Record<EvidenceThresholdScale, true> = {
+      logit: true,
+      sigmoid: true,
+      unit_interval: true,
+    };
+    const radii: Record<BotThemeRadius, true> = {
+      '0rem': true,
+      '0.25rem': true,
+      '0.5rem': true,
+      '0.625rem': true,
+      '0.75rem': true,
+      '1rem': true,
+    };
+
+    // READ OFF THE PROPERTY, not off a named component: the dumper INLINES an enum into the property
+    // that carries it. A sixth lifecycle state is a server change first, and this is where the client
+    // finds out — the alternative is a `<Select>` that silently cannot express a value the API
+    // returns.
+    const bot = schemas['BotResource']?.properties;
+    expect(new Set(bot?.['status']?.enum ?? []), 'status enum').toEqual(new Set(Object.keys(statuses)));
+    expect(new Set(bot?.['access_mode']?.enum ?? []), 'access_mode enum').toEqual(
+      new Set(Object.keys(accessModes)),
+    );
+    expect(new Set(bot?.['answer_mode']?.enum ?? []), 'answer_mode enum').toEqual(
+      new Set(Object.keys(answerModes)),
+    );
+    expect(
+      new Set(bot?.['theme']?.properties?.['radius']?.enum ?? []),
+      'theme.radius enum',
+    ).toEqual(new Set(Object.keys(radii)));
+
+    // THE ONE ENUM THAT CARRIES A `null` MEMBER, and the type does not: the document spells the
+    // nullable enum as `type: ["string","null"]` WITH `null` in `enum`, while the TypeScript side
+    // spells it `EvidenceThresholdScale | null` on the property. Comparing the raw member list would
+    // fail on a correct type, so the null is dropped here and asserted as nullability below —
+    // separately, because "which members" and "may it be absent" are different questions.
+    const scaleEnum = (bot?.['evidence_threshold_scale']?.enum ?? []).filter(
+      (member) => member !== null,
+    );
+    expect(new Set(scaleEnum), 'evidence_threshold_scale enum').toEqual(new Set(Object.keys(scales)));
+    expect(bot?.['evidence_threshold_scale']?.enum).toContain(null);
+  });
+
+  it('ListMetaResource is the shared list envelope, not a bot-specific one', () => {
+    const keys: Record<keyof ListMetaResource, true> = {
+      page: true,
+      per_page: true,
+      total: true,
+      total_pages: true,
+      sort: true,
+      dir: true,
+      filter: true,
+    };
+    expect(Object.keys(keys).sort()).toEqual([
+      'dir',
+      'filter',
+      'page',
+      'per_page',
+      'sort',
+      'total',
+      'total_pages',
+    ]);
+
+    // `sort` is typed `string` and NOT a union, deliberately: the sortable set is closed PER
+    // ENDPOINT and published in that endpoint's request rules (`IndexBotsRequest`), not here. One
+    // component serves every list in the API, so a union here would be one endpoint's vocabulary
+    // pretending to be every endpoint's.
+    expect(schemas['ListMetaResource']?.properties?.['sort']?.enum).toBeUndefined();
+    expect(new Set(schemas['ListMetaResource']?.properties?.['dir']?.enum ?? [])).toEqual(
+      new Set(['asc', 'desc']),
+    );
+
+    // `total_pages` is PUBLISHED rather than derived, because the client's `per_page` may not be the
+    // one the server used — it is clamped. A client that recomputed it would be wrong on every
+    // clamped response, and wrong in the direction that disables the Next button.
+    expect(Object.keys(keys)).toContain('total_pages');
+  });
+
+  it('BotCollectionResource wraps the array under a named key, beside meta', () => {
+    const keys: Record<keyof BotCollectionResource, true> = { bots: true, meta: true };
+    // `ResponseShape` maps a response KEY to a schema class and has no shape meaning "an array of",
+    // and every published component must be `additionalProperties: false`, which an array-typed
+    // schema cannot be. `meta` is a SIBLING of the collection inside `data`, not of `data`.
+    expect(Object.keys(keys).sort()).toEqual(['bots', 'meta']);
+    // `meta` is present on an EMPTY page too: a client that had to branch on its absence would be
+    // branching on "did this list have results", which is the question `total` answers.
+    expect(schemas['BotCollectionResource']?.required ?? []).toContain('meta');
+  });
+});
+
 // ── 2. the wire-level pin ────────────────────────────────────────────────────────────────────────
 
 /**
@@ -537,6 +761,48 @@ describe('every published component is mirrored here or exempt with a reason', (
       'created_at',
     ],
     ProviderModelCollectionResource: ['models'],
+
+    // ── the bot surface, mirrored by src/resources/bots.ts ─────────────────────────────────────
+    // `ListMetaResource` is NOT bot-specific and is listed here because it arrived with the first
+    // paginated list. One component serves every list endpoint in the API, so the second one imports
+    // the type rather than declaring a near-identical `PaginationMeta` beside itself — which is the
+    // duplication this whole suite was rewritten to catch after `MemberResource` was hand-written a
+    // second time in apps/web with no mechanical link to anything. That duplicate exists today at
+    // `apps/web/src/lib/table/envelope.ts` and is owed the same swap.
+    BotResource: [
+      'id',
+      'public_bot_id',
+      'name',
+      'slug',
+      'description',
+      'welcome_message',
+      'placeholder_text',
+      'system_instruction',
+      'answer_style_instruction',
+      'status',
+      'access_mode',
+      'provider_connection_id',
+      'provider_model_id',
+      'answer_mode',
+      'dense_top_k',
+      'sparse_top_k',
+      'rerank_candidates',
+      'rerank_retain',
+      'evidence_threshold',
+      'evidence_threshold_scale',
+      'retrieval_configuration_version',
+      'allow_general_answers',
+      'theme',
+      'rate_limit_per_minute',
+      'rate_limit_per_day',
+      'retention_days',
+      'collect_end_user_data',
+      'consent_text',
+      'created_at',
+      'updated_at',
+    ],
+    BotCollectionResource: ['bots', 'meta'],
+    ListMetaResource: ['page', 'per_page', 'total', 'total_pages', 'sort', 'dir', 'filter'],
   };
 
   /**
@@ -664,6 +930,49 @@ describe('every published component is mirrored here or exempt with a reason', (
       InvitationResource: {
         created_at: true,
       } satisfies Record<NullableKeys<InvitationResource>, true>,
+
+      /**
+       * FIFTEEN OF THIRTY, which is half the resource, and that is the shape of the thing rather
+       * than an accident: a bot is created with two fields typed and every optional one unset, so
+       * "null means not configured" is the normal state of most of this row and the console renders
+       * a platform default for each. Three of them are load-bearing beyond that:
+       *
+       *   `provider_connection_id`/`provider_model_id` are null on a bot that has not been
+       *   configured, which is the FIRST state every bot is in — a non-nullable type here would make
+       *   the create response unrepresentable.
+       *
+       *   `evidence_threshold` is null WITH NO PLATFORM DEFAULT, deliberately: the scale is a
+       *   property of the (provider, model) pair, so there is no number that means "unset but safe".
+       *
+       *   the three limits are null when the PLATFORM default applies, which is a different fact
+       *   from a configured limit that happens to equal it — an operator asking whether somebody set
+       *   this has to be able to tell them apart, and a `number` type collapses the two.
+       */
+      BotResource: {
+        description: true,
+        welcome_message: true,
+        placeholder_text: true,
+        system_instruction: true,
+        answer_style_instruction: true,
+        provider_connection_id: true,
+        provider_model_id: true,
+        evidence_threshold: true,
+        evidence_threshold_scale: true,
+        rate_limit_per_minute: true,
+        rate_limit_per_day: true,
+        retention_days: true,
+        consent_text: true,
+        created_at: true,
+        updated_at: true,
+      } satisfies Record<NullableKeys<BotResource>, true>,
+
+      // `filter` is null rather than `''`, because an empty filter is no filter and two spellings of
+      // "unfiltered" would make an unfiltered list's cache key depend on whether the client sent the
+      // parameter at all. Every other field on this envelope is a number the pager does arithmetic
+      // with, and a nullable one of those is a pager that renders `NaN`.
+      ListMetaResource: {
+        filter: true,
+      } satisfies Record<NullableKeys<ListMetaResource>, true>,
     };
 
     for (const component of Object.keys(MIRRORED)) {
@@ -840,6 +1149,14 @@ describe('the root entry export list', () => {
     // app shell and neither of which this package may declare at all.
     expect(emitted).not.toContain('resources/provider-models');
     expect(emitted).not.toContain('input_price_per_million');
+    // And the bot surface, whose second string is chosen for the reason that module holds five
+    // closed vocabularies as UNIONS: `knowledge_manager` above proves `Role` stayed a type, and
+    // `unit_interval` proves the same of `EvidenceThresholdScale`. The iterable tuples live behind
+    // `@kb/contracts/forms`, and a tuple that migrated here would be a widget app-shell regression
+    // that compiles, typechecks and passes review.
+    expect(emitted).not.toContain('resources/bots');
+    expect(emitted).not.toContain('unit_interval');
+    expect(emitted).not.toContain('public_bot_id');
   });
 
   it('keeps zod out of the root entry', () => {
