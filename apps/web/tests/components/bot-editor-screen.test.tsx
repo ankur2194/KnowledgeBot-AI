@@ -248,8 +248,25 @@ describe('the shell says once what every panel then obeys', () => {
 
     // They belong to the identity tab and to nothing else. The shell renders a summary, and a summary
     // that quoted a bot's own prompt would put it on a screen the projection exists to control.
-    expect(document.body.textContent).not.toContain('CANARY-SYSTEM-INSTRUCTION');
-    expect(document.body.textContent).not.toContain('CANARY-ANSWER-STYLE');
+    //
+    // SCOPED TO THE SUMMARY CARD, and the whole-body form this replaced was passing VACUOUSLY. It
+    // held only while `BotIdentityPanel` was a stub: the shell opens on the identity tab, that tab
+    // renders `system_instruction` in a controlled `<textarea>` for a caller who may see it — which
+    // is its entire job — and React emits a controlled textarea's value as a child node, so it is in
+    // `document.body.textContent` by construction. A whole-body assertion here therefore forbids the
+    // feature rather than the leak, and the first correct panel turns it red.
+    //
+    // The property it was written to defend is unchanged and still asserted: the SUMMARY never
+    // quotes the prompt. This is the same scoping, for the same reason, that the sibling assertion
+    // above already applies to `support-bot`.
+    //
+    // Nothing is lost by narrowing it. The case this test's NAME evokes — a viewer who may not see
+    // the fields — is the projection, and that is the next test in this file: the server nulls both
+    // keys for a caller without `bots.manage`, and the panel branches to a component that mounts no
+    // form at all, so there is no path on which a withheld value can seed a control.
+    const summary = document.querySelector('h2')?.closest('[data-slot="card"]');
+    expect(summary?.textContent).not.toContain('CANARY-SYSTEM-INSTRUCTION');
+    expect(summary?.textContent).not.toContain('CANARY-ANSWER-STYLE');
   });
 
   it('tells a reader without bots.manage that the fields are hidden rather than empty', async () => {
