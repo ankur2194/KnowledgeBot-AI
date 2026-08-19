@@ -1,18 +1,46 @@
-import type { BotAccessMode, BotCollectionResource, BotResource, BotStatus } from '@kb/contracts';
+import type {
+  BotAccessMode,
+  BotCollectionResource,
+  BotResource,
+  BotStatus,
+  Role,
+} from '@kb/contracts';
+import {
+  botFormDefaults,
+  type BotCreateOut,
+  type BotFormSource,
+  type BotSettingsIn,
+  type BotSettingsOut,
+} from '@kb/contracts/forms';
 import indexBotsRules from '@kb/contracts/rules/IndexBotsRequest.json';
+import storeBotRules from '@kb/contracts/rules/StoreBotRequest.json';
+import updateBotRules from '@kb/contracts/rules/UpdateBotRequest.json';
 
 import type { StatusKind } from '@/components/status-pill';
 import { organizationPath } from '@/features/providers/api';
-import { browserFetch, sessionCredential, type ApiEnvelope } from '@/lib/api/browser';
-import type { FormRulesManifest } from '@/lib/forms/known-paths';
+import {
+  browserFetch,
+  browserFetchData,
+  sessionCredential,
+  type ApiEnvelope,
+} from '@/lib/api/browser';
+import { knownPathsFromRules, type FormRulesManifest } from '@/lib/forms/known-paths';
 import { readPaginatedEnvelope, type TablePage } from '@/lib/table/envelope';
 import { MAX_PER_PAGE, type TableParamsConfig } from '@/lib/table/params';
 
 /**
- * The bot LIST transport, the view configuration the URL is parsed against, and the two display
- * vocabularies the table renders. REACT-FREE on purpose — nothing here imports a hook, so a spec can
- * call the fetcher directly and a render site cannot accidentally acquire a second copy of the
- * envelope knowledge.
+ * THE WHOLE BOT TRANSPORT — the list, the detail, the create and the PATCH — plus the view
+ * configuration the URL is parsed against, the two display vocabularies the table renders, and the
+ * FIELD PARTITION the editor's three tabs are built from. REACT-FREE on purpose: nothing here imports
+ * a hook, so a spec can call a fetcher directly and a render site cannot accidentally acquire a second
+ * copy of the envelope knowledge.
+ *
+ * ── IT IS ALSO THE EDITOR'S PUBLISHED SURFACE, AND THAT MAKES IT READ-ONLY TO THREE AGENTS ───────
+ * `bot-identity-panel.tsx`, `bot-model-panel.tsx` and `bot-publishing-panel.tsx` are written
+ * independently and may not edit this file or `bot-editor-screen.tsx`. Everything they need — the
+ * paths, `updateBot`, the three field tuples, `botPanelDefaults`, `botPanelKnownPaths` — is exported
+ * here so that "which fields are mine" and "how do I save" have one answer each rather than three.
+ * Adding a fourth panel means adding a fourth tuple HERE, and the partition test will say so.
  *
  * ── THE RESOURCE TYPES ARE `@kb/contracts`', NOT THIS FILE'S ─────────────────────────────────────
  * `BotResource`, `BotCollectionResource` and `ListMetaResource` are mirrored in
@@ -170,27 +198,29 @@ export interface BotStatusDisplay {
 
 /**
  * The five lifecycle states, each mapped onto the CLOSED status vocabulary of `<StatusPill>` (P8):
- * pending/queued -> slate, running -> info, ready/active -> success, degraded/partial -> warning,
- * failed/disabled -> destructive.
+ * pending/queued -> slate, running -> info AND MOVING, info -> info and still, ready/active ->
+ * success, degraded/partial -> warning, failed -> destructive, disabled -> slate.
  *
- * ── WHY `testing` IS SLATE AND NOT INFO, WHICH IS A COMPROMISE AND IS RECORDED AS ONE ───────────
- * A bot in `testing` is being exercised before publication — the info bucket by meaning. The only
- * info-coloured `StatusKind` is `running`, whose glyph SPINS, and an endlessly spinning loader on a
- * static list row reads as "this page is stuck" rather than "this bot is being trialled". So it takes
- * the slate bucket instead and is distinguished from `draft` by its word alone. Repairing it properly
- * is one entry in `components/status-pill.tsx` — an info variant with a still glyph — which is
- * outside this task's ownership and is reported rather than reached for.
+ * ── `testing` IS INFO, AND THE COMPROMISE THAT USED TO BE RECORDED HERE IS RESOLVED ─────────────
+ * A bot in `testing` is being exercised before publication — the info bucket by meaning. It used to
+ * take the SLATE bucket instead, because the only info-coloured `StatusKind` was `running`, whose
+ * glyph SPINS, and an endlessly spinning loader on a static list row reads as "this page is stuck"
+ * rather than "this bot is being trialled". The note here asked for one entry in
+ * `components/status-pill.tsx` — an info variant with a STILL glyph — and that entry now exists, so
+ * this row is retuned onto it rather than still describing the workaround.
  *
  * `paused` is WARNING and not destructive: a paused bot is not answering and somebody did that on
  * purpose. `archived` takes the disabled bucket, which is the same slate the pending bucket renders;
- * the word is again what separates them.
+ * `draft` and `archived` are therefore STILL separated by their word alone, which is the residue the
+ * repair did not cover — `pending` and `disabled` share one glyph in the shared vocabulary, and
+ * splitting them would move a bucket four other features render. Recorded in `status-pill.tsx`.
  *
  * A `Record` keyed by the union, so a sixth status added to `BotStatus` fails to typecheck HERE
  * rather than rendering as a bare wire string on the screen.
  */
 const BOT_STATUS_DISPLAY = {
   draft: { kind: 'pending', label: 'Draft' },
-  testing: { kind: 'pending', label: 'Testing' },
+  testing: { kind: 'info', label: 'Testing' },
   published: { kind: 'ready', label: 'Published' },
   paused: { kind: 'degraded', label: 'Paused' },
   archived: { kind: 'disabled', label: 'Archived' },
@@ -225,3 +255,262 @@ const BOT_ACCESS_MODE_BY_NAME = new Map<string, string>(Object.entries(BOT_ACCES
  */
 export const botAccessModeLabel = (mode: string): string =>
   BOT_ACCESS_MODE_BY_NAME.get(mode) ?? mode;
+
+// ── THE DETAIL AND MUTATION TRANSPORT ───────────────────────────────────────────────────────────
+
+/**
+ * `encodeURIComponent` on a ULID is a no-op today. It is here because the value comes off a server
+ * response (or off a route segment a person can type) and is interpolated into a URL, and the habit
+ * is what keeps the day it stops being a ULID from being an injected path segment. Same rule, same
+ * spelling, as `modelPath` in `features/models/api.ts`.
+ */
+export const botPath = (orgId: string, botId: string): string =>
+  `${botsPath(orgId)}/${encodeURIComponent(botId)}`;
+
+/**
+ * `GET .../bots/{bot}` -> 200 `{data: …}` | 403 | 404.
+ *
+ * ── EVERY FAILURE ON THIS ENDPOINT IS `authorization`, AND THE SCREEN MUST NOT GUESS WHICH ──────
+ * The route is mounted with `->scopeBindings()`, so an id belonging to another organization — or to
+ * no organization at all — 404s at BINDING time, before any policy runs, and `bootstrap/app.php`
+ * renders 404 as `authorization`. A viewer who genuinely lacks the permission gets 403, also
+ * `authorization`. The three cases are byte-identical on the wire ON PURPOSE (the deny split), so
+ * the editor renders one class-mapped sentence for all of them and names no role — all four roles
+ * hold `bots.view` (ADR-056), so a role gap is the one explanation that is never true here.
+ *
+ * ── TWO FIELDS ON THE RESPONSE ARE `null` FOR A REASON THAT IS NOT "UNSET" ──────────────────────
+ * `system_instruction` and `answer_style_instruction` are a MANAGEMENT-ONLY PROJECTION: a caller
+ * without `bots.manage` receives `null` for both, whatever is stored. Nothing may seed a form field
+ * from them without first establishing `bots.manage`, and nothing may render a `null` there as
+ * "empty" — the two facts are different and only one of them is the operator's to fix.
+ */
+export const fetchBot = async (
+  orgId: string,
+  botId: string,
+  signal: AbortSignal,
+): Promise<BotResource> =>
+  browserFetchData<BotResource>({
+    path: botPath(orgId, botId),
+    credential: await sessionCredential(),
+    signal,
+  });
+
+/**
+ * `POST .../bots` -> 201 `{data: …}` | 403 | 422.
+ *
+ * `name` and `slug` are the only required fields; the rest of the body is `botCreateDefaults()`,
+ * which re-states `NewBot`'s own defaults. Re-sending a value the server would have defaulted to is
+ * free — `retrieval_configuration_version` moves only when a knob's VALUE changes.
+ *
+ * SLUG UNIQUENESS IS NOT IN `rules()` AND CANNOT BE. It is per organization, and an unscoped
+ * `unique:` would be an existence oracle over the whole platform rendered as a validation error;
+ * `BotService` checks it through an org-scoped repository method and answers 422 keyed `slug`. So it
+ * arrives as an ordinary per-field validation error and must land under the input — not in a banner,
+ * which is where an unknown key would go.
+ */
+export const createBot = async (orgId: string, body: BotCreateOut): Promise<BotResource> =>
+  browserFetchData<BotResource>({
+    path: botsPath(orgId),
+    method: 'POST',
+    body,
+    credential: await sessionCredential(),
+  });
+
+/**
+ * `PATCH .../bots/{bot}` -> 200 `{data: …}` | 403 | 404 | 422.
+ *
+ * A PATCH, and `UpdateBotRequest` rules every field `sometimes`, so A BODY CARRYING ONE FIELD IS A
+ * LEGITIMATE REQUEST. That is what lets the editor's three tabs each save their own partition
+ * without re-sending the other two — and it is why nothing here may hand it `botFormDefaults(bot)`
+ * wholesale as a convenience: see `botPanelDefaults` for the pick that keeps a panel's body to a
+ * panel's fields, and `botFormDefaults`' own docblock for why `reset(resource)` is never the path
+ * from server data into form state.
+ */
+export const updateBot = async (
+  orgId: string,
+  botId: string,
+  body: BotSettingsOut,
+): Promise<BotResource> =>
+  browserFetchData<BotResource>({
+    path: botPath(orgId, botId),
+    method: 'PATCH',
+    body,
+    credential: await sessionCredential(),
+  });
+
+// ── THE FIELD PARTITION THE EDITOR'S THREE TABS ARE BUILT FROM ──────────────────────────────────
+
+/**
+ * One name from `botSettingsSchema`'s key set. `keyof` rather than a hand-written union, so the
+ * three tuples below cannot name a field the schema does not have — `satisfies` reports it here.
+ */
+export type BotSettingsField = keyof BotSettingsIn;
+
+/**
+ * THE THREE PANELS' FIELDS, AND THE PARTITION IS THE CONTRACT.
+ *
+ * `/bots/{id}` is one resource edited through three tabs that three people build independently, so
+ * "who owns which field" has to be a value both the shell and the panels read rather than a sentence
+ * in three briefs. These three tuples are DISJOINT and their union is EXACTLY `botSettingsSchema`'s
+ * key set; `tests/unit/bot-editor.test.ts` asserts both halves, so a field added to the server (and
+ * mirrored into the schema) fails by name instead of silently belonging to nobody and being
+ * unreachable in the console.
+ *
+ * ── THE PARTITION IS DRAWN SO THAT EVERY CROSS-FIELD RULE LANDS INSIDE ONE PANEL ────────────────
+ * `botSettingsSchema` carries three `superRefine`s and the server carries two more checks that no
+ * declarative rule can express. Every one of them relates fields that are in the SAME tuple:
+ *
+ *   evidence_threshold  <-> evidence_threshold_scale   both MODEL      (required_with, both ways)
+ *   evidence_threshold  <-> its scale's bounds         both MODEL      (EvidenceThresholdWithinScale)
+ *   provider_model_id   ->  provider_connection_id     both MODEL      (required_with, one way)
+ *   collect_end_user_data <-> consent_text             both PUBLISHING (BotService, not rules())
+ *
+ * That is not a coincidence to be preserved by luck: a partition that split one of those pairs would
+ * produce a panel whose form can never satisfy its own resolver, because the sibling it is judged
+ * against is not in its `defaultValues`. Moving a field across tuples means re-checking this list.
+ *
+ * `theme` is IDENTITY rather than PUBLISHING: it is the bot's appearance in the same sense its
+ * welcome message is, and its three sub-paths (`theme.primary`, `theme.accent`, `theme.radius`) come
+ * with it through `botPanelKnownPaths`.
+ */
+export const BOT_IDENTITY_FIELDS = [
+  'name',
+  'slug',
+  'description',
+  'welcome_message',
+  'placeholder_text',
+  'system_instruction',
+  'answer_style_instruction',
+  'theme',
+] as const satisfies readonly BotSettingsField[];
+
+export const BOT_MODEL_FIELDS = [
+  'provider_connection_id',
+  'provider_model_id',
+  'answer_mode',
+  'allow_general_answers',
+  'dense_top_k',
+  'sparse_top_k',
+  'rerank_candidates',
+  'rerank_retain',
+  'evidence_threshold',
+  'evidence_threshold_scale',
+] as const satisfies readonly BotSettingsField[];
+
+export const BOT_PUBLISHING_FIELDS = [
+  'status',
+  'access_mode',
+  'rate_limit_per_minute',
+  'rate_limit_per_day',
+  'retention_days',
+  'collect_end_user_data',
+  'consent_text',
+] as const satisfies readonly BotSettingsField[];
+
+/**
+ * `botFormDefaults(bot)` NARROWED TO ONE PANEL'S FIELDS — the only sanctioned way a panel seeds its
+ * form, and the reason it exists rather than each panel spreading what it needs.
+ *
+ * `botFormDefaults` is already the one sanctioned path from server data into form state (never
+ * `reset(resource)`, which round-trips `id`, `public_bot_id`, `retrieval_configuration_version` and
+ * both timestamps into a 200 with no change). This narrows it once more, because the PATCH body is
+ * `handleSubmit`'s output: a panel seeded with all 25 fields SENDS all 25 fields, and the identity
+ * tab would then silently rewrite the retrieval knobs another tab is mid-edit on.
+ *
+ * ── `Object.entries` + `Object.fromEntries`, NOT `all[field]` IN A LOOP ─────────────────────────
+ * Indexing an object by a variable is `security/detect-object-injection`'s sink and reports as a
+ * warning nobody can act on. Filtering entries reads the same and does not.
+ *
+ * The cast is the one place this file asserts something the compiler cannot: `Object.fromEntries`
+ * types its result as `{[k: string]: unknown}` regardless of the input's key union. Every value in
+ * it came out of a `BotSettingsIn` under a key from `BotSettingsField`, and every key of
+ * `BotSettingsIn` is optional, so a subset genuinely is one.
+ */
+export const botPanelDefaults = (
+  bot: BotFormSource,
+  fields: readonly BotSettingsField[],
+): BotSettingsIn => {
+  const wanted = new Set<string>(fields);
+  const all = botFormDefaults(bot);
+
+  return Object.fromEntries(
+    Object.entries(all).filter(([field]) => wanted.has(field)),
+  ) as BotSettingsIn;
+};
+
+// ── `knownPaths`: WHICH 422 KEYS EACH SURFACE CAN PUT UNDER A CONTROL ───────────────────────────
+
+/**
+ * `knownPaths` is "the paths this form RENDERS", which is a DIFFERENT SET from "the paths the
+ * FormRequest validates" (`lib/forms/known-paths.ts`). `applyServerErrors` routes a known key to
+ * `setError(path)` and everything else to a single `root.serverError` write, so a key routed to a
+ * control that is not on screen is a save where the server rejects, nothing visibly changes, and the
+ * operator clicks again. A caller may SUBTRACT from the derived set; it may never hand-type a
+ * replacement for it.
+ */
+const UPDATE_BOT_PATHS: readonly string[] = knownPathsFromRules(
+  updateBotRules as FormRulesManifest,
+);
+
+const STORE_BOT_PATHS: readonly string[] = knownPathsFromRules(storeBotRules as FormRulesManifest);
+
+/** `theme.primary` -> `theme`. The panel tuples name TOP-LEVEL fields; the manifest keys nested ones. */
+const rootSegment = (path: string): string => path.split('.')[0] ?? path;
+
+/**
+ * `UpdateBotRequest`'s vocabulary, narrowed to one panel's fields — the argument that panel passes to
+ * `applyAuthError`.
+ *
+ * A 422 keyed OUTSIDE the panel's partition is not a bug and is not swallowed: it reaches the panel's
+ * banner through `root.serverError` with Laravel's own translated sentence, which is exactly right
+ * for the two rules whose verdict depends on the STORED row rather than on the body
+ * (`bots_evidence_threshold_paired` re-checked against the stored threshold, and the consent pairing
+ * `BotService` evaluates against the resulting row). Those can 422 on a field the operator did not
+ * send and is not looking at, and a banner is the only honest place for that.
+ */
+export const botPanelKnownPaths = (fields: readonly BotSettingsField[]): readonly string[] => {
+  const wanted = new Set<string>(fields);
+  return UPDATE_BOT_PATHS.filter((path) => wanted.has(rootSegment(path)));
+};
+
+/**
+ * `StoreBotRequest`'s vocabulary, narrowed to the THREE controls the create dialog renders.
+ *
+ * The dialog posts all 25 fields — `botCreateDefaults()` under the two the operator types — and
+ * renders three of them, which is the case `knownPaths` exists to separate. A 422 on
+ * `evidence_threshold` from a create body the operator never composed has no control to land on, and
+ * writing it to a field that displays nowhere is the failure `HIDDEN_PATHS` was introduced for, one
+ * form larger. It goes to the banner instead.
+ *
+ * DERIVED AND THEN FILTERED, never typed out: the filter is over the SERVER'S key set, so a field
+ * this dialog renders that the server drops disappears from the set rather than silently becoming a
+ * path Laravel cannot key. `tests/unit/bot-editor.test.ts` asserts the three rendered names are a
+ * subset of the manifest, which is the direction a filter cannot report on its own.
+ */
+export const BOT_CREATE_RENDERED_FIELDS: readonly string[] = ['name', 'slug', 'description'];
+
+export const BOT_CREATE_KNOWN_PATHS: readonly string[] = STORE_BOT_PATHS.filter((path) =>
+  BOT_CREATE_RENDERED_FIELDS.includes(rootSegment(path)),
+);
+
+/**
+ * Does this role hold `bots.manage`? Owner and admin, per ADR-056 — which also grants `bots.view` to
+ * ALL FOUR roles, and that asymmetry is the whole reason this predicate exists as one exported
+ * function rather than as an inline comparison in four render sites.
+ *
+ * ── IT IS AN AFFORDANCE, NEVER AUTHORIZATION ────────────────────────────────────────────────────
+ * Laravel answers 403 whatever this returns, every mutation path handles that class, and a role that
+ * changed under a cached session shows up as that 403 rather than as a silently missing control. What
+ * it buys is a screen that does not offer a control whose every use would be refused.
+ *
+ * IT IS ALSO THE FLAG THAT DECIDES WHETHER TWO FIELDS MEAN ANYTHING. `system_instruction` and
+ * `answer_style_instruction` are a management-only projection: `false` here means both arrive `null`
+ * whatever is stored, so a screen must render "not shown to you" rather than an empty textarea, and
+ * must not seed a control from either.
+ *
+ * A `switch` is not used because the union is not exhausted on purpose: a fifth role added to `Role`
+ * should default to NOT holding a write permission, which is the direction a boolean expression gets
+ * right and an exhaustive switch would turn into a typecheck failure demanding a decision here rather
+ * than in `OrgRole::grants()`.
+ */
+export const canManageBots = (role: Role | null): boolean => role === 'owner' || role === 'admin';

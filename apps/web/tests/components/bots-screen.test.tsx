@@ -233,15 +233,55 @@ describe('success: one data source, two layouts', () => {
     const table = screen.getByRole('table', { name: 'Bots' });
     await expect.element(table).toBeInTheDocument();
     expect(document.querySelectorAll('tbody tr')).toHaveLength(2);
-    // Five columns: Name, Slug, Status, Access, Created.
-    expect(document.querySelectorAll('th[scope="col"]')).toHaveLength(5);
+    // Six columns: Name, Slug, Status, Access, Created, and the row action — whose header is a
+    // visually hidden "Actions" rather than an empty `<th>`, because an unlabelled column is
+    // unreadable to a screen-reader user even when its cells are self-describing.
+    expect(document.querySelectorAll('th[scope="col"]')).toHaveLength(6);
 
     // The card layout is fed from the SAME rows and the SAME column definitions.
     expect(cards()).toHaveLength(2);
     expect(cards()[0]?.textContent).toContain('Support bot');
+    // `card: 'action'` puts the row action in the card's action row rather than in a labelled pair —
+    // below 768px the slug's link is buried inside a `<dd>`, so without this the card has no way in.
+    expect(cards()[0]?.textContent).toContain('Configure');
     // `Created` carries `card: 'hidden'`: present in the table, dropped from the card, because a card
     // with five labelled pairs is a table with extra steps.
     expect(cards()[0]?.textContent).not.toContain('Created');
+  });
+
+  it('links the slug and the row action at the bot`s ID, never at its slug', async () => {
+    worker.use(listHandler());
+
+    const screen = await renderScreen();
+    await expect.element(screen.getByRole('cell', { name: 'support-bot' })).toBeVisible();
+
+    // SCOPED TO THE TABLE, because no CSS is imported here and both layouts are therefore in the DOM
+    // at once — a page-wide `getByRole('link', {name: 'support-bot'})` resolves the table's anchor AND
+    // the row-card's and fails on strict mode. That is the same "one data source, two layouts"
+    // property the sibling spec asserts, met from the awkward side.
+    const rowLinks = [...document.querySelectorAll<HTMLAnchorElement>('table a')].map((anchor) => [
+      anchor.textContent,
+      anchor.getAttribute('href'),
+    ]);
+
+    // BOTH point at `/bots/{id}`. The slug is a HANDLE an operator may rename; the id is the ULID
+    // Laravel's `->scopeBindings()` binding resolves. A route keyed on the mutable one would break
+    // every bookmark on a rename — and the cell that renders the handle is exactly where that mistake
+    // is natural.
+    //
+    // The row action's accessible name carries the BOT'S NAME in an `sr-only` span, so twenty-five
+    // otherwise identical links are addressable one at a time — by a screen-reader user and by a
+    // spec. "Configure" rather than "Settings", because the sidebar has a permanent `Settings` link
+    // and accessible-name matching is a case-insensitive substring.
+    expect(rowLinks).toEqual([
+      ['support-bot', `/bots/${SUPPORT_BOT.id}`],
+      ['Configure Support bot', `/bots/${SUPPORT_BOT.id}`],
+      ['onboarding-bot', `/bots/${DRAFT_BOT.id}`],
+      ['Configure Onboarding bot', `/bots/${DRAFT_BOT.id}`],
+    ]);
+
+    // The card layout is fed from the SAME column definitions, so it carries the same two links.
+    expect(cards()[0]?.querySelectorAll('a')).toHaveLength(2);
   });
 
   it('renders every lifecycle state, with the word as well as the colour', async () => {
@@ -385,6 +425,26 @@ describe('the empty split — the whole reason two components exist', () => {
 
     await expect.element(screen.getByText('No bots yet')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Clear filters' }).elements()).toHaveLength(0);
+    // THE PRIMARY ACTION IS BACK. The sentence used to carry "Create one to get started" and no
+    // button, because the create path did not exist and a control that goes nowhere is worse than a
+    // sentence. It does exist, so this is `references/states.md`'s onboarding moment as written.
+    await expect
+      .element(screen.getByRole('button', { name: 'Create your first bot' }))
+      .toBeVisible();
+  });
+
+  it('names the empty state`s action so it cannot collide with the page header`s', async () => {
+    worker.use(listHandler([], { total: 0 }));
+
+    const screen = await renderScreen();
+    await expect.element(screen.getByText('No bots yet')).toBeInTheDocument();
+
+    // Both triggers are on screen at once in exactly this state — the page header's "Add bot" is
+    // rendered by the SERVER component this spec does not mount, and would be beside this one in the
+    // browser. Role- and label-name matching is a case-insensitive SUBSTRING, so a locator for either
+    // must not resolve two elements. Asserting the exact name here is what pins that.
+    expect(screen.getByRole('button', { name: 'Add bot' }).elements()).toHaveLength(0);
+    expect(screen.getByRole('button', { name: 'Create your first bot' }).elements()).toHaveLength(1);
   });
 
   it('restates the query and offers Clear filters when a filter matched nothing', async () => {

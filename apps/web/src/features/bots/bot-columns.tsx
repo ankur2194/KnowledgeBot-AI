@@ -1,6 +1,8 @@
 import type { BotResource } from '@kb/contracts';
+import Link from 'next/link';
 
 import { StatusPill } from '@/components/status-pill';
+import { Button } from '@/components/ui/button';
 import { botAccessModeLabel, botStatusDisplay } from '@/features/bots/api';
 import { formatTimestamp } from '@/features/providers/api';
 import { createServerColumnHelper } from '@/lib/table/features';
@@ -53,13 +55,29 @@ export const BOT_COLUMNS = helper.columns([
   }),
   /**
    * The human handle, unique PER ORGANIZATION — another organization using the same handle is not a
-   * conflict, which is why every cache key derived from it carries the organization id first. Rendered
-   * as secondary text (P6's closed cell-type set), not as a link: `/bots/{id}` does not exist yet, and
-   * a link to a 404 is worse than a label.
+   * conflict, which is why every cache key derived from it carries the organization id first.
+   *
+   * ── IT IS A LINK NOW, AND IT WAS NOT BEFORE ────────────────────────────────────────────────────
+   * This cell used to be plain secondary text with a note saying `/bots/{id}` did not exist and a
+   * link to a 404 is worse than a label. The route exists, so this is the link — and it addresses
+   * `row.original.id`, never the slug: the slug is a HANDLE that an operator may rename, while the id
+   * is the ULID Laravel's `->scopeBindings()` binding resolves. A route keyed on the mutable one
+   * would break every bookmark on a rename.
+   *
+   * The MONOSPACE is the second channel that says "this is a machine handle" without relying on the
+   * link colour, and `--primary` plus an underline on hover is the repo's link treatment (the back
+   * links on the two detail screens use the same one).
    */
   helper.accessor('slug', {
     header: 'Slug',
-    cell: ({ getValue }) => <span className="text-muted-foreground">{getValue()}</span>,
+    cell: ({ getValue, row }) => (
+      <Link
+        href={`/bots/${row.original.id}`}
+        className="font-mono text-primary underline-offset-4 hover:underline"
+      >
+        {getValue()}
+      </Link>
+    ),
   }),
   helper.accessor('status', {
     header: 'Status',
@@ -100,6 +118,45 @@ export const BOT_COLUMNS = helper.columns([
         </span>
       );
     },
+  }),
+  /**
+   * THE ROW ACTION, and the reason it exists beside a slug that is already a link.
+   *
+   * `card: 'action'` puts it in the row-card's action row below 768px, where the slug's link is
+   * buried inside a labelled `<dd>` and the card would otherwise have no way in at all — a horizontal
+   * scroller is not the fallback here, because `components/data-table.tsx` replaces the table with
+   * cards at that width precisely so an actions column cannot be scrolled out of sight.
+   *
+   * Above 768px it is the control in a PREDICTABLE POSITION: an operator scanning twenty-five rows
+   * for "the thing I click" should not have to know that the second column happens to be a link. Two
+   * routes to one destination is the standard table pattern, and the two are distinguishable by name
+   * rather than only by position.
+   *
+   * ── THE NAME IS "Configure", AND THE WORD WAS CHOSEN AGAINST THE OTHER NAMES ON THE SCREEN ─────
+   * Not "Settings": the sidebar has a permanent `Settings` link, accessible-name matching is a
+   * case-insensitive SUBSTRING, and every locator for either would then resolve two elements. Not
+   * "Edit"/"Open" alone either — the bot's name is appended in an `sr-only` span so each row's control
+   * has its OWN accessible name ("Configure Support bot"), which is what makes twenty-five identical
+   * links addressable by a screen-reader user and by a spec.
+   *
+   * `variant="link"` and not a button: it navigates, so it is an anchor, and an anchor styled as a
+   * button would lose middle-click, "open in new tab" and the status bar preview. `asChild` hands the
+   * button's own classes to `next/link` rather than nesting an `<a>` inside a `<button>`.
+   */
+  helper.display({
+    id: 'actions',
+    // A visually hidden header: the column has no name worth a column heading, and an empty `<th>` is
+    // an unlabelled column for a screen-reader user. `cardLabel` is never read, because `card:
+    // 'action'` renders outside the labelled-pair list.
+    header: () => <span className="sr-only">Actions</span>,
+    meta: { card: 'action', cardLabel: 'Actions', align: 'end' },
+    cell: ({ row }) => (
+      <Button asChild variant="link" size="sm">
+        <Link href={`/bots/${row.original.id}`}>
+          Configure<span className="sr-only"> {row.original.name}</span>
+        </Link>
+      </Button>
+    ),
   }),
 ]);
 

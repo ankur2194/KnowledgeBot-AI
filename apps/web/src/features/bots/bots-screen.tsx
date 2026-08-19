@@ -9,6 +9,7 @@ import { EmptyState, ErrorState, TableSkeleton } from '@/components/states';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { useCurrentOrgId, useOrgKey, useSession } from '@/features/auth/session-context';
 import { BOT_COLUMN_COUNT, BOT_COLUMNS } from '@/features/bots/bot-columns';
+import { CreateBotDialog } from '@/features/bots/bot-create-dialog';
 import { BotSearchField } from '@/features/bots/bot-search-field';
 import { BOT_FILTER_PARAM, BOT_LIST_CONFIG, fetchBotPage } from '@/features/bots/api';
 import { useTableParams } from '@/lib/table/use-table-params';
@@ -180,10 +181,25 @@ function BotsForOrganization({ orgId }: { readonly orgId: string }) {
           <EmptyState
             glyph={BotIcon}
             title="No bots yet"
-            /* FIRST-RUN. The onboarding moment, and it says what a bot IS rather than what to click:
-               the create path is a later step in this batch, and a primary action that goes nowhere
-               is a worse answer than a sentence. */
-            body="A bot answers from the sources you give it, in the voice you configure. Create one to get started."
+            /* FIRST-RUN. The onboarding moment, and it says what a bot IS as well as offering the
+               action — the sentence was written when the create path did not exist yet and a primary
+               action that went nowhere was the worse answer. It does exist now, so the action is
+               back where `references/states.md` asks for it. */
+            body="A bot answers from the sources you give it, in the voice you configure."
+            /* THE PRIMARY ACTION, and the SAME component the page header mounts — with a different
+               trigger label, because both are on screen at once in exactly this state. Role- and
+               label-name matching is a case-insensitive SUBSTRING in both Playwright and
+               vitest-browser, so "Add bot" and "Create your first bot" are chosen so neither contains
+               the other; two controls whose names overlap resolve to two elements and every locator
+               for either fails on strict mode, and a screen-reader user meets the same ambiguity one
+               control at a time.
+
+               Both are `--primary` and that is not a violation of rule 3, which governs a page
+               HEADER's action cluster. They never sit adjacent: one is in the header plane, the other
+               is centred inside the table card. `<CreateBotDialog>` renders nothing at all for a
+               viewer without `bots.manage`, so an analyst reading an empty list sees the sentence and
+               no dead control — which is the same reason this state had no button before. */
+            action={<CreateBotDialog triggerLabel="Create your first bot" />}
           />
         }
         /* FILTERED. It restates what was asked for, because a user who cannot see their own query
