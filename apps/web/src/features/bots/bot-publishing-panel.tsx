@@ -41,7 +41,7 @@ import {
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { applyAuthError } from '@/features/auth/auth-error';
-import { deleteConflictMessage } from '@/features/providers/api';
+import { actionableConflictMessage } from '@/lib/api/actionable-conflict';
 
 import {
   BOT_PUBLISHING_FIELDS,
@@ -72,8 +72,8 @@ import { BotOrigins } from './bot-origins';
  *
  * ── `status` IS NOT A FIELD OF THIS TAB'S FORM, AND THAT IS THE ONE THING TO GET RIGHT HERE ─────
  * A lifecycle move is `PUT …/bots/{bot}/status`. `UpdateBotRequest` rules `status` as
- * `["prohibited"]`, so it is not a `botSettingsSchema` key, not in `BOT_PUBLISHING_FIELDS`, and not
- * in `botFormDefaults`. `prohibited` rather than an ABSENT rule is deliberate on the server's side
+ * `["missing"]`, so it is not a `botSettingsSchema` key, not in `BOT_PUBLISHING_FIELDS`, and not
+ * in `botFormDefaults`. A RULE rather than an ABSENT one is deliberate on the server's side
  * and is the reason the two saves are separate rather than merged: an absent rule makes
  * `validated()` discard the key in silence, so a console would publish a bot, receive a 200, and
  * find it still in `draft`.
@@ -91,12 +91,13 @@ import { BotOrigins } from './bot-origins';
  * shortly.", which is false twice — nothing is unavailable and retrying never works — so this is
  * one of the deliberate exceptions where a server `message` reaches the screen.
  *
- * IT IS NOT A NEW BRANCH TABLE. `deleteConflictMessage` (features/providers/api.ts) already reads
- * exactly this shape — `internal_dependency` + `!retryable` + `actionable` + non-empty message —
- * and it is handed to `applyAuthError`'s `copyFor` hook, which exists for precisely this: replace
- * the class-mapped sentence on ONE screen without forking the branch table. The name is wrong for
- * its third caller (it is not about deletes) and is reported rather than renamed, because
- * `features/providers/api.ts` is not this agent's file.
+ * IT IS NOT A NEW BRANCH TABLE. `actionableConflictMessage` (lib/api/actionable-conflict.ts) already
+ * reads exactly this shape — `internal_dependency` + `!retryable` + `actionable` + non-empty message
+ * — and it is handed to `applyAuthError`'s `copyFor` hook, which exists for precisely this: replace
+ * the class-mapped sentence on ONE screen without forking the branch table. It was
+ * `deleteConflictMessage` under `features/providers/` when this panel was written, and the note that
+ * used to sit here reported the name as wrong for its third caller; the rename and the move to
+ * `lib/api/` are that report being actioned.
  *
  * ── THE THIRD PUBLISH REFUSAL DOES NOT EXIST YET, AND THIS SCREEN SAYS SO ───────────────────────
  * `BotPolicy` names three: no model, no ASSIGNED KNOWLEDGE SOURCE, and the RAG-first pair. The
@@ -228,10 +229,10 @@ function LifecycleCard({ onDirtyChange }: { readonly onDirtyChange: (dirty: bool
       applyAuthError(form, BOT_STATUS_KNOWN_PATHS, error, {
         // The publish guard's 409 carries the only sentence that tells the operator what to fix.
         // Returning `undefined` for everything else keeps the class-mapped default from ERROR_COPY,
-        // so this is one expression rather than a second branch table. `deleteConflictMessage`
+        // so this is one expression rather than a second branch table. `actionableConflictMessage`
         // identifies the shape by the envelope's `actionable` flag, never by an HTTP status —
         // `KbError` carries none.
-        copyFor: (kbError) => deleteConflictMessage(kbError) ?? undefined,
+        copyFor: (kbError) => actionableConflictMessage(kbError) ?? undefined,
       });
     },
     onSettled: () => {
@@ -248,7 +249,7 @@ function LifecycleCard({ onDirtyChange }: { readonly onDirtyChange: (dirty: bool
   const rootError = form.formState.errors.root?.serverError?.message;
   /** Non-null exactly when the server refused with a sentence written for a person. */
   const refusal =
-    transition.error === null ? null : deleteConflictMessage(transition.error);
+    transition.error === null ? null : actionableConflictMessage(transition.error);
   const current = botStatusDisplay(bot.status);
 
   return (

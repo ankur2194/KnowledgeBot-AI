@@ -75,6 +75,7 @@ const BOT: BotResource = {
   placeholder_text: 'Ask about billing…',
   system_instruction: 'CANARY-SYSTEM-INSTRUCTION',
   answer_style_instruction: 'CANARY-ANSWER-STYLE',
+  instructions_visible: true,
   status: 'testing',
   access_mode: 'public',
   provider_connection_id: '01JCONNAAAAAAAAAAAAAAAAAAA',
@@ -262,7 +263,7 @@ describe('the eight fields, and only the eight', () => {
     expect(Object.keys(body).sort()).toEqual([...BOT_IDENTITY_FIELDS].sort());
     expect(body.name).toBe('Billing bot');
     // The three shapes `reset(resource)` would have round-tripped, and the one the PATCH rules
-    // `prohibited`.
+    // `missing`.
     expect(body).not.toHaveProperty('id');
     expect(body).not.toHaveProperty('status');
     expect(body).not.toHaveProperty('retrieval_configuration_version');
@@ -308,6 +309,10 @@ describe('the management-only projection', () => {
       ...BOT,
       system_instruction: null,
       answer_style_instruction: null,
+      // The server says which of the two readings that null carries. It is set from the same flag
+      // that decided the projection, so a fixture nulling the values without it would be a body the
+      // API cannot produce.
+      instructions_visible: false,
     };
 
     const screen = await renderPanel({ bot: projected, canManage: false });
@@ -341,13 +346,84 @@ describe('the management-only projection', () => {
   it('shows an empty control for a null instruction WITH bots.manage, because there null is unset', async () => {
     worker.use(questionsHandler());
 
-    const unset: BotResource = { ...BOT, system_instruction: null, answer_style_instruction: null };
+    // `instructions_visible: true` is the whole difference from the `projected` fixture above, and it
+    // is stated rather than inherited because it is the thing under test: the same two nulls, the
+    // opposite meaning.
+    const unset: BotResource = {
+      ...BOT,
+      system_instruction: null,
+      answer_style_instruction: null,
+      instructions_visible: true,
+    };
     const screen = await renderPanel({ bot: unset, canManage: true });
 
     // The same `null`, the opposite meaning — which is the whole reason the two paths are different
     // components rather than one with a flag.
     await expect.element(screen.getByLabelText('System instruction')).toHaveValue('');
     expect(document.body.textContent).not.toContain('are hidden from this view');
+  });
+
+  it('OMITS both keys from the PATCH when the row was withheld but this viewer can manage', async () => {
+    // THE DATA-LOSS WINDOW, RENDERED. `canManage` is this client's reading of a session role;
+    // `instructions_visible` is the server's per-record answer, and they disagree for a role promoted
+    // mid-session, a cached detail row, or any refetch skew. In that window the old panel seeded two
+    // projected `null`s into two textareas, and because `UpdateBotRequest` rules both fields
+    // `sometimes|nullable|string` — omitted means "leave it", present-null means "clear it" — saving
+    // a RENAME wrote null over both operator-authored prompts and returned 200.
+    //
+    // The assertion is on the KEYS of the body. A `system_instruction: null` here would be
+    // byte-identical to the destructive request, so asserting the value would assert nothing.
+    const bodies: unknown[] = [];
+    worker.use(
+      questionsHandler(),
+      http.patch(botUrl, async ({ request }) => {
+        bodies.push(await request.json());
+        return HttpResponse.json({ data: BOT });
+      }),
+    );
+
+    const withheld: BotResource = {
+      ...BOT,
+      system_instruction: null,
+      answer_style_instruction: null,
+      instructions_visible: false,
+    };
+    const screen = await renderPanel({ bot: withheld, canManage: true });
+
+    // AWAITED FIRST, and not decoration: `elements()` on a page that has not painted yet returns an
+    // empty list, so the two "no control" assertions below would pass against a blank document and
+    // prove nothing. Waiting on a control this tab DOES render is what makes their emptiness a fact
+    // about the projection.
+    await expect.element(screen.getByLabelText('Name')).toHaveValue('Support bot');
+
+    // NO CONTROL FOR EITHER FIELD, which is the first of the two lines of defence: RHF submits a
+    // registered input's DOM value whether or not `defaultValues` named it, so a rendered textarea
+    // would put the key back even with `botPanelDefaults` omitting it.
+    expect(screen.getByLabelText('System instruction').elements()).toHaveLength(0);
+    expect(screen.getByLabelText('Answer style').elements()).toHaveLength(0);
+    expect(document.body.textContent).toContain('not sent with this page');
+
+    // The rest of the tab is a working editor — the refusal is two fields wide, not a read-only
+    // screen. This is the save that used to destroy the prompts.
+    await screen.getByLabelText('Name').fill('Billing bot');
+    await screen.getByRole('button', { name: 'Save changes' }).click();
+
+    await vi.waitFor(() => {
+      expect(bodies).toHaveLength(1);
+    });
+
+    const body = bodies[0] as Record<string, unknown>;
+    expect(Object.keys(body)).not.toContain('system_instruction');
+    expect(Object.keys(body)).not.toContain('answer_style_instruction');
+    // …and it is the identity partition minus exactly those two, so nothing else was dropped with
+    // them. A body that had lost `theme` too would pass the two assertions above and be a different
+    // bug.
+    expect(Object.keys(body).sort()).toEqual(
+      BOT_IDENTITY_FIELDS.filter(
+        (field) => field !== 'system_instruction' && field !== 'answer_style_instruction',
+      ).sort(),
+    );
+    expect(body.name).toBe('Billing bot');
   });
 });
 

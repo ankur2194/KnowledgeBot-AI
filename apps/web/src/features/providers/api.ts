@@ -1,4 +1,3 @@
-import { KbError } from '@kb/contracts';
 import type {
   AcknowledgementResource,
   EmbeddingReadinessResource,
@@ -57,8 +56,7 @@ import { browserFetch, browserFetchData, sessionCredential } from '@/lib/api/bro
  * this two-line builder (`features/members/api.ts` holds the second). Three is the count the
  * `formatTimestamp` note below names as the moment a duplicate becomes a move — so rather than paste
  * it again, the embedding screen imports this one, exactly as `features/models` imports
- * `connectionPath` and `deleteConflictMessage`. The members copy is still private and is the one
- * left to delete.
+ * `connectionPath`. The members copy is still private and is the one left to delete.
  */
 export const organizationPath = (orgId: string): string =>
   `/api/v1/organizations/${encodeURIComponent(orgId)}`;
@@ -212,7 +210,8 @@ export const rotateCredential = async (
  * A GUARDED HARD DELETE: the connection row and its `provider_models` rows go in one transaction and
  * the audit row is the only thing that survives. The 409 that matters is not the suspended-organization
  * one — it is "this connection supplies the organization's embedding credential", and its `message`
- * carries the ONLY sentence that tells the operator what to do next. See `deleteConflictMessage`.
+ * carries the ONLY sentence that tells the operator what to do next. See
+ * `actionableConflictMessage` in `lib/api/actionable-conflict.ts`, which reads it.
  */
 export const deleteConnection = async (
   orgId: string,
@@ -325,55 +324,3 @@ export const embeddingBlockedExplanation = (
   readiness: EmbeddingReadinessResource,
 ): string | null => (readiness.ready ? null : readiness.explanation);
 
-/**
- * The one server `message` this screen renders verbatim, and the reasoning is worth the length because
- * it is a deliberate exception to a rule this app otherwise never breaks.
- *
- * ── WHAT THE SERVER SENDS ────────────────────────────────────────────────────────────────────────
- * Deleting the connection an organization has DESIGNATED for embedding is refused with a 409 whose
- * message names the remedy and the consequence: clear the designation first, read the readiness
- * verdict, then delete. That sentence is the only thing on the wire that tells the operator what to do
- * next — the class-mapped copy for this error is "Something on our side is unavailable. Try again
- * shortly.", which is false twice (nothing is unavailable, and retrying never works).
- *
- * ── WHY THE CLASS DOES NOT IDENTIFY IT, AND WHY THAT IS DELIBERATE SERVER-SIDE ───────────────────
- * The taxonomy has 18 classes and no 409 row, on purpose: 409 is a RENDERING of `internal_dependency`
- * for an unclassified 4xx our own code raised, and the render closure preserves both the status and the
- * message. `retryable` is false because the origin is `self`. So an actionable 409 and a genuine
- * 500 arrive at this client as the SAME `(error_class, retryable)` pair, and the status is not on
- * `KbError` at all.
- *
- * ── HOW THIS TELLS THEM APART WITHOUT BRANCHING ON A STATUS ─────────────────────────────────────
- * By the envelope's `actionable` flag, which both planes set beside the message and which says
- * exactly one thing: this `message` was written for this condition, rather than being the fixed
- * placeholder chosen to say nothing. It is not a status and nothing here infers one from it.
- *
- * ── WHAT THIS USED TO DO, KEPT BECAUSE THE SHAPE RECURS ────────────────────────────────────────
- * Until the flag existed (finding J2) this compared `message` against a client-side copy of the
- * server's 5xx constant, and treated "anything else" as a deliberate 4xx. That worked, and it was a
- * DENY-BY-EXCLUSION filter whose premise was a property of the whole server tree rather than of the
- * response in hand: the first `abort(400, $detail)` reachable from these screens would have broken
- * it silently, and in the worse direction — a defect whose message happened to differ would have
- * read to an operator as advice. A client inferring a status from a string is the coupling
- * `error_class` exists to remove, so the fix was server-side and the string is gone from this file.
- *
- * The fallback is unchanged and is what keeps the failure mode benign: anything this returns null
- * for falls back to `actionErrorCopy`'s class-mapped sentence, so the worst case is a user reading
- * a bland accurate sentence — never an internal hostname, because a >= 500 envelope is never
- * `actionable`.
- */
-export function deleteConflictMessage(error: unknown): string | null {
-  if (!(error instanceof KbError)) return null;
-  // NOT a status check — `KbError` carries none, deliberately. `internal_dependency` +
-  // `retryable: false` is the pair a deliberate 4xx and a defect share; `actionable` is what
-  // separates them, and it is the server's own answer rather than this client's inference.
-  if (error.error_class !== 'internal_dependency' || error.retryable) return null;
-  if (!error.actionable) return null;
-
-  const message = error.message.trim();
-
-  // An `actionable` envelope with an empty message is not a state either plane produces — both
-  // derive the flag from a non-empty message — so this is a guard against a body that lied, not a
-  // case. Rendering "" would blank the one line telling the operator what to do next.
-  return message === '' ? null : message;
-}

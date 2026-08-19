@@ -26,6 +26,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
  * byte-identical on the wire here, and a screen that guessed would be inviting the reader to fill in
  * a field it is not allowed to see.
  *
+ * The server states the same thing on the row itself — `instructions_visible` is false on every
+ * body that reaches this component, set from the same flag that decided the projection — so this is
+ * one claim in two places rather than an inference. The editing path reads that field; this path
+ * cannot be reached with it true.
+ *
  * Every other field on this tab is sent in full to every role, so `null` on one of those really is
  * "not set" and is rendered as such.
  */

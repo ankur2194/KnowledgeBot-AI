@@ -75,6 +75,7 @@ const BOT: BotResource = {
   placeholder_text: null,
   system_instruction: 'CANARY-SYSTEM-INSTRUCTION',
   answer_style_instruction: 'CANARY-ANSWER-STYLE',
+  instructions_visible: true,
   status: 'testing',
   access_mode: 'public',
   provider_connection_id: CONNECTION_A,

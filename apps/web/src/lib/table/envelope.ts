@@ -34,27 +34,25 @@
  * error state instead. The thrown value is not a `KbError`, so it carries no `error_class`, and
  * "no envelope parsed" is unknown, and unknown is permanently non-retryable (`kb-error-taxonomy`) —
  * which is right: a shape mismatch will not fix itself on a second attempt.
+ *
+ * ── THE META TYPE IS IMPORTED, NOT DECLARED HERE ─────────────────────────────────────────────────
+ * `ListMetaResource` is mirrored in `packages/contracts/src/resources/bots.ts` and compared field for
+ * field against the generated OpenAPI document by `test/resource-drift.test.ts`. This file used to
+ * carry a hand-written `PaginationMeta` that was identical to it — the duplication that mirror's own
+ * docblock names, and the shape `resource-drift.test.ts` was rewritten to catch after `MemberResource`
+ * was hand-written a second time here.
+ *
+ * The window a local copy opens is narrow and silent: a server-side change to the meta block turns
+ * `@kb/contracts` red while this app compiles clean against a stale interface, and `readMeta` guards
+ * only `page`/`per_page`/`total`, so the pager would read a field that is no longer what it says.
+ * Importing it means the drift test is this file's drift test too.
+ *
+ * There is no local envelope type either. `BotCollectionResource` (and its sibling per list) already
+ * spells `{data: {<collection>: [...], meta}}` in the mirrored package; a generic re-spelling of it
+ * here would be a second thing to keep true with nothing checking it.
  */
 
-export interface PaginationMeta {
-  /** ONE-BASED, as the request sends it. `PaginationState.pageIndex` is zero-based. */
-  readonly page: number;
-  /** Rows per page AS APPLIED. May be smaller than requested; the platform caps it. */
-  readonly per_page: number;
-  /** Rows matching the current filter across ALL pages. This is the table's `rowCount`. */
-  readonly total: number;
-  /** `pageCount`. Published rather than derived, because `per_page` may have been clamped. 1, not 0, for an empty list. */
-  readonly total_pages: number;
-  /** The applied ordering. Differs from the request when the endpoint's default was used. */
-  readonly sort: string;
-  readonly dir: 'asc' | 'desc';
-  /** Trimmed, and `null` rather than `''` — an empty filter is no filter. */
-  readonly filter: string | null;
-}
-
-export interface PaginatedEnvelope<TKey extends string, TRow> {
-  readonly data: { readonly [K in TKey]: readonly TRow[] } & { readonly meta: PaginationMeta };
-}
+import type { ListMetaResource } from '@kb/contracts';
 
 export interface TablePage<TRow> {
   readonly rows: readonly TRow[];
@@ -75,7 +73,7 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
  * ignores the applied-query echo. A response that carried rows and a total but had not yet grown its
  * `sort` echo would otherwise render as an error, which is a worse answer than the rows.
  */
-function readMeta(value: unknown): Pick<PaginationMeta, 'page' | 'per_page' | 'total'> | null {
+function readMeta(value: unknown): Pick<ListMetaResource, 'page' | 'per_page' | 'total'> | null {
   if (!isRecord(value)) return null;
   const total = value['total'];
   const page = value['page'];

@@ -50,6 +50,7 @@ const CREATED: BotResource = {
   placeholder_text: null,
   system_instruction: null,
   answer_style_instruction: null,
+  instructions_visible: true,
   status: 'draft',
   access_mode: 'private',
   provider_connection_id: null,

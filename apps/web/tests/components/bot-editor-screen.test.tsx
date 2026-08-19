@@ -62,6 +62,7 @@ const BOT: BotResource = {
   placeholder_text: null,
   system_instruction: 'CANARY-SYSTEM-INSTRUCTION',
   answer_style_instruction: 'CANARY-ANSWER-STYLE',
+  instructions_visible: true,
   status: 'testing',
   access_mode: 'public',
   provider_connection_id: '01JCONNAAAAAAAAAAAAAAAAAAA',
@@ -275,7 +276,12 @@ describe('the shell says once what every panel then obeys', () => {
       // THE SERVER'S OWN PROJECTION: the keys stay and the values become null for a caller without
       // `bots.manage`. A screen that read that as "not set" would offer to fill in a field it is not
       // allowed to see.
-      botHandler({ ...BOT, system_instruction: null, answer_style_instruction: null }),
+      botHandler({
+        ...BOT,
+        system_instruction: null,
+        answer_style_instruction: null,
+        instructions_visible: false,
+      }),
     );
 
     const screen = await renderScreen();

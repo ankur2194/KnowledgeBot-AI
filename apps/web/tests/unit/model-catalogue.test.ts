@@ -27,7 +27,7 @@ import {
  *
  * It runs in the `unit` project, which is `node` and installs no react plugin — so every module it
  * reaches transitively must be JSX-free. `features/models/api.ts` is, deliberately, and so is
- * `features/providers/api.ts`, which it imports for `connectionPath` and `deleteConflictMessage`.
+ * `features/providers/api.ts`, which it imports for `connectionPath` and `actionableConflictMessage`.
  * (`providers/api.ts` imports `StatusKind` from a `.tsx` file with `import type`, which
  * `verbatimModuleSyntax` erases, so no JSX is loaded.)
  *

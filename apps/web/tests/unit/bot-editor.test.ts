@@ -53,27 +53,33 @@ interface Manifest {
 const root = (path: string): string => path.split('.')[0] ?? path;
 
 /**
- * A path the FormRequest declares ONLY IN ORDER TO REFUSE IT — `prohibited`.
+ * A path the FormRequest declares ONLY IN ORDER TO REFUSE IT — `missing`.
  *
  * `UpdateBotRequest.status` is the one instance in this repo: a lifecycle move became
  * `PUT .../bots/{bot}/status`, and the rule is present rather than the field being deleted from
  * `rules()` because an ABSENT rule makes `validated()` discard the key in silence — the console
  * would publish a bot, get a 200, and find it still in draft.
  *
+ * IT WAS `prohibited` AND THE RULE DID NOT MEAN WHAT ITS NAME SAID. `validateProhibited` is
+ * `! validateRequired`, so it PASSED for `null`, `""` and `[]` and `validated()` kept the key —
+ * which reached a `NOT NULL` column and turned an accompanying rename into a lost edit behind a 500.
+ * `validateMissing` asks whether the key is present at all. This predicate reads the rule NAME out
+ * of the manifest, which is why it had to move with it rather than keeping working by shape.
+ *
  * SUBTRACTED FROM THE MANIFEST SIDE OF EVERY ASSERTION BELOW, and this is a STRENGTHENING rather
- * than a loophole. The partition is "the fields the three tabs may send", and a prohibited field is
- * one no tab may send: a tuple naming it would be a control whose every use is a 422. So the union
+ * than a loophole. The partition is "the fields the three tabs may send", and one of these is a
+ * field no tab may send: a tuple naming it would be a control whose every use is a 422. So the union
  * must equal the manifest's VALIDATED key set, and it stays closed in both directions — a tuple that
  * re-acquired `status` would be a superset and fail here, exactly as it fails the `satisfies` in
  * `api.ts` and the schema-side assertion below.
  */
-const prohibited = (rules: readonly string[]): boolean =>
-  rules.some((rule) => rule.split(':')[0] === 'prohibited');
+const unsendable = (rules: readonly string[]): boolean =>
+  rules.some((rule) => rule.split(':')[0] === 'missing');
 
 const manifestFields = (manifest: Manifest): readonly string[] => [
   ...new Set(
     Object.entries(manifest.rules)
-      .filter(([, rules]) => !prohibited(rules))
+      .filter(([, rules]) => !unsendable(rules))
       .map(([path]) => root(path)),
   ),
 ];
@@ -99,6 +105,7 @@ const BOT: BotResource = {
   placeholder_text: null,
   system_instruction: 'CANARY-SYSTEM-INSTRUCTION',
   answer_style_instruction: 'CANARY-ANSWER-STYLE',
+  instructions_visible: true,
   status: 'testing',
   access_mode: 'public',
   provider_connection_id: '01JCONNAAAAAAAAAAAAAAAAAAA',
@@ -150,14 +157,19 @@ describe('the three panels partition the PATCH exactly once', () => {
     expect([...union].sort()).toEqual([...manifestFields(updateBotRules as Manifest)].sort());
   });
 
-  it('names no field the PATCH prohibits, which is where `status` went', () => {
-    // The positive control on the subtraction above: with no prohibited key in the manifest the
-    // filter is a no-op and every assertion in this block would pass whether or not it existed.
+  it('names no field the PATCH refuses outright, which is where `status` went', () => {
+    // THE POSITIVE CONTROL ON THE SUBTRACTION ABOVE, and it is the reason this spec exists: with no
+    // such key in the manifest the filter is a no-op and every assertion in this block would pass
+    // whether or not it existed. It is asserted against the rule the server actually ships, so a
+    // rule renamed again — as `prohibited` was — fails HERE, by name, rather than quietly making the
+    // subtraction vacuous.
     const forbidden = Object.entries((updateBotRules as Manifest).rules)
-      .filter(([, rules]) => prohibited(rules))
+      .filter(([, rules]) => unsendable(rules))
       .map(([path]) => path);
 
-    expect(forbidden, 'UpdateBotRequest must still prohibit at least one path').toContain('status');
+    expect(forbidden, 'UpdateBotRequest must still rule at least one path `missing`').toContain(
+      'status',
+    );
     for (const field of union) expect(forbidden).not.toContain(field);
   });
 
@@ -229,6 +241,46 @@ describe('botPanelDefaults narrows the seed, which narrows the PATCH body', () =
     }
   });
 
+  it('omits a WITHHELD instruction rather than seeding its projected null', () => {
+    // THE DATA-LOSS PATH, AT THE FUNCTION THAT USED TO CAUSE IT. `botPanelDefaults` seeded every
+    // field of the tuple unconditionally, so a row whose `instructions_visible` is false — the two
+    // values are the PROJECTION, not the bot's — put two `null`s into form state. The PATCH body is
+    // `handleSubmit`'s output, `UpdateBotRequest` rules both fields `sometimes|nullable|string`, and
+    // the two readings of that pair are opposite: an OMITTED key is left alone, a PRESENT null
+    // CLEARS the column. So saving a rename wrote null over both operator-authored prompts, and the
+    // server answered 200.
+    //
+    // `canManage` is not in this test because it is not in the decision. It is this client's reading
+    // of a session role; the projection is resolved per record, and the window where the two
+    // disagree — a role promoted mid-session, a cached detail row, any refetch skew — is exactly the
+    // window this omission closes.
+    const withheld: BotResource = {
+      ...BOT,
+      system_instruction: null,
+      answer_style_instruction: null,
+      instructions_visible: false,
+    };
+    const seeded = botPanelDefaults(withheld, BOT_IDENTITY_FIELDS);
+
+    // KEYS, not values: a `system_instruction: null` here would be byte-identical to the destructive
+    // body, which is the whole reason omission rather than null is the fix.
+    expect(Object.keys(seeded)).not.toContain('system_instruction');
+    expect(Object.keys(seeded)).not.toContain('answer_style_instruction');
+
+    // Two keys wide and no wider — the tab is still a working editor for its other six fields.
+    expect(Object.keys(seeded).sort()).toEqual(
+      BOT_IDENTITY_FIELDS.filter(
+        (field) => field !== 'system_instruction' && field !== 'answer_style_instruction',
+      ).sort(),
+    );
+
+    // …and the same tuple on a VISIBLE row is untouched, which is what keeps the omission a
+    // statement about the projection rather than about these two fields in general.
+    expect(Object.keys(botPanelDefaults(BOT, BOT_IDENTITY_FIELDS)).sort()).toEqual(
+      [...BOT_IDENTITY_FIELDS].sort(),
+    );
+  });
+
   it('copies the theme rather than sharing the cached row`s object', () => {
     // The resource's object is shared with the query cache. A form handed it would mutate the cached
     // row in place when a colour changed, and TanStack Query would then compare the "new" data
@@ -257,11 +309,11 @@ describe('knownPaths decide which 422 keys can reach a control', () => {
       ...botPanelKnownPaths(BOT_PUBLISHING_FIELDS),
     ];
     expect(all).toHaveLength(new Set(all).size);
-    // The manifest's VALIDATED key set: a prohibited path is one no form renders, so it is not a
-    // `knownPath` on any panel and a 422 keyed to it goes to the banner. See `prohibited` above.
+    // The manifest's VALIDATED key set: a path ruled `missing` is one no form renders, so it is not
+    // a `knownPath` on any panel and a 422 keyed to it goes to the banner. See `unsendable` above.
     expect([...all].sort()).toEqual(
       Object.entries((updateBotRules as Manifest).rules)
-        .filter(([, rules]) => !prohibited(rules))
+        .filter(([, rules]) => !unsendable(rules))
         .map(([path]) => path)
         .sort(),
     );

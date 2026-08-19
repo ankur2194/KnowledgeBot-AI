@@ -41,14 +41,14 @@ import type { BotTheme } from '@/lib/theme';
  * the platform theme rather than as a broken one, which is the honest rendering: the server would
  * refuse it too.
  *
- * ── WHY THE RADIUS IS `rounded-(--radius)` AND NOT `rounded-xl` ────────────────────────────────
- * `--radius-xl` is declared once, on `:root`, as `calc(var(--radius) + 4px)`, and a custom property
- * is substituted at the element that DECLARES it — so overriding `--radius` on a nested element
- * leaves every derived step at the platform value. `rounded-xl` inside this scope would therefore
- * ignore the tenant's choice entirely, silently, and only here (the whole-page case at `:root` works,
- * which is why no unit test sees it — `tests/components/design-system-css.test.tsx` sets the property
- * on `documentElement`). Reading `var(--radius)` AT THE ELEMENT is what makes the six-value picker
- * previewable at all; it is a token reference and not a literal length.
+ * ── THE CORNER RADIUS IS AN ORDINARY `rounded-*` STEP ──────────────────────────────────────────
+ * It reads the tenant's `--radius` because the generated `@theme inline` block carries the derived
+ * scale as the CALC ITSELF rather than as `var(--radius-xl)`, so the arithmetic lands in the utility
+ * and resolves against the `--radius` this element inherits from `BotThemeScope`. This file used to
+ * carry `rounded-(--radius)` as a local workaround for the opposite emission, which previewed the
+ * `lg` step while the hosted composer shipped `xl` — the console under-reporting the corner it was
+ * there to show. The fix is in `packages/design-tokens/scripts/build.mjs`; the nested-override case
+ * is pinned by `tests/components/design-system-css.test.tsx`.
  */
 export function BotIdentityPreview({
   name,
@@ -95,7 +95,7 @@ export function BotIdentityPreview({
             No opening message. The conversation starts with the composer and nothing above it.
           </p>
         ) : (
-          <p className="rounded-(--radius) bg-card p-3 text-base shadow-xs">{welcomeMessage}</p>
+          <p className="rounded-xl bg-card p-3 text-base shadow-xs">{welcomeMessage}</p>
         )}
 
         {questions.length === 0 ? (
@@ -118,7 +118,7 @@ export function BotIdentityPreview({
           </ul>
         )}
 
-        <div className="flex items-center gap-2 rounded-(--radius) bg-card px-3 py-2 ring-1 ring-input">
+        <div className="flex items-center gap-2 rounded-xl bg-card px-3 py-2 ring-1 ring-input">
           {/* A placeholder is TEXT and takes --muted-foreground: --subtle-foreground does not clear
               4.5:1 and is restricted to disabled controls and decoration. */}
           <span className="min-w-0 flex-1 truncate text-base text-muted-foreground">
@@ -135,7 +135,7 @@ export function BotIdentityPreview({
         {/* --accent is shadcn's neutral hover wash rather than a second brand colour, and it is
             invisible everywhere else in this preview — so it gets one sample, labelled, instead of
             being a field whose effect the operator has to guess at. */}
-        <p className="rounded-(--radius) bg-accent px-3 py-2 text-sm text-accent-foreground">
+        <p className="rounded-xl bg-accent px-3 py-2 text-sm text-accent-foreground">
           Highlight — the wash behind a hovered row or a selected suggestion.
         </p>
       </div>

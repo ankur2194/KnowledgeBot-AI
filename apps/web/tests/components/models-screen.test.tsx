@@ -726,7 +726,7 @@ describe('deleting the designated embedding model', () => {
           // own status and its own message. It is NOT a server fault and there is nothing to retry.
           // `actionable: true` IS THE 409's DISTINGUISHING FIELD, not decoration on the fixture.
           // A deliberate 4xx and a defect share `(internal_dependency, retryable: false)`; this flag
-          // is what `deleteConflictMessage` reads, and a fixture omitting it would exercise the
+          // is what `actionableConflictMessage` reads, and a fixture omitting it would exercise the
           // fallback path while claiming to test the conflict one (finding J2).
           envelope('internal_dependency', {
             message: DESIGNATED,
@@ -762,7 +762,7 @@ describe('deleting the designated embedding model', () => {
       http.delete(`${modelsUrl(ORG_A, CONNECTION)}/${CHAT_MODEL.id}`, () =>
         HttpResponse.json(
           // DELIBERATELY OPERATOR-SHAPED, AND THAT IS A STRONGER TEST THAN IT USED TO BE. This
-          // fixture used to carry the exact 5xx constant, because `deleteConflictMessage` told a
+          // fixture used to carry the exact 5xx constant, because `actionableConflictMessage` told a
           // deliberate 4xx from a defect by COMPARING the message against a copy of that string —
           // so the assertion below could not fail, whatever the client did. Since finding J2 the
           // discriminator is the envelope's `actionable` flag, which `envelope()` defaults to

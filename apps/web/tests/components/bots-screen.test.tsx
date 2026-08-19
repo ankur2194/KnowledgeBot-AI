@@ -78,6 +78,7 @@ const SUPPORT_BOT: BotResource = {
   placeholder_text: null,
   system_instruction: 'CANARY-SYSTEM-INSTRUCTION',
   answer_style_instruction: 'CANARY-ANSWER-STYLE',
+  instructions_visible: true,
   status: 'published',
   access_mode: 'public',
   provider_connection_id: '01JCONNAAAAAAAAAAAAAAAAAAA',

@@ -453,7 +453,7 @@ describe('the hand-written provider-model types', () => {
  * `in:` probes in test/form-drift.test.ts.
  */
 describe('the hand-written bot types', () => {
-  it('BotResource declares exactly thirty keys and no credential-shaped one', () => {
+  it('BotResource declares exactly thirty-one keys and no credential-shaped one', () => {
     const keys: Record<keyof BotResource, true> = {
       id: true,
       public_bot_id: true,
@@ -464,6 +464,7 @@ describe('the hand-written bot types', () => {
       placeholder_text: true,
       system_instruction: true,
       answer_style_instruction: true,
+      instructions_visible: true,
       status: true,
       access_mode: true,
       provider_connection_id: true,
@@ -486,7 +487,7 @@ describe('the hand-written bot types', () => {
       created_at: true,
       updated_at: true,
     };
-    expect(Object.keys(keys)).toHaveLength(30);
+    expect(Object.keys(keys)).toHaveLength(31);
 
     // Nothing of the parent connection beyond its ULID: no vendor, no label, no masked credential.
     // The same property `ProviderModelResource` holds, and for the same reason — a client that could
@@ -508,6 +509,28 @@ describe('the hand-written bot types', () => {
     // admin-only: the hosted-chat, widget and stylesheet surfaces publish their own, smaller
     // resources, and none of them may carry it.
     expect(published).toContain('system_instruction');
+  });
+
+  it('publishes `instructions_visible` as a boolean, so a withheld null is not read as "not set"', () => {
+    // THE PROJECTION IS SELF-DESCRIBING, and this is the field that says so. Both instruction fields
+    // are `null` for a caller without `bots.manage`, whatever is stored, and `UpdateBotRequest` rules
+    // them `sometimes|nullable|string` — so a form seeded from a withheld body PATCHes `null` over an
+    // operator-authored prompt and gets a 200. The client reads this key instead of re-deriving the
+    // grant from a role name it holds locally.
+    //
+    // A BOOLEAN AND REQUIRED, not a nullable or optional one: "the server did not say" is exactly the
+    // state that put the data-loss path there, so the wire may not be able to express it.
+    const bot = schemas['BotResource'];
+    expect(bot?.properties?.['instructions_visible']).toMatchObject({ type: 'boolean' });
+    expect(bot?.required ?? []).toContain('instructions_visible');
+
+    // The TYPE side of the same claim, asserted by assignment rather than by a string: a `boolean |
+    // null` on the mirror would fail to typecheck here.
+    const projection: Pick<
+      BotResource,
+      'instructions_visible' | 'system_instruction' | 'answer_style_instruction'
+    > = { instructions_visible: false, system_instruction: null, answer_style_instruction: null };
+    expect(projection.instructions_visible).toBe(false);
   });
 
   it('publishes no form-settable spelling of the two derived fields', () => {
@@ -781,6 +804,7 @@ describe('every published component is mirrored here or exempt with a reason', (
       'placeholder_text',
       'system_instruction',
       'answer_style_instruction',
+      'instructions_visible',
       'status',
       'access_mode',
       'provider_connection_id',

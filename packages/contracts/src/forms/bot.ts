@@ -28,11 +28,17 @@ import { ULID_PATTERN } from './laravel-rules.js';
  * ── `status` IS ON NEITHER OF THEM, AND THAT IS THE INTERESTING HALF ────────────────────────────
  *
  * A lifecycle move is `PUT …/bots/{bot}/status` and nothing else. `UpdateBotRequest` now rules the
- * field `["prohibited"]` — a rule rather than a deletion, and the difference is the whole point: an
+ * field `["missing"]` — a rule rather than a deletion, and the difference is the whole point: an
  * ABSENT rule makes `validated()` discard the key in silence, so a console would publish a bot, get
- * a 200, and find it still in draft. `prohibited` turns that into a 422 keyed `status`.
+ * a 200, and find it still in draft. `missing` turns that into a 422 keyed `status`.
  *
- * The mirror of "the server prohibits this key" is "no schema declares this path", which is what
+ * IT WAS `["prohibited"]` AND THAT RULE DID NOT MEAN WHAT ITS NAME SAID. `validateProhibited` is
+ * `! validateRequired`, so it passed for `null`, `""` and `[]` and `validated()` kept the key —
+ * which reached a `NOT NULL` column and turned an accompanying rename into a lost edit behind a 500.
+ * `validateMissing` asks whether the key is present at all, which is the rule this paragraph always
+ * described.
+ *
+ * The mirror of "the server refuses this key" is "no schema declares this path", which is what
  * `strictObject` turns into a parse failure. So `status` appears in exactly one schema here —
  * `botStatusTransitionSchema` at the bottom of this file, against the transition endpoint's own
  * FormRequest — and `botSettingsSchema` cannot express a lifecycle move at all. `botFormDefaults`
@@ -565,7 +571,7 @@ export const botSettingsSchema = z
     slug: slug.optional(),
     /**
      * NO `status`, AND ITS ABSENCE IS THE MIRROR OF A RULE RATHER THAN AN OMISSION.
-     * `UpdateBotRequest` rules it `["prohibited"]`, so a body carrying one is a 422 keyed `status` —
+     * `UpdateBotRequest` rules it `["missing"]`, so a body carrying one is a 422 keyed `status` —
      * and the client-side spelling of "this key may not be sent" is a `strictObject` that does not
      * declare the path. See the module docblock; the transition lives in
      * `botStatusTransitionSchema`.
@@ -591,7 +597,8 @@ export interface BotFormSource {
   readonly name: string;
   readonly slug: string;
   /**
-   * NO `status`. `UpdateBotRequest` prohibits it, `botSettingsSchema` therefore does not declare it,
+   * NO `status`. `UpdateBotRequest` rules it `missing`, `botSettingsSchema` therefore does not
+   * declare it,
    * and a source shape that still carried it would be a shape whose only reader was a pick that must
    * not make one — the two would then disagree silently rather than at the typecheck. A screen
    * rendering the current lifecycle state reads it off `BotResource` directly; only a form's state
@@ -602,6 +609,16 @@ export interface BotFormSource {
   readonly placeholder_text: string | null;
   readonly system_instruction: string | null;
   readonly answer_style_instruction: string | null;
+  /**
+   * REQUIRED, AND IT MAY NOT GAIN A DEFAULT. It is the server's own statement of whether the two
+   * fields above carry their stored values in the body this source came from, and `botFormDefaults`
+   * reads it to decide whether either may be seeded at all — see that function.
+   *
+   * A default here would let a call site inherit a decision it never made, which is the same reason
+   * `BotResource::__construct`'s `$withInstructions` is a required argument on the server. A
+   * structural shape whose one boolean is optional is a shape where forgetting it means "visible".
+   */
+  readonly instructions_visible: boolean;
   readonly access_mode: (typeof BOT_ACCESS_MODES)[number];
   readonly answer_mode: (typeof BOT_ANSWER_MODES)[number];
   readonly allow_general_answers: boolean;
@@ -626,6 +643,40 @@ export interface BotFormSource {
 }
 
 /**
+ * THE TWO INSTRUCTION FIELDS, OR NEITHER — the whole of the management-only projection, kept in one
+ * place so the two can never be seeded one at a time.
+ *
+ * ── OMISSION, NOT `null`, AND THE DIFFERENCE IS THE WHOLE FIX ───────────────────────────────────
+ * `UpdateBotRequest` rules both `sometimes|nullable|string`. `sometimes` means an OMITTED key is
+ * left alone; a PRESENT `null` is a legitimate "clear it" that returns 200. So a form seeded with
+ * the projected `null` — which is what a body with `instructions_visible: false` carries whatever is
+ * stored — writes `null` over an operator-authored system prompt the next time anybody saves a
+ * rename. Narrow window, worst possible payload: it needs only a role promoted mid-session, a cached
+ * detail row, or any refetch skew between the row a form was seeded from and the role the client
+ * believes it has.
+ *
+ * Returning `{}` here means the keys never enter form state, so `handleSubmit`'s output — which is
+ * the PATCH body verbatim — cannot carry them. `botSettingsSchema` is a `strictObject` of optional
+ * fields, so a subset parses and the request is exactly those keys.
+ *
+ * ── THE FLAG IS THE SERVER'S, AND NOTHING HERE MAY RE-DERIVE IT ────────────────────────────────
+ * `bots.manage` is resolved per record against that record's own organization. A client predicate
+ * over a session role answers a different question, against a row that may have been fetched under a
+ * different membership — which is precisely how a `true` lands on a body whose instructions were
+ * withheld. `instructions_visible` is set from the same flag that decided the projection, so the two
+ * cannot disagree.
+ */
+const instructionDefaults = (
+  bot: BotFormSource,
+): Pick<BotSettingsIn, 'system_instruction' | 'answer_style_instruction'> =>
+  bot.instructions_visible
+    ? {
+        system_instruction: bot.system_instruction,
+        answer_style_instruction: bot.answer_style_instruction,
+      }
+    : {};
+
+/**
  * NEVER `reset(resource)`. The API Resource carries `id`, `public_bot_id`,
  * `retrieval_configuration_version`, `created_at` and `updated_at`; `reset()` replaces form state
  * with exactly what it is handed, `getValues()` returns those keys, and submit posts them back — a
@@ -641,6 +692,13 @@ export interface BotFormSource {
  * `supported`: the resource's object is shared with the query cache, and handing it to a form that
  * then edits a colour would mutate the cached row in place — TanStack Query would compare the "new"
  * data against a value that had already changed.
+ *
+ * ── THE KEY SET IS NOT FIXED, AND THE ONE THING THAT VARIES IS THE PROJECTION ───────────────────
+ * `system_instruction` and `answer_style_instruction` are OMITTED — not nulled — on a source whose
+ * `instructions_visible` is false, because a withheld value must not be able to be written back.
+ * Every other key is always present. `instructionDefaults` above carries the argument; a caller that
+ * needs "the fields this form may send" must read the returned object's keys rather than assume the
+ * schema's.
  */
 export const botFormDefaults = (bot: BotFormSource): BotSettingsIn => ({
   name: bot.name,
@@ -648,8 +706,9 @@ export const botFormDefaults = (bot: BotFormSource): BotSettingsIn => ({
   description: bot.description,
   welcome_message: bot.welcome_message,
   placeholder_text: bot.placeholder_text,
-  system_instruction: bot.system_instruction,
-  answer_style_instruction: bot.answer_style_instruction,
+  // Both keys, or NEITHER. A withheld field must not reach form state at all — see
+  // `instructionDefaults`, which is where the reason is written down.
+  ...instructionDefaults(bot),
   access_mode: bot.access_mode,
   answer_mode: bot.answer_mode,
   allow_general_answers: bot.allow_general_answers,
@@ -719,7 +778,7 @@ export const botCreateDefaults = (): BotCreateIn => ({
  *
  * ── ONE FIELD, AND IT IS THE ONLY SCHEMA IN THIS PACKAGE THAT MAY NAME IT ──────────────────────
  *
- * `status` is `prohibited` on the PATCH, so this is where the vocabulary is submitted from and the
+ * `status` is ruled `missing` on the PATCH, so this is where the vocabulary is submitted from and the
  * only place `BOT_STATUSES` is compared against the server: `test/form-drift.test.ts` probes
  * `in:"draft","testing","published","paused","archived"` member by member against this schema, which
  * is what keeps the tuple every status pill and transition menu iterates honest.

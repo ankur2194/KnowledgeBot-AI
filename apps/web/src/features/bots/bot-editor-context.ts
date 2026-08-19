@@ -46,8 +46,11 @@ export interface BotEditorContextValue {
    * and no panel needs a pending branch of its own — the shell owns all four states.
    *
    * `system_instruction` and `answer_style_instruction` are a MANAGEMENT-ONLY PROJECTION: `null`
-   * when `canManage` is false, whatever is stored. `null` there means "not shown to you", NOT "not
-   * set", and nothing may seed a control from one without `canManage`.
+   * when THIS ROW's `instructions_visible` is false, whatever is stored. `null` there means "not
+   * shown to you", NOT "not set", and nothing may seed a control from one — `botPanelDefaults` omits
+   * both keys rather than seeding them, and a panel renders no control for them. Read the flag off
+   * this row; `canManage` below answers a different question and can be `true` over a body whose
+   * instructions were withheld.
    */
   readonly bot: BotResource;
   /** `['org', orgId, 'bots', botId]`, built once by the shell. */
@@ -59,6 +62,9 @@ export interface BotEditorContextValue {
    * the server itself handed us. AN AFFORDANCE, NEVER AUTHORIZATION: Laravel answers 403 whatever a
    * panel renders, `useBotSave` handles that class, and a role that changed under a cached session
    * shows up as that 403 rather than as a silently missing control.
+   *
+   * ALL IT MAY DECIDE IS WHETHER AN EDITOR IS OFFERED. It is not the projection flag — that is
+   * `bot.instructions_visible` above — and nothing may seed form state from it.
    */
   readonly canManage: boolean;
   /**

@@ -90,6 +90,121 @@ describe('the derived radius scale survives every value in the tenant enum', () 
   });
 });
 
+/**
+ * THE CASE EVERY SPEC ABOVE IS BLIND TO, and the one the product actually renders in the console.
+ *
+ * Every assertion in the block above sets `--radius` on `documentElement`. That is the whole-page
+ * shape — hosted chat's `/c/[publicBotId]/theme.css` route, which emits `:root`/`.dark` — and it
+ * passes whether or not the derived scale is scoped-override-safe. The admin console takes the other
+ * path: `<BotThemeScope>` writes `--radius` onto a NESTED div, many bots in one document.
+ *
+ * A custom property is substituted at the element that DECLARES it. So while the scale was emitted
+ * into `@theme inline` as `--radius-xl: var(--radius-xl)`, `rounded-xl` compiled to
+ * `border-radius: var(--radius-xl)` and read the value `:root` had already computed — a fixed length
+ * every descendant inherits, which a nested `--radius` cannot move. The bot identity preview showed
+ * the platform corner while the widget shipped the tenant's, in the direction where the preview
+ * UNDER-reports, and nothing failed: no build error, no console warning, and the documentElement
+ * specs above stayed green.
+ *
+ * The fix is in the generator (`packages/design-tokens/scripts/build.mjs`): the block now carries the
+ * calc itself, so the utility is `border-radius: max(0px, calc(var(--radius) - 4px))` and the
+ * arithmetic resolves against whatever `--radius` the ELEMENT inherits.
+ */
+describe('the derived radius scale follows a NESTED --radius, not only the document root', () => {
+  /** `--radius: 1rem` is 16px and is in the tenant enum; the platform default is 0.625rem = 10px. */
+  const SCOPED_RADIUS = '1rem';
+
+  /** Every step at 16px, spelled out rather than derived — a table computed from the same formula
+   *  under test would agree with a broken generator. `full` is the constant and is here to prove the
+   *  loop covers the whole scale rather than skipping the step that cannot move.
+   *
+   *  A Map and not an object literal: `security/detect-object-injection` reports `TABLE[step]` for a
+   *  non-literal key, and this file is not the place to argue with it. */
+  const AT_1REM = new Map<(typeof RADIUS_STEPS)[number], string>([
+    ['xs', '10px'],
+    ['sm', '12px'],
+    ['md', '14px'],
+    ['lg', '16px'],
+    ['xl', '20px'],
+    ['2xl', '26px'],
+    ['3xl', '34px'],
+    ['full', '9999px'],
+  ]);
+
+  it('moves every step inside the scope and leaves an identical sibling outside it alone', async () => {
+    const screen = await render(
+      <div>
+        {/* No colour classes and no style attribute — the same shape <BotThemeScope/> renders. */}
+        <div data-testid="scope">
+          {RADIUS_STEPS.map((step) => (
+            <div key={step} data-inside={step} className={`rounded-${step}`} />
+          ))}
+        </div>
+        {RADIUS_STEPS.map((step) => (
+          <div key={step} data-outside={step} className={`rounded-${step}`} />
+        ))}
+      </div>,
+    );
+
+    const inside = (step: string) =>
+      getComputedStyle(screen.container.querySelector(`[data-inside="${step}"]`) as Element)
+        .borderTopLeftRadius;
+    const outside = (step: string) =>
+      getComputedStyle(screen.container.querySelector(`[data-outside="${step}"]`) as Element)
+        .borderTopLeftRadius;
+
+    const before = new Map(RADIUS_STEPS.map((step) => [step, outside(step)] as const));
+    // Sanity: the two columns start identical, so the difference asserted below is the override's.
+    for (const step of RADIUS_STEPS) expect(inside(step), step).toBe(before.get(step));
+
+    // Written through the CSSOM exactly as <BotThemeScope/> does it, on a NESTED element — never on
+    // documentElement, which is the whole point of this spec.
+    const scope = screen.container.querySelector('[data-testid="scope"]') as HTMLElement;
+    scope.style.setProperty('--radius', SCOPED_RADIUS);
+
+    for (const step of RADIUS_STEPS) {
+      expect(inside(step), `rounded-${step} ignored the scoped --radius`).toBe(AT_1REM.get(step));
+      expect(outside(step), `the scoped --radius leaked out of its subtree at rounded-${step}`).toBe(
+        before.get(step),
+      );
+    }
+
+    // The regression signature, stated directly: before the generator emitted the calc, the two
+    // columns stayed equal at every DERIVED step and this is the assertion that saw it. `full` is
+    // excluded because 9999px is a literal and is legitimately equal on both sides.
+    for (const step of RADIUS_STEPS.filter((s) => s !== 'full')) {
+      expect(inside(step), `rounded-${step} is inert under a scoped --radius`).not.toBe(
+        outside(step),
+      );
+    }
+  });
+
+  it('clamps the small end inside a scope too, at the enum value that goes negative', async () => {
+    const screen = await render(
+      <div data-testid="scope">
+        {/* `data-radius-probe` opts these two into the 99px @layer base fallback declared at the top
+            of this file. Without it `0px` is indistinguishable from "the utility was discarded as
+            invalid and the initial value showed through", which is the failure being tested. */}
+        <div data-radius-probe data-step="xs" className="rounded-xs" />
+        <div data-radius-probe data-step="3xl" className="rounded-3xl" />
+      </div>,
+    );
+
+    const scope = screen.container.querySelector('[data-testid="scope"]') as HTMLElement;
+    scope.style.setProperty('--radius', '0rem');
+
+    const read = (step: string) =>
+      getComputedStyle(screen.container.querySelector(`[data-step="${step}"]`) as Element)
+        .borderTopLeftRadius;
+
+    // The `max(0px, …)` wrapper has to survive the move into the utility: without it `calc(0rem -
+    // 6px)` is an invalid border-radius, the browser discards the declaration, and a square-cornered
+    // tenant loses the radius entirely rather than getting square corners.
+    expect(read('xs')).toBe('0px');
+    expect(read('3xl')).toBe('18px');
+  });
+});
+
 describe('@theme inline is what makes a subtree override work', () => {
   /**
    * `tailwind-shadcn` Gotcha 1, and the reason this spec exists at all: `@theme` WITHOUT `inline`

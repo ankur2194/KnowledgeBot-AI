@@ -34,8 +34,9 @@ import { knownPathsFromRules, type FormRulesManifest } from '@/lib/forms/known-p
  * ── THE PATHS ARE BUILT FROM `connectionPath`, NOT RE-SPELLED ───────────────────────────────────
  * `features/providers/api.ts` exports it, and re-deriving
  * `/api/v1/organizations/{org}/provider-connections/{id}` here would be a second spelling of one
- * route. The same import brings `deleteConflictMessage`, which the delete path below needs and which
- * must never be copied — see `model-list.tsx`.
+ * route. `actionableConflictMessage`, which the delete path below needs, comes from
+ * `lib/api/actionable-conflict.ts` instead — it is four features' shared reader, not this feature's,
+ * and must never be copied — see `model-list.tsx`.
  *
  * THE ORGANIZATION AND THE CONNECTION ARE BOTH IN THE PATH, AND NEITHER IS THE SCOPE. The routes are
  * mounted with `->scopeBindings()` and `TenantContext` re-reads the membership row from PostgreSQL on
@@ -171,7 +172,7 @@ export const updateModel = async (
  * A GUARDED HARD DELETE. The 409 that matters is not the suspended-organization one — it is "this row
  * is the (connection, model) pair the organization's embedding designation names", and its `message`
  * carries the ONLY sentence that tells the operator what to do next. It is read with
- * `deleteConflictMessage` from `features/providers/api.ts`, which is IMPORTED rather than copied; see
+ * `actionableConflictMessage` from `lib/api/actionable-conflict.ts`, which is IMPORTED rather than copied; see
  * `model-list.tsx` for why a second copy of that inference would be a real defect rather than
  * duplication.
  *

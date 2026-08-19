@@ -25,7 +25,7 @@ import { worker } from '../msw/setup';
  *      is `internal_dependency`, whose class-mapped copy is "Something on our side is unavailable.
  *      Try again shortly." — false twice, and it fails no test anywhere.
  *   3. A STATUS CHANGE GOES TO `PUT …/status` AND NEVER ONTO THE PATCH. The PATCH rules `status`
- *      `prohibited` precisely so this cannot fail silently; an ABSENT rule would have made it a 200
+ *      `missing` precisely so this cannot fail silently; an ABSENT rule would have made it a 200
  *      with the bot still in draft.
  *
  * ── WHAT IT MAY NOT CLAIM ────────────────────────────────────────────────────────────────────────
@@ -64,6 +64,7 @@ const BOT: BotResource = {
   placeholder_text: null,
   system_instruction: 'CANARY-SYSTEM-INSTRUCTION',
   answer_style_instruction: 'CANARY-ANSWER-STYLE',
+  instructions_visible: true,
   status: 'draft',
   access_mode: 'public',
   provider_connection_id: null,
@@ -227,7 +228,7 @@ describe('the lifecycle transition is its own endpoint', () => {
       // extra key here.
       expect(puts).toEqual([{ status: 'testing' }]);
     });
-    // The PATCH rules `status` `prohibited` rather than dropping it, precisely so a client that got
+    // The PATCH rules `status` `missing` rather than dropping it, precisely so a client that got
     // this wrong would see a 422 instead of a 200 on an unchanged bot. Nothing here should reach it.
     expect(patched).toBe(false);
   });

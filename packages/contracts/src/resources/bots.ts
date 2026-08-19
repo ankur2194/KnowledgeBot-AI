@@ -119,6 +119,28 @@ export interface BotResource {
    * change to the grounding rules.
    */
   readonly answer_style_instruction: string | null;
+  /**
+   * WHETHER THE TWO FIELDS ABOVE CARRY THEIR STORED VALUES IN *THIS* BODY. It is the server stating
+   * its own projection, and it exists because the `null` above otherwise carries two facts a client
+   * cannot tell apart.
+   *
+   * `false` means WITHHELD — the caller does not hold `bots.manage` on this bot's organization — so
+   * the `null` is the projection rather than the bot's state. `true` means the null is the bot's own
+   * "not set".
+   *
+   * ── THE WRONG READING IS DESTRUCTIVE, WHICH IS WHY THIS IS A FIELD AND NOT A CONVENTION ────────
+   * `UpdateBotRequest` rules both instruction fields `sometimes|nullable|string`, so an omitted key
+   * is left alone and a present `null` CLEARS THE COLUMN and returns 200. A form seeded from a
+   * withheld body therefore writes `null` over an operator-authored prompt on the next save of any
+   * unrelated field. `botFormDefaults` (src/forms/bot.ts) refuses to seed either key when this is
+   * false, which is what makes the omission structural rather than remembered.
+   *
+   * ── AND IT IS NOT DERIVABLE FROM A ROLE THE CLIENT HOLDS ───────────────────────────────────────
+   * The grant is resolved per record against the record's OWN organization, so a client that
+   * re-derives it from a session role is answering a different question — and answering it from a
+   * row that may have been fetched under a different membership. Read this key; never a role map.
+   */
+  readonly instructions_visible: boolean;
   readonly status: BotStatus;
   readonly access_mode: BotAccessMode;
   /**

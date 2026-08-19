@@ -79,16 +79,16 @@
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
 
-  /* ---- radius: derived from the tenant --radius, closed ---- */
+  /* ---- radius: the CALC, not var(--radius-n) — the utility must resolve at the element ---- */
   --radius-*: initial;
-  --radius-xs: var(--radius-xs);
-  --radius-sm: var(--radius-sm);
-  --radius-md: var(--radius-md);
-  --radius-lg: var(--radius-lg);
-  --radius-xl: var(--radius-xl);
-  --radius-2xl: var(--radius-2xl);
-  --radius-3xl: var(--radius-3xl);
-  --radius-full: var(--radius-full);
+  --radius-xs: max(0px, calc(var(--radius) - 6px));
+  --radius-sm: max(0px, calc(var(--radius) - 4px));
+  --radius-md: max(0px, calc(var(--radius) - 2px));
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 10px);
+  --radius-3xl: calc(var(--radius) + 18px);
+  --radius-full: 9999px;
 
   /* ---- elevation: pick a step, never blend or invent an offset ---- */
   --shadow-*: initial;

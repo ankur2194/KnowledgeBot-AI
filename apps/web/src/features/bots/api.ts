@@ -76,7 +76,7 @@ export const botsPath = (orgId: string): string => `${organizationPath(orgId)}/b
  * the worst possible place to discover a drift.
  *
  * The same file is already imported this way for `knownPathsFromRules`, so the mechanism is the
- * repo's rather than this feature's. `tests/unit/bot-list-config.test.ts` pins the parsed set and the
+ * repo's rather than this feature's. `tests/unit/bot-list.test.ts` pins the parsed set and the
  * two bounds, so a manifest whose SHAPE changed (rather than its values) fails by name instead of
  * degrading to an empty set at render time.
  *
@@ -282,9 +282,12 @@ export const botPath = (orgId: string, botId: string): string =>
  *
  * ── TWO FIELDS ON THE RESPONSE ARE `null` FOR A REASON THAT IS NOT "UNSET" ──────────────────────
  * `system_instruction` and `answer_style_instruction` are a MANAGEMENT-ONLY PROJECTION: a caller
- * without `bots.manage` receives `null` for both, whatever is stored. Nothing may seed a form field
- * from them without first establishing `bots.manage`, and nothing may render a `null` there as
- * "empty" — the two facts are different and only one of them is the operator's to fix.
+ * without `bots.manage` receives `null` for both, whatever is stored. Nothing may render a `null`
+ * there as "empty" — the two facts are different and only one of them is the operator's to fix.
+ *
+ * WHICH OF THE TWO IT IS COMES OFF THE BODY, IN `instructions_visible`, and never off a role this
+ * client holds. `botFormDefaults` refuses to seed either key when it is false, so a form cannot
+ * PATCH the projection back over the stored prompts — see `botPanelDefaults` below.
  */
 export const fetchBot = async (
   orgId: string,
@@ -348,10 +351,11 @@ export const botStatusPath = (orgId: string, botId: string): string =>
  * `PUT .../bots/{bot}/status` -> 200 `{data: …}` | 403 | 404 | 409 | 422.
  *
  * ── A LIFECYCLE MOVE IS NOT A FIELD, AND THE SERVER MADE THAT A RULE RATHER THAN A CONVENTION ───
- * `UpdateBotRequest` rules `status` as `["prohibited"]`, so sending it on the PATCH is a 422 keyed
- * `status`. The rule is there rather than the field simply being dropped from `rules()`, and the
- * difference is the whole reason this function exists: an ABSENT rule makes `validated()` discard
- * the key in silence, so the console would publish a bot, get a 200, and find it still in draft.
+ * `UpdateBotRequest` rules `status` as `["missing"]`, so sending it on the PATCH is a 422 keyed
+ * `status` — for any value, `null` and `""` included. The rule is there rather than the field simply
+ * being dropped from `rules()`, and the difference is the whole reason this function exists: an
+ * ABSENT rule makes `validated()` discard the key in silence, so the console would publish a bot,
+ * get a 200, and find it still in draft.
  *
  * `status` is therefore OUT of `BOT_PUBLISHING_FIELDS`, out of `botSettingsSchema` and out of
  * `botFormDefaults`. The Publishing tab calls this instead of `useBotSave`, with its own
@@ -427,7 +431,7 @@ export type BotSettingsField = keyof BotSettingsIn;
  *
  * ── `status` IS IN NO TUPLE, AND ITS ABSENCE IS THE PARTITION WORKING RATHER THAN A HOLE ────────
  * It used to be the first entry of `BOT_PUBLISHING_FIELDS`. `UpdateBotRequest` now rules it
- * `["prohibited"]` — a lifecycle move is `PUT .../bots/{bot}/status`, and `updateBotStatus` above is
+ * `["missing"]` — a lifecycle move is `PUT .../bots/{bot}/status`, and `updateBotStatus` above is
  * the call — so it is not a `botSettingsSchema` key, `keyof BotSettingsIn` no longer admits it, and
  * the `satisfies` on this tuple is what reported that rather than a reviewer. The union below is
  * still EXACTLY the PATCH's key set; what changed is the key set.
@@ -486,6 +490,24 @@ export const BOT_PUBLISHING_FIELDS = [
  * `handleSubmit`'s output: a panel seeded with all 25 fields SENDS all 25 fields, and the identity
  * tab would then silently rewrite the retrieval knobs another tab is mid-edit on.
  *
+ * ── IT RETURNS THE TUPLE *INTERSECTED WITH WHAT THE SERVER SHOWED US*, WHICH IS NOT THE SAME THING ─
+ * A field the caller cannot SEE is not seeded, at all — omitted rather than seeded `null`. The one
+ * instance is the management-only projection: on a row whose `instructions_visible` is false,
+ * `system_instruction` and `answer_style_instruction` arrive `null` whatever is stored, and
+ * `UpdateBotRequest` rules both `sometimes|nullable|string` — so an omitted key is left alone while a
+ * present `null` CLEARS the column and returns 200. Seeding the projected null and saving a rename
+ * therefore writes null over two operator-authored prompts.
+ *
+ * The refusal lives in `botFormDefaults` (`packages/contracts/src/forms/bot.ts`), which this filters,
+ * so it holds for every caller of either function rather than for the panels that remembered. What
+ * decides it is the SERVER'S `instructions_visible` and never `canManageBots` below: the grant is
+ * resolved per record against that record's own organization, and the whole failure window is a row
+ * fetched while the client's own answer was `true`.
+ *
+ * A panel that renders a control for a field this drops would put it straight back — RHF collects a
+ * registered input's DOM value on submit whether or not `defaultValues` named it — so the same flag
+ * gates the CONTROLS in `bot-identity-panel.tsx`. Omission here is the second line, not the only one.
+ *
  * ── `Object.entries` + `Object.fromEntries`, NOT `all[field]` IN A LOOP ─────────────────────────
  * Indexing an object by a variable is `security/detect-object-injection`'s sink and reports as a
  * warning nobody can act on. Filtering entries reads the same and does not.
@@ -519,7 +541,14 @@ export const botPanelDefaults = (
  */
 /**
  * A path the FormRequest declares only in order to REFUSE it. `UpdateBotRequest.status` is the one
- * instance: `["prohibited"]`, because a lifecycle move is `PUT .../bots/{bot}/status`.
+ * instance: `["missing"]`, because a lifecycle move is `PUT .../bots/{bot}/status`.
+ *
+ * ── THE RULE NAME MOVED, AND IT WAS NOT A RENAME ───────────────────────────────────────────────
+ * It read `["prohibited"]` until the server corrected it. `validateProhibited` is literally
+ * `! validateRequired`, so it PASSED for `null`, `""` and `[]` and `validated()` kept the key — which
+ * reached a `NOT NULL` column and turned an accompanying rename into a lost edit behind a 500.
+ * `validateMissing` asks whether the KEY is there at all, so every one of those four bodies is now a
+ * 422. This module reads the rule NAME below, which is why it had to move with it.
  *
  * SUBTRACTED FROM THE DERIVED SET, and the reason is what `knownPaths` means. It is "the paths this
  * form RENDERS", and no panel renders a control for a field it may not send — so a 422 keyed
@@ -531,23 +560,23 @@ export const botPanelDefaults = (
  * it, so a `status` 422 on the PATCH means a caller bypassed both. The banner is the honest place
  * for a failure nobody rendered a control for.
  *
- * DERIVED FROM THE MANIFEST, not a hard-coded `'status'`: a second prohibited field added
- * server-side is subtracted the day it is dumped. The subtraction is local to this module rather
- * than in `lib/forms/known-paths.ts` because this is the only manifest in the repo carrying the rule
- * today; the second one is the case for lifting it.
+ * DERIVED FROM THE MANIFEST, not a hard-coded `'status'`: a second such field added server-side is
+ * subtracted the day it is dumped. The subtraction is local to this module rather than in
+ * `lib/forms/known-paths.ts` because this is the only manifest in the repo carrying the rule today;
+ * the second one is the case for lifting it.
  */
-const PROHIBITED_UPDATE_BOT_PATHS: ReadonlySet<string> = new Set(
+const UNSENDABLE_UPDATE_BOT_PATHS: ReadonlySet<string> = new Set(
   // `Object.entries` rather than `rules[path]` in a predicate, for the reason `botPanelDefaults`
   // gives: indexing an object by a variable is `security/detect-object-injection`'s sink and reports
   // as a warning nobody can act on.
   Object.entries((updateBotRules as FormRulesManifest).rules)
-    .filter(([, rules]) => rules.some((rule) => rule.split(':')[0] === 'prohibited'))
+    .filter(([, rules]) => rules.some((rule) => rule.split(':')[0] === 'missing'))
     .map(([path]) => path),
 );
 
 const UPDATE_BOT_PATHS: readonly string[] = knownPathsFromRules(
   updateBotRules as FormRulesManifest,
-).filter((path) => !PROHIBITED_UPDATE_BOT_PATHS.has(path));
+).filter((path) => !UNSENDABLE_UPDATE_BOT_PATHS.has(path));
 
 const STORE_BOT_PATHS: readonly string[] = knownPathsFromRules(storeBotRules as FormRulesManifest);
 
@@ -612,15 +641,26 @@ export const BOT_STATUS_KNOWN_PATHS: readonly string[] = knownPathsFromRules(
  * ALL FOUR roles, and that asymmetry is the whole reason this predicate exists as one exported
  * function rather than as an inline comparison in four render sites.
  *
- * ── IT IS AN AFFORDANCE, NEVER AUTHORIZATION ────────────────────────────────────────────────────
- * Laravel answers 403 whatever this returns, every mutation path handles that class, and a role that
- * changed under a cached session shows up as that 403 rather than as a silently missing control. What
- * it buys is a screen that does not offer a control whose every use would be refused.
+ * ── IT IS AN AFFORDANCE, NEVER THE AUTHORITY, AND THE LINE IS NOW LOAD-BEARING ─────────────────
+ * All it may decide is whether a control is OFFERED. Laravel answers 403 whatever it returns, every
+ * mutation path handles that class, and a role that changed under a cached session shows up as that
+ * 403 rather than as a silently missing control. What it buys is a screen that does not offer a
+ * control whose every use would be refused.
  *
- * IT IS ALSO THE FLAG THAT DECIDES WHETHER TWO FIELDS MEAN ANYTHING. `system_instruction` and
- * `answer_style_instruction` are a management-only projection: `false` here means both arrive `null`
- * whatever is stored, so a screen must render "not shown to you" rather than an empty textarea, and
- * must not seed a control from either.
+ * ── IT IS NOT THE PROJECTION FLAG, AND IT USED TO BE READ AS ONE ───────────────────────────────
+ * This docblock used to continue "IT IS ALSO THE FLAG THAT DECIDES WHETHER TWO FIELDS MEAN
+ * ANYTHING", and that sentence was the data-loss path. It is a HAND-WRITTEN THIRD SPELLING of a
+ * grant `OrgRole::grants()` owns and can move without this line changing, and it answers a question
+ * about the SESSION while the projection is decided PER RECORD against that record's own
+ * organization. The two disagree in exactly the window that matters: a role promoted mid-session, a
+ * cached detail row, any refetch skew — `true` here over a body whose instructions were withheld,
+ * `null` seeded into two textareas, and a rename saved as a PATCH that clears both prompts with a
+ * 200.
+ *
+ * `BotResource.instructions_visible` is the server's own statement of what it withheld, set from the
+ * same flag that decided the projection. Read it for "may I see or edit these two fields"; this
+ * predicate answers "should this screen offer an editor at all" and NOTHING may seed form state from
+ * it (`botPanelDefaults`, and `botFormDefaults` behind it).
  *
  * A `switch` is not used because the union is not exhausted on purpose: a fifth role added to `Role`
  * should default to NOT holding a write permission, which is the direction a boolean expression gets

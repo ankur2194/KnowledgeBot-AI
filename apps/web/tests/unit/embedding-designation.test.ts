@@ -15,7 +15,7 @@ import {
   rejectionReasonSentence,
   resolverRefusalMessage,
 } from '@/features/embedding/api';
-import { deleteConflictMessage } from '@/features/providers/api';
+import { actionableConflictMessage } from '@/lib/api/actionable-conflict';
 
 /**
  * The REACT-FREE half of the embedding designation screen: the request path, the 422 field
@@ -23,7 +23,7 @@ import { deleteConflictMessage } from '@/features/providers/api';
  *
  * It runs in the `unit` project, which is `node` and installs no react plugin — so every module it
  * reaches transitively must be JSX-free. `features/embedding/api.ts` is, deliberately, and so is
- * `features/providers/api.ts`, which it imports for `organizationPath` and `deleteConflictMessage`.
+ * `features/providers/api.ts`, which it imports for `organizationPath` and `actionableConflictMessage`.
  *
  * WHAT THIS SPEC MAY NOT CLAIM: anything about isolation. It exercises pure functions. That two
  * organizations never see each other's verdict is Playwright's, and is recorded as unproven here.
@@ -298,7 +298,7 @@ describe('the resolver refusal is discriminated structurally, never by wording',
  * A3's 409 discriminator, PINNED against the shape this endpoint's 409 actually has.
  *
  * BOTH HALVES OF THIS BLOCK HAVE SINCE FLIPPED, WHICH IS WHY IT WAS WRITTEN. It used to record
- * that the suspended-organization abort carried an EMPTY message and that `deleteConflictMessage`
+ * that the suspended-organization abort carried an EMPTY message and that `actionableConflictMessage`
  * therefore bought nothing here, "so that the day the control plane gives that `abort` a sentence,
  * this assertion flips and names the reason". Two things have happened since:
  *
@@ -322,7 +322,7 @@ describe('the suspended-organization 409 now carries a sentence, and it renders'
       true,
     );
 
-    expect(deleteConflictMessage(suspended)).toBe(
+    expect(actionableConflictMessage(suspended)).toBe(
       'This organization is suspended, so its configuration is read-only.',
     );
   });
@@ -332,7 +332,7 @@ describe('the suspended-organization 409 now carries a sentence, and it renders'
     // message, opposite verdict — and the verdict is the SERVER's, not an inference from the text.
     // A defect falls through to the class-mapped sentence, which is what `actionErrorCopy` is for.
     expect(
-      deleteConflictMessage(
+      actionableConflictMessage(
         new KbError('internal_dependency', false, null, '01JREQ', 'api-7.internal: ECONNRESET'),
       ),
     ).toBeNull();
@@ -343,7 +343,7 @@ describe('the suspended-organization 409 now carries a sentence, and it renders'
     // SSE `error` frame (which omits the field) and a body from something that is not our server
     // both land here. The cost is a blander sentence; the cost of the other default is an internal
     // hostname on screen.
-    expect(deleteConflictMessage(new KbError('internal_dependency', false, null, '01JREQ', 'x')))
+    expect(actionableConflictMessage(new KbError('internal_dependency', false, null, '01JREQ', 'x')))
       .toBeNull();
   });
 
@@ -351,10 +351,10 @@ describe('the suspended-organization 409 now carries a sentence, and it renders'
     // `actionable` narrows; it does not replace the two checks in front of it. A retryable
     // `internal_dependency` is a downstream brownout, and its message is not this screen's to show.
     expect(
-      deleteConflictMessage(new KbError('internal_dependency', true, null, '01JREQ', 'x', null, true)),
+      actionableConflictMessage(new KbError('internal_dependency', true, null, '01JREQ', 'x', null, true)),
     ).toBeNull();
     expect(
-      deleteConflictMessage(new KbError('validation', false, null, '01JREQ', 'x', null, true)),
+      actionableConflictMessage(new KbError('validation', false, null, '01JREQ', 'x', null, true)),
     ).toBeNull();
   });
 });

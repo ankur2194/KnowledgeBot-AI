@@ -301,13 +301,15 @@ export function rejectionReasonSentence(reason: string): string | null {
  * from connection ids, provider names, model ids and matrix sources only, and the data plane's own
  * tests assert it carries no credential and no tenant content.
  *
- * ── WHY THIS IS NOT `deleteConflictMessage` UNDER A NEW NAME ───────────────────────────────────
+ * ── WHY THIS IS NOT `actionableConflictMessage` UNDER A NEW NAME ───────────────────────────────────
  * That sentinel discriminates a deliberate 4xx from a defect INSIDE `internal_dependency`, where the
  * only difference is whether the message equals the fixed >=500 constant. This one discriminates two
  * populations inside `validation`, where the difference is a structural field. Same shape of
  * problem, different axis; folding them into one function would mean a predicate that branches on
  * class first and then does two unrelated things. A3's sentinel is still used on this screen — see
- * `designation-form.tsx`, which passes it as `copyFor` for the 409.
+ * `designation-form.tsx`, which passes it as `copyFor` for the 409. It now lives in
+ * `lib/api/actionable-conflict.ts` under a name that describes what it reads rather than the one
+ * delete path it started on.
  */
 export function resolverRefusalMessage(error: unknown): string | null {
   if (!(error instanceof KbError)) return null;

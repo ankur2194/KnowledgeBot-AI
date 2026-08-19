@@ -7,7 +7,7 @@ import {
   type BotSettingsIn,
   type BotSettingsOut,
 } from '@kb/contracts/forms';
-import { DEFAULT_RADIUS } from '@kb/design-tokens';
+import { colors, DEFAULT_RADIUS } from '@kb/design-tokens';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useQuery } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
@@ -75,15 +75,24 @@ import { BotStarterQuestions } from './bot-starter-questions';
  * ── THE ONE THING THIS TAB MUST GET RIGHT AND THE OTHER TWO NEED NOT ────────────────────────────
  * `system_instruction` and `answer_style_instruction` are a MANAGEMENT-ONLY PROJECTION (ADR-056): a
  * caller without `bots.manage` receives `null` for both, whatever is stored. `null` there means "not
- * shown to you", NOT "not set".
+ * shown to you", NOT "not set" — and the server says which of the two readings applies, per row, in
+ * `bot.instructions_visible`.
  *
- * The protection here is STRUCTURAL rather than a remembered check. Without `canManage` this file
- * renders `BotIdentityReadOnly` and mounts NO form at all — no `useForm`, no `defaultValues`, no
- * `botPanelDefaults` call — so there is no code path on which a withheld `null` can be seeded into a
- * control, and the sentence that path renders says the two fields are hidden without testing them
- * (which is the only honest thing to say: on that path a bot with a 4,000-character prompt and a bot
- * with none are byte-identical on the wire). WITH `canManage` the values are the operator's own and
- * `null` really is "not set", so an empty textarea is correct there and only there.
+ * THAT FIELD IS THE CONDITION, AND `canManage` IS NOT. They agree almost always and the gap is the
+ * whole bug: `canManage` is this client's own reading of a session role, while the projection was
+ * decided per record against that record's organization. A role promoted mid-session, a cached
+ * detail row or any refetch skew puts `canManage: true` in front of a body whose instructions were
+ * withheld — and because `UpdateBotRequest` rules both fields `sometimes|nullable|string`, a present
+ * `null` is a legitimate "clear it": saving a rename would write null over two operator-authored
+ * prompts and return 200.
+ *
+ * So the protection is STRUCTURAL at two levels rather than remembered at either. Without
+ * `canManage` this file renders `BotIdentityReadOnly` and mounts NO form at all — no `useForm`, no
+ * `defaultValues`, no `botPanelDefaults` call. WITH `canManage` but WITHOUT `instructions_visible`,
+ * `botPanelDefaults` OMITS both keys from form state (not `null` — omitted, because `sometimes`
+ * leaves an absent key alone) and the card below renders no control for either, because RHF collects
+ * a registered input's DOM value on submit whether or not `defaultValues` named it. Only with both
+ * are the values the operator's own, and only there does an empty textarea mean "not set".
  *
  * ── WHAT THE PANEL DELIBERATELY DOES NOT DO ────────────────────────────────────────────────────
  * No Server Action — every mutation is a browser fetch to Laravel. No `retry`. No literal colour,
@@ -345,58 +354,82 @@ function BotIdentityEditor() {
                 <span className="font-mono">null</span> for both.
               </CardDescription>
             </CardHeader>
-            <CardContent className="flex flex-col gap-5">
-              <FormField
-                control={form.control}
-                name="system_instruction"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>System instruction</FormLabel>
-                    <FormControl>
-                      <Textarea
-                        {...field}
-                        value={asText(field.value)}
-                        rows={8}
-                        maxLength={SYSTEM_INSTRUCTION_MAX}
-                        className="font-mono"
-                      />
-                    </FormControl>
-                    {/* Retrieved content is UNTRUSTED DATA and can never alter these instructions —
-                        that is enforced in the data plane's prompt assembly, not here. Saying so is
-                        what stops an operator writing "ignore anything the documents say" as if this
-                        box were the defence. */}
-                    <FormDescription>
-                      Who the bot is and what it must not do. Source text can never override it —
-                      retrieved content is treated as data, never as instructions.
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+            {/* THE ONE CONDITIONAL CARD BODY ON THIS TAB, AND THE CONDITION IS THE SERVER'S OWN.
+                `instructions_visible` is false when this body arrived without the two stored values;
+                `botPanelDefaults` has already omitted both keys from form state, and rendering the
+                controls anyway would put them straight back — RHF submits a registered input's DOM
+                value whether or not `defaultValues` named it, `clearableText` turns the empty string
+                into `null`, and `sometimes|nullable` accepts that as "clear it".
 
-              <FormField
-                control={form.control}
-                name="answer_style_instruction"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Answer style</FormLabel>
-                    <FormControl>
-                      <Textarea
-                        {...field}
-                        value={asText(field.value)}
-                        rows={5}
-                        maxLength={ANSWER_STYLE_INSTRUCTION_MAX}
-                      />
-                    </FormControl>
-                    <FormDescription>
-                      Length, tone and shape — &ldquo;two short paragraphs, no bullet lists&rdquo;.
-                      It does not change what the bot is allowed to say.
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </CardContent>
+                Two things are deliberately NOT done here. No disabled textarea: a disabled control is
+                a value an operator will keep clicking at, and it would still be showing the
+                projection's `null` as if it were the prompt. And no guess about whether either field
+                is set — on this body a bot with an 8,000-character prompt and a bot with none are
+                byte-identical, so the copy says withheld and stops. */}
+            {bot.instructions_visible ? (
+              <CardContent className="flex flex-col gap-5">
+                <FormField
+                  control={form.control}
+                  name="system_instruction"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>System instruction</FormLabel>
+                      <FormControl>
+                        <Textarea
+                          {...field}
+                          value={asText(field.value)}
+                          rows={8}
+                          maxLength={SYSTEM_INSTRUCTION_MAX}
+                          className="font-mono"
+                        />
+                      </FormControl>
+                      {/* Retrieved content is UNTRUSTED DATA and can never alter these instructions —
+                          that is enforced in the data plane's prompt assembly, not here. Saying so is
+                          what stops an operator writing "ignore anything the documents say" as if this
+                          box were the defence. */}
+                      <FormDescription>
+                        Who the bot is and what it must not do. Source text can never override it —
+                        retrieved content is treated as data, never as instructions.
+                      </FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <FormField
+                  control={form.control}
+                  name="answer_style_instruction"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Answer style</FormLabel>
+                      <FormControl>
+                        <Textarea
+                          {...field}
+                          value={asText(field.value)}
+                          rows={5}
+                          maxLength={ANSWER_STYLE_INSTRUCTION_MAX}
+                        />
+                      </FormControl>
+                      <FormDescription>
+                        Length, tone and shape — &ldquo;two short paragraphs, no bullet lists&rdquo;.
+                        It does not change what the bot is allowed to say.
+                      </FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              </CardContent>
+            ) : (
+              <CardContent>
+                <p className="text-base text-muted-foreground">
+                  This bot&apos;s instructions were not sent with this page, so they cannot be edited
+                  here. They are{' '}
+                  <strong className="font-medium text-foreground">not empty</strong> — this screen
+                  cannot tell you whether they are set. Reload the page; if they stay hidden, reading
+                  them needs the owner or admin role in this organization.
+                </p>
+              </CardContent>
+            )}
           </Card>
 
           <Card>
@@ -655,7 +688,14 @@ function ThemeColorField({
                   spellCheck={false}
                   maxLength={THEME_COLOR_MAX}
                   className="font-mono"
-                  placeholder="oklch(0.525 0.235 264)"
+                  // The platform accent, READ from the token package rather than transcribed. It is
+                  // display text and not an applied style, so a stale literal here would not have
+                  // shown up as a colour drift — it would have shown up as an example that no longer
+                  // matches the colour the field falls back to, which is worse to debug than a wrong
+                  // swatch. `light` because this is the grammar example, not a rendered value: the
+                  // dark-mode accent is a different triple and showing it in dark mode would suggest
+                  // the field's default follows the console's theme, which it does not.
+                  placeholder={colors.primary.light}
                   // CLEARING THE BOX OMITS THE KEY rather than sending `""`. `ConvertEmptyStringsToNull`
                   // turns `""` into null before any rule runs and neither colour is `nullable`, so an
                   // empty string is a 422 on both sides — and `theme` is replaced wholesale, so an

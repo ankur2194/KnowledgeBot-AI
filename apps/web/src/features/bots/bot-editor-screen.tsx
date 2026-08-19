@@ -85,7 +85,7 @@ import { BotPublishingPanel } from './bot-publishing-panel';
  *                            retention_days, collect_end_user_data, consent_text
  *
  * `status` is deliberately in NO partition: it is not a PATCH field. A transition is
- * `PUT /bots/{bot}/status` via `updateBotStatus`, and the bot PATCH rules the key `prohibited`.
+ * `PUT /bots/{bot}/status` via `updateBotStatus`, and the bot PATCH rules the key `missing`.
  *
  * All three are exported from `./api`. They are DISJOINT and their union is exactly
  * `botSettingsSchema`'s key set, asserted by `tests/unit/bot-editor.test.ts`. Render a field outside
@@ -137,10 +137,16 @@ import { BotPublishingPanel } from './bot-publishing-panel';
  *      tabs; a panel renders its values as read-only text and mounts no `useForm`. A disabled input
  *      holding a value is a control an operator will keep clicking.
  *
- *   b. `system_instruction` and `answer_style_instruction` ARE A MANAGEMENT-ONLY PROJECTION. Without
- *      `bots.manage` they arrive `null` whatever is stored, so `null` there means "not shown to you"
- *      and NOT "not set". They belong to the identity tab and to nothing else; do not seed a control
- *      from one without `canManage`, and never render an empty textarea in their place.
+ *   b. `system_instruction` and `answer_style_instruction` ARE A MANAGEMENT-ONLY PROJECTION, AND
+ *      `bot.instructions_visible` IS WHAT SAYS SO — not `canManage`. Without `bots.manage` on THAT
+ *      ROW they arrive `null` whatever is stored, so `null` there means "not shown to you" and NOT
+ *      "not set". They belong to the identity tab and to nothing else. `botPanelDefaults` already
+ *      omits both keys from form state when the flag is false — omitted rather than `null`, because
+ *      `sometimes` leaves an absent key alone while a present `null` clears the column — so a panel's
+ *      job is to render no CONTROL for them either, and never an empty textarea in their place.
+ *      `canManage` may not stand in for the flag: it is this client's reading of a session role, the
+ *      projection is resolved per record, and the window where they disagree is a save that writes
+ *      `null` over an operator-authored prompt and returns 200.
  *
  *   c. YOUR PANEL IS UNMOUNTED WHEN ITS TAB IS NOT SELECTED. Radix's `TabsContent` renders
  *      `present && children`, so the `role="tabpanel"` div survives (`hidden`) and your component

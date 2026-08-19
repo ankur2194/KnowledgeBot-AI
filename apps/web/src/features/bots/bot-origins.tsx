@@ -53,7 +53,8 @@ import {
 } from '@/components/ui/table';
 import { actionErrorCopy } from '@/features/auth/action-error';
 import { applyAuthError } from '@/features/auth/auth-error';
-import { deleteConflictMessage, formatTimestamp } from '@/features/providers/api';
+import { formatTimestamp } from '@/features/providers/api';
+import { actionableConflictMessage } from '@/lib/api/actionable-conflict';
 import { asText } from '@/lib/forms/as-text';
 
 import { useBotEditor } from './bot-editor-context';
@@ -197,7 +198,7 @@ export function BotOrigins({
   const rowError = (mutation: { error: Error | null }): string | null =>
     mutation.error === null
       ? null
-      : (deleteConflictMessage(mutation.error) ?? actionErrorCopy(mutation.error));
+      : (actionableConflictMessage(mutation.error) ?? actionErrorCopy(mutation.error));
 
   const statusError = rowError(changeStatus);
   const removeError = rowError(remove);
@@ -561,7 +562,7 @@ function AddOriginForm({
       // makes that banner the server's own actionable sentence rather than "Something on our side
       // is unavailable", which would be false twice.
       applyAuthError(form, BOT_DOMAIN_CREATE_KNOWN_PATHS, error, {
-        copyFor: (kbError) => deleteConflictMessage(kbError) ?? undefined,
+        copyFor: (kbError) => actionableConflictMessage(kbError) ?? undefined,
       });
     },
     onSettled: () => {

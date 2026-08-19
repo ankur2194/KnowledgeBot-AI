@@ -480,17 +480,17 @@ const MIRRORS: Readonly<Record<string, Mirror>> = {
    * ── ONE DIFFERENCE BETWEEN THE TWO BASELINES, AND IT IS THE WHOLE DIFFERENCE BETWEEN THE
    *    REQUESTS ────────────────────────────────────────────────────────────────────────────────────
    * This note used to read "`status` is on the PATCH and not on the POST: a bot is created `draft`,
-   * always", and BOTH BASELINES ARE NOW IDENTICAL. `status` is `["prohibited"]` on the PATCH — a
+   * always", and BOTH BASELINES ARE NOW IDENTICAL. `status` is `["missing"]` on the PATCH — a
    * lifecycle move is `PUT …/bots/{bot}/status` and nothing else — so a PATCH baseline that still
    * carried one would fail `the baseline is a value both sides accept` against a server that answers
    * 422. What is left as the whole difference between the two requests is `sometimes`, which is what
    * the note on `UpdateBotRequest` below is about.
    *
-   * The `prohibited` PROBES are what keep the new arrangement from being a claim nobody checks:
-   * `probesFor` generates an omission ACCEPTED and a value-present REJECTED for the path, so a
-   * `botSettingsSchema` that re-declared `status` fails by name — as does the set comparison in `the
-   * schema declares exactly the fields the FormRequest validates`, which subtracts prohibited paths
-   * from the manifest side for exactly this reason.
+   * The `missing` PROBES are what keep the new arrangement from being a claim nobody checks:
+   * `probesFor` generates an omission ACCEPTED and both a value and an explicit null REJECTED for the
+   * path, so a `botSettingsSchema` that re-declared `status` fails by name — as does the set
+   * comparison in `the schema declares exactly the fields the FormRequest validates`, which subtracts
+   * those paths from the manifest side for exactly this reason.
    */
   'App\\Http\\Requests\\StoreBotRequest': {
     schema: botCreateSchema,
@@ -528,7 +528,7 @@ const MIRRORS: Readonly<Record<string, Mirror>> = {
    * THE STATUS TRANSITION, AND IT IS THE ONLY PLACE `BOT_STATUSES` IS STILL COMPARED TO THE SERVER.
    *
    * The tuple used to be pinned through `botSettingsSchema`'s `status` field. That field is gone —
-   * `UpdateBotRequest` rules it `["prohibited"]` — and if this manifest had been exempted instead of
+   * `UpdateBotRequest` rules it `["missing"]` — and if this manifest had been exempted instead of
    * mirrored, the five-member tuple every status pill and transition menu iterates would have become
    * a list nothing in this repo compares to anything. The `in:` probes below are that comparison: a
    * sixth lifecycle value added server-side fails HERE rather than being invisible until a `<Select>`
@@ -805,76 +805,91 @@ const SERVER_ONLY = new Set(['exists', 'unique', '@server-only', 'current_passwo
 const SOMETIMES = 'sometimes';
 
 /**
- * `prohibited` is the INVERSE of `required`, and the client-side mirror of it is not a field rule at
- * all — it is the ABSENCE of a path from a `strictObject`. So this rule drives the presence pair the
- * way `sometimes` does rather than generating a value probe, and it changes two things about how a
- * manifest is read.
+ * `missing` is the rule that says "this key may not appear in the body at all", and the client-side
+ * mirror of it is not a field rule either — it is the ABSENCE of a path from a `strictObject`. So it
+ * drives the presence probes the way `sometimes` does rather than generating a value probe, and it
+ * changes two things about how a manifest is read.
+ *
+ * ── IT USED TO BE `prohibited`, AND THE RENAME IS THE WHOLE REASON THIS NOTE MOVED ──────────────
+ * `Illuminate\Validation\Concerns\ValidatesAttributes::validateProhibited` is literally
+ * `! validateRequired`, so it means "missing OR EMPTY": measured against the installed factory,
+ * `{status: null}`, `{status: ""}` and `{status: []}` all PASS, and `validated()` KEEPS the key.
+ * That reached a `NOT NULL` column and turned an accompanying rename into a lost edit behind a 500.
+ * `validateMissing` is `! Arr::has($this->data, $attribute)` — the key itself, present or not — so
+ * the same four probes now read: omitted PASSES, and null, `""` and `[]` all FAIL. The server rules
+ * `'status' => ['missing']` and this harness follows the rule NAME rather than the shape it used to
+ * have.
  *
  * ── WHAT IT IS FOR, IN THE ONE CASE THIS REPO HAS ───────────────────────────────────────────────
- * `UpdateBotRequest.status` is `["prohibited"]` because a lifecycle move became `PUT
+ * `UpdateBotRequest.status` is `["missing"]` because a lifecycle move became `PUT
  * …/bots/{bot}/status`. The rule is there rather than the field simply being deleted from `rules()`,
  * and the difference is the whole point: an ABSENT rule makes `validated()` discard the key in
- * silence, so a console would publish a bot, get a 200, and find it still in draft. `prohibited`
- * turns that into a 422.
+ * silence, so a console would publish a bot, get a 200, and find it still in draft. `missing` turns
+ * that into a 422.
  *
- * ── THE TWO PROBES IT GENERATES, AND WHAT EACH ONE ACTUALLY CATCHES ─────────────────────────────
- * An omission is ACCEPTED, and a non-empty value is REJECTED. Both are true of a schema that does
- * not declare the path.
+ * ── THE THREE PROBES IT GENERATES, AND WHAT EACH ONE ACTUALLY CATCHES ───────────────────────────
+ * An omission is ACCEPTED; a non-empty value is REJECTED; an explicit null is REJECTED. All three
+ * are true of a schema that does not declare the path.
  *
- * THE VALUE PROBE IS THE WEAKER HALF AND THE LIMIT WAS MEASURED, NOT ASSUMED. `PROHIBITED_VALUE` is
- * a string this harness invents, so it catches a re-declaration typed loosely enough to accept one
+ * THE NULL PROBE IS NEW WITH THE RENAME AND IS NOT DECORATION. Under `prohibited` it had to be
+ * SUPPRESSED — the server accepted null there, so the probe would have claimed the faithful mirror
+ * "blocks input the server accepts" and invited the re-declaration this rule exists to prevent.
+ * Under `missing` the server rejects it, so the probe is honest, and it reaches a re-declaration the
+ * value probe cannot: `z.enum(BOT_STATUSES).nullable().optional()` accepts null and is caught here.
+ *
+ * THE VALUE PROBE IS THE WEAKEST OF THE THREE AND THE LIMIT WAS MEASURED, NOT ASSUMED. `MISSING_VALUE`
+ * is a string this harness invents, so it catches a re-declaration typed loosely enough to accept one
  * (`z.string().optional()`, `z.unknown()`) and NOT a re-declaration typed as the real vocabulary —
- * `z.enum(BOT_STATUSES).optional()` refuses `'__prohibited__'` too, so both sides "agree" and the
- * probe is silent. Reaching that case would mean the harness knowing the field's legal values, which
- * live in a DIFFERENT manifest (`UpdateBotStatusRequest`), and a cross-manifest probe generator is a
+ * `z.enum(BOT_STATUSES).optional()` refuses `'__missing__'` too, so both sides "agree" and the probe
+ * is silent. Reaching that case would mean the harness knowing the field's legal values, which live
+ * in a DIFFERENT manifest (`UpdateBotStatusRequest`), and a cross-manifest probe generator is a
  * second harness.
  *
  * What closes it is not a probe at all: `the schema declares exactly the fields the FormRequest
- * validates` subtracts prohibited paths from the manifest side, so ANY declaration of the path — of
- * any type — is a superset and fails by name. The omitted probe closes the other repair that failure
- * invites, which is to declare the path as REQUIRED. All four cases are proved against fixtures in
- * `the `prohibited` branch of the rule classifier` below, because "the probe was silent" and "the
- * probe passed" are indistinguishable in the output.
+ * validates` subtracts these paths from the manifest side, so ANY declaration of the path — of any
+ * type — is a superset and fails by name. The omitted probe closes the other repair that failure
+ * invites, which is to declare the path as REQUIRED. All five cases are proved against fixtures in
+ * `the `missing` branch of the rule classifier` below, because "the probe was silent" and "the probe
+ * passed" are indistinguishable in the output.
  *
- * ── AND THE ONE IT DELIBERATELY DOES NOT, WHICH WAS MEASURED RATHER THAN ASSUMED ────────────────
- * The generic `null` probe is suppressed. Laravel's `prohibited` means "missing OR EMPTY", and empty
- * includes null, `""` and `[]` — verified against the installed `Illuminate\Validation\Factory`,
- * where `{status: null}` PASSES and `{status: "published"}` fails. A `null` probe would therefore
- * claim `serverAccepts: true` against a `strictObject` that rejects the key outright, report "form
- * blocks input the server accepts" on exactly the schema this rule demands, and invite the repair of
- * declaring the path — which is the bug. Nothing is lost by declining it: what the server accepts
- * there is a key `validated()` then DISCARDS, so no client functionality rides on being able to send
- * it.
+ * ── AND THE IMPLICIT-RULE DIFFERENCE, WHICH CHANGES WHY THE OMITTED PROBE PASSES ────────────────
+ * `Missing` is in `Validator::$implicitRules` and `Prohibited` was not. Under the old rule an
+ * omission passed because a non-implicit rule is SKIPPED entirely for an absent key; under this one
+ * it passes because the rule RAN and returned true. The verdict is the same and the reason is not,
+ * which matters the day someone writes `sometimes|missing`: `sometimes` short-circuits an absent
+ * key before any rule runs, so it would make the whole declaration inert. `UpdateBotRequest` rules
+ * this field `["missing"]` alone, and it must stay alone.
  */
-const PROHIBITED = 'prohibited';
+const MISSING = 'missing';
 
 /**
- * A value that is not "empty" by Laravel's reckoning, so `prohibited` really does refuse it.
+ * A value `missing` really does refuse. Any value would do — `validateMissing` looks at the KEY and
+ * never at what it holds, so `null` and `""` are rejected by it exactly as this string is.
  *
- * A STRING even on a field the manifest gives no type for. `prohibited` short-circuits before any
- * type rule, so the server's verdict is the same for any non-empty value — and the client's is too,
- * since a `strictObject` rejects an undeclared KEY whatever it holds.
+ * A STRING even on a field the manifest gives no type for. `missing` short-circuits before any type
+ * rule, so the server's verdict is the same for every value — and the client's is too, since a
+ * `strictObject` rejects an undeclared KEY whatever it holds.
  */
-const PROHIBITED_VALUE = '__prohibited__';
+const MISSING_VALUE = '__missing__';
 
 /** The paths a manifest forbids the caller from sending at all. */
-const prohibitedPaths = (manifest: Manifest): ReadonlySet<string> =>
+const missingPaths = (manifest: Manifest): ReadonlySet<string> =>
   new Set(
     Object.entries(manifest.rules)
-      .filter(([, rules]) => rules.map(nameOf).includes(PROHIBITED))
+      .filter(([, rules]) => rules.map(nameOf).includes(MISSING))
       .map(([path]) => path),
   );
 
 /**
- * The paths a manifest VALIDATES, which is its key set minus the ones it prohibits — and therefore
- * the set a mirroring schema must declare exactly.
+ * The paths a manifest VALIDATES, which is its key set minus the ones it rules `missing` — and
+ * therefore the set a mirroring schema must declare exactly.
  *
  * A function rather than an inline filter so the fixture block below can prove the subtraction has
  * teeth against a manifest of its own, the same way `driftFailures` is a function so the tampering
  * test can prove the probes do.
  */
 const validatedPaths = (manifest: Manifest): readonly string[] => {
-  const forbidden = prohibitedPaths(manifest);
+  const forbidden = missingPaths(manifest);
 
   return Object.keys(manifest.rules).filter((path) => !forbidden.has(path));
 };
@@ -1179,14 +1194,18 @@ function probesFor(path: string, rules: readonly string[], mirror: Mirror): Prob
   // Presence. Suppressed when a cross-field rule makes "is this field required?" depend on a
   // sibling — the harness cannot answer that from one field's rule list.
   if (!crossField) {
-    if (names.includes(PROHIBITED)) {
-      // The pair, and NOT the generic `null` probe below it — see the note on PROHIBITED. `here`
-      // rather than `value`: `confirmed` never co-occurs with this rule, and a prohibited field has
-      // no `_confirmation` sibling to keep in step.
-      probes.push(probe(here, 'omitted (prohibited)', OMITTED, true));
-      probes.push(
-        probe(here, 'prohibited: a value the caller may not send', PROHIBITED_VALUE, false),
-      );
+    if (names.includes(MISSING)) {
+      // All three presence probes, INCLUDING the null one, which this branch generates itself rather
+      // than leaving to the generic line below — see the note on MISSING. The generic one reads
+      // `nullable`, and a `missing|nullable` co-declaration (nonsense, but expressible) would flip it
+      // into claiming an acceptance the server does not make; here the verdict comes from the rule
+      // that actually decides, which looks at the KEY and never at the value.
+      //
+      // `here` rather than `value`: `confirmed` never co-occurs with this rule, and a field the
+      // caller may not send has no `_confirmation` sibling to keep in step.
+      probes.push(probe(here, 'omitted (missing)', OMITTED, true));
+      probes.push(probe(here, 'missing: a key the caller may not send', MISSING_VALUE, false));
+      probes.push(probe(here, 'missing: an explicit null is still a present key', null, false));
     } else if (names.includes(SOMETIMES)) {
       // Omission is accepted UNCONDITIONALLY: `sometimes` skips every remaining rule, so a
       // co-declared `required` never runs. See the note on SOMETIMES above.
@@ -1198,10 +1217,9 @@ function probesFor(path: string, rules: readonly string[], mirror: Mirror): Prob
     }
 
     // An explicit null is PRESENT, so `sometimes` does not fire and the verdict is unchanged:
-    // accepted only if the server said `nullable`. SKIPPED for a prohibited field, where null is
-    // "empty" and therefore accepted server-side while no schema may declare the path — see the note
-    // on PROHIBITED for the measurement.
-    if (!names.includes(PROHIBITED)) {
+    // accepted only if the server said `nullable`. A `missing` field already generated its own null
+    // probe above, where the verdict is the rule's rather than `nullable`'s.
+    if (!names.includes(MISSING)) {
       probes.push(probe(here, 'null', null, names.includes('nullable')));
     }
   }
@@ -1414,22 +1432,22 @@ describe.each(manifests.filter(([, manifest]) => manifest.class in MIRRORS))(
 
     it('the schema declares exactly the fields the FormRequest validates', () => {
       /**
-       * PROHIBITED PATHS ARE SUBTRACTED FROM THE MANIFEST SIDE, and that is a strengthening rather
+       * `missing` PATHS ARE SUBTRACTED FROM THE MANIFEST SIDE, and that is a strengthening rather
        * than an exemption.
        *
-       * `prohibited` is the one rule whose correct mirror is the ABSENCE of a path: the server says
+       * `missing` is the one rule whose correct mirror is the ABSENCE of a path: the server says
        * "you may not send this key", and a `strictObject` says the same thing by not declaring it.
        * Compared against the raw key set, a correct schema fails here and the repair the failure
        * invites is to declare the field — which is precisely the body the server now answers 422 to.
        *
        * Subtracting does not weaken the comparison, because the set stays CLOSED IN BOTH DIRECTIONS:
-       * a schema that declares a prohibited path is now a SUPERSET and fails here. That is not a
-       * duplicate of the `prohibited` probes — it is the check that catches the case they cannot,
+       * a schema that declares one of these paths is now a SUPERSET and fails here. That is not a
+       * duplicate of the `missing` probes — it is the check that catches the case they cannot,
        * because a path re-declared with its real vocabulary (`z.enum(BOT_STATUSES).optional()`)
        * refuses the harness's invented probe value and both sides silently agree. See the note on
-       * PROHIBITED, and the fixture block that proves the boundary between the two.
+       * MISSING, and the fixture block that proves the boundary between the two.
        */
-      const forbidden = prohibitedPaths(manifest);
+      const forbidden = missingPaths(manifest);
 
       expect(new Set(schemaPaths(mirror.schema))).toEqual(new Set(validatedPaths(manifest)));
 
@@ -1437,7 +1455,7 @@ describe.each(manifests.filter(([, manifest]) => manifest.class in MIRRORS))(
       // schema declares a field the server forbids" are the same red with very different repairs.
       expect(
         schemaPaths(mirror.schema).filter((path) => forbidden.has(path)),
-        `${manifest.class}: a prohibited path may not be declared by any schema`,
+        `${manifest.class}: a path ruled \`missing\` may not be declared by any schema`,
       ).toEqual([]);
     });
 
@@ -1560,12 +1578,16 @@ describe('what the harness declines to probe', () => {
     SOMETIMES,
     /**
      * TAUGHT RATHER THAN EXEMPTED, and the choice was a real one: an entry in UNPROBED_RULES is
-     * silent forever, and `prohibited` is the rule that says "a client sending this key gets a 422"
-     * — precisely the thing a drift suite exists to catch a schema forgetting. It drives the presence
-     * pair (see the note on PROHIBITED), so a schema that re-declares a prohibited path fails on the
-     * value probe as well as on the path-set comparison.
+     * silent forever, and `missing` is the rule that says "a client sending this key gets a 422" —
+     * precisely the thing a drift suite exists to catch a schema forgetting. It drives all three
+     * presence probes (see the note on MISSING), so a schema that re-declares one of these paths
+     * fails on a value probe as well as on the path-set comparison.
+     *
+     * It replaced `prohibited` here, and the replacement was not a rename in this file alone: the
+     * old rule accepted a null the new one refuses, so the branch it drives generates a probe it
+     * used to suppress.
      */
-    PROHIBITED,
+    MISSING,
   ]);
 
   const unknownRuleNames = (rules: readonly string[]): string[] => {
@@ -1891,16 +1913,21 @@ describe('the `sometimes` branch of the rule classifier', () => {
 });
 
 /**
- * The `prohibited` branch of the rule classifier, proved against a manifest fixture — and unlike the
+ * The `missing` branch of the rule classifier, proved against a manifest fixture — and unlike the
  * `sometimes` block above, this one exists to write down where the probes STOP.
  *
  * `UpdateBotRequest.status` is the real instance, and a fixture is used here for the same reason the
  * `sometimes` block uses one: writing it to `rules/` would make the "every manifest is mirrored or
- * exempt" suite assert against a FormRequest that does not exist. All four specs run through
+ * exempt" suite assert against a FormRequest that does not exist. All five specs run through
  * `driftFailures` and `validatedPaths`, the same two functions the real manifests use.
+ *
+ * IT WAS THE `prohibited` BRANCH UNTIL THE SERVER CHANGED THE RULE, and the fifth spec is the one
+ * that moved rather than being renamed: `prohibited` ACCEPTED an explicit null and this branch had
+ * to suppress the null probe to stay honest, while `missing` refuses one — so the spec that recorded
+ * a suppression now records a probe, and the fourth spec below is the tooth that suppression cost.
  */
-describe('the `prohibited` branch of the rule classifier', () => {
-  const PROHIBITED_MANIFEST: Manifest = {
+describe('the `missing` branch of the rule classifier', () => {
+  const MISSING_MANIFEST: Manifest = {
     class: 'App\\Http\\Requests\\Fixture\\UpdateBotRequest',
     rules: {
       name: ['sometimes', 'required', 'string', 'max:120'],
@@ -1908,7 +1935,10 @@ describe('the `prohibited` branch of the rule classifier', () => {
       // to its own endpoint. The rule is present rather than the field being deleted from `rules()`,
       // and that difference is the reason this branch exists at all — an absent rule makes
       // `validated()` discard the key in silence.
-      status: ['prohibited'],
+      //
+      // ALONE, with no `sometimes` beside it. `missing` is an implicit rule and `sometimes` would
+      // short-circuit it for exactly the body it is meant to judge.
+      status: ['missing'],
     },
   };
 
@@ -1920,11 +1950,11 @@ describe('the `prohibited` branch of the rule classifier', () => {
     baseline,
   };
 
-  it('accepts the faithful mirror — the client-side spelling of `prohibited` is an absent path', () => {
-    expect(driftFailures(PROHIBITED_MANIFEST, faithful)).toEqual([]);
+  it('accepts the faithful mirror — the client-side spelling of `missing` is an absent path', () => {
+    expect(driftFailures(MISSING_MANIFEST, faithful)).toEqual([]);
     // …and the path-set comparison agrees with it, which is the assertion the real suite makes.
-    expect(validatedPaths(PROHIBITED_MANIFEST)).toEqual(['name']);
-    expect(new Set(schemaPaths(faithful.schema))).toEqual(new Set(validatedPaths(PROHIBITED_MANIFEST)));
+    expect(validatedPaths(MISSING_MANIFEST)).toEqual(['name']);
+    expect(new Set(schemaPaths(faithful.schema))).toEqual(new Set(validatedPaths(MISSING_MANIFEST)));
   });
 
   it('catches a re-declaration loose enough to accept the probe value', () => {
@@ -1936,16 +1966,37 @@ describe('the `prohibited` branch of the rule classifier', () => {
       baseline,
     };
 
-    expect(driftFailures(PROHIBITED_MANIFEST, loose)).toEqual([
-      'form accepts input the server rejects: status — prohibited: a value the caller may not send',
+    expect(driftFailures(MISSING_MANIFEST, loose)).toEqual([
+      'form accepts input the server rejects: status — missing: a key the caller may not send',
+    ]);
+  });
+
+  it('catches a re-declaration that is nullable, which the old `prohibited` probes could not', () => {
+    // THE TOOTH THE RENAME BOUGHT. `z.enum(BOT_STATUSES).nullable().optional()` refuses the invented
+    // probe value exactly as the server does, so the value probe is silent on it — and under
+    // `prohibited` the null probe was suppressed, so this schema passed every probe and was caught
+    // only by the path-set comparison. `missing` rejects a present null, so the null probe now names
+    // it directly. It is the schema shape a form gets when somebody mirrors "the server sends null
+    // here" into the resolver.
+    const nullableTyped: Mirror = {
+      schema: z.strictObject({
+        name: z.string().trim().min(1).max(120).optional(),
+        status: z.enum(BOT_STATUSES).nullable().optional(),
+      }),
+      baseline,
+    };
+
+    expect(driftFailures(MISSING_MANIFEST, nullableTyped)).toEqual([
+      'form accepts input the server rejects: status — missing: an explicit null is still a present key',
     ]);
   });
 
   it('is SILENT on a re-declaration typed as the real vocabulary — and the path set is not', () => {
     // THE MEASURED LIMIT, and the reason the path-set subtraction is not a duplicate of these probes.
-    // `z.enum(BOT_STATUSES)` refuses `'__prohibited__'` exactly as the server does, so both sides
-    // agree and every probe passes — which is the shape this schema would actually have if somebody
-    // simply left the old field in place after the server moved the write.
+    // `z.enum(BOT_STATUSES)` refuses `'__missing__'` exactly as the server does, and `.optional()`
+    // without `.nullable()` refuses the null too, so both sides agree and every probe passes — which
+    // is the shape this schema would actually have if somebody simply left the old field in place
+    // after the server moved the write.
     const typed: Mirror = {
       schema: z.strictObject({
         name: z.string().trim().min(1).max(120).optional(),
@@ -1954,14 +2005,14 @@ describe('the `prohibited` branch of the rule classifier', () => {
       baseline,
     };
 
-    expect(driftFailures(PROHIBITED_MANIFEST, typed)).toEqual([]);
+    expect(driftFailures(MISSING_MANIFEST, typed)).toEqual([]);
 
     // …and this is what fails instead, by name, in `the schema declares exactly the fields the
     // FormRequest validates`.
     expect(new Set(schemaPaths(typed.schema))).not.toEqual(
-      new Set(validatedPaths(PROHIBITED_MANIFEST)),
+      new Set(validatedPaths(MISSING_MANIFEST)),
     );
-    expect(schemaPaths(typed.schema).filter((path) => prohibitedPaths(PROHIBITED_MANIFEST).has(path))).toEqual(
+    expect(schemaPaths(typed.schema).filter((path) => missingPaths(MISSING_MANIFEST).has(path))).toEqual(
       ['status'],
     );
   });
@@ -1979,28 +2030,41 @@ describe('the `prohibited` branch of the rule classifier', () => {
     };
 
     // `toContain` rather than a whole-array comparison, and the reason is worth a line: a REQUIRED
-    // path the server prohibits makes the BASELINE itself unparseable, so every probe on every other
+    // path the server forbids makes the BASELINE itself unparseable, so every probe on every other
     // field fails too. That cascade is noise — it names `name` for a mistake that is entirely about
     // `status` — and the two assertions below are the ones that identify the cause.
-    const failures = driftFailures(PROHIBITED_MANIFEST, mandatory);
+    const failures = driftFailures(MISSING_MANIFEST, mandatory);
 
-    expect(failures).toContain('form blocks input the server accepts: status — omitted (prohibited)');
+    expect(failures).toContain('form blocks input the server accepts: status — omitted (missing)');
     expect(failures).toContain(
-      'form accepts input the server rejects: status — prohibited: a value the caller may not send',
+      'form accepts input the server rejects: status — missing: a key the caller may not send',
     );
   });
 
-  it('generates no `null` probe, because Laravel calls null EMPTY and therefore permitted', () => {
-    // Measured against the installed `Illuminate\Validation\Factory`: `{status: null}` PASSES a
-    // `prohibited` rule and `{status: 'published'}` fails. A generated `null` probe would claim the
-    // server accepts a key no schema may declare, report the faithful mirror above as blocking input
-    // the server accepts, and invite exactly the re-declaration this block is about.
-    const labels = probesFor('status', ['prohibited'], faithful).map((generated) => generated.label);
+  it('generates exactly three presence probes, and the null one is REJECTED by both sides', () => {
+    // MEASURED against the installed `Illuminate\Validation\Factory` rather than read off the rule
+    // name: under `['missing']`, `{}` passes and `{status: null}`, `{status: ''}`, `{status: []}` and
+    // `{status: 'published'}` all fail. Under `['prohibited']` the first FOUR of those passed and
+    // `validated()` kept the key, which is the data-loss shape the server moved off.
+    //
+    // Asserted as an exact list, because the count is the thing: the branch generates these three and
+    // must NOT also pick up the generic `null` probe below it, whose verdict comes from `nullable`
+    // rather than from the rule that actually decides.
+    const labels = probesFor('status', ['missing'], faithful).map((generated) => generated.label);
 
     expect(labels).toEqual([
-      'omitted (prohibited)',
-      'prohibited: a value the caller may not send',
+      'omitted (missing)',
+      'missing: a key the caller may not send',
+      'missing: an explicit null is still a present key',
     ]);
+
+    // The verdicts, not merely the labels: the null probe is only worth generating if it claims a
+    // REJECTION. A probe claiming the server accepts null would report the faithful mirror above as
+    // blocking input the server accepts, and invite exactly the re-declaration this block is about —
+    // which is what the old rule forced and this one does not.
+    expect(
+      probesFor('status', ['missing'], faithful).map((generated) => generated.serverAccepts),
+    ).toEqual([true, false, false]);
   });
 });
 
@@ -2485,7 +2549,7 @@ describe('the bot requests: the rules a single-field probe cannot express', () =
 
     // ── THE PATCH HALF IS NEW, AND IT IS THE ASSERTION THAT USED TO SAY THE OPPOSITE ──────────
     // This line read `expect(settings({status:'draft'}).success).toBe(true)` while `status` was a
-    // PATCH field. `UpdateBotRequest` now rules it `["prohibited"]` — a lifecycle move is
+    // PATCH field. `UpdateBotRequest` now rules it `["missing"]` — a lifecycle move is
     // `PUT …/bots/{bot}/status` and nothing else — and the rule is there rather than the field being
     // deleted from `rules()` because an ABSENT rule makes `validated()` discard the key in silence:
     // a console would publish a bot, get a 200, and find it still in draft.
@@ -2719,43 +2783,53 @@ describe('the bot requests: the rules a single-field probe cannot express', () =
     expect(cleared.success && cleared.data.description).toBeNull();
   });
 
+  /**
+   * A `BotResource`-shaped row, at describe scope so the two `botFormDefaults` specs below read the
+   * SAME row and differ only in the projection flag.
+   *
+   * It carries `status` deliberately — a real resource has one — so the pick is asserted to DROP it
+   * rather than asserted against a fixture that could not have leaked it. Both instruction fields
+   * carry text for the same reason: the withheld spec overrides them to `null`, which is what the
+   * wire actually does, and a fixture that was already null could not tell the two states apart.
+   */
+  const SEEDABLE_ROW = {
+    name: 'Support desk',
+    slug: 'support-desk',
+    status: 'published',
+    description: null,
+    welcome_message: 'Hi',
+    placeholder_text: null,
+    system_instruction: 'You are a support agent.',
+    answer_style_instruction: 'Two short paragraphs.',
+    // The server's own statement that the two values above are this bot's rather than the
+    // projection's. The withheld case is the spec below.
+    instructions_visible: true,
+    access_mode: 'public',
+    answer_mode: 'rag_first',
+    allow_general_answers: true,
+    provider_connection_id: ULID,
+    provider_model_id: ULID,
+    dense_top_k: 30,
+    sparse_top_k: 25,
+    rerank_candidates: 24,
+    rerank_retain: 8,
+    evidence_threshold: 0.42,
+    evidence_threshold_scale: 'sigmoid',
+    theme: { primary: 'oklch(0.525 0.235 264)', radius: '1rem' },
+    rate_limit_per_minute: 60,
+    rate_limit_per_day: null,
+    retention_days: 30,
+    collect_end_user_data: true,
+    consent_text: 'We keep your email.',
+  } as const;
+
   it('the defaults factory reaches exactly the 24 mutable fields, and no identifier', () => {
     // The ONLY path from server data into this form's state. A `reset({...bot})` would keep `id`,
     // `public_bot_id`, `retrieval_configuration_version`, `created_at` and `updated_at`, and the
     // second of those is the one that matters: it is the token every live embed carries.
     //
-    // TWENTY-FOUR AND NOT TWENTY-FIVE: `status` left with the PATCH field. The source row below
-    // still CARRIES one, deliberately — the fixture is a `BotResource`-shaped row and a real one has
-    // a status — so this asserts the pick DROPS it rather than asserting against a fixture that
-    // could not have leaked it in the first place.
-    const source = {
-      name: 'Support desk',
-      slug: 'support-desk',
-      status: 'published',
-      description: null,
-      welcome_message: 'Hi',
-      placeholder_text: null,
-      system_instruction: null,
-      answer_style_instruction: null,
-      access_mode: 'public',
-      answer_mode: 'rag_first',
-      allow_general_answers: true,
-      provider_connection_id: ULID,
-      provider_model_id: ULID,
-      dense_top_k: 30,
-      sparse_top_k: 25,
-      rerank_candidates: 24,
-      rerank_retain: 8,
-      evidence_threshold: 0.42,
-      evidence_threshold_scale: 'sigmoid',
-      theme: { primary: 'oklch(0.525 0.235 264)', radius: '1rem' },
-      rate_limit_per_minute: 60,
-      rate_limit_per_day: null,
-      retention_days: 30,
-      collect_end_user_data: true,
-      consent_text: 'We keep your email.',
-    } as const;
-
+    // TWENTY-FOUR AND NOT TWENTY-FIVE: `status` left with the PATCH field.
+    const source = SEEDABLE_ROW;
     const seeded = botFormDefaults(source);
 
     expect(Object.keys(seeded)).toHaveLength(24);
@@ -2764,6 +2838,9 @@ describe('the bot requests: the rules a single-field probe cannot express', () =
       // the way the five below are — an operator moves it — but it is not this form's to send, and a
       // seeded `status` would ride a rename back into a PATCH that answers 422.
       'status',
+      // The flag itself is a STATEMENT ABOUT the body, not a field of the bot: `UpdateBotRequest`
+      // rules no such key, so a seeded one would be an unknown key `strictObject` rejects.
+      'instructions_visible',
       'id',
       'public_bot_id',
       'retrieval_configuration_version',
@@ -2783,6 +2860,38 @@ describe('the bot requests: the rules a single-field probe cannot express', () =
     // TanStack Query would then compare the "new" data against a value that had already changed.
     expect(seeded.theme).toEqual(source.theme);
     expect(seeded.theme).not.toBe(source.theme);
+  });
+
+  it('OMITS both instruction fields on a withheld row, rather than seeding the projected null', () => {
+    // THE DATA-LOSS PATH, ASSERTED AT ITS SOURCE. A body with `instructions_visible: false` carries
+    // `null` for both fields whatever is stored — the projection, not the bot's state. Seeding those
+    // nulls makes them form values, and `UpdateBotRequest` rules both `sometimes|nullable|string`:
+    // an OMITTED key is left alone, a PRESENT null CLEARS the column and returns 200. So saving an
+    // unrelated rename would wipe two operator-authored prompts.
+    //
+    // The assertion is about the KEYS and not the values, because that is the whole distinction: a
+    // `system_instruction: null` in this object would be indistinguishable from the withheld row in
+    // the PATCH body, which is exactly the bug.
+    const withheld = botFormDefaults({
+      ...SEEDABLE_ROW,
+      instructions_visible: false,
+      system_instruction: null,
+      answer_style_instruction: null,
+    });
+
+    expect(Object.keys(withheld)).not.toContain('system_instruction');
+    expect(Object.keys(withheld)).not.toContain('answer_style_instruction');
+    // Both or neither: a partial refusal would leave one prompt writable from a value nobody read.
+    expect(Object.keys(withheld)).toHaveLength(22);
+
+    // Everything else is seeded exactly as before — the refusal is two keys wide, not a degraded
+    // form. `name` is the field whose save is the one that used to destroy the prompts.
+    expect(withheld.name).toBe(SEEDABLE_ROW.name);
+    expect(withheld.consent_text).toBe(SEEDABLE_ROW.consent_text);
+
+    // And the narrowed object is still a body the schema accepts: `sometimes` on every field is what
+    // makes a subset a legitimate PATCH, and `strictObject` is what would have caught a stray key.
+    expect(settings(withheld).success).toBe(true);
   });
 
   it('the create defaults are a value the schema accepts once the two identifiers are typed', () => {
@@ -3131,7 +3240,8 @@ describe('ownership columns are unrepresentable', () => {
     // have — so after the schema was expanded it would have failed for the unknown keys rather than
     // for `organization_id`, and asserted nothing about ownership at all. A negative control needs a
     // positive one beside it or it is only a claim that SOMETHING was wrong.
-    // NO `status`: `UpdateBotRequest` prohibits it, so a positive control carrying one would fail
+    // NO `status`: `UpdateBotRequest` rules it `missing`, so a positive control carrying one would
+    // fail
     // for that rather than proving anything about ownership.
     const legitimate = { name: 'Support bot', access_mode: 'public', welcome_message: 'Hi' };
     expect(botSettingsSchema.safeParse(legitimate).success).toBe(true);
