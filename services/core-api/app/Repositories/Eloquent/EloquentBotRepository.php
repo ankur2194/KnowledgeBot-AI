@@ -268,7 +268,32 @@ final class EloquentBotRepository implements BotRepositoryInterface
 
             $bot->save();
 
-            $audit($bot);
+            // ── THE AUDIT ROW IS GATED ON THE ROW HAVING ACTUALLY MOVED ──────────────────────
+            //
+            // A console that re-submits its whole form on every save is a SUPPORTED shape here —
+            // `slugExists()` excludes this bot's own row for exactly that reason, and
+            // `movesRetrievalConfiguration()` refuses to bump a knob that was named at its stored
+            // value. So a PATCH whose every value equals what is stored gets a 200 and the row it
+            // asked for; what it must not get is a `bot.updated` row asserting an edit happened.
+            // That is the trail wrong in the one direction nobody checks it in, and it is the same
+            // objection `UpdateProviderConnectionRequest` raises against its own empty body.
+            //
+            // `wasChanged()` AND NOT `isDirty()` BEFORE THE SAVE, because the two answer different
+            // questions and only one of them survives the version bump. `wasChanged()` reads
+            // `$changes`, which `performUpdate()` syncs — and `save()` reaches `performUpdate()`
+            // only when the model is dirty, so an unchanged row leaves `$changes` empty and issues
+            // no UPDATE at all. It therefore also reports true for a bump this method applied
+            // itself, which is correct: a moved `retrieval_configuration_version` IS an edit, and
+            // it invalidates every cached answer for the bot.
+            //
+            // NOT A 422. Refusing the no-op would turn a whole-form resubmit into an error, which
+            // is the opposite of the decision `slugExists()` records. `transition()` and
+            // `BotDomainService::changeStatus()` DO refuse their no-ops, and that is a different
+            // case: there the request names a lifecycle MOVE, and a move to the state you are
+            // already in is a caller who has misread the row rather than a form being saved.
+            if ($bot->wasChanged()) {
+                $audit($bot);
+            }
 
             return $bot;
         });

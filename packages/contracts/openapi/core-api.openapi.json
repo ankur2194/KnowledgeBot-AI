@@ -897,6 +897,69 @@
                             "type": "string"
                         },
                         "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 1
+                        },
+                        "description": "1-based page number, matching `meta.page` in the response and Laravel's own paginator. There is no page 0."
+                    },
+                    {
+                        "name": "per_page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 100,
+                            "default": 25
+                        },
+                        "description": "Rows per page. A value above the maximum is REFUSED with a 422 rather than clamped silently, so a client asking for more than the platform serves finds out rather than paginating against a size it did not choose. The applied value is echoed as `meta.per_page`."
+                    },
+                    {
+                        "name": "sort",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "id",
+                                "name",
+                                "slug",
+                                "status"
+                            ],
+                            "default": "id"
+                        },
+                        "description": "Column to order by, from this endpoint's closed set. The set is closed because a caller-chosen sort reaches an `ORDER BY`, so every member here is a column with an index behind it."
+                    },
+                    {
+                        "name": "dir",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "asc",
+                                "desc"
+                            ],
+                            "default": "asc"
+                        },
+                        "description": "Sort direction."
+                    },
+                    {
+                        "name": "filter",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "maxLength": 200
+                        },
+                        "description": "Free-text search term. Deliberately unconstrained in character class — it is a string a human types — and bounded only in length; the endpoint documents which columns it searches. An empty or whitespace-only value is treated as no filter at all, and `meta.filter` comes back null."
                     }
                 ],
                 "responses": {

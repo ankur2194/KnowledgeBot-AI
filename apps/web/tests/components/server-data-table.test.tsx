@@ -351,6 +351,35 @@ describe('the pager', () => {
     await expect.element(screen.getByRole('button', { name: 'Previous page' })).toBeEnabled();
   });
 
+  it('never prints a range past the total while the placeholder window is a page behind', async () => {
+    /**
+     * THE SKEW THIS EXISTS FOR. `pageIndex` comes from the URL and moves the instant Next is
+     * clicked; `rowsOnPage` is the row model's length, which under TanStack Query's
+     * `placeholderData` is still the PREVIOUS page's count until the fetch lands. Page 6 of a
+     * 137-row set holds 12 rows, but for those few hundred milliseconds the pager is handed the
+     * page-5 count of 25 — and `first + rowsOnPage - 1` is 150.
+     *
+     * "126–150 of 137" is not a rounding artefact: it is the console asserting rows exist that the
+     * envelope says do not, on the surface whose whole job is to say how much there is.
+     */
+    resetNavigation('page=6');
+    const previousPageWindow = Array.from({ length: 25 }, (_, index) => ({
+      id: `bot-${index}`,
+      name: `Bot ${index}`,
+      status: 'Active',
+      chunk_count: index,
+    }));
+
+    const screen = await render(<Harness rows={previousPageWindow} rowCount={137} />);
+
+    await expect.element(screen.getByText('126–137 of 137')).toBeInTheDocument();
+    expect(screen.getByText(/of 137/).elements()).toHaveLength(1);
+    expect(document.body.textContent).not.toContain('150');
+    // And Next stays refused throughout, because it is derived from the URL and the envelope total
+    // alone — `(pageIndex + 1) * pageSize` is 150, which is past 137 whatever the row model holds.
+    await expect.element(screen.getByRole('button', { name: 'Next page' })).toBeDisabled();
+  });
+
   it('pages forward with a single pushed navigation', async () => {
     const screen = await render(<Harness />);
 

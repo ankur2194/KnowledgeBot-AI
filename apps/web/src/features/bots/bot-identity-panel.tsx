@@ -49,6 +49,10 @@ import {
   fetchStarterQuestions,
   starterQuestionsKeyParts,
 } from './bot-identity-starter-questions';
+// `clearableFieldValue` maps a cleared control back to the `null` `clearableText` produces, so a
+// type-and-delete on a field whose stored value is null does not leave `''` in form state and arm
+// the tab guard forever. `asText` stays the read direction.
+import { clearableFieldValue } from './bot-model-shared';
 import { BotStarterQuestions } from './bot-starter-questions';
 
 /**
@@ -274,6 +278,9 @@ function BotIdentityEditor() {
                       <Textarea
                         {...field}
                         value={asText(field.value)}
+                        onChange={(event) => {
+                          field.onChange(clearableFieldValue(event.target.value));
+                        }}
                         rows={3}
                         maxLength={DESCRIPTION_MAX}
                       />
@@ -307,6 +314,9 @@ function BotIdentityEditor() {
                       <Textarea
                         {...field}
                         value={asText(field.value)}
+                        onChange={(event) => {
+                          field.onChange(clearableFieldValue(event.target.value));
+                        }}
                         rows={3}
                         maxLength={WELCOME_MESSAGE_MAX}
                       />
@@ -330,6 +340,9 @@ function BotIdentityEditor() {
                       <Input
                         {...field}
                         value={asText(field.value)}
+                        onChange={(event) => {
+                          field.onChange(clearableFieldValue(event.target.value));
+                        }}
                         autoComplete="off"
                         maxLength={PLACEHOLDER_TEXT_MAX}
                       />
@@ -378,6 +391,9 @@ function BotIdentityEditor() {
                         <Textarea
                           {...field}
                           value={asText(field.value)}
+                          onChange={(event) => {
+                            field.onChange(clearableFieldValue(event.target.value));
+                          }}
                           rows={8}
                           maxLength={SYSTEM_INSTRUCTION_MAX}
                           className="font-mono"
@@ -406,6 +422,9 @@ function BotIdentityEditor() {
                         <Textarea
                           {...field}
                           value={asText(field.value)}
+                          onChange={(event) => {
+                            field.onChange(clearableFieldValue(event.target.value));
+                          }}
                           rows={5}
                           maxLength={ANSWER_STYLE_INSTRUCTION_MAX}
                         />

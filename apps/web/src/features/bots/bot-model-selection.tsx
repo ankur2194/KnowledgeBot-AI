@@ -59,10 +59,20 @@ const NOT_CONFIGURED = 'not-configured';
  * requests whose only possible answer is 403.
  *
  * ── THE PAIR IS THE UNIT, NOT THE TWO FIELDS ───────────────────────────────────────────────────
- * `provider_connection_id` is `required_with:provider_model_id`, ONE DIRECTION ONLY. A connection
- * with no model is a real state ("vendor chosen, model not yet") and both columns are nullable so it
- * stays expressible; a model with no connection names no credential at all, because a catalogue row
- * reaches one only through its parent. `BotService::assertModelSelection()` also refuses a model
+ * A connection with no model is a real state ("vendor chosen, model not yet") and both columns are
+ * nullable so it stays expressible; a model with no connection names no credential at all, because a
+ * catalogue row reaches one only through its parent.
+ *
+ * `provider_connection_id` carries `required_with:provider_model_id` — ONE DIRECTION ONLY — on
+ * `StoreBotRequest` ALONE. It is correct on create, where the body IS the whole row. It was removed
+ * from `UpdateBotRequest`, where it was both wrong and redundant: `sometimes` short-circuits the rule
+ * set for an absent key, so it decided only one of the four reachable PATCH shapes and refused a
+ * legitimate model-only PATCH against a bot that already stores a connection. On the PATCH the
+ * pairing that matters is the RESULTING one, and that is `BotService::assertModelSelection()`'s,
+ * judged against the stored row. `botSettingsSchema` mirrors this split: `crossFieldCreate` includes
+ * `modelNeedsConnection`, `crossFieldSettings` does not.
+ *
+ * `BotService::assertModelSelection()` also refuses a model
  * registered under a DIFFERENT connection of the same organization — no constraint on `bots` catches
  * that, and the resulting configuration would name a credential from one account and a model from
  * another. Changing the connection therefore CLEARS the model here rather than leaving a stale pair

@@ -1,6 +1,6 @@
 'use client';
 
-import type { Role } from '@kb/contracts';
+import type { BotResource, Role } from '@kb/contracts';
 import {
   botCreateDefaults,
   botCreateSchema,
@@ -18,11 +18,13 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from '@/components/ui/dialog';
 import {
   Form,
@@ -66,8 +68,9 @@ import { BOT_CREATE_KNOWN_PATHS, canManageBots, createBot } from './api';
  * the dialog's submit ("Save bot") or its title ("Create a bot"). Role- and label-name matching is a
  * case-insensitive SUBSTRING in both Playwright and vitest-browser, so two controls whose names
  * overlap resolve to two elements and every locator for either fails on strict mode — and a
- * screen-reader user meets the same ambiguity one control at a time. The two dialogs cannot collide
- * because each is mounted only while ITS trigger opened it, and only one can be open.
+ * screen-reader user meets the same ambiguity one control at a time. Both `<Dialog>` roots ARE always
+ * mounted (see `CreateBotForOrganization`), but each holds its own `open` and only the open one
+ * renders a `DialogContent`, so at most one dialog is ever on screen and in the accessibility tree.
  *
  * Both are `--primary`, which reads as a violation of "at most one primary action" and is not: that
  * rule is about a page HEADER's action cluster, and the first-run empty state's primary action is
@@ -126,7 +129,6 @@ function CreateBotForOrganization({
   readonly orgId: string;
   readonly triggerLabel: string;
 }) {
-  const queryClient = useQueryClient();
   const router = useRouter();
   const [open, setOpen] = useState(false);
 
@@ -139,8 +141,85 @@ function CreateBotForOrganization({
    * Built with `orgKey` rather than `useOrgKey()` because this component has already established a
    * non-null organization by a mount condition, and the hook's throw is for the case that condition
    * exists to prevent.
+   *
+   * It is computed HERE and not in the form body so that it survives the body's unmount unchanged —
+   * `useMutation`'s `onSettled` still fires for a request in flight when the dialog closes, and a key
+   * rebuilt on each remount would be a second array identity for one namespace.
    */
   const botsListKey = orgKey(orgId, 'bots');
+
+  return (
+    /**
+     * ── THE DIALOG ROOT IS ALWAYS MOUNTED; THE FORM IS NOT ────────────────────────────────────────
+     * This component never unmounts — both of its mount points live for the whole page — so anything
+     * declared HERE lives for the whole page too. That is why `useForm` and `useMutation` are not
+     * here but in `<CreateBotForm>`, one level down inside `<DialogContent>`: Radix unmounts a closed
+     * `DialogContent`'s children, so form state, the resolver's errors and the mutation's
+     * `root.serverError` genuinely die with the dialog rather than waiting inside it.
+     *
+     * The previous shape was `{open ? <Dialog…> : null}` with a single `form.reset()` on success,
+     * which left Cancel, Escape and an overlay click holding whatever had been typed: submit a
+     * duplicate handle, press Escape, reopen, and both the rejected slug and its 422 banner were
+     * still on screen. Conditioning the ROOT also stripped the two behaviours the primitive is here
+     * for — the exit animation had no node left to play on, and focus return had no trigger to return
+     * to, because the trigger only becomes the return target when it is a `DialogTrigger`.
+     *
+     * There is deliberately no success receipt outside the dialog: the navigation IS the
+     * confirmation, and an alert rendered on a page we are leaving shows for no frames at all.
+     */
+    <Dialog open={open} onOpenChange={setOpen}>
+      {/* `asChild`, so the button below IS the trigger rather than being wrapped by one. That is what
+          makes Radix return focus to it on close — the behaviour the comment above claims. */}
+      <DialogTrigger asChild>
+        <Button type="button">
+          <PlusIcon aria-hidden />
+          {triggerLabel}
+        </Button>
+      </DialogTrigger>
+
+      {/* Focus trapping, Escape, scroll lock and `inert` on the background all come from the
+          primitive. */}
+      <DialogContent className="max-h-[85vh] overflow-y-auto">
+        <CreateBotForm
+          orgId={orgId}
+          botsListKey={botsListKey}
+          onCreated={(bot) => {
+            setOpen(false);
+            // THE POINT OF THE CREATE PATH. A new bot is a draft with no model, no sources and no
+            // voice; the next act is always configuring it, so this lands on the editor rather than
+            // on a list row the operator then has to find. `push`, not `replace`: back returns to
+            // the list they came from.
+            router.push(`/bots/${bot.id}`);
+          }}
+        />
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * THE FORM BODY, AND ITS LIFETIME IS THE DIALOG'S.
+ *
+ * Everything stateful about creating a bot is declared in this function, which exists only while the
+ * dialog is open. Closing it — by Cancel, by Escape, by the overlay, by the corner X, or by a
+ * successful create — unmounts this component and takes `useForm`'s values, the resolver's field
+ * errors and `useMutation`'s error with it. So there is no `form.reset()` anywhere below: a reset is
+ * a second, weaker spelling of the same intention, and the shape that needed one is exactly the shape
+ * that forgot to call it on four of its five close paths.
+ *
+ * `onSettled` still runs for a request that was in flight when the dialog closed, because
+ * `queryClient` and `botsListKey` outlive this component.
+ */
+function CreateBotForm({
+  orgId,
+  botsListKey,
+  onCreated,
+}: {
+  readonly orgId: string;
+  readonly botsListKey: readonly unknown[];
+  readonly onCreated: (bot: BotResource) => void;
+}) {
+  const queryClient = useQueryClient();
 
   // THREE GENERICS, and the first and third genuinely differ: `BotCreateIn` is what the controls hold
   // (`description` is a `z.preprocess`, so its INPUT type is `unknown`) while `BotCreateOut` is what
@@ -158,14 +237,7 @@ function CreateBotForOrganization({
   const create = useMutation({
     mutationFn: (values: BotCreateOut) => createBot(orgId, values),
     onSuccess: (bot) => {
-      // RESET BEFORE CLOSING, so a re-open starts empty rather than holding the bot that was just
-      // created — a pre-filled slug is a duplicate 422 waiting to happen.
-      form.reset(botCreateDefaults());
-      setOpen(false);
-      // THE POINT OF THE CREATE PATH. A new bot is a draft with no model, no sources and no voice;
-      // the next act is always configuring it, so this lands on the editor rather than on a list row
-      // the operator then has to find. `push`, not `replace`: back returns to the list they came from.
-      router.push(`/bots/${bot.id}`);
+      onCreated(bot);
     },
     onError: (error) => {
       // The SHARED handler, branching on `error_class` and never on an HTTP status. `validation`
@@ -187,146 +259,137 @@ function CreateBotForOrganization({
   const rootError = form.formState.errors.root?.serverError?.message;
 
   return (
-    <>
-      <Button type="button" onClick={() => setOpen(true)}>
-        <PlusIcon aria-hidden />
-        {triggerLabel}
-      </Button>
+    <Form {...form}>
+      <form
+        // POST, never the browser's default GET — this form sits behind a session, so its
+        // native fallback would put form values in an admin's history and in a referer.
+        // Asserted for every form by tests/unit/form-method.test.ts.
+        method="post"
+        onSubmit={form.handleSubmit((values) => {
+          create.mutate(values);
+        })}
+        // The browser's own validation bubbles would pre-empt the server's messages and
+        // cannot be styled or read consistently by a screen reader.
+        noValidate
+        className="space-y-4"
+      >
+        <DialogHeader>
+          <DialogTitle>Create a bot</DialogTitle>
+          <DialogDescription>
+            A bot starts as a draft: it answers nobody until you give it a model, its sources and a
+            voice. You can change every one of those afterwards.
+          </DialogDescription>
+        </DialogHeader>
 
-      {/* Mounted only while open, so the screen carries no form state — and no dialog holding a
-          half-typed handle — while it is closed. There is deliberately no success receipt outside the
-          dialog: the navigation IS the confirmation, and an alert rendered on a page we are leaving
-          shows for no frames at all. */}
-      {open ? (
-        <Dialog open={open} onOpenChange={setOpen}>
-          {/* Focus trapping, Escape, scroll lock, `inert` on the background and focus return to the
-              trigger all come from the primitive. */}
-          <DialogContent className="max-h-[85vh] overflow-y-auto">
-            <Form {...form}>
-              <form
-                // POST, never the browser's default GET — this form sits behind a session, so its
-                // native fallback would put form values in an admin's history and in a referer.
-                // Asserted for every form by tests/unit/form-method.test.ts.
-                method="post"
-                onSubmit={form.handleSubmit((values) => {
-                  create.mutate(values);
-                })}
-                // The browser's own validation bubbles would pre-empt the server's messages and
-                // cannot be styled or read consistently by a screen reader.
-                noValidate
-                className="space-y-4"
-              >
-                <DialogHeader>
-                  <DialogTitle>Create a bot</DialogTitle>
-                  <DialogDescription>
-                    A bot starts as a draft: it answers nobody until you give it a model, its
-                    sources and a voice. You can change every one of those afterwards.
-                  </DialogDescription>
-                </DialogHeader>
+        {rootError === undefined ? null : (
+          <Alert variant="destructive">
+            <AlertDescription>{rootError}</AlertDescription>
+          </Alert>
+        )}
 
-                {rootError === undefined ? null : (
-                  <Alert variant="destructive">
-                    <AlertDescription>{rootError}</AlertDescription>
-                  </Alert>
-                )}
-
-                <FormField
-                  control={form.control}
-                  name="name"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Name</FormLabel>
-                      <FormControl>
-                        <Input
-                          {...field}
-                          value={asText(field.value)}
-                          autoComplete="off"
-                          maxLength={NAME_MAX}
-                          placeholder="Support bot"
-                        />
-                      </FormControl>
-                      <FormDescription>
-                        What your team calls it. Only people in this organization see it.
-                      </FormDescription>
-                      <FormMessage />
-                    </FormItem>
-                  )}
+        <FormField
+          control={form.control}
+          name="name"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Name</FormLabel>
+              <FormControl>
+                <Input
+                  {...field}
+                  value={asText(field.value)}
+                  autoComplete="off"
+                  maxLength={NAME_MAX}
+                  placeholder="Support bot"
                 />
+              </FormControl>
+              <FormDescription>
+                What your team calls it. Only people in this organization see it.
+              </FormDescription>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
 
-                <FormField
-                  control={form.control}
-                  name="slug"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Handle</FormLabel>
-                      <FormControl>
-                        <Input
-                          {...field}
-                          value={asText(field.value)}
-                          autoComplete="off"
-                          autoCapitalize="none"
-                          spellCheck={false}
-                          maxLength={SLUG_MAX}
-                          className="font-mono"
-                          placeholder="support-bot"
-                        />
-                      </FormControl>
-                      {/* NOT DERIVED FROM THE NAME, deliberately. A slugifier here would be a fourth
-                          spelling of `bots_slug_shape` — after the CHECK constraint, the
-                          FormRequest's `regex:` and `botCreateSchema`'s mirror of it — and the one
-                          spelling nothing compares against anything. The schema's own message says
-                          what a handle is; typing it is one field. */}
-                      <FormDescription>
-                        Lower-case letters, digits and internal hyphens. Unique within this
-                        organization only — another organization using the same handle is not a
-                        conflict.
-                      </FormDescription>
-                      <FormMessage />
-                    </FormItem>
-                  )}
+        <FormField
+          control={form.control}
+          name="slug"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Handle</FormLabel>
+              <FormControl>
+                <Input
+                  {...field}
+                  value={asText(field.value)}
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  maxLength={SLUG_MAX}
+                  className="font-mono"
+                  placeholder="support-bot"
                 />
+              </FormControl>
+              {/* NOT DERIVED FROM THE NAME, deliberately. A slugifier here would be a fourth
+                  spelling of `bots_slug_shape` — after the CHECK constraint, the FormRequest's
+                  `regex:` and `botCreateSchema`'s mirror of it — and the one spelling nothing
+                  compares against anything. The schema's own message says what a handle is;
+                  typing it is one field. */}
+              <FormDescription>
+                Lower-case letters, digits and internal hyphens. Unique within this organization
+                only — another organization using the same handle is not a conflict.
+              </FormDescription>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
 
-                <FormField
-                  control={form.control}
-                  name="description"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Description</FormLabel>
-                      <FormControl>
-                        {/* `unknown` -> string: `clearableText` is a `z.preprocess`, so this field's
-                            INPUT type is `unknown` while its output is `string | null`. The `''`
-                            fallback is also what keeps the control CONTROLLED across the reset that
-                            runs after a successful create. */}
-                        <Textarea
-                          {...field}
-                          value={asText(field.value)}
-                          rows={3}
-                          maxLength={DESCRIPTION_MAX}
-                        />
-                      </FormControl>
-                      <FormDescription>
-                        Optional. For your team, not for the people talking to it.
-                      </FormDescription>
-                      <FormMessage />
-                    </FormItem>
-                  )}
+        <FormField
+          control={form.control}
+          name="description"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Description</FormLabel>
+              <FormControl>
+                {/* `unknown` -> string: `clearableText` is a `z.preprocess`, so this field's INPUT
+                    type is `unknown` while its output is `string | null`. The `''` fallback is what
+                    keeps the control CONTROLLED for its whole life.
+
+                    NO `clearableFieldValue` ON THE WRITE SIDE, unlike the editor's three tabs. There
+                    it maps a cleared control to the `null` the stored row holds, so `isDirty` can
+                    return to false; here `botCreateDefaults()` seeds this field as `''` and nothing
+                    reads `isDirty`, so mapping blank to null would only make form state disagree
+                    with the factory that seeded it. The resolver's preprocess produces the same
+                    `null` on submit either way. */}
+                <Textarea
+                  {...field}
+                  value={asText(field.value)}
+                  rows={3}
+                  maxLength={DESCRIPTION_MAX}
                 />
+              </FormControl>
+              <FormDescription>
+                Optional. For your team, not for the people talking to it.
+              </FormDescription>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
 
-                <DialogFooter>
-                  <Button type="button" variant="outline" onClick={() => setOpen(false)}>
-                    Cancel
-                  </Button>
-                  {/* Disabled on `isPending`: this POST carries no `Idempotency-Key`, so nothing may
-                      replay it — including a double-click. */}
-                  <Button type="submit" disabled={create.isPending}>
-                    {create.isPending ? 'Creating…' : 'Save bot'}
-                  </Button>
-                </DialogFooter>
-              </form>
-            </Form>
-          </DialogContent>
-        </Dialog>
-      ) : null}
-    </>
+        <DialogFooter>
+          {/* `DialogClose`, not an `onClick` that reaches for the parent's setter: closing is the
+              primitive's job and routing it through the primitive is what keeps Escape, the overlay,
+              the corner X and this button on one code path. */}
+          <DialogClose asChild>
+            <Button type="button" variant="outline">
+              Cancel
+            </Button>
+          </DialogClose>
+          {/* Disabled on `isPending`: this POST carries no `Idempotency-Key`, so nothing may
+              replay it — including a double-click. */}
+          <Button type="submit" disabled={create.isPending}>
+            {create.isPending ? 'Creating…' : 'Save bot'}
+          </Button>
+        </DialogFooter>
+      </form>
+    </Form>
   );
 }

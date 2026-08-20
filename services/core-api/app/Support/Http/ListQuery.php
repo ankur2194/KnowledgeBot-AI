@@ -107,6 +107,106 @@ final readonly class ListQuery
     }
 
     /**
+     * The same five parameters, as OpenAPI parameter objects — for a request that implements
+     * `ProvidesOpenApiQueryParameters`.
+     *
+     * ── IT SITS HERE, BESIDE `rules()`, AND THAT PLACEMENT IS THE WHOLE MECHANISM ─────────────
+     *
+     * The two describe one contract to two audiences: `rules()` decides what the server accepts and
+     * this decides what a generated client is told it may send. Split across two files they drift
+     * silently and in the worse direction — a client that cannot express a parameter the server
+     * supports removes functionality with nothing reported. Adjacent, a reviewer changing one sees
+     * the other, and every bound below is read from the SAME constant the rule reads rather than
+     * restated as a literal.
+     *
+     * ── WHY THE DEFAULTS APPEAR HERE AND NOT IN THE RULES MANIFEST ────────────────────────────
+     *
+     * A validation rule cannot express a default; `rules()` says so at `sort` and the class docblock
+     * says it again for `per_page`. The default is `fromValidated()`'s argument, so it is the
+     * endpoint's decision rather than the rule's — which means this method is the only place in the
+     * document a client can learn what happens when it says nothing. `page` and `dir` are the two
+     * whose defaults are fixed by this class (1 and `fromValidated()`'s own `SortDirection::Asc`),
+     * so they are stated unconditionally; `per_page` and `sort` are arguments, so they are
+     * arguments here too.
+     *
+     * ── `default` IS DESCRIPTIVE AND `maximum` IS NOT THE WHOLE STORY ─────────────────────────
+     *
+     * `per_page` publishes `maximum: $maxPerPage`, which is what the RULE enforces — a larger value
+     * is a 422 and not a silent clamp, and `BotCrudTest` pins that direction. The second clamp in
+     * `fromValidated()` is deliberately not published, because it exists for the service and job
+     * callers that never ran a FormRequest and no HTTP client can reach it.
+     *
+     * @param  list<string>  $sortable  the columns this endpoint permits an ORDER BY on; the same
+     *                                  list passed to `rules()`, and it becomes the published enum
+     * @param  string  $defaultSort  the column `fromValidated()` falls back to, which is the
+     *                               endpoint's decision and is unexpressible as a rule
+     * @return list<array<string, mixed>>
+     */
+    public static function openApiQueryParameters(
+        array $sortable,
+        string $defaultSort,
+        SortDirection $defaultDirection = SortDirection::Asc,
+        int $defaultPerPage = self::DEFAULT_PER_PAGE,
+        int $maxPerPage = self::MAX_PER_PAGE,
+    ): array {
+        return [
+            [
+                'name' => 'page',
+                'in' => 'query',
+                'required' => false,
+                'schema' => ['type' => 'integer', 'minimum' => 1, 'default' => 1],
+                'description' => '1-based page number, matching `meta.page` in the response and '
+                    .'Laravel\'s own paginator. There is no page 0.',
+            ],
+            [
+                'name' => 'per_page',
+                'in' => 'query',
+                'required' => false,
+                'schema' => [
+                    'type' => 'integer',
+                    'minimum' => 1,
+                    'maximum' => $maxPerPage,
+                    'default' => $defaultPerPage,
+                ],
+                'description' => 'Rows per page. A value above the maximum is REFUSED with a 422 '
+                    .'rather than clamped silently, so a client asking for more than the platform '
+                    .'serves finds out rather than paginating against a size it did not choose. '
+                    .'The applied value is echoed as `meta.per_page`.',
+            ],
+            [
+                'name' => 'sort',
+                'in' => 'query',
+                'required' => false,
+                'schema' => ['type' => 'string', 'enum' => $sortable, 'default' => $defaultSort],
+                'description' => 'Column to order by, from this endpoint\'s closed set. The set is '
+                    .'closed because a caller-chosen sort reaches an `ORDER BY`, so every member '
+                    .'here is a column with an index behind it.',
+            ],
+            [
+                'name' => 'dir',
+                'in' => 'query',
+                'required' => false,
+                'schema' => [
+                    'type' => 'string',
+                    'enum' => SortDirection::values(),
+                    'default' => $defaultDirection->value,
+                ],
+                'description' => 'Sort direction.',
+            ],
+            [
+                'name' => 'filter',
+                'in' => 'query',
+                'required' => false,
+                'schema' => ['type' => 'string', 'maxLength' => self::MAX_FILTER_LENGTH],
+                'description' => 'Free-text search term. Deliberately unconstrained in character '
+                    .'class — it is a string a human types — and bounded only in length; the '
+                    .'endpoint documents which columns it searches. An empty or whitespace-only '
+                    .'value is treated as no filter at all, and `meta.filter` comes back null.',
+            ],
+        ];
+    }
+
+    /**
      * Build a query from a validated payload.
      *
      * `$defaultSort` HAS NO DEFAULT VALUE ON PURPOSE. Every list has a deterministic order or two

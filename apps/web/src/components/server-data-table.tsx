@@ -500,9 +500,20 @@ function TablePager({
 
   const format = new Intl.NumberFormat();
   const first = pageIndex * pageSize + 1;
-  const last = first + rowsOnPage - 1;
+  // THE LABEL AND THE BUTTON ARE DERIVED FROM DIFFERENT SOURCES ON PURPOSE.
+  //
+  // `pageIndex` and `pageSize` come from the URL and move SYNCHRONOUSLY on a click. `rowsOnPage` is
+  // `modelRows.length`, and under TanStack Query's `placeholderData` that is still the PREVIOUS
+  // page's row count until the fetch lands. Mixing the two gives a window that briefly describes a
+  // page that does not exist: paging from 5 to a final page 6 of 137 rows renders "126–150 of 137".
+  //
+  //   - `last` is clamped to the total, so the label can be a page behind but never nonsense.
+  //   - `canNext` is derived from the URL and the envelope total ALONE, so the placeholder window
+  //     cannot reach it. Deriving it from `last` inherited the skew and could offer a Next that
+  //     walks past the end (or, on a shrinking page, refuse one that exists).
+  const last = Math.min(first + rowsOnPage - 1, rowCount);
   const canPrevious = pageIndex > 0;
-  const canNext = last < rowCount;
+  const canNext = (pageIndex + 1) * pageSize < rowCount;
 
   return (
     <>

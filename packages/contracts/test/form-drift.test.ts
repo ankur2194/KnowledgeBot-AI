@@ -2493,7 +2493,11 @@ describe('the model catalog: the rules a single-field probe cannot express', () 
  *   1. `required_with` in BOTH directions on the evidence pair. Every presence probe on a CROSS_FIELD
  *      field is suppressed, so the whole rule is here.
  *   2. `required_with` in ONE direction from `provider_model_id` to `provider_connection_id`. Same
- *      suppression, opposite asymmetry to the model catalog's currency rule.
+ *      suppression, opposite asymmetry to the model catalog's currency rule. ON THE POST ONLY:
+ *      `UpdateBotRequest` dropped it, because on a PATCH the rule sees only the keys the caller
+ *      sent and the pair that matters is the RESULTING one, which `BotService` decides against the
+ *      stored row. So every assertion below is `create(...)`, and `botSettingsSchema` must NOT
+ *      mirror it — the probe harness reports that as "form blocks input the server accepts".
  *   3. `App\Rules\EvidenceThresholdWithinScale` — a sibling-dependent RANGE, which `probesFor` has no
  *      vocabulary for at all. `UNPROBED_RULES` records the suppression; this is the check.
  *   4. `App\Rules\ReadableThemeColor` — the one rule in this file that is unprobed AND unmirrored.

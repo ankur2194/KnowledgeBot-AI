@@ -254,6 +254,28 @@ export const numericFieldValue = (raw: string, empty: null | undefined): unknown
   return Number.isFinite(parsed) ? parsed : raw;
 };
 
+/**
+ * The same job as `numericFieldValue`, for a `clearableText` field — and it exists for the same
+ * reason: a control that writes the raw DOM string leaves form state holding a value the schema
+ * would never produce, and `formState.isDirty` compares against `defaultValues` BEFORE the resolver
+ * runs.
+ *
+ * `clearableText` (`packages/contracts/src/forms/bot.ts`) preprocesses with
+ * `(v) => (typeof v === 'string' && v.trim() === '' ? null : v)`. This is that expression and
+ * nothing else, deliberately:
+ *
+ *   - blank OR whitespace-only becomes `null`, because `TrimStrings` then
+ *     `ConvertEmptyStringsToNull` run server-side before any rule, so `'   '` is stored as null;
+ *   - a non-blank string is passed through VERBATIM and is NOT trimmed here, because the preprocess
+ *     does not trim either — `z.string().trim()` inside it does, at parse time. Trimming on the way
+ *     into form state would move the caret and delete a space the operator is still typing after.
+ *
+ * The consequence that matters: a stored `null` that an operator types into and then clears returns
+ * to `null` rather than sticking at `''`, so the tab guard disarms. Without it `'' !== null` and the
+ * shell asks "Leave without saving?" for a form holding exactly the stored row.
+ */
+export const clearableFieldValue = (raw: string): string | null => (raw.trim() === '' ? null : raw);
+
 /** Present AND non-null — the same reading `botSettingsSchema`'s `isSet` uses, because absent and
  *  explicitly-null are different intentions and the same verdict for "is this configured". */
 export const isConfigured = (value: unknown): boolean => value !== undefined && value !== null;

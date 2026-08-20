@@ -6450,3 +6450,352 @@ are a real decision rather than a wording fix — either the three missing scala
 column addition, or the skill is describing a surface this product will not have. That is
 `admin-web-engineer`'s to rule, and it needs an ADR whichever way it goes, exactly as the
 `UNVERIFIED` marker asked for before the migration existed.
+
+## The Phase B review fixes — N1–N7, 2026-08-20
+
+A `/code-review` over `main…claude/phase-b-task-planning-ay7299` — the same Phase B branch § *The
+Phase B audits* reads — returned **seven** findings. All seven are fixed, and the effort reports the
+suites green; this section was written from `docs/`, which does not run them, so that verdict is
+recorded as reported rather than as measured here.
+
+**Two of the seven were wrong about the mechanism**, and that is the reason this section exists at
+all rather than being a changelog. N4's premise was false outright — the rule the review said refused
+a legitimate PATCH did not refuse it, and could not have — and N5's was false in part. Both were
+caught because each was measured against the installed framework before anything was edited. The
+closing note ties that to § *The rulings of 2026-08-12*, which records the same shape for a ruling.
+
+**No ADR is warranted, and saying so is part of the record.** None of the seven changes an
+architectural decision: five are defects against a decision already made, one (N3) adds a mechanism
+in the shape of the two the repository already uses, and **N7 is a decision being *upheld* under
+pressure** — the obvious repair was an optimistic update, an existing decision forbids it, and the
+fix was built the harder way so the decision survives. An ADR that ratified any of these would be
+recording a choice nobody made.
+
+**Why the prefix is `N`.** `K1`–`K6` are the bots-schema findings, `L1`–`L6` the security read of the
+bots surface, `M1`–`M7` the Phase B audits; `N` continues them. It is also **not** one of
+`docs/23`'s class letters — those are `M`, `S`, `V`, `P`, `X`, `D`, `W` — so `§ N4` cannot be read as
+a class the way `§ M3` once could.
+
+**Measure these in the working tree, not at a commit.** The seven fixes were uncommitted when this
+was written (`CLAUDE.md` § *Git*: Ankur reviews and commits), so unlike § M6 the check here is
+`git diff` and `git status --porcelain`, and the line numbers below will move the moment they land.
+Where a fact is likely to move, a grep is given instead.
+
+### N1 — the Publishing tab reported unsaved edits for a form holding exactly the stored row, and the same defect was in six more places *(CLOSED)*
+
+```bash
+grep -n 'export const numericFieldValue\|export const clearableFieldValue' \
+  apps/web/src/features/bots/bot-model-shared.ts
+grep -rn 'clearableFieldValue\|numericFieldValue' apps/web/src/features/bots/
+```
+
+`formState.isDirty` compares form state against `defaultValues` **before the resolver runs**, so the
+schema's `z.preprocess` never sees the comparison. `botPanelDefaults` seeds the three
+`nullableIntField` limits (`rate_limit_per_minute`, `rate_limit_per_day`, `retention_days`) from the
+resource as **numbers**, while the three number inputs on the Publishing tab wrote the raw DOM string
+into form state. `'60' !== 60`, so typing a seeded value back in — or merely touching and restoring
+it — left the panel dirty **permanently**, and `useUnsavedBotEdits` then had the editor shell
+interpose its *"Leave without saving?"* dialog on every tab change for a form nobody had edited. That
+is the one dialog in the editor whose whole purpose is to stop an operator losing work, and this
+taught them to click through it.
+
+**The repo already held the fix, one tab over.** `numericFieldValue` in
+`apps/web/src/features/bots/bot-model-shared.ts:251` exists for exactly this failure and its docblock
+says so in the same words with a different literal (`'20' !== 20`); the Model tab used it and the
+Publishing tab did not. The repair adopts `asFieldText` for the read direction and
+`numericFieldValue(raw, null)` for the write, and **deletes two private near-duplicates**
+(`numberText`, `clearableTextValue`) that did the read half correctly and the write half not at all.
+
+**The part worth recording is that the defect was in seven places rather than one.** The review found
+the three number inputs. `consent_text` on the same tab had it in text form, and so did **all five**
+`clearableText` fields on the Identity tab — `description`, `welcome_message`, `placeholder_text`,
+`system_instruction`, `answer_style_instruction`. `clearableText` preprocesses blank-or-whitespace to
+`null` (which is what `TrimStrings` then `ConvertEmptyStringsToNull` do server-side before any rule),
+so a control writing the raw `''` leaves `'' !== null` against a stored null, and a type-and-delete
+arms the guard the same way. A new `clearableFieldValue`
+(`bot-model-shared.ts:277`) is that preprocess expression and nothing else — deliberately **not**
+trimming, because trimming into form state moves the caret and eats a space the operator is still
+typing after. **This is ADR-036's lesson in component form: a private copy of a shared helper is
+where the fix fails to arrive**, and it is § M4 again one layer down — there a hand-copied *type*,
+here a hand-copied *helper*.
+
+**Deliberately not changed, and the distinction is the finding's edge.**
+`bot-create-dialog.tsx`'s `description` is the same code shape and is **not** the same defect:
+`botCreateDefaults()` seeds it as `''`, and that dialog reads no `isDirty` at all. Mapping blank to
+`null` there would make form state disagree with the factory that seeded it, to fix nothing. The
+comment beside the control now says that, so the next reader sweeping for this shape does not
+"complete" the sweep by breaking it.
+
+### N2 — the create-bot dialog reopened holding a slug the server had rejected, under a stale 422 *(CLOSED)*
+
+```bash
+grep -n 'DialogTrigger asChild\|function CreateBotForm' apps/web/src/features/bots/bot-create-dialog.tsx
+grep -n 'form.reset' apps/web/src/features/bots/bot-create-dialog.tsx   # expect: nothing
+```
+
+`useForm` and `useMutation` sat in `CreateBotForOrganization`, a component that **never unmounts** —
+only the `<Dialog>` subtree was conditionally rendered — and `form.reset()` ran in `onSuccess`
+alone. There are five ways to close that dialog (Cancel, Escape, the overlay, the corner X, a
+successful create) and the reset covered one. Submit a duplicate handle, press Escape, reopen: the
+refused slug and its 422 banner were both still there, an error about a request the operator had not
+just made. The component's own comment claimed *"the screen carries no form state … while it is
+closed"*, which was false the whole time.
+
+**The fix makes the comment true rather than adding four resets.** `<Dialog>` is now unconditional;
+the form and its mutation live in a child rendered inside `<DialogContent>`, which Radix unmounts on
+close; and `form.reset()` is **gone entirely**. Unmount covers all five paths, and a reset is a
+second, weaker spelling of the same intention — the shape that needed one is precisely the shape that
+forgot to call it. `queryClient` and the list query key stay in the parent on purpose, so
+`onSettled` still fires for a request that was in flight when the dialog closed.
+
+**The second-order gain is the reason this is not merely tidier.** Conditioning the `<Dialog>` root
+had also removed the node Radix restores focus to and the node its exit animation plays on, so
+**focus return and the close animation were both silently broken** — two behaviours the primitive is
+there to provide, and the old comment credited it with providing. A `DialogTrigger asChild` supplies
+the return target, and the regression test asserts it on `document.activeElement` after an
+**Escape** — chosen because it is the close path with no handler of ours on it, and therefore the one
+a per-path reset is likeliest to miss.
+
+### N3 — `admin.bots.index` published none of its five query parameters, so a generated client could not reach page 2 *(CLOSED)*
+
+```bash
+grep -n 'ProvidesOpenApiQueryParameters' services/core-api/app/Console/Commands/DumpOpenApiCommand.php \
+     services/core-api/app/Http/Requests/IndexBotsRequest.php
+grep -n 'public static function openApiQueryParameters' services/core-api/app/Support/Http/ListQuery.php
+```
+
+`DumpOpenApiCommand::parameters()` derived its entire output from `$route->parameterNames()`, which
+returns **URI placeholders and nothing else**, and hard-coded `'in' => 'path'`. It had no query
+branch because it had never needed one: `IndexBotsRequest` is this API's **first and only**
+query-string FormRequest. So the operation published `organization` and stopped, and a client
+generated from the committed document got `listBots(organization)` with no way to ask for a second
+page, choose a sort column, choose a direction, or pass a filter — against an endpoint that validates
+and honours all five. **Functionality removed with nothing reported**, which is the drift direction
+the contract suite exists to catch and the direction it is hardest to notice, because nothing fails.
+
+**Why it was not fixed by parsing `rules()`, which is the obvious design.** Two independent reasons,
+both recorded in the new interface's docblock so the next person does not re-propose it:
+
+1. **Mechanical.** `packages/contracts/rules/UpdateBotRequest.json` and its siblings are dumps of
+   `rules()` *after* Laravel stringified them, so a closed set arrives as the literal
+   `in:"id","name",…` — embedded quotes and all, because `Rule::in()` quotes every member. Reading an
+   `enum` back out means writing a parser for Laravel's rule serialization, complete with quoting,
+   escaping and the comma inside a value, against a format nobody promised to keep stable.
+2. **Substantive, and the stronger of the two.** The manifest **cannot express the facts a caller
+   most needs**. A validation rule has no vocabulary for a default: `page` is "an integer at least 1"
+   and says nothing about being 1 when absent, because the default is an argument to
+   `ListQuery::fromValidated()` and is therefore the *endpoint's* decision, not the rule's. Same for
+   `per_page` and `sort`. A document derived from the rules alone would publish three parameters
+   whose absent behaviour is exactly the part a client has to guess.
+
+The repair follows the two mechanisms already in this repository — `ProvidesOpenApiSchema` lets a
+Resource describe the JSON it emits, `#[ResponseShape]` names the status codes — with a third:
+`App\Support\Contracts\ProvidesOpenApiQueryParameters`, implemented by `IndexBotsRequest`, satisfied
+by a generic `ListQuery::openApiQueryParameters()` at `ListQuery.php:145`. **Its placement is the
+mechanism**: it sits directly beside `ListQuery::rules()` and reads every bound from the same
+constant the rule reads, so the two descriptions of one contract cannot drift without a reviewer
+seeing both. `DumpOpenApiCommand` gained one shared `formRequestClass()` for its two questions, so
+"which FormRequest does this action take" is answered once rather than by two reflections that can
+disagree.
+
+**The diff is `+63/−0`.** `organization` is byte-identical and still first, which is load-bearing:
+the committed document is compared byte for byte, so query parameters are appended and nothing above
+them moves. `tests/Contract/OpenApiDocumentTest.php` asserts the published values against
+`ListQuery`'s own constants and `IndexBotsRequest::SORTABLE` rather than against literals — a
+hard-coded `100` in the test would agree with a document describing a ceiling the server does not
+enforce.
+
+**And the thing this fix does not close, recorded because it is now load-bearing on a human.**
+Nothing verifies that the committed artifacts are current. `OpenApiDocumentTest.php:1349` already
+carries the note: the *"keeps the committed document current"* test called
+`kb:dump-openapi --check` at the default path, a CI step took the assertion over, and **the premise
+became true again on 2026-08-17 when `.github/` was deleted**. The suite proves the generator is
+deterministic and that `--check` *can* fail, against a temp path; it proves nothing about
+`packages/contracts/openapi/core-api.openapi.json`. Both dumps here were re-run by hand and both
+`--check`s are reported to exit 0 — unverified from `docs/`, which runs neither — and **the next
+change to `rules()`, and the next implementer of `ProvidesOpenApiQueryParameters`, needs the same
+manual step with nothing to remind them.** That is § *Removing CI/CD*'s "the committed OpenAPI
+artifact unchecked again", now with one more producer feeding it.
+
+### N4 — `UpdateBotRequest`'s `required_with`: the review's premise was wrong, and *that* is the finding *(CLOSED)*
+
+**Recorded as a correction, not as a bug fix.** A record written from the review's wording would be
+false, which is the § K1 and § M1 shape a third time: the reported defect was real in its
+*conclusion* and wrong in its *mechanism*, and only measurement told them apart.
+
+The review claimed `'provider_connection_id' => [… 'required_with:provider_model_id']` refused a
+legitimate model-only PATCH. **It did not, and it could not have.** The four reachable bodies,
+measured against the real `rules()` before anything was edited:
+
+| body | old behaviour |
+| --- | --- |
+| `{"provider_model_id":"01J…"}` | **passes** — no 422, the shape the review said was refused |
+| `{"provider_connection_id":null}` | **passes** the rule; the service refuses it |
+| `{"provider_connection_id":null,"provider_model_id":null}` | **passes** |
+| `{"provider_connection_id":null,"provider_model_id":"01J…"}` | **422** — the one shape the rule did decide |
+
+The mechanism is `sometimes`, which sits before `required_with` in the array:
+
+```bash
+grep -n 'function passesOptionalCheck' -A 10 \
+  services/core-api/vendor/laravel/framework/src/Illuminate/Validation/Validator.php
+```
+
+`passesOptionalCheck()` short-circuits **every remaining rule** for an absent key. So a body naming
+only the model never reached `required_with` at all, and a body clearing only the connection left the
+sibling absent and never reached it either. The rule therefore decided **one of four shapes,
+redundantly** — `BotService::assertModelSelection()` already refuses that same pair on that same
+field with a fuller message — and was **silent on the shape its own error message described**
+(*"Clearing the connection while keeping the model…"*, which is the connection-only body against a
+bot with a model stored).
+
+**It was still removed**, because the design the file's own comment states is the right one: one
+check on the **resulting** pair, in `BotService::assertModelSelection()`, reading the half the body
+did not name off the stored row through `resolved()`. `UpdateBotRequest.php:170` is now
+`['bail', 'sometimes', 'nullable', 'string', 'ulid']` and the `required_with` message is gone. **The
+only behavioural change** is that the fourth shape now receives the service's fuller message instead
+of a second, shorter one on the same field — two spellings of one refusal being how they drift.
+
+`StoreBotRequest` **keeps** the rule, and the asymmetry is the difference between a POST and a PATCH
+rather than an oversight: on a create the body *is* the resulting pair, so a declarative rule can
+decide it. The Zod mirror had to move with it — `crossField` was shared by both bot schemas and is
+now split into `crossFieldShared`, `crossFieldCreate` (which keeps `modelNeedsConnection`) and
+`crossFieldSettings` (which does not). Mirroring it on the settings schema anyway would make
+`@kb/contracts` refuse a body the server accepts, which the probe harness reports as *"form blocks
+input the server accepts"*.
+
+**The general rule, stated because it will recur on every PATCH surface this product grows:** *a
+validation rule sitting behind `sometimes` cannot enforce anything about an absent key, so a
+cross-field invariant on a PATCH has to be checked against the resulting state and not against the
+body.* The evidence pair is the counter-example that shows the rule is not "never use `required_with`
+on a PATCH": `evidence_threshold` and its scale are `required_with` each other on both verbs,
+correctly, because neither half means anything without the other **whatever is stored**.
+
+### N5 — audit rows describing edits that did not happen *(CLOSED)*
+
+```bash
+grep -n 'wasChanged' services/core-api/app/Repositories/Eloquent/EloquentBotRepository.php
+grep -n 'changed === \[\]' services/core-api/app/Repositories/Eloquent/EloquentBotStarterQuestionRepository.php
+```
+
+`BotService::update()` wrote a `bot.updated` row unconditionally. A PATCH naming a field at its
+current value passes the controller's empty-body guard, Eloquent finds the model clean and issues no
+UPDATE — `save()` reaches `performUpdate()` only when the model is dirty — and an **append-only** row
+then claimed an edit that never occurred. The trail was wrong in the one direction nobody audits it
+in: not a missing row, an invented one. The codebase already refused exactly this on exactly this
+ground in three places — `BotService::transition()`, `BotDomainService::changeStatus()`, and the
+controller's own empty-body message.
+
+**Why the fix is a gate and not a 422, which is the part that needed deciding.** `BotService::update()`
+deliberately **excludes the bot's own row** from the slug-collision check, on the recorded ground that
+*"a console that re-submits the whole form would report every save as a duplicate of itself"* — so a
+whole-form resubmit is a **supported shape** here, and `movesRetrievalConfiguration()` makes the same
+concession for a knob named at its stored value. Refusing the no-op would break the save button on an
+unchanged form. The lifecycle siblings that *do* refuse theirs are a genuinely different case: there
+the request names a **move**, and a move to the state you already hold is a caller who has misread the
+row rather than a form being saved.
+
+`EloquentBotRepository::update()` now gates the audit closure on `$bot->wasChanged()`
+(`EloquentBotRepository.php:294`). **`wasChanged()` and not a pre-save `isDirty()`**, because the two
+answer different questions and only one survives the version bump: `wasChanged()` reads `$changes`,
+which `performUpdate()` syncs, so it also reports true for the
+`retrieval_configuration_version` bump this method applies **itself** — correctly, since a moved
+configuration version *is* an edit and it invalidates every cached answer for the bot. A pre-save
+`isDirty()` would have missed it. `EloquentBotStarterQuestionRepository::update()` short-circuits on
+`$changed === []` (`:140`), where both branches above it are value comparisons rather than presence
+tests.
+
+**A correction to the review here too.** It claimed that path stored `changed: ''`. **It did not.**
+`AuditLogger::sanitize()` normalises with `mb_substr(trim($value), …)` and skips a value that was
+already empty on arrival — silently, and that silence is relied on by name elsewhere (`capabilities`
+on the provider-model operations is `implode(',', $flags)`, which legitimately produces `''`). So the
+key was simply **absent**, and the row read as an ordinary edit rather than as a vacuous one. **The
+defect was the row existing at all**, not its payload — and the payload being unremarkable is what
+made it survive the phase's own reviews.
+
+### N6 — the pager could print a row range past the total *(CLOSED)*
+
+`apps/web/src/components/server-data-table.tsx` derived `last = first + rowsOnPage - 1`, mixing two
+sources that do not move together. `pageIndex` and `pageSize` come from the **URL** and move
+synchronously on a click; `rowsOnPage` is the row model's length, which under TanStack Query's
+`placeholderData` is still the **previous page's** count until the fetch lands. Paging to a short
+final page therefore rendered, for the duration of the request, a window describing rows the envelope
+says do not exist — "126–150 of 137" on the surface whose entire job is to say how much there is.
+`canNext` was derived from `last` and inherited the same skew, so it could offer a Next past the end
+or, on a shrinking page, refuse one that exists.
+
+```bash
+grep -n 'Math.min(first + rowsOnPage\|const canNext' apps/web/src/components/server-data-table.tsx
+```
+
+`last` is now clamped to `rowCount` (`:514`) — the label may be a page behind but can never be
+nonsense — and `canNext` is `(pageIndex + 1) * pageSize < rowCount` (`:516`), derived from the URL
+and the envelope total **alone**, so the placeholder window cannot reach it. The regression test
+renders a 25-row page-5 window at `page=6` against a 137-row total and asserts the string `150`
+appears nowhere in the document, which is the assertion that would have failed before.
+
+### N7 — the origin status select snapped back mid-request, and the fix deliberately did **not** make it optimistic *(CLOSED)*
+
+**This is the one that upholds an existing decision under pressure, so the reasoning is the record
+and the diff is the footnote.**
+
+`OriginStatusSelect` is fully controlled on `row.status`, and the status mutation is
+invalidate-and-re-read. So choosing "Active" re-rendered the trigger still reading "Pending" for the
+whole PATCH **plus** the refetch — a control that visibly ignores the click, on the one screen where
+the control decides whether a page on the internet may boot this widget.
+
+The obvious repair is an optimistic update, and it was **explicitly rejected**:
+
+```bash
+grep -n 'optimistic flip would claim' apps/web/src/features/bots/bot-origins.tsx   # :176-177
+grep -rn 'onMutate' apps/web/src apps/web/tests                                     # expect: nothing
+```
+
+`bot-origins.tsx:176-177` states it: an optimistic flip *"would claim one the server may have
+refused, on the control that decides whether a page on the internet can boot this widget."* There are
+**zero `onMutate` calls anywhere in `apps/web`**, and three other files record the same decision for
+their own surfaces — `features/models/model-list.tsx:64` (*"an optimistic flip would claim a write
+that may have been refused"*), `app/(admin)/sources/page.tsx:17` (deletion and disable are two-phase
+and verified), and `features/bots/bot-starter-questions.tsx:82`. The one apparent counter-example is
+not one: `features/chat/chat-surface.tsx:79`'s "optimistic user turn" is local component state
+reconciled against the server's echo by `clientMessageId`, not a query-cache write.
+
+**The fix shows in-flight *intent* with no cache write.** `changeStatus.variables` is react-query's
+own record of the argument currently in flight, so the chosen status needs **no new state** that
+could disagree with it, no cache write and no rollback path; the cache holds the server's row
+throughout, and the instant the mutation settles every trigger falls back to `row.status`. Beside it:
+a spinner (`motion-reduce:animate-none`), `aria-busy` on the trigger, and an `sr-only`
+`role="status"` live region — because `aria-busy` is announced by nothing on its own and `disabled`
+is announced as "unavailable" with no reason, so without the region the only feedback was visual.
+
+**The regression test is the argument.** It holds the PATCH open, asserts the trigger reads the
+chosen value and is busy, then **has the server refuse** — answering with the row unchanged — and
+asserts the trigger settles back to "Pending". *That assertion is impossible to write under an
+optimistic update*, which is the point: a client that had written the cache would now be claiming a
+grant the server withheld and would need a rollback path to un-claim it. The test is in
+`apps/web/tests/components/bot-publishing-panel.test.tsx`, because `BotOrigins` renders inside that
+tab.
+
+This also carries § L2's warning forward unchanged: the delete path still destroys a bot's origin
+allow-list with no record of what it permitted, and nothing here touches that.
+
+### Two of seven were wrong about the mechanism, and both were caught by measuring first
+
+The review returned seven findings and **two of them misdescribed the mechanism** — N4 entirely, N5
+in part. Neither would have been visible from the diff. N4's premise was refuted by reading
+`passesOptionalCheck()` in the installed framework rather than reasoning about rule order; N5's by
+reading `AuditLogger::sanitize()` rather than trusting the reported payload. In both cases the
+*outcome* the review asked for was still right — remove the rule, stop writing the row — and the
+*reason* was not, which is precisely the combination that survives a fix and then misleads the next
+reader, because a record written from the review's wording would have been a confident false
+statement about how Laravel validates and how this repository audits.
+
+This file already has a convention for it. § *The rulings of 2026-08-12* records that **four of nine
+rulings went a different way from the brief that asked for them, and in three the investigation
+refuted the premise**, and says why that is written down: *"a ruling recorded only as its outcome
+invites the same question next quarter."* § K1 and § M1 apply the same treatment to a reported
+finding. **The same reasoning applies to a review finding, and this section is that convention being
+extended to one**: a review is a hypothesis with a suggested fix attached, the fix can be right while
+the hypothesis is wrong, and the cheap way to tell — measuring the claim against the installed
+dependency before editing anything — is also the only way. Applying the review's wording without it
+would have produced two entries here that read as authoritative and were false.

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Requests;
 
 use App\Enums\SortDirection;
+use App\Support\Contracts\ProvidesOpenApiQueryParameters;
 use App\Support\Http\ListQuery;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -49,7 +50,7 @@ use Illuminate\Foundation\Http\FormRequest;
  * `LIKE` metacharacters itself — and what bounds it is `MAX_FILTER_LENGTH`. It searches `name` and
  * `slug`; `EloquentBotRepository::FILTERABLE` records why the prose columns are not searched.
  */
-final class IndexBotsRequest extends FormRequest
+final class IndexBotsRequest extends FormRequest implements ProvidesOpenApiQueryParameters
 {
     /**
      * The columns this endpoint permits an `ORDER BY` on. Closed, and published in this endpoint's
@@ -86,6 +87,34 @@ final class IndexBotsRequest extends FormRequest
     public function rules(): array
     {
         return ListQuery::rules(self::SORTABLE);
+    }
+
+    /**
+     * The same five parameters, published so a generated client can reach page 2.
+     *
+     * ── THE THREE VALUES ARE THE ONES `toQuery()` ALREADY PASSES ──────────────────────────────
+     *
+     * `SORTABLE`, `DEFAULT_SORT` and `SortDirection::Asc` are what `fromValidated()` is given below,
+     * so the document publishes the behaviour this endpoint actually has rather than a second
+     * opinion about it. A fourth argument — the default page size — is deliberately NOT passed:
+     * `toQuery()` does not pass one either, so both fall to `ListQuery::DEFAULT_PER_PAGE` and the
+     * published default is the applied one by construction.
+     *
+     * WITHOUT THIS, THE OPERATION PUBLISHED `organization` AND NOTHING ELSE. `DumpOpenApiCommand`
+     * derives parameters from `$route->parameterNames()`, which sees URI placeholders only — so a
+     * client generated from the document got `listBots(organization)` with no way to ask for a
+     * second page, change the sort column, or pass a filter, against an endpoint that supports all
+     * three. That is the drift direction that removes functionality with nothing reported.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public static function openApiQueryParameters(): array
+    {
+        return ListQuery::openApiQueryParameters(
+            self::SORTABLE,
+            defaultSort: self::DEFAULT_SORT,
+            defaultDirection: SortDirection::Asc,
+        );
     }
 
     /**

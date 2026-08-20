@@ -242,6 +242,60 @@ it('edits the text without touching the order', function (): void {
     ]);
 });
 
+it('writes no audit row for a PATCH naming both fields at their stored values', function (): void {
+    // Both branches of the repository's edit are VALUE comparisons rather than presence tests, so
+    // this body issues no UPDATE at all — and it still answers 200, because a no-op save is a
+    // supported shape on this surface rather than an error. What it must not do is write a
+    // `bot.starter_question.updated` row: that row is the ONLY record that a bot's suggestions
+    // moved, and one describing an edit that did not happen makes "who reordered the chips" worse
+    // to answer than not recording it.
+    //
+    // THE ROW USED TO BE WRITTEN WITH NO `changed` KEY AT ALL, which reads as an ordinary edit
+    // rather than as a vacuous one: `AuditLogger::sanitize()` drops empty strings silently, so the
+    // empty `implode(',', [])` never reached the payload. The defect was the row, not the detail.
+    $fixture = botStarterQuestionFixture();
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    $subject = $fixture['second'];
+
+    currentTest()->patchJson(
+        botStarterQuestionUrl($fixture)."/{$subject->id}",
+        ['question' => $subject->question, 'sort_order' => $subject->sort_order],
+        spaHeaders(),
+    )
+        ->assertOk()
+        ->assertJsonPath('data.question', $subject->question)
+        ->assertJsonPath('data.sort_order', $subject->sort_order);
+
+    assertDatabaseMissing('audit_logs', [
+        'operation' => AuditLogger::BOT_STARTER_QUESTION_UPDATED,
+        'subject_id' => $subject->id,
+    ]);
+
+    // THE LIST IS UNTOUCHED, which is the other half: a re-sequence that ran and produced the same
+    // order would be invisible to the assertion above and is not what happened here.
+    expect(starterQuestionOrder($fixture['botA']))->toBe([
+        'Where is my order?' => 0,
+        'How do I get a refund?' => 1,
+        'What are your opening hours?' => 2,
+    ]);
+
+    // THE POSITIVE CONTROL. Without it, an endpoint that stopped auditing entirely passes.
+    currentTest()->patchJson(
+        botStarterQuestionUrl($fixture)."/{$subject->id}",
+        ['question' => 'How do refunds work?'],
+        spaHeaders(),
+    )->assertOk();
+
+    expect(
+        AuditLog::query()
+            ->where('operation', '=', AuditLogger::BOT_STARTER_QUESTION_UPDATED)
+            ->where('subject_id', '=', $subject->id)
+            ->count(),
+    )->toBe(1);
+});
+
 it('moves a question and re-sequences the whole list, without colliding', function (
     string $subject,
     int $target,

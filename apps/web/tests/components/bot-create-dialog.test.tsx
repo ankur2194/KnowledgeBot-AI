@@ -4,6 +4,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { http, HttpResponse } from 'msw';
 import type * as NextNavigation from 'next/navigation';
 import { useEffect } from 'react';
+import { userEvent } from 'vitest/browser';
 import { render } from 'vitest-browser-react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -320,6 +321,80 @@ describe('the 422s', () => {
     await expect
       .element(dialog.getByLabelText('Handle'))
       .not.toHaveAttribute('aria-invalid', 'true');
+  });
+
+  it('reopens empty after a rejected handle is dismissed, and returns focus to the trigger', async () => {
+    /**
+     * THE REOPEN BUG, AS A REGRESSION.
+     *
+     * `useForm` and `useMutation` used to live in a component that never unmounts — only the
+     * `<Dialog>` subtree was conditional — and `form.reset()` ran on ONE of the five close paths
+     * (success). So Cancel, Escape, the overlay and the corner X all left the rejected handle and
+     * its 422 sitting in state: reopen, and the operator is looking at a slug the server has already
+     * refused, under an error banner about a request they did not just make. The obvious repair is
+     * a reset on every close path, which is four places to forget; the shape below is one place —
+     * the form body lives inside `<DialogContent>`, and Radix unmounts it.
+     *
+     * The 422 carries BOTH a rendered field (`slug`) and an unrendered one (`evidence_threshold`),
+     * so this covers the per-field message and the root banner in one dismissal.
+     */
+    worker.use(
+      http.post(botsUrl(ORG_A), () =>
+        HttpResponse.json(
+          envelope('validation', {
+            errors: {
+              slug: ['A bot with this handle already exists in this organization.'],
+              evidence_threshold: ['An evidence threshold and its scale are meaningless apart.'],
+            },
+          }),
+          { status: 422 },
+        ),
+      ),
+    );
+
+    const screen = await renderDialog();
+    const trigger = screen.getByRole('button', { name: 'Add bot' });
+    await trigger.click();
+
+    const dialog = screen.getByRole('dialog');
+    await dialog.getByLabelText('Name').fill('Support bot');
+    await dialog.getByLabelText('Handle').fill('support-bot');
+    await dialog.getByRole('button', { name: 'Save bot' }).click();
+
+    await expect
+      .element(screen.getByText('A bot with this handle already exists in this organization.'))
+      .toBeVisible();
+    await expect
+      .element(screen.getByText('An evidence threshold and its scale are meaningless apart.'))
+      .toBeVisible();
+
+    // ESCAPE, not Cancel: it is the close path with no handler of ours on it at all, so it is the
+    // one a per-path reset is likeliest to miss.
+    await userEvent.keyboard('{Escape}');
+    await vi.waitFor(() => {
+      expect(screen.getByRole('dialog').elements()).toHaveLength(0);
+    });
+
+    // FOCUS RETURNS TO THE TRIGGER, which is the primitive's job and only happens because the button
+    // is a `DialogTrigger`. Conditioning the whole `<Dialog>` on `open` removed the node Radix
+    // restores to — and the exit animation with it.
+    await vi.waitFor(() => {
+      expect(document.activeElement?.textContent).toContain('Add bot');
+    });
+
+    await trigger.click();
+    const reopened = screen.getByRole('dialog');
+    await expect.element(reopened.getByLabelText('Name')).toHaveValue('');
+    await expect.element(reopened.getByLabelText('Handle')).toHaveValue('');
+    await expect
+      .element(reopened.getByLabelText('Handle'))
+      .not.toHaveAttribute('aria-invalid', 'true');
+    expect(
+      screen.getByText('A bot with this handle already exists in this organization.').elements(),
+    ).toHaveLength(0);
+    expect(
+      screen.getByText('An evidence threshold and its scale are meaningless apart.').elements(),
+    ).toHaveLength(0);
   });
 
   it('renders a class-mapped sentence and the request id for a quota refusal', async () => {

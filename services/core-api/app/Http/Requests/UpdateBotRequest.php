@@ -147,9 +147,27 @@ final class UpdateBotRequest extends FormRequest
             // moving back to "vendor not chosen" is how an operator undoes a mistake. The pairing
             // that matters is the RESULTING one and it is checked in BotService: a body that clears
             // only the connection while a model stays stored would pass every rule here.
-            'provider_connection_id' => [
-                'bail', 'sometimes', 'nullable', 'string', 'ulid', 'required_with:provider_model_id',
-            ],
+            //
+            // NO `required_with:provider_model_id`, WHICH `StoreBotRequest` DOES CARRY, and the
+            // asymmetry is the difference between a POST and a PATCH rather than an oversight.
+            //
+            // On a create there is no stored row, so the body IS the resulting pair and a
+            // declarative rule can decide it. On an edit it cannot: the rule only ever sees the two
+            // keys the caller happened to send. Measured against the installed framework, it
+            // decided exactly one of the four shapes that reach this endpoint —
+            // `{connection: null, model: <ulid>}` — and it decided that one REDUNDANTLY, because
+            // `BotService::assertModelSelection()` refuses the same pair on the same field with a
+            // fuller message. The other three it was silent on: `{model: <ulid>}` alone never fires
+            // it at all (`sometimes` short-circuits every remaining rule for an ABSENT key, this one
+            // included — the same mechanism the `evidence_threshold` block below leaves `sometimes`
+            // off for), and `{connection: null}` alone against a bot with a model STORED — which is
+            // precisely the case its own error message described — leaves the sibling absent, so it
+            // was silent there too.
+            //
+            // One check on the RESULTING pair answers all four. It lives in `BotService`, reading
+            // the half the body did not name off the stored row through `resolved()`, and it is the
+            // only thing standing between a bot and a model row that reaches no credential.
+            'provider_connection_id' => ['bail', 'sometimes', 'nullable', 'string', 'ulid'],
             'provider_model_id' => ['bail', 'sometimes', 'nullable', 'string', 'ulid'],
 
             'answer_mode' => ['bail', 'sometimes', 'required', 'string', Rule::in(BotAnswerMode::values())],
@@ -222,9 +240,6 @@ final class UpdateBotRequest extends FormRequest
                 .'the current name alone.',
             'slug.regex' => 'A slug is lower-case letters, digits and internal hyphens — '
                 .'`support-desk`, not `Support Desk` — and it may not start or end with a hyphen.',
-            'provider_connection_id.required_with' => 'A model needs the connection it is '
-                .'registered under. Clearing the connection while keeping the model would leave the '
-                .'bot naming a model row that reaches no credential.',
             'evidence_threshold.required_with' => $pair,
             'evidence_threshold_scale.required_with' => $pair,
             'theme.array' => 'A theme carries `primary`, `accent` and `radius` and nothing else, '

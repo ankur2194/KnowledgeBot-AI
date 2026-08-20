@@ -934,6 +934,168 @@ it('leaves a PATCH that names only `name` alone, which is the shape the refusal 
     ]);
 });
 
+it('writes no `bot.updated` row for a PATCH that changes nothing, and still answers 200', function (): void {
+    // ── THE SHAPE: A WHOLE-FORM RESUBMIT ─────────────────────────────────────────────────────
+    //
+    // The console posts every field it renders on every save, so "the operator opened the settings
+    // form and pressed Save without typing" arrives here as a body naming a dozen columns at their
+    // stored values. That is a SUPPORTED request and it keeps its 200 — `BotService::update()`
+    // excludes the bot's own row from the slug-collision check for exactly this reason, so turning
+    // the no-op into a 422 would contradict a decision two lines of that method record.
+    //
+    // What it must not produce is an audit row. `bot.updated` asserts that a bot's configuration
+    // changed; §18.11 is why the row exists at all, and a trail that reports edits which never
+    // happened is wrong in the one direction nobody checks it in.
+    //
+    // NOT THE SAME CASE AS `transition()` OR `BotDomainService::changeStatus()`, both of which
+    // refuse their no-ops with a 422 and must stay that way: those requests name a lifecycle MOVE,
+    // and a move to the state you are already in is a caller who has misread the row.
+    $fixture = botCrudFixture();
+
+    $bot = $fixture['botA'];
+    $url = "/api/v1/organizations/{$fixture['orgA']->id}/bots/{$bot->id}";
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    $unchanged = [
+        'name' => $bot->name,
+        'slug' => $bot->slug,
+        'description' => $bot->description,
+        'access_mode' => $bot->access_mode->value,
+        'answer_mode' => $bot->answer_mode->value,
+        // THE FOUR RETRIEVAL KNOBS ARE IN THE BODY DELIBERATELY. They are the fields most likely to
+        // be re-sent unchanged, and `movesRetrievalConfiguration()` already refuses to bump on a
+        // named-but-unmoved knob — so a version that stayed at 1 while an audit row appeared would
+        // be two mechanisms disagreeing about whether this request was an edit.
+        'dense_top_k' => $bot->dense_top_k,
+        'sparse_top_k' => $bot->sparse_top_k,
+        'rerank_candidates' => $bot->rerank_candidates,
+        'rerank_retain' => $bot->rerank_retain,
+        'allow_general_answers' => $bot->allow_general_answers,
+    ];
+
+    currentTest()->patchJson($url, $unchanged, spaHeaders())
+        ->assertOk()
+        ->assertJsonPath('data.name', $bot->name)
+        ->assertJsonPath('data.slug', $bot->slug)
+        ->assertJsonPath('data.retrieval_configuration_version', 1);
+
+    assertDatabaseMissing('audit_logs', [
+        'operation' => AuditLogger::BOT_UPDATED,
+        'subject_id' => $bot->id,
+    ]);
+
+    // THE POSITIVE CONTROL, without which the assertion above is satisfied by an endpoint that
+    // stopped auditing altogether.
+    currentTest()->patchJson($url, ['name' => 'ALPHA actually renamed'], spaHeaders())
+        ->assertOk();
+
+    expect(
+        AuditLog::query()
+            ->where('operation', '=', AuditLogger::BOT_UPDATED)
+            ->where('subject_id', '=', $bot->id)
+            ->count(),
+    )->toBe(1, 'the no-op PATCH and the real one wrote a different number of rows than 0 and 1');
+
+    // AND A KNOB THAT REALLY MOVES STILL AUDITS, because the bump is applied by the repository
+    // itself rather than by the edit — `wasChanged()` has to see it, or a configuration change that
+    // invalidates every cached answer for this bot would leave no trace.
+    currentTest()->patchJson($url, ['dense_top_k' => $bot->dense_top_k + 1], spaHeaders())
+        ->assertOk()
+        ->assertJsonPath('data.retrieval_configuration_version', 2);
+
+    expect(
+        AuditLog::query()
+            ->where('operation', '=', AuditLogger::BOT_UPDATED)
+            ->where('subject_id', '=', $bot->id)
+            ->count(),
+    )->toBe(2);
+});
+
+it('accepts a PATCH naming only the model, and refuses the RESULTING orphan from the stored row', function (): void {
+    // ── THE RULE THAT USED TO BE HERE, AND WHY IT IS NOT ──────────────────────────────────────
+    //
+    // `UpdateBotRequest.provider_connection_id` carried `required_with:provider_model_id` until it
+    // was measured against the four shapes that actually reach this endpoint. It decided exactly
+    // one of them, redundantly, and was silent on the other three — including the one its own error
+    // message described. `sometimes` short-circuits every remaining rule for an ABSENT key, so a
+    // body naming only the model never reached it at all; and a body clearing only the connection
+    // leaves the sibling absent, so it never reached it either.
+    //
+    // What decides all four is `BotService::assertModelSelection()` against the RESULTING pair,
+    // reading the half the body did not name off the stored row. These are the two halves of that.
+    $fixture = botCrudFixture();
+
+    $second = ProviderModelEntry::factory()
+        ->recycle($fixture['orgA'])->recycle($fixture['connectionA'])
+        ->supporting(['text'])
+        ->create(['model' => 'gpt-5.2', 'display_name' => 'ALPHA second chat row']);
+
+    $bot = Bot::factory()->recycle($fixture['orgA'])
+        ->usingModel($fixture['connectionA'], $fixture['modelA'])
+        ->create(['name' => 'ALPHA configured bot', 'slug' => 'alpha-configured-bot']);
+
+    $url = "/api/v1/organizations/{$fixture['orgA']->id}/bots/{$bot->id}";
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    // A MODEL-ONLY PATCH IS A LEGITIMATE EDIT — "same vendor, different model" is the commonest
+    // change on this form, and the connection it needs is already on the row.
+    currentTest()->patchJson($url, ['provider_model_id' => $second->id], spaHeaders())
+        ->assertOk()
+        ->assertJsonPath('data.provider_model_id', $second->id)
+        ->assertJsonPath('data.provider_connection_id', $fixture['connectionA']->id);
+
+    assertDatabaseHas('bots', [
+        'id' => $bot->id,
+        'provider_model_id' => $second->id,
+        'provider_connection_id' => $fixture['connectionA']->id,
+    ]);
+
+    // CLEARING THE CONNECTION WHILE THE MODEL STAYS STORED is still refused, and the refusal is the
+    // service's — keyed on the same field, with the message that says why a model row reaches no
+    // credential without its parent. This is the shape `required_with` never saw.
+    $orphanFromStored = currentTest()
+        ->patchJson($url, ['provider_connection_id' => null], spaHeaders())
+        ->assertStatus(422)
+        ->assertJsonPath('error_class', 'validation')
+        ->assertJsonStructure(['errors' => ['provider_connection_id']]);
+
+    expect((string) $orphanFromStored->json('errors.provider_connection_id.0'))
+        ->toContain('nothing in the database refuses that row');
+
+    // AND THE SHAPE IT DID SEE, now answered by the same check rather than by a second, shorter
+    // message on the same field — two spellings of one refusal is how they drift.
+    $orphanInBody = currentTest()->patchJson(
+        $url,
+        ['provider_connection_id' => null, 'provider_model_id' => $fixture['modelA']->id],
+        spaHeaders(),
+    )
+        ->assertStatus(422)
+        ->assertJsonStructure(['errors' => ['provider_connection_id']]);
+
+    expect((string) $orphanInBody->json('errors.provider_connection_id.0'))
+        ->toContain('nothing in the database refuses that row');
+
+    // NEITHER REFUSAL WROTE ANYTHING: the stored pair is the one the accepted PATCH left.
+    assertDatabaseHas('bots', [
+        'id' => $bot->id,
+        'provider_model_id' => $second->id,
+        'provider_connection_id' => $fixture['connectionA']->id,
+    ]);
+
+    // AND CLEARING BOTH TOGETHER IS ACCEPTED — "vendor not chosen" is the first state every bot is
+    // in, so undoing a model selection must stay expressible.
+    currentTest()->patchJson(
+        $url,
+        ['provider_connection_id' => null, 'provider_model_id' => null],
+        spaHeaders(),
+    )
+        ->assertOk()
+        ->assertJsonPath('data.provider_connection_id', null)
+        ->assertJsonPath('data.provider_model_id', null);
+});
+
 it('refuses to publish a bot that could not answer, and refuses every edit to an archived one', function (): void {
     $fixture = botCrudFixture();
 

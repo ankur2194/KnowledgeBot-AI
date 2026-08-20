@@ -11,7 +11,7 @@ import {
 } from '@kb/contracts/forms';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { GlobeIcon } from 'lucide-react';
+import { GlobeIcon, LoaderIcon } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useForm } from 'react-hook-form';
 
@@ -203,6 +203,23 @@ export function BotOrigins({
   const statusError = rowError(changeStatus);
   const removeError = rowError(remove);
   const busyId = changeStatus.isPending ? changeStatus.variables?.domainId : undefined;
+  /**
+   * THE IN-FLIGHT INTENT, READ OFF THE MUTATION — NOT AN OPTIMISTIC UPDATE.
+   *
+   * `variables` is react-query's own record of the argument currently in flight, so this is the
+   * chosen status without a second piece of state that could disagree with it, without a cache
+   * write, and without a rollback path. The cache still holds the SERVER's row throughout, and the
+   * moment the mutation settles `isPending` goes false and every trigger falls back to `row.status`
+   * — so a refusal is displayed as a refusal rather than being papered over by a value we invented.
+   *
+   * What it fixes: the select is fully controlled on `row.status`, so choosing "Active" used to
+   * re-render with the trigger still reading "Pending" for the whole PATCH plus refetch. That reads
+   * as a control that ignored the click, on the one screen where the control decides whether a page
+   * on the internet may boot this widget.
+   */
+  const busyStatus = changeStatus.isPending ? changeStatus.variables?.status : undefined;
+  const busyOrigin =
+    busyId === undefined ? undefined : domains.data?.find((row) => row.id === busyId)?.origin;
 
   return (
     <section aria-labelledby="bot-origins-heading" className="flex flex-col gap-3">
@@ -256,6 +273,19 @@ export function BotOrigins({
       {/* The two row mutations' failures, rendered in the SECTION rather than in a row: the delete's
           dialog has already closed, and the status change's row may have been re-read away. Both
           are `role="alert"` through `<Alert>`. */}
+      {/* THE IN-FLIGHT SENTENCE, and it is a separate channel from the spinner rather than a
+          duplicate of it. `aria-busy` on a trigger is not announced by any screen reader on its own,
+          and `disabled` is announced as "unavailable" with no reason — so without this the only
+          feedback for a promotion in flight is a visual one. `role="status"` is polite: it is read
+          after whatever the operator's selection already announced, and it is empty the rest of the
+          time so nothing is re-announced when the row settles. The failure is a separate
+          `role="alert"` below; success is the re-read row itself. */}
+      <p role="status" className="sr-only">
+        {busyStatus === undefined
+          ? ''
+          : `Setting ${busyOrigin ?? 'this origin'} to ${botDomainStatusDisplay(busyStatus).label}…`}
+      </p>
+
       {statusError === null ? null : (
         <Alert variant="destructive">
           <AlertTitle>That origin&apos;s status did not change</AlertTitle>
@@ -319,7 +349,7 @@ export function BotOrigins({
                         {canManage ? (
                           <OriginStatusSelect
                             row={row}
-                            disabled={busyId === row.id}
+                            pendingStatus={busyId === row.id ? busyStatus : undefined}
                             onChange={(status) => changeStatus.mutate({ domainId: row.id, status })}
                           />
                         ) : (
@@ -382,7 +412,7 @@ export function BotOrigins({
                   {canManage ? (
                     <OriginStatusSelect
                       row={row}
-                      disabled={busyId === row.id}
+                      pendingStatus={busyId === row.id ? busyStatus : undefined}
                       onChange={(status) => changeStatus.mutate({ domainId: row.id, status })}
                     />
                   ) : (
@@ -472,17 +502,24 @@ function PermitsEmbedding({ row }: { readonly row: BotDomainResource }) {
  */
 function OriginStatusSelect({
   row,
-  disabled,
+  pendingStatus,
   onChange,
 }: {
   readonly row: BotDomainResource;
-  readonly disabled: boolean;
+  /**
+   * The status this row's PATCH is currently carrying, or `undefined` when nothing is in flight for
+   * it. It is DISPLAY ONLY and lives for exactly the duration of the request: the cache is never
+   * written, so whatever the server answers — including a refusal — is what ends up on screen.
+   */
+  readonly pendingStatus?: BotDomainStatusOut['status'];
   readonly onChange: (status: BotDomainStatusOut['status']) => void;
 }) {
+  const busy = pendingStatus !== undefined;
+
   return (
     <Select
-      value={row.status}
-      disabled={disabled}
+      value={pendingStatus ?? row.status}
+      disabled={busy}
       onValueChange={(next) => {
         // Narrowed against the declared tuple rather than cast: Radix hands `onValueChange` a bare
         // string, and a cast would let a typo'd `SelectItem` value reach a PATCH body as a status
@@ -493,7 +530,19 @@ function OriginStatusSelect({
         onChange(target);
       }}
     >
-      <SelectTrigger aria-label={`Allow-list status for ${row.origin}`} className="w-44">
+      {/* `aria-label` IS LOAD-BEARING AND ITS WORDING IS FIXED — role-name matching is a
+          case-insensitive SUBSTRING in both Playwright and vitest-browser, so this string is chosen
+          to neither contain nor be contained by the lifecycle select's name on the same tab.
+          `aria-busy` is the machine-readable half of the spinner; the sentence a screen reader
+          actually hears is the section's live region, because a busy trigger is not announced. */}
+      <SelectTrigger
+        aria-label={`Allow-list status for ${row.origin}`}
+        aria-busy={busy}
+        className="w-44"
+      >
+        {busy ? (
+          <LoaderIcon aria-hidden className="size-4 animate-spin motion-reduce:animate-none" />
+        ) : null}
         <SelectValue />
       </SelectTrigger>
       <SelectContent>

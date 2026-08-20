@@ -92,8 +92,7 @@
             "sometimes",
             "nullable",
             "string",
-            "ulid",
-            "required_with:provider_model_id"
+            "ulid"
         ],
         "provider_model_id": [
             "bail",

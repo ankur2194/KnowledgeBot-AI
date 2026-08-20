@@ -146,7 +146,13 @@ interface BotRepositoryInterface
      * whole form on every save would otherwise mint a new configuration identity on every keystroke
      * pass, invalidating every cached answer for a configuration that did not move.
      *
-     * @param  Closure(Bot): void  $audit  invoked inside the transaction
+     * @param  Closure(Bot): void  $audit  invoked inside the transaction, and ONLY when the save
+     *                                     genuinely changed the row. A PATCH whose every value
+     *                                     equals what is stored — the shape a whole-form resubmit
+     *                                     produces, and one this endpoint deliberately accepts —
+     *                                     issues no UPDATE and must not leave a `bot.updated` row
+     *                                     asserting an edit that did not happen. The implementation
+     *                                     records why the predicate is `wasChanged()`.
      * @return Bot|null null when no such bot exists in THIS organization
      */
     public function update(

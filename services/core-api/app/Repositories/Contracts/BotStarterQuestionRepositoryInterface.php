@@ -88,7 +88,13 @@ interface BotStarterQuestionRepositoryInterface
      *                                                                 with the updated row, a
      *                                                                 comma-joined list of the
      *                                                                 fields that CHANGED, and the
-     *                                                                 list length
+     *                                                                 list length. NOT INVOKED AT
+     *                                                                 ALL when that list is empty:
+     *                                                                 a PATCH naming both fields at
+     *                                                                 their stored values writes
+     *                                                                 nothing, and an audit row for
+     *                                                                 it would describe an edit
+     *                                                                 that did not happen.
      * @return BotStarterQuestion|null null when no such question exists on this bot in this
      *                                 organization
      */

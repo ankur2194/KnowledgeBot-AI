@@ -453,6 +453,14 @@ const thresholdWithinScale = (value: EvidenceAndModelSelection, ctx: z.Refinemen
  * `provider_connection_id` is `required_with:provider_model_id` — ONE DIRECTION ONLY, and the
  * asymmetry is the content of the rule.
  *
+ * IT IS `StoreBotRequest`'S RULE AND NOT `UpdateBotRequest`'S, which is why `crossField` below is
+ * split in two. On a create the body IS the resulting pair, so a declarative rule can decide it. On
+ * a PATCH it cannot — the rule only ever sees the keys the caller sent — so the server dropped it
+ * and `BotService::assertModelSelection()` decides the RESULTING pair alone, reading the half the
+ * body did not name off the stored row. Mirroring it on the settings schema anyway would make this
+ * package refuse a body the server accepts, which is the drift the probe harness reports as
+ * "form blocks input the server accepts".
+ *
  * A connection with no model is a real and common state: "I have chosen the vendor, not the model
  * yet". Both columns are nullable with `MATCH SIMPLE` foreign keys precisely so a half-configured
  * draft is expressible. A MODEL with no connection is not a state at all — a `provider_models` row
@@ -477,11 +485,24 @@ const modelNeedsConnection = (value: EvidenceAndModelSelection, ctx: z.Refinemen
   });
 };
 
-const crossField = (value: EvidenceAndModelSelection, ctx: z.RefinementCtx): void => {
+/**
+ * The refinements BOTH requests declare. `evidence_threshold` and its scale are `required_with` each
+ * other on the POST and on the PATCH alike — that pair is genuinely decidable from the body, because
+ * neither half means anything without the other whatever is stored.
+ */
+const crossFieldShared = (value: EvidenceAndModelSelection, ctx: z.RefinementCtx): void => {
   evidencePair(value, ctx);
   thresholdWithinScale(value, ctx);
+};
+
+/** POST. `StoreBotRequest` carries `required_with:provider_model_id`; see `modelNeedsConnection`. */
+const crossFieldCreate = (value: EvidenceAndModelSelection, ctx: z.RefinementCtx): void => {
+  crossFieldShared(value, ctx);
   modelNeedsConnection(value, ctx);
 };
+
+/** PATCH. `UpdateBotRequest` does not, and the settings schema must not either. */
+const crossFieldSettings = crossFieldShared;
 
 /**
  * The fields both requests declare identically. Spread into both schemas rather than expressed as
@@ -553,7 +574,7 @@ export const botCreateSchema = z
     slug,
     ...sharedBotFields,
   })
-  .superRefine(crossField);
+  .superRefine(crossFieldCreate);
 
 export type BotCreateIn = z.input<typeof botCreateSchema>;
 export type BotCreateOut = z.output<typeof botCreateSchema>;
@@ -578,7 +599,7 @@ export const botSettingsSchema = z
      */
     ...sharedBotFields,
   })
-  .superRefine(crossField);
+  .superRefine(crossFieldSettings);
 
 export type BotSettingsIn = z.input<typeof botSettingsSchema>;
 export type BotSettingsOut = z.output<typeof botSettingsSchema>;

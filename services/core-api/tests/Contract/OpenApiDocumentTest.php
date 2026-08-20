@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 use App\Enums\BotDomainStatus;
 use App\Enums\EvidenceThresholdScale;
+use App\Enums\SortDirection;
 use App\Exceptions\KbException;
+use App\Http\Requests\IndexBotsRequest;
 use App\Http\Resources\BotCollectionResource;
 use App\Http\Resources\BotDomainCollectionResource;
 use App\Http\Resources\BotDomainResource;
@@ -1200,6 +1202,134 @@ it('names no credential anywhere in the document', function (): void {
         expect((bool) preg_match('/^(credential|api_key|apiKey|secret|token|password|ciphertext|kek)/i', $fragment))
             ->toBeFalse("the published document names a credential-shaped schema key: {$fragment}");
     }
+});
+
+// ── query parameters: the half `$route->parameterNames()` cannot see ──────────────────────────────
+
+it('publishes all five list-query parameters on the bots index, not just the path one', function (): void {
+    // ── WHAT THIS IS THE ABSENCE OF ──────────────────────────────────────────────────────────
+    //
+    // `DumpOpenApiCommand::parameters()` derived its whole output from `$route->parameterNames()`,
+    // which returns URI PLACEHOLDERS and nothing else, and hard-coded `in: path`. So the first
+    // endpoint in this API with a query string published `organization` alone: a generated client
+    // got `listBots(organization)` with no way to ask for page 2, choose a sort column, or pass a
+    // filter — against an endpoint that validates and honours all five. Functionality removed with
+    // nothing reported, which is the drift direction this file exists to catch.
+    //
+    // THE VALUES ARE ASSERTED AGAINST `ListQuery`'S OWN CONSTANTS AND `IndexBotsRequest::SORTABLE`,
+    // never against literals. A published `maximum: 100` that stopped matching `MAX_PER_PAGE` would
+    // be a document describing a ceiling the server does not enforce, and a hard-coded 100 here
+    // would agree with the document while both were wrong.
+    $document = dumpDocument()['document'];
+    $paths = $document['paths'] ?? null;
+
+    assert(is_array($paths));
+
+    $parameters = $paths['/api/v1/organizations/{organization}/bots']['get']['parameters'] ?? null;
+
+    assert(is_array($parameters));
+
+    /** @var array<string, array<string, mixed>> $byName */
+    $byName = [];
+
+    foreach ($parameters as $parameter) {
+        assert(is_array($parameter) && is_string($parameter['name'] ?? null));
+        $byName[$parameter['name']] = $parameter;
+    }
+
+    // ORDER AND NAMES TOGETHER. The path parameter stays FIRST — the committed document is compared
+    // byte for byte, so an implementation that prepended the query half would rewrite an operation
+    // that did not change.
+    expect(array_column($parameters, 'name'))
+        ->toBe(['organization', 'page', 'per_page', 'sort', 'dir', 'filter'])
+        // …and every name appears once. A declared parameter colliding with a URI placeholder would
+        // publish the name twice, which most generators resolve by silently keeping one.
+        ->and(array_keys($byName))->toHaveCount(count($parameters));
+
+    // THE PATH PARAMETER IS UNTOUCHED, asserted as a whole object rather than field by field: this
+    // change must be purely additive to it.
+    expect($byName['organization'])->toBe([
+        'name' => 'organization',
+        'in' => 'path',
+        'required' => true,
+        'schema' => ['type' => 'string'],
+        'description' => 'ULID of the organization. The tenant scope for everything below this path; a '
+            .'value the caller is not a current member of is denied, never served.',
+    ]);
+
+    foreach (['page', 'per_page', 'sort', 'dir', 'filter'] as $name) {
+        expect($byName[$name]['in'] ?? null)->toBe('query', "{$name} is not published as a query parameter")
+            // `required: false` WRITTEN OUT rather than left to OpenAPI's default, for the reason
+            // `securityFor()` gives about an omitted `security` key: silence is indistinguishable
+            // from a generator that never asked.
+            ->and($byName[$name]['required'] ?? null)->toBe(false, "{$name} does not state `required`")
+            ->and($byName[$name]['description'] ?? null)->toBeString();
+    }
+
+    // THE BOUNDS AND THE DEFAULTS, from the constants the rules read.
+    expect($byName['page']['schema'] ?? null)
+        ->toBe(['type' => 'integer', 'minimum' => 1, 'default' => 1]);
+
+    expect($byName['per_page']['schema'] ?? null)->toBe([
+        'type' => 'integer',
+        'minimum' => 1,
+        'maximum' => ListQuery::MAX_PER_PAGE,
+        'default' => ListQuery::DEFAULT_PER_PAGE,
+    ]);
+
+    // THE ENUM IS THE ENDPOINT'S OWN CLOSED SET, not a shared vocabulary: `sort` reaches an
+    // `ORDER BY`, and a document publishing a column this endpoint does not permit would invite a
+    // client to send a value that 422s.
+    expect($byName['sort']['schema'] ?? null)->toBe([
+        'type' => 'string',
+        'enum' => IndexBotsRequest::SORTABLE,
+        'default' => IndexBotsRequest::DEFAULT_SORT,
+    ]);
+
+    expect($byName['dir']['schema'] ?? null)->toBe([
+        'type' => 'string',
+        'enum' => SortDirection::values(),
+        'default' => SortDirection::Asc->value,
+    ]);
+
+    expect($byName['filter']['schema'] ?? null)
+        ->toBe(['type' => 'string', 'maxLength' => ListQuery::MAX_FILTER_LENGTH]);
+});
+
+it('publishes query parameters only where a request declares them', function (): void {
+    // THE OTHER DIRECTION, and the one a single-endpoint assertion cannot see: a `parameters()` that
+    // appended the list-query block to every operation would satisfy the test above and would put
+    // `page` on `POST …/bots`. Only requests implementing `ProvidesOpenApiQueryParameters` may
+    // contribute, and `IndexBotsRequest` is currently the only one — Phases C4, D and E2 are
+    // expected to add more, which is why this asserts the RULE rather than the count.
+    $document = dumpDocument()['document'];
+    $paths = $document['paths'] ?? null;
+
+    assert(is_array($paths));
+
+    $withQuery = [];
+
+    foreach ($paths as $path => $operations) {
+        assert(is_array($operations));
+
+        foreach ($operations as $verb => $operation) {
+            assert(is_array($operation));
+
+            foreach ($operation['parameters'] ?? [] as $parameter) {
+                assert(is_array($parameter));
+
+                if (($parameter['in'] ?? null) === 'query') {
+                    $withQuery[] = strtoupper((string) $verb).' '.$path;
+                    break;
+                }
+            }
+        }
+    }
+
+    // PINNED BY NAME AND NOT COUNTED (D29): a count says "expected 1, got 2" and a deliberate new
+    // paginated list fails identically to the block leaking onto an operation that never asked.
+    expect(array_values(array_unique($withQuery)))
+        ->toBe(['GET /api/v1/organizations/{organization}/bots']);
 });
 
 it('is byte-identical across two runs and --check is a real gate', function (): void {

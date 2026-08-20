@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
+use App\Support\Contracts\ProvidesOpenApiQueryParameters;
 use App\Support\Contracts\ProvidesOpenApiSchema;
 use App\Support\Contracts\ResponseShape;
 use App\Support\Kb\ErrorTaxonomy;
 use Illuminate\Console\Command;
+use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Routing\Route;
 use Illuminate\Routing\Router;
 use Illuminate\Support\Str;
@@ -378,6 +380,23 @@ final class DumpOpenApiCommand extends Command
     }
 
     /**
+     * ── PATH PARAMETERS FIRST, ALWAYS, AND THEN THE QUERY STRING ──────────────────────────────
+     *
+     * The path half is derived from `$route->parameterNames()`, which sees URI placeholders and
+     * nothing else. That was the WHOLE of this method until `admin.bots.index` — the first endpoint
+     * in this API whose FormRequest validates a query string rather than a body — published
+     * `organization` and nothing else, leaving a generated client with no way to reach page 2, pick
+     * a sort column, or pass a filter against an endpoint that supports all three.
+     *
+     * The query half is DECLARED by the request rather than derived from its rules, and
+     * `ProvidesOpenApiQueryParameters` records the two reasons that is not a shortcut: a dumped rule
+     * set spells a closed set as `in:"id","name",…` with embedded quotes, and it cannot express a
+     * default at all. Deriving would mean parsing Laravel's rule serialization to publish half the
+     * facts.
+     *
+     * THE ORDER AND SHAPE OF THE PATH ENTRIES IS LOAD-BEARING: the committed document is compared
+     * byte for byte, so query parameters are APPENDED and nothing above them moves.
+     *
      * @return list<array<string, mixed>>
      */
     private function parameters(Route $route): array
@@ -400,6 +419,14 @@ final class DumpOpenApiCommand extends Command
             ];
         }
 
+        $request = $this->formRequestClass($route);
+
+        if ($request !== null && is_subclass_of($request, ProvidesOpenApiQueryParameters::class)) {
+            foreach ($request::openApiQueryParameters() as $parameter) {
+                $parameters[] = $parameter;
+            }
+        }
+
         return $parameters;
     }
 
@@ -408,6 +435,34 @@ final class DumpOpenApiCommand extends Command
      * null when the action takes no FormRequest.
      */
     private function requestRulesManifest(Route $route): ?string
+    {
+        $request = $this->formRequestClass($route);
+
+        if ($request === null) {
+            return null;
+        }
+
+        return '../rules/'.(new ReflectionClass($request))->getShortName().'.json';
+    }
+
+    /**
+     * The FormRequest an action type-hints, or null when it takes none.
+     *
+     * ── ONE DISCOVERY FOR TWO CALL SITES ──────────────────────────────────────────────────────
+     *
+     * `parameters()` asks whether the request describes a query string; `requestRulesManifest()`
+     * asks where its dumped rules live. Both questions start with "which FormRequest does this
+     * action take", and two reflections walking the same parameter list are two chances to disagree
+     * about it — one endpoint publishing a rules pointer while publishing no query parameters, for a
+     * request that declares both, would look exactly like a request that declares neither.
+     *
+     * FIRST MATCH WINS, which is the pre-existing behaviour restated rather than a new rule: an
+     * action takes at most one FormRequest, because a second would be resolved and validated by the
+     * container too and the first 422 would decide the response.
+     *
+     * @return class-string<FormRequest>|null
+     */
+    private function formRequestClass(Route $route): ?string
     {
         $controller = $route->getControllerClass();
         $method = $this->actionMethod($route);
@@ -425,8 +480,9 @@ final class DumpOpenApiCommand extends Command
 
             $class = $type->getName();
 
-            if (is_subclass_of($class, \Illuminate\Foundation\Http\FormRequest::class)) {
-                return '../rules/'.(new ReflectionClass($class))->getShortName().'.json';
+            if (is_subclass_of($class, FormRequest::class)) {
+                /** @var class-string<FormRequest> $class */
+                return $class;
             }
         }
 

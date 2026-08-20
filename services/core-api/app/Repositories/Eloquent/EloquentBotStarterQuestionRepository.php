@@ -122,6 +122,25 @@ final class EloquentBotStarterQuestionRepository implements BotStarterQuestionRe
                 // the 200 body would report the position the caller asked to move away from.
                 $subject->refresh();
 
+                // ── NO WRITE, NO AUDIT ROW ──────────────────────────────────────────────────
+                //
+                // Both branches above are VALUE comparisons rather than presence tests, so a PATCH
+                // naming both fields at their stored values — the shape an editor produces when the
+                // operator opens a row and saves it unchanged — reaches here having issued no
+                // UPDATE at all. It still returns 200 and the refreshed row, which is right: this
+                // endpoint deliberately does not refuse a no-op edit, for the same reason
+                // `BotService::update()` excludes a bot's own row from the slug-collision check.
+                // What it must not do is write a `bot.starter_question.updated` row describing an
+                // edit that did not happen.
+                //
+                // `$changed === []` AND NOT AN EMPTY `changed` DETAIL. `AuditLogger::sanitize()`
+                // drops empty strings, so the row this used to write did not even carry the field
+                // that would have shown it was vacuous — it read as an ordinary edit with the key
+                // simply absent. The defect was the row existing, not its payload.
+                if ($changed === []) {
+                    return $subject;
+                }
+
                 $audit($subject, implode(',', $changed), count($rows));
 
                 return $subject;

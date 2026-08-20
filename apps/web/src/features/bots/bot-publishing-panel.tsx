@@ -52,6 +52,12 @@ import {
   updateBotStatus,
 } from './api';
 import { useBotEditor, useBotSave, useUnsavedBotEdits } from './bot-editor-context';
+// The Model tab's helpers, imported rather than re-declared. All four fields below are a
+// `z.preprocess`, so `field.value` is `unknown` at the control (`asFieldText`) and the raw DOM
+// string must be mapped back to what the SERVER would read before it enters form state
+// (`numericFieldValue` / `clearableFieldValue`) — otherwise `'60' !== 60` and the tab is dirty
+// forever. This file used to carry private copies that did the first half and not the second.
+import { asFieldText, clearableFieldValue, numericFieldValue } from './bot-model-shared';
 import { BotOrigins } from './bot-origins';
 
 /**
@@ -367,28 +373,6 @@ function LifecycleCard({ onDirtyChange }: { readonly onDirtyChange: (dirty: bool
 }
 
 /**
- * `unknown` -> the string a number input shows.
- *
- * `nullableIntField` is a `z.preprocess`, so the schema's INPUT type for all three numeric fields
- * is `unknown` and `<Input value={unknown}>` does not typecheck. `asText` cannot be reused: it
- * returns `''` for a number, which would blank a seeded limit on first render and then post `null`
- * — silently clearing a limit nobody touched.
- *
- * The `''` for null/undefined is what keeps the input CONTROLLED across a `form.reset()`, and it is
- * also the value the preprocess maps back to `null`, so "cleared" survives the round trip as the
- * intention it is rather than as a zero.
- */
-function numberText(value: unknown): string {
-  if (typeof value === 'number') return Number.isNaN(value) ? '' : String(value);
-  return typeof value === 'string' ? value : '';
-}
-
-/** The same for `clearableText`, whose input type is `unknown` for the identical reason. */
-function clearableTextValue(value: unknown): string {
-  return typeof value === 'string' ? value : '';
-}
-
-/**
  * THE SIX-FIELD SAVE — `useBotSave(form, BOT_PUBLISHING_FIELDS)` and nothing outside the tuple.
  *
  * `botSettingsSchema` mirrors a PATCH: every field is optional, so a form seeded with one tuple
@@ -505,8 +489,10 @@ function ReachAndRetentionCard({
                           name={field.name}
                           ref={field.ref}
                           onBlur={field.onBlur}
-                          value={numberText(field.value)}
-                          onChange={(event) => field.onChange(event.currentTarget.value)}
+                          value={asFieldText(field.value)}
+                          onChange={(event) => {
+                            field.onChange(numericFieldValue(event.target.value, null));
+                          }}
                           placeholder="No limit"
                         />
                       </FormControl>
@@ -533,8 +519,10 @@ function ReachAndRetentionCard({
                           name={field.name}
                           ref={field.ref}
                           onBlur={field.onBlur}
-                          value={numberText(field.value)}
-                          onChange={(event) => field.onChange(event.currentTarget.value)}
+                          value={asFieldText(field.value)}
+                          onChange={(event) => {
+                            field.onChange(numericFieldValue(event.target.value, null));
+                          }}
                           placeholder="No limit"
                         />
                       </FormControl>
@@ -564,8 +552,10 @@ function ReachAndRetentionCard({
                         name={field.name}
                         ref={field.ref}
                         onBlur={field.onBlur}
-                        value={numberText(field.value)}
-                        onChange={(event) => field.onChange(event.currentTarget.value)}
+                        value={asFieldText(field.value)}
+                        onChange={(event) => {
+                          field.onChange(numericFieldValue(event.target.value, null));
+                        }}
                         placeholder="Keep indefinitely"
                       />
                     </FormControl>
@@ -624,7 +614,13 @@ function ReachAndRetentionCard({
                       <FormControl>
                         <Textarea
                           {...field}
-                          value={clearableTextValue(field.value)}
+                          value={asFieldText(field.value)}
+                          // `clearableText` maps blank -> `null`, so a type-and-delete has to land
+                          // on `null` too. Writing the raw `''` would leave `'' !== null` against a
+                          // stored null and arm the tab guard on a form nobody edited.
+                          onChange={(event) => {
+                            field.onChange(clearableFieldValue(event.target.value));
+                          }}
                           rows={3}
                           placeholder="We store your name and email so we can follow up on this conversation."
                         />

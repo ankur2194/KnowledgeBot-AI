@@ -405,6 +405,55 @@ describe('the six-field save', () => {
     expect(firstBody(bodies).rate_limit_per_minute).toBeNull();
   });
 
+  it('disarms the tab guard when a limit is typed back to the value the bot stores', async () => {
+    /**
+     * THE PERMANENTLY-DIRTY BUG, AS A REGRESSION.
+     *
+     * `formState.isDirty` compares form state against `defaultValues` — BEFORE the resolver, so the
+     * schema's preprocess never sees it. `botPanelDefaults` seeds these three from the resource as
+     * NUMBERS, so a control writing the raw DOM string left `'60'` against a stored `60`, and
+     * `'60' !== 60`. The panel then reported unsaved edits forever and the shell asked "Leave
+     * without saving?" on a form holding exactly the stored row — which teaches an operator to click
+     * through the one dialog that exists to stop them losing work.
+     *
+     * The positive control comes first deliberately: without it a broken `reportUnsaved` wiring
+     * would make the second half pass for the wrong reason.
+     */
+    const screen = await renderPanel({ ...BOT, rate_limit_per_minute: 60 });
+    const field = screen.getByLabelText('Messages per minute');
+
+    await field.fill('90');
+    await vi.waitFor(() => {
+      expect(reportUnsaved).toHaveBeenLastCalledWith('publishing', true);
+    });
+
+    await field.fill('60');
+    // LAST call, not "never called with true": `fill` clears before it types, and a momentarily
+    // empty control genuinely IS an edit (null against a stored 60). What must be true is where it
+    // COMES TO REST.
+    await vi.waitFor(() => {
+      expect(reportUnsaved).toHaveBeenLastCalledWith('publishing', false);
+    });
+  });
+
+  it('disarms the tab guard when a cleared disclosure returns to the stored null', async () => {
+    // The same defect in text form. `clearableText` maps blank to `null` — that is what
+    // `ConvertEmptyStringsToNull` does server-side before any rule runs — so a control writing the
+    // raw `''` leaves `'' !== null` against a bot that has never had a disclosure.
+    const screen = await renderPanel();
+    const field = screen.getByLabelText('Disclosure shown before the first message');
+
+    await field.fill('We store your name.');
+    await vi.waitFor(() => {
+      expect(reportUnsaved).toHaveBeenLastCalledWith('publishing', true);
+    });
+
+    await field.fill('');
+    await vi.waitFor(() => {
+      expect(reportUnsaved).toHaveBeenLastCalledWith('publishing', false);
+    });
+  });
+
   it('lets the consent pairing arrive as the server’s 422 rather than blocking the request', async () => {
     const attempts: Record<string, unknown>[] = [];
     worker.use(
@@ -545,6 +594,68 @@ describe('the origin allow-list', () => {
     // have refused on the control that decides whether a page on the internet can boot this widget.
     await expect
       .element(screen.getByText('A widget on this origin may boot.').first())
+      .toBeVisible();
+  });
+
+  it('shows the chosen status while the PATCH is in flight, and the server’s answer once it lands', async () => {
+    /**
+     * IN-FLIGHT INTENT, NOT AN OPTIMISTIC UPDATE, and the difference is the whole point of this
+     * spec — the fixture below REFUSES the promotion and answers with the row unchanged.
+     *
+     * The select is controlled on `row.status`, so before this fix picking "Active" re-rendered the
+     * trigger still reading "Pending" for the whole PATCH plus refetch: a control that visibly
+     * ignores the click, on the one screen where the control decides whether a page on the internet
+     * may boot this widget. What is rendered instead comes from `changeStatus.variables` — the
+     * mutation's own record of the argument in flight. No `onMutate`, no `setQueryData`, no
+     * rollback: the cache holds the server's row throughout, which is why the assertion after the
+     * release can be "Pending" and mean something.
+     */
+    const rows = [PENDING_ROW];
+    useDomains(rows);
+
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    worker.use(
+      http.patch(domainUrl(PENDING_ROW.id), async () => {
+        await held;
+        // THE SERVER REFUSES — the row comes back exactly as it was. A client that had written the
+        // cache optimistically would now have to roll back; this one has nothing to undo.
+        return HttpResponse.json({ data: PENDING_ROW });
+      }),
+    );
+
+    const screen = await renderPanel();
+    const trigger = screen
+      .getByRole('combobox', { name: `Allow-list status for ${PENDING_ROW.origin}` })
+      .first();
+
+    await choose(screen, `Allow-list status for ${PENDING_ROW.origin}`, 'Active');
+
+    // IN FLIGHT: the trigger reads the chosen value and is marked busy.
+    await expect.element(trigger).toHaveAttribute('aria-busy', 'true');
+    await expect.element(trigger).toHaveTextContent('Active');
+    // `aria-busy` is announced by nothing on its own and `disabled` is announced as "unavailable"
+    // with no reason, so the sentence a screen reader actually gets is the section's live region.
+    await vi.waitFor(() => {
+      expect(document.body.textContent).toContain(
+        `Setting ${PENDING_ROW.origin} to Active`,
+      );
+    });
+
+    release();
+
+    // SETTLED: the re-read row is still pending, and that is what is displayed. A UI that had
+    // flipped locally would now be claiming a grant the server withheld.
+    await vi.waitFor(() => {
+      expect(document.body.textContent).not.toContain('Setting ');
+    });
+    await expect.element(trigger).toHaveAttribute('aria-busy', 'false');
+    await expect.element(trigger).toHaveTextContent('Pending');
+    await expect
+      .element(screen.getByText('A widget on this origin is refused.').first())
       .toBeVisible();
   });
 
