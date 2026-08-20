@@ -27,10 +27,14 @@ use Illuminate\Support\Facades\Gate;
  * "already processed" — correct for a retry, and exactly wrong for a button labelled Reprocess.
  *
  * TWO CALLS THEREFORE COST TWO RUNS, and that is the honest reading of the button rather than an
- * oversight. What it must not cost is two runs of the SAME dispatch: `SubmitIngestionJob` is
- * `ShouldBeUniqueUntilProcessing` keyed on `(organization, source)`, so a double-click collapses
- * while the first is still queued, and every item is re-stamped with the new job id so the older
- * run's callbacks are ignored outright rather than merely ordered.
+ * oversight. WHAT REFUSES THE DOUBLE-PRESS IS THE TRANSITION TABLE, NOT THE QUEUE: `queued ->
+ * queued` is not an edge of `SourceState::transitionTable()`, so the second press is a 422 naming
+ * the field. `SubmitIngestionJob` is `ShouldBeUniqueUntilProcessing` keyed on `(organization, job
+ * id)` and deliberately NOT on the source — `SubmitIngestionJob::uniqueId()` records the
+ * measurement, that keying it on the source made a second legitimate dispatch a silent drop — so
+ * what the queue collapses is one dispatch delivered twice, and nothing else. Every item is
+ * re-stamped with the new job id besides, so the older run's callbacks are ignored outright rather
+ * than merely ordered.
  *
  * ── AND THIS IS WHY THE ENDPOINT DOES NOT HONOUR `Idempotency-Key` ───────────────────────────
  *

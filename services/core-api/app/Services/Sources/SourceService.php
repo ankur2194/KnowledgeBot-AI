@@ -36,20 +36,38 @@ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
  * requires destructive operations audited; on this surface the case extends to a DISABLE, because
  * "who turned this source off" is a question with real consequences and nothing else records it.
  *
- * ── C3's HEADLINE REQUIREMENT: DISABLE IS IMMEDIATE ───────────────────────────────────────────
+ * ── C3's HEADLINE REQUIREMENT: DISABLE, AND WHICH HALF OF IT IS ACTUALLY WIRED ────────────────
  *
- * `disable()` moves the source to `SourceState::Disabled` and returns. That single column change is
- * the whole exclusion, and it is exclusion at query time rather than a purge: `source_status` is
- * matched positively against `['ready','ready_with_warnings']` in every tenant filter, so a source
- * in any other state is unreachable by construction — `kb-tenancy-isolation` NN5 spells out that a
- * `match` condition is not satisfied by a point that lacks the value, which is what makes a
- * positive filter fail closed. NOTHING IS DELETED and no job has to succeed first: every vector is
- * retained, which is what makes re-enabling a metadata write.
+ * `disable()` moves the source to `SourceState::Disabled` and returns. THAT COLUMN IS THE DURABLE
+ * HALF, AND IT IS THE ONLY HALF THIS SERVICE WRITES — this docblock claimed it was the whole
+ * exclusion and that claim did not survive being checked against the other side of the seam.
+ * PostgreSQL is the source of truth and it now records the intent; NOTHING IS DELETED and no job
+ * has to succeed first, so every vector is retained and re-enabling stays a metadata write.
  *
- * The one thing that could still answer after a disable is a CACHED ANSWER, and it cannot, for a
- * reason that lives in another file: `valkey-keyspaces` keys `ans:` on a fingerprint of the
- * RESOLVED retrieval scope — the set of source versions this bot may search right now — so a
- * disable changes the key rather than requiring a purge that somebody has to remember.
+ * THE RETRIEVAL-SCOPE HALF IS OWED. `source_status` matched positively against
+ * `['ready','ready_with_warnings']` is the right mechanism, and `kb-tenancy-isolation` NN5 is why
+ * that direction matters — a `match` condition is not satisfied by a point that lacks the value,
+ * so a positive filter fails closed. But `source_status` is a QDRANT PAYLOAD FIELD WRITTEN AT
+ * UPSERT TIME (`services/ai-service/app/ingestion/indexing/upserter.py`, which says so itself and
+ * adds that "re-enabling is a payload write rather than a re-ingest"), and this path issues no
+ * payload write and dispatches no job that would. The other mechanism that could carry a disable —
+ * the resolved `allowed_version_ids` set Laravel is meant to compute from `bot_source_assignments`
+ * joined to `knowledge_sources` and `source_versions` and ship in the config snapshot, which is
+ * what makes a disable take effect AT ONCE without touching any payload — does not exist in this
+ * service either. The only thing here that takes that set,
+ * `SparseCorpusStatisticsRepositoryInterface`, receives it as an argument from a caller nobody has
+ * written.
+ *
+ * IT IS LATENT AND NOT LIVE, which is why `disable()` and `enable()` carry a TODO rather than this
+ * class carrying a defect: there is no chat path in this repository, so nothing can read a stale
+ * payload today. It goes live with the first one, and the failure shape is the silent one — a
+ * disabled source answering at normal latency with a well-formed citation and an HTTP 200.
+ *
+ * THE CACHED ANSWER CARRIES THE SAME QUALIFICATION. `valkey-keyspaces` keys `ans:` on a fingerprint
+ * of the RESOLVED retrieval scope — the set of source versions this bot may search right now — so
+ * a disable changes the key rather than requiring a purge somebody has to remember. That is the
+ * design and it is sound; the fingerprint is computed from the same unresolved set, and there is no
+ * answer cache here yet to key.
  *
  * ── THE STATE MACHINE IS ASKED, NEVER RE-IMPLEMENTED ──────────────────────────────────────────
  *
@@ -263,11 +281,24 @@ final class SourceService
     }
 
     /**
-     * Exclude this source from retrieval, immediately, keeping every vector.
+     * Move this source to `Disabled`, keeping every vector.
      *
-     * See the class docblock: this is C3's headline requirement and it is one column. `Disabled` is
-     * not `Deleting` — disabling is not a way to reclaim storage, and deleting is not a way to hide
-     * something for a week.
+     * ONE COLUMN, AND IT IS THE DURABLE HALF OF C3's HEADLINE REQUIREMENT RATHER THAN THE WHOLE OF
+     * IT — see the class docblock, which now says which half. `Disabled` is still not `Deleting`:
+     * disabling is not a way to reclaim storage, and deleting is not a way to hide something for a
+     * week.
+     *
+     * TODO(phase-c): NOTHING A RETRIEVAL QUERY CAN SEE IS CHANGED BY THIS METHOD, and neither piece
+     * that would change one belongs to this service to build. (1) The data plane owes the
+     * `set_payload` that rewrites `source_status` on this source's points — the field is written at
+     * upsert in `services/ai-service/app/ingestion/indexing/upserter.py`, so the rewrite is
+     * `ingestion-engineer`'s — together with the internal operation Laravel would call to ask for
+     * it, which is an addition to `kb-internal-api-contracts` and is absent from
+     * `InternalAiClient`. (2) The config snapshot owes the resolved active-version set that
+     * `tenant_filter()` takes as a required argument and that `retrieval-engineer` consumes; that
+     * resolver is Laravel's own and lands with the chat path, and it is the mechanism that makes a
+     * disable immediate WITHOUT any payload rewrite. Latent while no chat path exists; live the day
+     * one does.
      *
      * @throws ValidationException 422 for a move the transition table forbids
      * @throws NotFoundHttpException when the row disappeared between the binding and the write
@@ -303,6 +334,15 @@ final class SourceService
      * two it means. A source with no live version at all re-enables as `Ready`: there is nothing
      * warned about, and the state is honest — retrievability additionally requires an active-version
      * pointer, which such a source does not have, so the status alone cannot make it answerable.
+     *
+     * TODO(phase-c): THE MIRROR OF `disable()`'s MARKER, AND IT IS THE MORE DANGEROUS DIRECTION.
+     * Re-enabling is a metadata write here and nowhere else: the same `set_payload` and the same
+     * resolved active-version set are what would put this source back INTO a retrieval query, and
+     * both are unwritten (`ingestion-engineer` for the payload rewrite plus its internal operation,
+     * this service's own snapshot resolver for the version set, `retrieval-engineer` for the
+     * consumer). A disable that does not reach the index leaves a source answering; an enable that
+     * does not reach it leaves a source silently absent from its own organization's answers — the
+     * failure `kb-tenancy-isolation` describes as the correct-filter-wrong-payload case.
      *
      * @throws ValidationException 422 for a move the transition table forbids
      * @throws NotFoundHttpException when the row disappeared between the binding and the write

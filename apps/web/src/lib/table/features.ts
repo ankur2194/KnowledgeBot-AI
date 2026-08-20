@@ -60,6 +60,24 @@ export interface ServerColumnMeta {
    */
   readonly card?: 'title' | 'field' | 'action' | 'hidden';
   /**
+   * A column the TABLE layout drops below 1280px, keeping it above.
+   *
+   * `kb-ui-patterns`' density table asks for "table, secondary columns hidden" between 768px and
+   * 1279px, and this is how a column says it is one of those. The failure it prevents is the one that
+   * rule exists for: at 768px a five- or six-column table with an actions cluster is wider than the
+   * viewport, so it scrolls INSIDE its container and the first thing scrolled out of sight is the
+   * trailing actions column — where the destructive action lives, i.e. exactly what P6 says a
+   * horizontal scroller must never hide.
+   *
+   * `'xl'` is the only value because 1280px is the only breakpoint in the density table where a
+   * column may reappear; the card layout below 768px is a separate mechanism (`card: 'hidden'`), and a
+   * column is usually both.
+   *
+   * It is CSS visibility only: the cell stays in the DOM and in the accessibility tree's column count,
+   * so nothing about the header/cell relationship changes with the viewport.
+   */
+  readonly showFrom?: 'xl';
+  /**
    * The `<dt>` text in the card layout when the column's header is not a plain string — an icon-only
    * or visually-hidden header has no text to reuse, and an unlabelled `<dd>` is an unreadable card.
    */

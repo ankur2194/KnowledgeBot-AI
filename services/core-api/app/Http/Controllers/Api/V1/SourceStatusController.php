@@ -37,20 +37,25 @@ use Illuminate\Support\Facades\Gate;
  * reason `BotStatusController` and `RotateProviderCredentialController` exist. A `transition`
  * method on `SourceController` would fail the arch suite.
  *
- * ── DISABLE IS IMMEDIATE, AND THAT IS THIS PHASE'S HEADLINE REQUIREMENT ──────────────────────
+ * ── DISABLE IS THIS PHASE'S HEADLINE REQUIREMENT, AND ONE COLUMN IS THE HALF OF IT THAT EXISTS ─
  *
- * One column changes and the source leaves retrieval on the next query. Nothing is purged, no job
- * has to succeed, and every vector is retained — which is what makes re-enabling a metadata write
- * rather than a re-ingestion. The mechanism is the STATUS FILTER: `source_status` is matched
- * POSITIVELY against `['ready','ready_with_warnings']` in every tenant filter, and
- * `kb-tenancy-isolation` NN5 is why that direction matters — a `match` condition is not satisfied
- * by a point that lacks the value, so a positive filter fails closed while a `must_not` would fail
- * open.
+ * One column changes. Nothing is purged, no job has to succeed, and every vector is retained —
+ * which is what keeps re-enabling a metadata write rather than a re-ingestion. The intended
+ * mechanism is the STATUS FILTER: `source_status` matched POSITIVELY against
+ * `['ready','ready_with_warnings']` in every tenant filter, and `kb-tenancy-isolation` NN5 is why
+ * that direction matters — a `match` condition is not satisfied by a point that lacks the value, so
+ * a positive filter fails closed while a `must_not` would fail open.
  *
- * The one thing that could still answer after a disable is a CACHED ANSWER, and it cannot for a
- * reason that lives in another file: `valkey-keyspaces` keys `ans:` on a fingerprint of the
- * RESOLVED retrieval scope, so a disable changes the key rather than requiring a purge somebody has
- * to remember.
+ * WHAT THIS DOCBLOCK USED TO SAY, AND WHY IT NO LONGER SAYS IT: "the source leaves retrieval on the
+ * next query" is not true of anything in this repository. `source_status` is a Qdrant PAYLOAD field
+ * written at upsert time (`services/ai-service/app/ingestion/indexing/upserter.py`), and no path
+ * here rewrites it or resolves the active-version set that would make the change immediate without
+ * a rewrite. `SourceService::disable()` and `::enable()` carry the `TODO(phase-c)` markers naming
+ * both obligations and their owners. It is latent rather than live — there is no chat path to read
+ * a stale payload — and the same qualification applies to the CACHED ANSWER: `valkey-keyspaces`
+ * keys `ans:` on a fingerprint of the RESOLVED retrieval scope, so a disable changes the key rather
+ * than requiring a purge somebody has to remember, but that fingerprint is the same unresolved set
+ * and there is no answer cache here yet.
  *
  * `Disabled` IS NOT `Deleting`. Disabling is not a way to reclaim storage and deleting is not a way
  * to hide something for a week.

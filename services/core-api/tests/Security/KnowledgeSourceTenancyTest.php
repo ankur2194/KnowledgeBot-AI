@@ -129,13 +129,113 @@ it('refuses the mirror image: Org A\'s source pointed at Org B\'s bot', function
         ->toBeTrue((string) $exception?->getMessage());
 });
 
+it('refuses Org B\'s source on Org A\'s own bot, and names `source_same_org`', function (): void {
+    $t = tenantPair();
+
+    // THE ONLY CASE IN THIS REPOSITORY THAT PUTS `bot_source_assignments_source_same_org` UNDER
+    // TEST ALONE, AND ITS ABSENCE WAS MEASURED RATHER THAN ARGUED. Delete that constraint from
+    // `2026_08_20_002300_create_bot_source_assignments_table.php` and, before this test existed,
+    // every case in this file and in tests/Security/SourceEndpointAccessTest.php stayed green — so
+    // the guard against an admin of Org A attaching Org B's corpus to their own bot could be
+    // removed from the schema and nothing would object.
+    //
+    // The reason is structural rather than an oversight in any one test. `crossOrg()` writes the
+    // SOURCE's organization onto the row by construction, so in both tests above the row agrees
+    // with the source and `bot_source_assignments_bot_same_org` is always the key that fires; and
+    // the neither-parent case below violates BOTH keys, so it can only assert a disjunction and
+    // therefore pins no name at all. This row violates the source key and nothing else.
+    //
+    // IT IS ALSO THE REALISTIC ATTACK. Own organization, own bot, somebody else's corpus — every
+    // value on it is one this admin legitimately controls except the last, and `bot_same_org`
+    // passes on it, because the bot really is theirs. One accepted row here makes a
+    // correctly-filtered query return Org B's documents at normal latency with a well-formed
+    // citation and an HTTP 200: `bot_ids` is resolved from this table, so the tenant filter does
+    // not catch the row, it ENFORCES it.
+    //
+    // Written field by field rather than through the factory, deliberately: `crossOrg()` cannot
+    // express this shape and `assignedTo()` refuses it outright, and both refusals are
+    // fixture-level guards worth not routing around.
+
+    // A SOURCE IN ORG A, CREATED HERE AND NOT ON THE FIXTURE. TenantPair has no `$sourceA` on
+    // purpose — Org A owning no knowledge of its own is what makes the suite's negative assertions
+    // mean something — so a test that needs one says so in one line, naming the tenant it meant.
+    $sourceA = KnowledgeSource::factory()->recycle($t->a)->create();
+
+    // POSITIVE CONTROL FIRST (pest-testing NN2), AND IT IS THE NEGATIVE WRITE WITH ONE FIELD
+    // CHANGED. Same organization, same bot, same columns; only the source's owner differs between
+    // this write and the one below, so a refusal there is attributable to that one field and to
+    // nothing else. Without it this test also passes against a schema that refuses EVERY
+    // assignment — which would break the product completely while making the security assertion
+    // look strongest.
+    $legal = assignmentAttempt(static function () use ($t, $sourceA): void {
+        $row = new BotSourceAssignment;
+        $row->organization_id = $t->a->id;   // Org A ...
+        $row->bot_id = $t->botA->id;         // ... Org A's own bot ...
+        $row->source_id = $sourceA->id;      // ... and Org A's own source.
+        $row->priority = 0;
+        $row->enabled = true;
+        $row->save();
+    });
+
+    expect($legal)->toBeNull(
+        'Org A could not assign its OWN source to its OWN bot, so the refusal asserted below '
+        .'proves nothing about which organization owns what. The write failed with: '
+        .(string) $legal?->getMessage()
+    );
+
+    // AND NOW THE ONE FIELD THAT CHANGES.
+    $exception = assignmentAttempt(static function () use ($t): void {
+        $row = new BotSourceAssignment;
+        $row->organization_id = $t->a->id;   // Org A ...
+        $row->bot_id = $t->botA->id;         // ... Org A's own bot, so `bot_same_org` PASSES ...
+        $row->source_id = $t->sourceB->id;   // ... and ORG B'S SOURCE.
+        $row->priority = 0;
+        $row->enabled = true;
+        $row->save();
+    });
+
+    expect($exception)->toBeInstanceOf(
+        QueryException::class,
+        'an admin of Org A attached Org B\'s corpus to their own bot and the database accepted it. '
+        .'That is not a flaky test: it is a permanent cross-tenant leak that every downstream '
+        .'filter AGREES with, because you have taught it that Org B\'s source belongs to Org A\'s '
+        .'bot.'
+    );
+
+    // THE CONSTRAINT, BY NAME AND WITH NO DISJUNCTION. Exactly one key can fire on this row, so
+    // there is no planner-order argument to make here and accepting either name would put this
+    // test back in the state that let the constraint be deleted unnoticed.
+    expect(str_contains((string) $exception?->getMessage(), 'bot_source_assignments_source_same_org'))
+        ->toBeTrue(
+            'the write was refused, but not by `bot_source_assignments_source_same_org`, which is '
+            .'the only constraint this test exists for. The actual message was: '
+            .(string) $exception?->getMessage()
+        );
+
+    // AND NOTHING LANDED BUT THE LEGAL ROW. A constraint that raises after writing is not a
+    // constraint, and asserting the surviving row by id rather than by count also proves the
+    // control above was not silently rolled back with the violation.
+    expect(
+        BotSourceAssignment::withoutGlobalScopes()
+            ->where('bot_id', $t->botA->id)->pluck('source_id')->all()
+    )->toBe([$sourceA->id]);
+});
+
 it('refuses a row whose organization matches neither parent', function (): void {
     $t = tenantPair();
 
-    // THE THIRD SHAPE, AND IT IS THE ONE `crossOrg()` CANNOT EXPRESS: a row claiming a tenant that
-    // owns neither the bot nor the source. `crossOrg()` always agrees with one side by
-    // construction, so without this case `bot_source_assignments_source_same_org` is never the
-    // constraint under test and could be dropped with both tests above still green.
+    // THE FOURTH SHAPE, AND IT IS THE ONE `crossOrg()` CANNOT EXPRESS: a row claiming a tenant that
+    // owns neither the bot nor the source — what a repair script or a seeder writes when it takes
+    // the organization from a third place. Neither single-key case above reaches it.
+    //
+    // IT IS A SMOKE TEST AND IT PINS NEITHER CONSTRAINT NAME. This row violates BOTH composite
+    // keys, PostgreSQL promises no order between them, and so the assertion at the bottom can only
+    // require that one of the two fired. That is not a weakness to be fixed here — it is why the
+    // single-key cases exist, and this comment used to claim the opposite:
+    // `bot_source_assignments_bot_same_org` is held by the two `crossOrg()` tests above and by
+    // tests/Security/SourceEndpointAccessTest.php, and `bot_source_assignments_source_same_org` is
+    // held by 'refuses Org B's source on Org A's own bot' immediately above. Delete either of
+    // those and this test still passes.
     //
     // Written field by field rather than through the factory, deliberately: the factory REFUSES to
     // produce this row, and that refusal is itself a fixture-level guard worth not routing around.
@@ -153,7 +253,9 @@ it('refuses a row whose organization matches neither parent', function (): void 
 
     // EITHER KEY MAY FIRE FIRST — PostgreSQL does not promise an order between two violated
     // constraints on one insert — so the assertion names both and requires one of them. Pinning a
-    // single name here would be a test that passes on this planner and fails on the next.
+    // single name here would be a test that passes on this planner and fails on the next. The
+    // price is stated in the header: this assertion cannot hold either name, and the two tests
+    // above are what do.
     $message = (string) $exception?->getMessage();
 
     expect(
