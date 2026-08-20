@@ -29,7 +29,7 @@ import type { FileUploads } from './use-file-uploads';
  *               per-file `authorization` error and renders in the row through the class-mapped
  *               sentence; the SCREEN is what refuses to show an upload surface at all to a member
  *               without the role, because a control a user may not use is HIDDEN rather than
- *               disabled (states.md). That screen is a later task.
+ *               disabled (states.md). That screen is `upload-screen.tsx`, and it does exactly that.
  *
  * ── PARTIAL SUCCESS IS THE DEFAULT READING, NOT AN EDGE CASE ───────────────────────────────────
  * Eight of ten uploaded is eight successes and two failures with their own reasons, never one red
@@ -37,7 +37,23 @@ import type { FileUploads } from './use-file-uploads';
  * stay on their rows with a scoped retry.
  */
 
-export function UploadFileList({ uploads }: { readonly uploads: FileUploads }) {
+export function UploadFileList({
+  uploads,
+  issues,
+}: {
+  readonly uploads: FileUploads;
+  /**
+   * ROW INDEX -> the message in that row's `files.<index>` form slot, for the rows that have one.
+   *
+   * A `Map` rather than an array or a record keyed by index: the caller builds it from
+   * `formState.errors.files`, which is sparse, and a Map says "most rows have nothing" without a
+   * hole-riddled array or a computed member read at every row (the object-injection shape this repo
+   * lints for). Absent entirely on a list with no form behind it — `tests/components/
+   * upload-dropzone.test.tsx` mounts exactly that, because a screen with no form is not a screen
+   * with no error reporting.
+   */
+  readonly issues?: ReadonlyMap<number, string>;
+}) {
   const { items, succeeded, failed, isPending } = uploads;
 
   if (items.length === 0) {
@@ -89,10 +105,15 @@ export function UploadFileList({ uploads }: { readonly uploads: FileUploads }) {
       {/* `<ul>`, so the count is announced and the rows are navigable as a list. A stack of divs
           reads as one run-on paragraph. */}
       <ul className="rounded-xl bg-card shadow-hairline">
-        {items.map((item) => (
+        {items.map((item, index) => (
           <UploadFileRow
             key={item.id}
             item={item}
+            // THE ROW'S POSITION IS THE FORM PATH. `files.<index>` is where `applyServerErrors`
+            // writes and where the resolver's per-file issues land, and the index is read HERE — at
+            // render time — rather than captured when the row was added, because removing a row
+            // renumbers every row after it.
+            issue={issues?.get(index)}
             onCancel={uploads.cancel}
             onRemove={uploads.remove}
             onRetry={uploads.requeue}

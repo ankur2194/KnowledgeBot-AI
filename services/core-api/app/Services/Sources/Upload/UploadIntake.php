@@ -74,10 +74,16 @@ use ZipArchive;
  *
  * ═══ WHAT THIS CLASS DOES NOT DO ════════════════════════════════════════════════════════════
  *
- * It does not decompress anything. It reads a ZIP central directory to enumerate part names; the
- * authoritative streamed-byte cap belongs where the decompression happens, which is the Celery
- * parser (`kb-security-baseline`: layers 1 and 2 are self-reported, and the only authoritative check
- * is counting bytes as they come out).
+ * It does not decompress anything. It reads a ZIP central directory to enumerate part names, so
+ * every cap it enforces is read from a structure the file's author wrote —
+ * `kb-security-baseline`'s layers 1 and 2, both self-reported. THE AUTHORITATIVE THIRD LAYER — count
+ * the bytes as they come out of the decompression — DOES NOT EXIST ANYWHERE IN THIS REPOSITORY
+ * TODAY. It belongs where the decompression happens, which is the Celery parser, and it is OWED
+ * rather than delegated: `grep -rn 'ZipFile\|infolist\|compress_size' services/ai-service/app`
+ * returns nothing, so the sentence this paragraph used to carry — that the cap "belongs" to the
+ * parser — read as a statement that it was implemented there. Do not read the caps below as backed
+ * by a check further down the pipeline until that check is written; they are the only ones running.
+ * Owner: `ingestion-engineer`, reported as security finding S2 and not fixable from this side.
  *
  * It does not parse XML. Not `[Content_Types].xml`, not a worksheet — an XML parser over a hostile
  * archive is the XXE surface the data plane pins `lxml >= 6.1.0` and `defusedxml` to survive, and
@@ -285,20 +291,35 @@ final class UploadIntake
     /**
      * STEP 2. The NFKC-normalized name must be a bare filename with an allow-listed final extension.
      *
-     * ── WHAT "BARE FILENAME" REFUSES, AND WHY IT IS REFUSED RATHER THAN STRIPPED ────────────
+     * ── WHAT "BARE FILENAME" REFUSES, AND WHAT SYMFONY HAS ALREADY DONE TO THE NAME ─────────
      *
-     * `basename()` would turn `../evil.pdf` into `evil.pdf` and accept it. That is a SILENT RENAME
-     * of a value we are about to show an operator and write to a column, and `ObjectKey::segment()`
-     * one directory over already argues the general form: refusing structurally beats sanitizing,
-     * because a sanitized value is a different value nobody was told about. It also keeps this class
-     * honest about what it is doing — the storage key is generated and the name is never a path, so
-     * the ONLY thing this refusal protects is the `display_name` column and whatever eventually
-     * renders it, which is exactly the layer `source_items_display_name_is_not_a_path` guards from
-     * the other side.
+     * AN ASCII `../evil.pdf` NEVER REACHES THIS METHOD, AND THIS PARAGRAPH USED TO CLAIM OTHERWISE.
+     * `UploadedFile::getClientOriginalName()` returns a value Symfony's own `File::getName()`
+     * already sanitized on construction — it replaces `\` with `/` and keeps only the segment after
+     * the last `/` — so `../evil.pdf` arrives here as `evil.pdf`, passes the shape check, and IS
+     * ACCEPTED. That is the right outcome for the wrong-sounding reason: the storage key is
+     * generated (`ObjectKey`), the name is never a path, and `evil.pdf` is a perfectly ordinary
+     * display value. `tests/Unit/UploadIntakeGateTest.php` states this at `intakeFile()`, and this
+     * docblock now says what the test says. The earlier claim — that traversal "dies here" because
+     * we refuse rather than calling `basename()` — described a refusal that never fires.
      *
-     * Traversal, the null-byte truncation `x.pdf\0.php`, `report.pdf:ads.exe`, and `evil.php.` with
-     * its trailing dot all die here — the last of them because `pathinfo()` reports no extension for
-     * a name ending in a separator dot, and `report.pdf ` with a trailing space dies because its
+     * WHAT THE SHAPE CHECK ACTUALLY CATCHES IS EVERYTHING SYMFONY'S SANITIZER CANNOT SEE, and the
+     * FULL-WIDTH TRAVERSAL FIXTURE IS THE LOAD-BEARING ONE: `．．／evil.pdf` is U+FF0E U+FF0E U+FF0F,
+     * which is not a separator to `getName()` and is not one to a `".." not in name` check either —
+     * until NFKC turns it into `../evil.pdf`. Normalizing BEFORE validating is what puts it in front
+     * of the shape check, and the shape check is what refuses it. Remove either half and a
+     * `display_name` containing a path is written to a column, where
+     * `source_items_display_name_is_not_a_path` turns a 422 into a 500 and any consumer that joins a
+     * display name to a path has a traversal.
+     *
+     * REFUSED RATHER THAN STRIPPED, for what does reach here. `ObjectKey::segment()` one directory
+     * over argues the general form: refusing structurally beats sanitizing, because a sanitized
+     * value is a different value nobody was told about — and the ONLY thing this refusal protects is
+     * the `display_name` column and whatever eventually renders it.
+     *
+     * The null-byte truncation `x.pdf\0.php`, `report.pdf:ads.exe`, and `evil.php.` with its
+     * trailing dot all die here — the last of them because `pathinfo()` reports no extension for a
+     * name ending in a separator dot, and `report.pdf ` with a trailing space dies because its
      * extension is the four characters `pdf ` and the allow-list is an exact-match map. `CON.pdf`
      * survives, correctly: Windows reserved device names are only dangerous to something that treats
      * the name as a path, and nothing here does.
@@ -318,6 +339,52 @@ final class UploadIntake
             $byteSize,
             $message,
         );
+
+        // ── VALID UTF-8, FIRST, BECAUSE EVERY CHECK BELOW READS THIS VALUE AS TEXT ───────────
+        //
+        // THIS CHECK IS HERE BECAUSE ITS ABSENCE WAS A REAL HOLE, AND THE COMMENT THAT USED TO SIT
+        // FURTHER DOWN IS WHY NOBODY ADDED IT. That comment argued that a name which is not valid
+        // UTF-8 "falls through to the extension lookup — which refuses it, because no allow-listed
+        // extension survives invalid UTF-8 intact". THAT REASONING IS FALSE, and it is false for the
+        // ordinary case rather than an exotic one: the bad bytes only have to land somewhere OTHER
+        // than the extension. Measured, for `"\xFFreport.pdf"`:
+        //
+        //     Normalizer::normalize(…)             => false   (normalize() keeps the name as-is)
+        //     mb_strlen(…)                         => 11      (passes the length check)
+        //     preg_match('/[\/\\]|[[:cntrl:]]/')   => 0       (byte-mode, so it answers — passes)
+        //     preg_match('/\p{Cf}/u')              => FALSE   (not 1, so it passes)
+        //     pathinfo(…, PATHINFO_EXTENSION)      => 'pdf'   (pure ASCII, ALLOW-LISTED)
+        //
+        // The name is admitted, the batch is admitted, `SourceObjectWriter` writes the object, and
+        // PostgreSQL then rejects the INSERT with `22021 invalid byte sequence for encoding "UTF8"`.
+        // The transaction aborts and the request 500s — AFTER the bytes are in object storage, at
+        // `org/{org}/sources/{sourceId}/original/{sha256}` under a source id that never became a
+        // `knowledge_sources` row. That is exactly `ObjectKey`'s defect 1 arriving by a third road:
+        // an object nothing can delete, in a prefix the phase-2 purge only visits for sources that
+        // exist, which verification will certify clean over.
+        //
+        // WHY IT IS THE FIRST CHECK IN THE METHOD RATHER THAN THE LAST. Every one of the four lines
+        // above is Unicode-aware and every one of them answers DIFFERENTLY for a byte sequence that
+        // is not a string: `mb_strlen` counts by a substitution rule, a `/u` pattern returns `false`
+        // rather than `0` — and `false !== 1` reads as "no match", which is fail-OPEN — and
+        // `mb_strtolower` may substitute. Establishing validity first is what makes the three checks
+        // below mean what they are written to mean, instead of each carrying its own escape hatch.
+        //
+        // `mb_check_encoding` AND NOT `Normalizer::normalize() === false`. The two agree on this
+        // input, but they are not the same question: `normalize()` failing is one library's opinion
+        // about one form, while validity is a property of the bytes and is the property PostgreSQL,
+        // `json_encode` on the audit row, and every consumer of `display_name` actually require.
+        //
+        // THE `extension` TOKEN, and not one of its own: step 2 IS the name gate, which is the same
+        // argument `UploadRejectionReason::Extension` already makes for the shape refusal.
+        if (! mb_check_encoding($displayName, 'UTF-8')) {
+            throw $refuse(
+                'This filename is not valid UTF-8. It is not a length, a character or an extension '
+                    .'problem: the bytes are not text at all, so nothing downstream can read the name '
+                    .'the way it was meant — the database refuses the value outright, and an audit '
+                    .'row could not carry it either. Rename the file and upload it again.',
+            );
+        }
 
         if ($displayName === '' || mb_strlen($displayName) > self::MAX_NAME_LENGTH) {
             throw $refuse(
@@ -361,9 +428,12 @@ final class UploadIntake
         // `basename()`: a stripped name is a different name nobody was told about, on a value we are
         // about to display.
         //
-        // `preg_match` returns false rather than 0 for a name that is not valid UTF-8, and false is
-        // not 1, so an un-normalizable name falls through to the extension lookup — which refuses it,
-        // because no allow-listed extension survives invalid UTF-8 intact.
+        // THIS CHECK CAN ONLY ANSWER FOR VALID UTF-8, WHICH IS WHY VALIDITY IS ESTABLISHED ABOVE.
+        // `preg_match` with `/u` returns `false`, not `0`, for a subject that is not valid UTF-8 —
+        // and `false !== 1`, so the refusal below simply does not fire. This comment used to argue
+        // that the fall-through was safe because the extension lookup would refuse the name anyway;
+        // it is not, the bad bytes only have to sit before the final dot, and the first check in
+        // this method now carries the measurement.
         if (preg_match('/\p{Cf}/u', $displayName) === 1) {
             throw $refuse(
                 'This filename contains an invisible formatting character — a bidirectional override, '
@@ -624,8 +694,31 @@ final class UploadIntake
             }
 
             // (d) STEP 5 PROPER.
+            //
+            // ── THE SEPARATOR IS NORMALIZED BEFORE EITHER CHECK, AND `basename()` IS WHY ──────
+            //
+            // `basename()` ON POSIX DOES NOT TREAT `\` AS A SEPARATOR — `kb-security-baseline`'s
+            // `references/file-upload-safety.md` makes exactly this point ("On POSIX it returns
+            // `"..\\..\\evil"` unchanged, because `posixpath` does not treat `\` as a separator"),
+            // and Symfony's own `File::getName()` replaces backslashes before basenaming for the
+            // same reason. Measured: `basename('word\vbaproject.bin')` is the whole string, so the
+            // comparison against `vbaproject.bin` fails, and `str_contains('word\embeddings\…',
+            // '/embeddings/')` is false. A central directory spelling its parts with backslashes
+            // therefore walked both refusals. `ZipArchive` preserves such a name verbatim, so the
+            // spelling survives a round trip and is a name we can genuinely be handed.
+            //
+            // WHETHER A REAL OPC CONSUMER RESOLVES A BACKSLASH-NAMED ENTRY AS THAT PART IS UNTESTED
+            // HERE, AND THIS COMMENT DOES NOT CLAIM IT DOES. The refusal is separator-agnostic
+            // because the cost is one `str_replace` and the cost of finding out the other way is a
+            // live payload we stored and handed on. Asymmetric, so it is not a close call.
+            //
+            // (c) ABOVE STAYS AN EXACT MATCH, deliberately: a package whose ROOT part is spelled
+            // `word\document.xml` fails the identity check and is refused as `mime_mismatch`, which
+            // is fail-closed and the more accurate row. The reachable shape is the MIXED one — a
+            // forward-slash root part to pass (c), a backslash payload part to dodge (d) — and that
+            // is what `tests/Unit/UploadIntakeGateTest.php` builds.
             foreach ($names as $name) {
-                $lower = mb_strtolower($name);
+                $lower = str_replace('\\', '/', mb_strtolower($name));
 
                 if (basename($lower) === UploadLimits::VBA_PART_BASENAME) {
                     throw $refuse(
@@ -667,8 +760,10 @@ final class UploadIntake
      * validation. Doing it before is the whole trick.
      *
      * `Normalizer::normalize()` returns false for input that is not valid UTF-8. That value is kept
-     * as-is rather than repaired: an un-normalizable name is refused by step 2's shape check or its
-     * extension lookup, and repairing it would be another silent rename.
+     * as-is rather than repaired, because repairing it would be another silent rename — and the name
+     * that comes back out of here is therefore NOT GUARANTEED TO BE VALID UTF-8. It is
+     * `assertExtensionIsAllowed()`'s first check that refuses it, deliberately and explicitly; this
+     * method does not, and must not, be read as having filtered anything.
      */
     private function normalize(string $name): string
     {

@@ -2,6 +2,7 @@
 
 import { useQuery } from '@tanstack/react-query';
 import { LibraryIcon } from 'lucide-react';
+import Link from 'next/link';
 import { useMemo } from 'react';
 
 import { DataTableSurface } from '@/components/data-table';
@@ -9,6 +10,7 @@ import { ServerDataTable, type ServerDataTableStatus } from '@/components/server
 import { EmptyState, ErrorState, TableSkeleton } from '@/components/states';
 import { TableSearchField } from '@/components/table-search-field';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
 import { useCurrentOrgId, useOrgKey, useSession } from '@/features/auth/session-context';
 import {
   SOURCE_FILTER_PARAM,
@@ -178,10 +180,9 @@ function SourcesForOrganization({
 
   const appliedFilter = view.params.filters.get(SOURCE_FILTER_PARAM) ?? '';
 
-  const actions = useMemo(
-    () => ({ orgId, listKey, canManage: canManageSources(viewerRole) }),
-    [orgId, listKey, viewerRole],
-  );
+  const canManage = canManageSources(viewerRole);
+
+  const actions = useMemo(() => ({ orgId, listKey, canManage }), [orgId, listKey, canManage]);
 
   return (
     // Sections are separated by --space-8, never by a divider (the composition law).
@@ -244,10 +245,23 @@ function SourcesForOrganization({
               glyph={LibraryIcon}
               title="No sources yet"
               /* FIRST-RUN — the onboarding moment, and it says what a source IS as well as what to
-                 do. There is deliberately NO primary action here yet: the create/upload screen is a
-                 later batch, and a button that goes nowhere is worse than a sentence. When it lands
-                 it goes here, with a trigger label that is not a substring of the page header's. */
+                 do. The primary action landed with `/sources/upload`; the note here used to say
+                 there was deliberately none, because a button that goes nowhere is worse than a
+                 sentence. Its label is not a substring of the page header's ("Add files") or of the
+                 form's submit ("Upload N files") — nesting names resolve to several elements under
+                 substring role matching and every query for either one then fails. */
               body="Upload a document, add a website to crawl, or paste text. Your bots answer from what you add here."
+              action={
+                /* HIDDEN, not disabled, for a viewer without `sources.manage` — and this branch is
+                   reachable: the four roles that can VIEW this list are the three that can manage it
+                   plus nobody, so today the two predicates agree and they are separate on the server
+                   and may diverge. */
+                canManage ? (
+                  <Button asChild>
+                    <Link href="/sources/upload">Upload files</Link>
+                  </Button>
+                ) : null
+              }
             />
           }
           /* FILTERED. It restates what was asked for, because a user who cannot see their own query

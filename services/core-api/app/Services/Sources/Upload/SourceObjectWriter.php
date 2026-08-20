@@ -53,6 +53,17 @@ use RuntimeException;
  * `UploadIntake::sniff()`, which refuses to fall back at all: there the fallback would be a
  * DIFFERENT AND WEAKER CHECK, and here it is the same write through a different driver.
  *
+ * THE TWO BRANCHES DIFFER IN EXACTLY ONE THING, AND ENUMERATING IT IS THE POINT OF CLAIMING THAT
+ * NOTHING DIFFERS. The `MultipartUploader` branch sets the object's `ContentType` from the SNIFFED
+ * type; the `writeStream()` branch sets nothing, so a faked disk stores the object with whatever its
+ * driver defaults to. No security property turns on it — `source_items.mime` is the authority for
+ * every reader, nothing anywhere reads a stored object's `ContentType` back, and a download is
+ * served by a Laravel route that sets the response type itself alongside
+ * `Content-Disposition: attachment` and `X-Content-Type-Options: nosniff` from the user-content
+ * origin. It is written down because a paragraph asserting the divergence has been enumerated is
+ * worth exactly as much as the enumeration, and a reader who finds an unlisted difference has no way
+ * to tell an oversight from a decision.
+ *
  * `tests/Arch/StringLevelDoctrineTest.php` rule 6 asserts this file names `MultipartUploader` and
  * `AwsS3V3Adapter` in CODE rather than in this docblock, and that the upload path names neither
  * `file_get_contents` nor `readfile`, so the rule survives an edit that reads as a
@@ -86,11 +97,42 @@ final class SourceObjectWriter
      * ── THE OBJECT IS WRITTEN BEFORE THE ROWS EXIST, AND THAT ORDERING IS CHOSEN ────────────
      *
      * Object storage does not participate in a PostgreSQL transaction, so the only two orderings are
-     * "orphan object, no row" and "row pointing at nothing". `SourceService::create()` already
-     * argues the same choice for a pasted body and it holds identically here: the orphan is a
-     * byte-for-byte-identical object at a content-addressed key that the next attempt overwrites and
-     * a sweep can collect, while the second is a source whose ingestion fails on every attempt with
-     * `error_class: storage` and needs an operator.
+     * "orphan object, no row" and "row pointing at nothing". `SourceService::create()` argues the
+     * same choice for a pasted body, and the ordering stands: a row pointing at nothing is a source
+     * whose ingestion fails on every attempt with `error_class: storage` and needs an operator,
+     * which is worse than an orphan.
+     *
+     * ── BUT THE ORPHAN HAS NO RECOVERY PATH, AND BOTH HALVES OF THE ONE THIS USED TO CLAIM ARE
+     *    FALSE ─────────────────────────────────────────────────────────────────────────────────
+     *
+     * The claim was that the orphan is "a byte-for-byte-identical object at a content-addressed key
+     * that the next attempt overwrites and a sweep can collect". Neither half survives contact:
+     *
+     *   NOTHING OVERWRITES IT. The key is SOURCE-scoped, not globally content-addressed
+     *   (`ObjectKey::originalUpload()` → `org/{org}/sources/{sourceId}/original/{sha256}`), and
+     *   `SourceService::create()` mints `$sourceId` PER REQUEST. A retry of the identical upload
+     *   therefore produces a DIFFERENT key. Orphans accumulate, one per failed attempt.
+     *
+     *   NO SWEEP EXISTS. `kb.maintenance.sweep_orphan_objects` is a line in a docstring —
+     *   `services/ai-service/app/maintenance/tasks.py` declares `__all__: list[str] = []` and
+     *   carries a `TODO(unassigned)` saying these tasks have no owner. Nothing collects anything.
+     *
+     * So an orphan here is permanent, and it is permanent in the shape `ObjectKey`'s class docblock
+     * calls defect 1: outside every prefix the phase-2 purge visits (it visits prefixes for sources
+     * that EXIST), which means deletion verification certifies it clean while the bytes survive.
+     *
+     * TODO(phase-c): give the write-before-row ordering an actual recovery path. The two real
+     * options, neither of which is a docblock edit: (a) ROWS FIRST — insert `source_items` with the
+     * storage key and a not-yet-written marker, write the object, then clear the marker, so a crash
+     * leaves a row a reaper can find and either complete or purge; or (b) A PENDING-KEY RECORD —
+     * write the intended key to a small table before the object and delete the record after the
+     * commit, so an unmatched record IS the sweep's input. (a) changes the failure mode of the whole
+     * create path and is a design decision with its own review; (b) is additive but needs a sweeper,
+     * and THE SWEEPER HAS NO OWNER — that is the blocking half, not the schema. Reported as security
+     * finding S3. The reachable trigger that made this urgent (an invalid-UTF-8 `display_name` that
+     * walked the intake gate and was refused by PostgreSQL after the write) is closed at
+     * `UploadIntake::assertExtensionIsAllowed()`; what remains is any other database failure between
+     * the write and the commit, which is latent rather than absent.
      */
     public function write(string $key, AcceptedUpload $upload): void
     {

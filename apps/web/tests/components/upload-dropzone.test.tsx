@@ -171,9 +171,18 @@ async function drop(files: readonly File[]): Promise<void> {
   });
 }
 
+/**
+ * Click a button by its ACCESSIBLE NAME, which is not always its text.
+ *
+ * The row's actions carry the filename in `aria-label` and show a short verb — "Remove", not
+ * "Remove alpha-handbook.pdf" — because the visible form starved the filename column at 375px
+ * (`upload-file-row.tsx` carries the measurement). The accessible name is still unique per row,
+ * which is the property every assertion in this file depends on, so this helper reads THAT rather
+ * than `textContent`: `aria-label` when present, the trimmed text otherwise.
+ */
 const clickButton = async (name: string): Promise<void> => {
   const button = [...document.querySelectorAll('button')].find(
-    (candidate) => candidate.textContent?.trim() === name,
+    (candidate) => (candidate.getAttribute('aria-label') ?? candidate.textContent?.trim()) === name,
   );
   if (button === undefined) throw new Error(`no button named ${name}`);
   await act(async () => {
@@ -414,8 +423,12 @@ describe('cancel actually cancels', () => {
       .element(screen.getByRole('progressbar', { name: 'Upload progress for bravo-ledger.csv' }))
       .toBeInTheDocument();
 
-    // A cancellation is an OUTCOME, not a failure: no error block, no retry affordance.
-    expect(document.body.textContent).not.toContain('Try alpha-handbook.pdf again');
+    // A cancellation is an OUTCOME, not a failure: no error block, no retry affordance. Addressed
+    // by ACCESSIBLE NAME rather than by text: the row's actions carry the filename in `aria-label`
+    // and show a short verb, so `textContent` no longer holds the per-row string.
+    expect(
+      screen.getByRole('button', { name: 'Try again with alpha-handbook.pdf' }).elements(),
+    ).toHaveLength(0);
     expect(document.querySelectorAll('[data-phase="cancelled"]')).toHaveLength(1);
   });
 });
@@ -504,11 +517,17 @@ describe('a per-file failure lands on that file and not on the batch', () => {
       expect(document.querySelectorAll('[data-phase="failed"]')).toHaveLength(2);
     });
 
-    await expect.element(screen.getByText('Try alpha-handbook.pdf again')).toBeVisible();
+    const retry = screen.getByRole('button', { name: 'Try again with alpha-handbook.pdf' });
+    await expect.element(retry).toBeVisible();
+    // WCAG 2.5.3 Label in Name: the VISIBLE label is a contiguous prefix of the accessible name, so
+    // speech input on the visible words still activates it. "Try alpha.pdf again" would not be.
+    await expect.element(retry).toHaveTextContent('Try again');
     // ...on the row that failed retryably, not floating over the batch.
-    expect(rowFor('alpha-handbook.pdf').textContent).toContain('Try alpha-handbook.pdf again');
+    expect(rowFor('alpha-handbook.pdf').contains(retry.element())).toBe(true);
     // Offering a retry that cannot help is worse than offering nothing.
-    expect(document.body.textContent).not.toContain('Try bravo-ledger.csv again');
+    expect(
+      screen.getByRole('button', { name: 'Try again with bravo-ledger.csv' }).elements(),
+    ).toHaveLength(0);
 
     // The class-mapped sentences, not the envelope's message.
     expect(document.body.textContent).toContain('File storage is unavailable right now.');
@@ -532,7 +551,7 @@ describe('a per-file failure lands on that file and not on the batch', () => {
       expect(document.body.textContent).toContain('Failed');
     });
 
-    await clickButton('Try alpha-handbook.pdf again');
+    await clickButton('Try again with alpha-handbook.pdf');
 
     // A SECOND call into the transport, which is a second create — this request carries no
     // Idempotency-Key, so nothing may replay it automatically and the user has to ask.

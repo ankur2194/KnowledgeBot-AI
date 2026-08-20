@@ -115,6 +115,41 @@ function intakeZipBytes(array $parts): string
 }
 
 /**
+ * The part names a built package actually carries, read back out of its central directory.
+ *
+ * Exists so the backslash fixture can ASSERT that `ZipArchive` preserved the separator rather than
+ * assume it: if `addFromString()` ever rewrote `word\vbaProject.bin` into `word/vbaProject.bin`, the
+ * fixture would be testing the ordinary path and would still pass, which is the quiet way a security
+ * test stops being one.
+ *
+ * @return list<string>
+ */
+function intakeZipPartNames(string $bytes): array
+{
+    $path = tempnam(sys_get_temp_dir(), 'kb-zip-names-');
+
+    file_put_contents($path, $bytes);
+
+    $zip = new \ZipArchive;
+    $zip->open($path, \ZipArchive::RDONLY);
+
+    $names = [];
+
+    for ($index = 0; $index < $zip->count(); $index++) {
+        $stat = $zip->statIndex($index);
+
+        if ($stat !== false) {
+            $names[] = (string) $stat['name'];
+        }
+    }
+
+    $zip->close();
+    unlink($path);
+
+    return $names;
+}
+
+/**
  * The three parts that make a package a real, minimal `.docx`.
  *
  * @return array<string, string>
@@ -297,6 +332,48 @@ it('refuses the malicious-filename fixture set from docs/17 §22.5', function (s
     'zero-width character' => ["hand\u{200B}book.pdf"],
 ]);
 
+it('refuses a filename that is not valid UTF-8, even though its extension is allow-listed', function (): void {
+    // ── THE FIXTURE IS THE FINDING, AND THE EXTENSION BEING FINE IS THE WHOLE POINT ──────────
+    //
+    // `\xFF` is not a legal UTF-8 lead byte, and it sits BEFORE the final dot — so the extension is
+    // the three ASCII characters `pdf`, which is allow-listed, and the bytes are a real PDF, so
+    // steps 3 and 4 would both pass too. Every other check in step 2 passes as well, measured:
+    // `Normalizer::normalize()` returns false and the name is kept as-is, `mb_strlen` says 11, the
+    // byte-mode shape pattern says 0, and `preg_match('/\p{Cf}/u', …)` returns FALSE — which is not
+    // 1, so the invisible-character refusal does not fire. Nothing between the intake and the INSERT
+    // looks at the name again.
+    //
+    // WHAT THE ABSENCE OF THIS CHECK COST, which is why the case is here rather than in a linter:
+    // the file is admitted, `SourceObjectWriter` writes the object at
+    // `org/{org}/sources/{sourceId}/original/{sha256}`, and PostgreSQL then refuses the row with
+    // `22021 invalid byte sequence for encoding "UTF8"`. The transaction aborts, the request 500s,
+    // and the object is orphaned under a source id that never became a `knowledge_sources` row — in
+    // a prefix the phase-2 purge only ever visits for sources that DO exist, which deletion
+    // verification will certify clean over. Ten files per request, no per-org storage quota.
+    //
+    // MUTATION CHECK, RUN IN BOTH DIRECTIONS. Deleting the `mb_check_encoding()` guard at the top of
+    // `UploadIntake::assertExtensionIsAllowed()` makes this test fail on the FIRST expectation —
+    // `$screening->accepted` is `[0 => …]` and `$screening->rejected[0]` is not set at all, so the
+    // file was ADMITTED, which is the defect and not merely a different reason token. Restoring the
+    // guard makes it pass. Recorded because a check whose test cannot fail is how this shipped.
+    $screening = (new UploadIntake)->screen([0 => intakeFile("\xFFreport.pdf", intakePdfBytes())]);
+
+    expect($screening->accepted)->toBe([])
+        // The `extension` token, because step 2 IS the name gate — the same argument
+        // `UploadRejectionReason::Extension` already makes for the shape refusal.
+        ->and($screening->rejected[0]->reason)->toBe(UploadRejectionReason::Extension)
+        // No sniffed MIME: the refusal is at step 2, so step 3 never ran. Same ordering fact the
+        // `.exe` case asserts, seen from the audit row.
+        ->and($screening->rejected[0]->sniffedMime)->toBeNull();
+
+    // AND THE CONTROL: the identical name in valid UTF-8 is accepted. Without this, the test above
+    // would also pass against a gate that refused every `.pdf`, which is the failure shape
+    // `pest-testing` non-negotiable 2 exists for.
+    $control = (new UploadIntake)->screen([0 => intakeFile('report.pdf', intakePdfBytes())]);
+
+    expect($control->hasRejections())->toBeFalse();
+});
+
 // ── step 3 and step 4, which are different findings ──────────────────────────────────────────────
 
 it('refuses a type it does not recognise as `mime_sniff`, with the extension allow-listed', function (): void {
@@ -378,6 +455,45 @@ it('refuses an OPC package carrying an /embeddings/ part', function (): void {
     expect($screening->rejected[0]->reason)->toBe(UploadRejectionReason::MacroPayload)
         ->and($screening->rejected[0]->getMessage())->toContain('embedded object');
 });
+
+it('refuses the same two parts spelled with backslashes, because basename() does not on POSIX', function (array $parts, string $fragment): void {
+    // ── THE MIXED SPELLING IS THE REACHABLE SHAPE, AND IT IS DELIBERATE ──────────────────────
+    //
+    // The ROOT part keeps its forward slashes, so the package passes the identity check at (c) and
+    // reaches (d) — a package whose root part is `word\document.xml` is refused one step earlier as
+    // `mime_mismatch`, which is fail-closed and a different test. Only the PAYLOAD part is spelled
+    // the Windows way, which is exactly what an author who wanted to keep a live payload would do.
+    //
+    // WHAT THE CHECK LOOKED LIKE WITHOUT THE NORMALIZATION, measured:
+    //   basename('word\vbaproject.bin')                       === 'word\vbaproject.bin'  (no match)
+    //   str_contains('word\embeddings\…', '/embeddings/')      === false
+    // `posixpath` does not treat `\` as a separator, which
+    // `kb-security-baseline/references/file-upload-safety.md` states outright and which Symfony's
+    // own `File::getName()` works around by replacing backslashes before basenaming.
+    //
+    // `ZipArchive` PRESERVES THE NAME VERBATIM — asserted below rather than assumed, because if it
+    // silently rewrote the separator this fixture would be testing nothing and would still pass.
+    //
+    // WHETHER A REAL OPC CONSUMER RESOLVES SUCH AN ENTRY AS THAT PART IS UNTESTED AND UNCLAIMED. The
+    // refusal is separator-agnostic because it costs one `str_replace` and the other outcome costs a
+    // stored live payload.
+    //
+    // MUTATION CHECK: dropping the `str_replace('\\', '/', …)` from step (d) of
+    // `assertPackageIsSafe()` makes both rows fail — the package is ACCEPTED, `hasRejections()` is
+    // false — and restoring it makes both pass.
+    $bytes = intakeZipBytes(intakeDocxParts() + $parts);
+
+    expect(intakeZipPartNames($bytes))->toContain(array_key_first($parts));
+
+    $screening = (new UploadIntake)->screen([0 => intakeFile('Handbook.docx', $bytes)]);
+
+    expect($screening->accepted)->toBe([])
+        ->and($screening->rejected[0]->reason)->toBe(UploadRejectionReason::MacroPayload)
+        ->and($screening->rejected[0]->getMessage())->toContain($fragment);
+})->with([
+    'vbaProject.bin under a backslash path' => [['word\vbaProject.bin' => "\xD0\xCF\x11\xE0macro"], 'VBA macro'],
+    'an embeddings part spelled the Windows way' => [['word\embeddings\oleObject1.bin' => "\xD0\xCF\x11\xE0ole"], 'embedded object'],
+]);
 
 // ── the decompression caps, one fixture each ─────────────────────────────────────────────────────
 

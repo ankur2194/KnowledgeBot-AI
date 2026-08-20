@@ -153,10 +153,20 @@ final class SourceService
      *
      * WRITTEN BEFORE THE TRANSACTION, DELIBERATELY. Object storage does not participate in a
      * PostgreSQL transaction, so the only two orderings are "orphan object, no row" and "row
-     * pointing at nothing". The first is a byte-for-byte-identical object at a content-addressed
-     * key that the next attempt overwrites and a sweep can collect; the second is a source whose
-     * ingestion fails on every attempt with `error_class: storage` and needs an operator. Choose
-     * the orphan.
+     * pointing at nothing". The second is a source whose ingestion fails on every attempt with
+     * `error_class: storage` and needs an operator, so the orphan is chosen — but ON THE STRENGTH OF
+     * THAT COMPARISON ALONE, AND NOT ON THE RECOVERY PATH THIS PARAGRAPH USED TO CLAIM. It said the
+     * orphan was "a byte-for-byte-identical object at a content-addressed key that the next attempt
+     * overwrites and a sweep can collect", and both halves are false: the key is SOURCE-scoped and
+     * `$sourceId` is minted per request twenty lines below, so a retry writes a DIFFERENT key and
+     * overwrites nothing, and `kb.maintenance.sweep_orphan_objects` is a docstring line in
+     * `services/ai-service/app/maintenance/tasks.py`, whose `__all__` is empty and whose
+     * `TODO(unassigned)` says these tasks have no owner. An orphan on this path is permanent, and it
+     * is permanent in the shape `ObjectKey`'s docblock calls defect 1 — outside every prefix the
+     * phase-2 purge visits, so verification certifies it clean while the bytes survive.
+     * `SourceObjectWriter::write()` carries the same correction and the `TODO(phase-c)` naming the
+     * two real fixes; it is stated once there rather than twice, because the ordering decision is
+     * one decision made in two places.
      *
      * ── THE UPLOADED FILES GO THROUGH THE GATE BEFORE ANY BYTE IS STORED ─────────────────────
      *

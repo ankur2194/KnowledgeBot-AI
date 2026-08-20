@@ -106,10 +106,19 @@ final class UploadLimits
      *
      * ALL THREE ARE READ OFF THE ZIP CENTRAL DIRECTORY HERE, WHICH IS ATTACKER-AUTHORED, and that
      * is stated rather than hidden. The reference is explicit that layers 1 and 2 are self-reported
-     * and that the only authoritative check is counting bytes while streaming the decompression —
-     * which is the PARSER's job, in the data plane, because Laravel never decompresses an upload.
-     * The intake opens the package to enumerate PART NAMES (step 5), which reads the directory and
-     * not the data.
+     * and that the only authoritative check is counting bytes while streaming the decompression.
+     * Laravel never decompresses an upload, so that check cannot live here — the intake opens the
+     * package to enumerate PART NAMES (step 5), which reads the directory and not the data.
+     *
+     * THE AUTHORITATIVE CHECK IS NOT WRITTEN, ANYWHERE, AND THIS DOCBLOCK USED TO IMPLY IT WAS.
+     * Saying it "is the PARSER's job, in the data plane" describes an owner, not an implementation:
+     * `grep -rn 'ZipFile\|infolist\|compress_size' services/ai-service/app` returns nothing, so no
+     * code in this repository counts bytes out of an OOXML decompression. Until it does, THESE THREE
+     * NUMBERS ARE THE ENTIRE DEFENCE and all three are self-reported — a package whose directory
+     * declares modest sizes and whose streams do not is refused by nothing. Owed to
+     * `ingestion-engineer`; recorded as security finding S2 and deliberately not worked around from
+     * this side, because the only workaround available here is decompressing hostile archives inside
+     * the control plane.
      *
      * The ratio cap is the one that catches the modern non-recursive bomb: Fifield's
      * overlapping-entry construction (USENIX WOOT 2019) reaches ratios past 28 million to one and
@@ -226,6 +235,12 @@ final class UploadLimits
      * archives are inconsistent about its case. `/embeddings/` is matched as a path segment —
      * `word/embeddings/oleObject1.bin` — so a file whose NAME merely contains the word is not
      * caught by accident.
+     *
+     * BOTH VALUES ARE SPELLED WITH FORWARD SLASHES AND THE CALLER NORMALIZES BEFORE COMPARING.
+     * `UploadIntake::assertPackageIsSafe()` step (d) runs `str_replace('\\', '/', …)` first, because
+     * `basename()` on POSIX does not treat `\` as a separator and a central directory naming its
+     * parts `word\vbaProject.bin` would otherwise pass both comparisons. The constants stay in one
+     * spelling; the normalization is at the one comparison site.
      */
     public const VBA_PART_BASENAME = 'vbaproject.bin';
 

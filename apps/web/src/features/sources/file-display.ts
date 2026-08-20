@@ -11,6 +11,14 @@ import type { SourceKind } from '@/components/tone';
  * schema is a factory over both (`@kb/contracts/forms`). Hard-code either and the form silently
  * enforces a different limit from the organization it is rendering for.
  *
+ * AND `allowed_mime` IS NOT THE WHOLE ADMISSION RULE EITHER — this paragraph used to imply it was,
+ * which was false in a way that invites the wrong next build. The intake admits a part only if the
+ * SNIFFED type is on that list AND the filename's final extension is on a SECOND allow-list, which
+ * the published shape does not carry (there is no `allowed_extensions`). The two sets are not in
+ * bijection: `.md` and `.csv` both sniff as `text/plain`, so an `accept="text/plain"` picker offers
+ * a `.txt` the extension step then refuses. Do not guess that list here or anywhere else in this
+ * app; the refusal is a 422 keyed on the part and the file's own row is where it renders.
+ *
  * Nothing below gates anything. `formatBytes` is a unit ladder, and `sourceKindForFile` picks a
  * TINT — an unrecognised file is `document`, never a refusal. If a reader ever finds themselves
  * comparing a value from this module against a limit, the bug is at the comparison.
@@ -74,8 +82,9 @@ export function formatBytes(bytes: number): string {
  * `presentation` are the words IANA itself puts in the OOXML and OpenDocument subtypes
  * (`…-officedocument.spreadsheetml.sheet`, `…opendocument.presentation`), `image/` is a top-level
  * type, and `csv` and `html` are subtype stems. So this cannot be mistaken for — or drift into —
- * the organization's `allowed_mime` list, which is the only thing that decides what may be
- * uploaded.
+ * the organization's `allowed_mime` list, which is ONE of the two terms deciding what may be
+ * uploaded: the server's extension allow-list is the other, and it is unpublished. (This sentence
+ * used to call `allowed_mime` "the only thing", which was wrong — see the module docblock.)
  *
  * `File.type` IS FORGEABLE AND THAT DOES NOT MATTER HERE. The browser derives it from the extension
  * on most platforms and any caller can set it; a lie changes the colour of a 20px badge. The server

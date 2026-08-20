@@ -78,6 +78,14 @@ export const sourceStatusPath = (orgId: string, sourceId: string): string =>
 export const sourceReprocessPath = (orgId: string, sourceId: string): string =>
   `${sourcePath(orgId, sourceId)}/reprocess`;
 
+/**
+ * `GET .../sources/upload-limits`. A COLLECTION-level route, not a member one — the ceilings belong
+ * to the organization, so there is no `{source}` to hang them off and `upload-limits` can never
+ * collide with a ULID in the `{source}` slot.
+ */
+export const sourceUploadLimitsPath = (orgId: string): string =>
+  `${sourcesPath(orgId)}/upload-limits`;
+
 // ── THE VIEW CONFIGURATION, READ OUT OF THE SERVER'S OWN RULES ──────────────────────────────────
 
 const INDEX_SOURCES_RULES = (indexSourcesRules as FormRulesManifest).rules;
@@ -325,6 +333,15 @@ export const canManageSources = (role: Role | null): boolean =>
  */
 export const SOURCE_VIEW_ROLE = 'knowledge manager';
 
+/**
+ * The role to NAME in the forbidden state on the UPLOAD screen. The same words as `SOURCE_VIEW_ROLE`
+ * today and a SEPARATE constant for the same reason `canManageSources` is a separate predicate: the
+ * two grants are separate on the server (`sources.view` and `sources.manage` in `OrgRole::grants()`)
+ * and may diverge. One constant serving both would make a divergence render a role that cannot do
+ * the thing the sentence is about, which is worse than no sentence.
+ */
+export const SOURCE_MANAGE_ROLE = 'knowledge manager';
+
 // ── POLLING ─────────────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -500,6 +517,44 @@ export const deleteSource = async (orgId: string, sourceId: string): Promise<Sou
   });
 
 // ── THE UPLOAD TRANSPORT ────────────────────────────────────────────────────────────────────────
+
+/**
+ * `GET .../sources/upload-limits` -> 200 `{data:{max_bytes, allowed_mime, max_batch}}` | 403 | 404.
+ *
+ * ── THE UPLOAD SCREEN CANNOT BE RENDERED WITHOUT THIS, AND THAT IS THE POINT ────────────────────
+ * §8.10 makes the per-file ceiling and the accepted media types PER-ORGANIZATION, so there is no
+ * byte constant and no MIME constant anywhere in this app: `uploadSchema` is a FACTORY over this DTO
+ * and the picker's `accept=` is built from `allowed_mime`. A screen that rendered a dropzone before
+ * this resolved would be enforcing SOME organization's limits — whichever one a fallback was copied
+ * from — so the form is mounted only once this query has data, and the loading state is a skeleton
+ * rather than a dropzone with a guessed cap.
+ *
+ * THE ANSWER IS ORGANIZATION-SCOPED, so it is cached under an ORG-NAMESPACED key and never on the
+ * Next server: every Next cache is keyed by URL or by arguments and `/sources/upload` is one URL for
+ * every organization an administrator belongs to. It inherits the client's 30 s `staleTime` — these
+ * are deployment configuration and move on the order of a config change, not of a request — and an
+ * organization switch REPLACES the QueryClient outright (`useResetQueryClient`), so a stale entry
+ * cannot outlive the tenant it was fetched for even for the length of one render.
+ *
+ * `allowed_mime` IS NOT THE WHOLE ADMISSION RULE. The intake admits a part only if the SNIFFED type
+ * is on this list AND the filename's final extension is on a SECOND allow-list the server does not
+ * publish. The two sets are not in bijection — `.md` and `.csv` both sniff as `text/plain` — so a
+ * picker built from this list OVER-ACCEPTS, and the refusal arrives as a 422 keyed on the part. The
+ * screen renders it there; it does not guess the extension list, and it does not describe the
+ * picker's filter to the user as what will be accepted (`OrgUploadLimits` in `@kb/contracts` carries
+ * the full statement).
+ */
+export const fetchUploadLimits = async (
+  orgId: string,
+  signal: AbortSignal,
+): Promise<OrgUploadLimits> =>
+  browserFetchData<OrgUploadLimits>({
+    path: sourceUploadLimitsPath(orgId),
+    credential: await sessionCredential(),
+    // Forwarded because `queryClient.cancelQueries()` is a no-op against a queryFn that drops it,
+    // and cancelling in-flight reads is step 2 of both logout and the organization switch.
+    signal,
+  });
 
 /**
  * THE MULTIPART PART NAME, AND IT IS INDEXED EVEN THOUGH EACH REQUEST CARRIES ONE FILE.

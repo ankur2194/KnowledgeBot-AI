@@ -49,8 +49,15 @@ enum UploadRejectionReason: string
     case Size = 'size';
 
     /**
-     * STEP 2. The NFKC-normalized name has no final extension, has one that is not allow-listed, is
-     * one of the four macro-enabled Office extensions, or is not a bare filename at all.
+     * STEP 2. The NFKC-normalized name is not valid UTF-8, has no final extension, has one that is
+     * not allow-listed, is one of the four macro-enabled Office extensions, or is not a bare
+     * filename at all.
+     *
+     * THE FIRST CASE IS HERE FOR THE SAME REASON AS THE LAST, and it was added because its absence
+     * was a hole rather than a tidiness question: an invalid-UTF-8 name whose bad bytes sit before
+     * the final dot keeps a pure-ASCII allow-listed extension, so every check in step 2 passed it
+     * and PostgreSQL refused the INSERT afterwards — with the object already written. The
+     * measurement is in `UploadIntake::assertExtensionIsAllowed()`.
      *
      * THE LAST CASE IS HERE AND NOT UNDER A NAME OF ITS OWN because step 2 IS the name gate: it
      * normalizes first and validates second, and a normalized name carrying a separator or a

@@ -83,6 +83,26 @@ export type { OrgUploadLimits } from '../resources/sources.js';
  * `z.file()` over `z.instanceof(FileList)`: `FileList` is a DOM type absent from Node, and
  * `z.instanceof` evaluates at module load — importing this file from a server component or a
  * node-environment test would crash it outright.
+ *
+ * ── EVERY MESSAGE HERE IS RENDERED TO A CUSTOMER, WHICH IS WHY THEY ARE WRITTEN ────────────────
+ * Zod's defaults are developer copy and they reach a screen verbatim: `.mime()` unset emits
+ * `Invalid option: expected one of "application/pdf"|"text/csv"|"image/png"` and `.max()` on a file
+ * emits `Too big: expected file to have <=10485760 bytes`. Both were measured in a rendered upload
+ * row on 2026-08-20 and both break `kb-ui-patterns` -> references/states.md's microcopy rules in the
+ * same three ways: they are not sentence case, they surface internal vocabulary (a MIME union, a
+ * raw byte count), and they state no next step. Validation strings are the ONE class of server-or-
+ * schema text this product renders verbatim, so they have to be copy somebody wrote.
+ *
+ * TWO OF THEM DELIBERATELY CARRY NO NUMBER. The per-file ceiling is stated once, in the reader's own
+ * units, by the screen that has a formatter (`formatBytes` in apps/web) — repeating it here would
+ * need a second byte formatter inside a package that is zero-dependency and Node-builtins-only on
+ * purpose, and two formatters is two answers to "what is 10 MB". The BATCH cap is a count rather
+ * than a size, so it can be interpolated with no formatter and no second copy of anything.
+ *
+ * They are also deliberately silent about WHY a type was refused, because this schema does not know:
+ * `allowed_mime` is one of two terms the server admits a file on (the paragraph above), so "this file
+ * type isn't one this organization accepts" is true of everything it rejects, while any more
+ * specific sentence would be a claim about a rule nobody sent us.
  */
 export const uploadSchema = (limits: OrgUploadLimits) =>
   z.strictObject({
@@ -90,11 +110,15 @@ export const uploadSchema = (limits: OrgUploadLimits) =>
       .array(
         z
           .file()
-          .max(limits.max_bytes)
-          .mime([...limits.allowed_mime]),
+          .max(limits.max_bytes, { error: 'This file is larger than this organization allows.' })
+          .mime([...limits.allowed_mime], {
+            error: 'This file type isn’t one this organization accepts.',
+          }),
       )
-      .min(1)
-      .max(limits.max_batch),
+      .min(1, { error: 'Choose at least one file to upload.' })
+      .max(limits.max_batch, {
+        error: `Upload at most ${limits.max_batch} files at a time.`,
+      }),
   });
 
 export type UploadSchema = ReturnType<typeof uploadSchema>;

@@ -38,6 +38,7 @@ export function UploadDropzone({
   selectedCount,
   onFilesChosen,
   disabled = false,
+  invalidMessageId,
   className,
 }: {
   /** Per-organization, from the bootstrap config. THE ONLY SOURCE of the accept list and the batch
@@ -47,6 +48,21 @@ export function UploadDropzone({
   readonly selectedCount: number;
   readonly onFilesChosen: (files: readonly File[]) => void;
   readonly disabled?: boolean;
+  /**
+   * The id of the element rendering the BATCH-level form error, when there is one.
+   *
+   * THE FILE INPUT IS THE `files` FIELD'S CONTROL, so a message about the batch as a whole — "choose
+   * at least one file", "this organization accepts at most 3 at a time" — has to be bound to it or
+   * it is an error that is only red (kb-ui-accessibility, *Live regions*). Passing an id rather than
+   * the text keeps the message's PRESENTATION with the caller, which owns whether it came from the
+   * resolver or from a 422, while the two ARIA attributes that make it an error state live here with
+   * the control they describe.
+   *
+   * PER-FILE messages are NOT bound here: those belong to `files.<index>`, are rendered in the row
+   * they are about, and pointing this input at five of them would announce the whole batch's
+   * problems on one control.
+   */
+  readonly invalidMessageId?: string;
   readonly className?: string;
 }) {
   const inputId = useId();
@@ -141,7 +157,15 @@ export function UploadDropzone({
           // forgeable, and the server's sniffing is the control (kb-security-baseline).
           accept={limits.allowed_mime.join(',')}
           disabled={inert}
-          aria-describedby={capId}
+          // The cap sentence ALWAYS, the error only when there is one — in that order, so a screen
+          // reader hears what the control is before it hears what is wrong with it.
+          aria-describedby={invalidMessageId === undefined ? capId : `${capId} ${invalidMessageId}`}
+          // `undefined`, not `false`, when there is nothing wrong: React omits the attribute
+          // entirely for `undefined` and RENDERS `aria-invalid="false"` for `false`. Both are
+          // spec-legal, and the second is a control permanently announcing a validity state it was
+          // never asked about — noise in the a11y tree, and a spec asserting "no error is bound"
+          // that can only ever check a string.
+          aria-invalid={invalidMessageId === undefined ? undefined : true}
           onChange={(event) => {
             choose(Array.from(event.target.files ?? []));
             // The input is CLEARED after every read. Without it, choosing the same file twice in a

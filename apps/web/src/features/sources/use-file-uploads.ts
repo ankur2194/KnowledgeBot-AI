@@ -26,7 +26,10 @@ import type { UploadProgress } from '@/lib/api/upload';
  * there is no retry option to get wrong and no `Property[key.name='retry']` for ESLint to find.
  *
  * The list a completed upload eventually refreshes is invalidated by the SCREEN that owns it, from
- * the org-namespaced key it already holds. That screen is a later task.
+ * the org-namespaced key it already holds. That screen is `upload-screen.tsx`: it invalidates the
+ * `['org', orgId, 'sources']` PREFIX once the batch has settled with at least one success, and again
+ * after a row is retried into one. It writes nothing into the cache — a 201 body is a `draft` or
+ * `queued` snapshot, and the row a list shows has to be the server's answer.
  */
 
 /**

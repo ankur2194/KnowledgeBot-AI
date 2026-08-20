@@ -1,4 +1,5 @@
 import { PageHeader } from '@/components/page-header';
+import { AddFilesAction } from '@/features/sources/add-files-action';
 import { SourcesScreen } from '@/features/sources/sources-screen';
 
 /**
@@ -44,12 +45,17 @@ import { SourcesScreen } from '@/features/sources/sources-screen';
  * `fetch` to Laravel, and none of them is optimistic — deletion is two-phase and verified, and a
  * lifecycle transition is not computable in a browser.
  *
- * ── THE PAGE HEADER HAS NO ACTION CLUSTER YET, AND THAT IS DELIBERATE ───────────────────────────
- * "Add source" belongs here and the create/upload screen is a later batch's
- * (`features/sources/upload-dropzone.tsx` and its transport are already built and are not wired to a
- * route). A `--primary` button that goes nowhere is worse than no button, and the first-run empty
- * state makes the same choice for the same reason — both places take the control together when it
- * exists, with names that are not substrings of one another.
+ * ── THE PAGE HEADER'S ACTION CLUSTER LANDED, AND IT IS A CLIENT COMPONENT FOR A REASON ─────────
+ * This paragraph used to read "no action cluster yet": the upload screen was a later batch's, and a
+ * `--primary` button that goes nowhere is worse than no button. `/sources/upload` exists now, so the
+ * control is here — and in the first-run empty state, which took it in the same change, with names
+ * that are not substrings of one another ("Add files" / "Upload files" / "Upload N files").
+ *
+ * It is `<AddFilesAction>` rather than a `<Link>` written inline because `sources.manage` is withheld
+ * from ANALYST and a control a user may not use is HIDDEN rather than disabled (states.md). The role
+ * is per-organization and lives in the session, which only the browser holds — this server component
+ * cannot read it, by construction — so the decision is made in a client component and this file stays
+ * byte-identical for every tenant.
  */
 export default function SourcesPage() {
   return (
@@ -59,6 +65,7 @@ export default function SourcesPage() {
         titleId="sources-heading"
         // ONE SENTENCE, and it says what the page is FOR rather than restating the title (P3).
         description="Documents, spreadsheets, presentations and crawled sites your bots can answer from."
+        actions={<AddFilesAction />}
       />
 
       <SourcesScreen />
