@@ -193,18 +193,27 @@ final class SourceController extends Controller
      * dispatched AFTER THE COMMIT (`after_commit` on the `valkey` connection) so the worker cannot
      * pop it before the rows exist.
      *
-     * ── `type: file` IS ACCEPTED BY THE VALIDATOR AND REFUSED HERE ────────────────────────────
+     * ── `type: file` RUNS THE INTAKE GATE, AND THE FILES NEVER TOUCH THIS BODY ────────────────
      *
-     * TODO(phase-c): the upload INTAKE — the six-step gate of `kb-security-baseline`, the object
-     * write, and the `source.upload.accepted` / `source.upload.rejected` audit pair — is a separate
-     * unit of work and is not in this change. The FormRequest declares `files` and `files.*` anyway,
-     * so the multipart shape the console was written against is PINNED rather than contradicted: an
-     * absent rule would make `validated()` discard the parts silently and return a 201 for a source
-     * with no content. This refusal is what stops that 201 being wrong instead of merely honest.
+     * `$request->file('files')` is handed to the service unread. The six-step gate of
+     * `kb-security-baseline` — size, extension allow-list on the NFKC-normalized name, MIME sniffed
+     * from content by libmagic, the extension/MIME cross-check, the OPC macro and embedded-object
+     * refusal, and the SHA-256 — lives in `UploadIntake`, in one method, in one order, because THE
+     * ORDER IS THE SECURITY PROPERTY and an order spread across a controller and a service is an
+     * order nobody can read. This action decides authorization and organization status; it decides
+     * nothing about bytes.
+     *
+     * A REFUSED BATCH IS A 422 WITH ONE ENTRY PER FILE, keyed `files.0`, `files.1`, … Nothing is
+     * stored for a batch with any refusal in it — no object, no source row, no item — and every
+     * refusal writes a `source.upload.rejected` audit row carrying a closed reason token, because a
+     * caller grinding at the gate with crafted files otherwise leaves no trace anywhere.
      *
      * The request body is NOT described in the OpenAPI document. Its rules live in
      * `packages/contracts/rules/StoreSourceRequest.json`, dumped from executing `rules()`, and
-     * docs/22 finding 19 rules that the FormRequest is the only source of a request rule.
+     * docs/22 finding 19 rules that the FormRequest is the only source of a request rule. The
+     * numbers a console needs BEFORE it posts — the byte ceiling, the accepted MIME types and the
+     * batch cap — are `GET .../sources/upload-limits`, which publishes the FormRequest's own
+     * constants rather than a second copy of them.
      */
     #[ResponseShape(
         status: 201,
@@ -212,10 +221,14 @@ final class SourceController extends Controller
         description: 'The created source, wrapped in `data`, already moved out of `draft` into '
             .'`queued` — creation and submission are one act, because a caller who has handed over '
             .'content has submitted it. 409 when the organization is not active; 422 for a body '
-            .'whose content does not match its declared `type`, and for `type: file` until the '
-            .'upload intake lands. The response is the SOURCE and never a job handle: progress is '
-            .'read by polling this resource, because the platform reports it onto `status` rather '
-            .'than through a job resource clients would have to learn.',
+            .'whose content does not match its declared `type`, and — for `type: file` — with one '
+            .'entry per refused part, keyed `files.0`, `files.1`, …, when the upload intake gate '
+            .'refuses a file on size, extension, sniffed MIME, an extension/MIME disagreement, an '
+            .'embedded macro or object, a decompression cap, or a duplicate of another part in the '
+            .'same request. A batch with any refusal in it stores NOTHING. The response is the '
+            .'SOURCE and never a job handle: progress is read by polling this resource, because the '
+            .'platform reports it onto `status` rather than through a job resource clients would '
+            .'have to learn.',
         errors: [401, 403, 404, 409, 422, 429, 500, 503],
     )]
     public function store(
@@ -242,19 +255,20 @@ final class SourceController extends Controller
             OrganizationStatus::SUSPENDED_REFUSAL,
         );
 
-        if ($input->type === SourceType::File) {
-            // TODO(phase-c): see the docblock. Keyed on `files` so the console renders it against
-            // the drop zone rather than as an unattached banner, and phrased as a capability that
-            // has not landed rather than as a validation failure of the operator's file.
-            throw ValidationException::withMessages([
-                'files' => 'File upload is not available on this deployment yet. The route and the '
-                    .'multipart shape are final — `files[0]`, `files[1]`, … — and the six-step '
-                    .'intake gate that has to run before bytes are stored has not landed. Add a URL '
-                    .'or paste text in the meantime.',
-            ]);
-        }
+        // THE PARTS, UNREAD. `$request->file('files')` returns the `UploadedFile` objects Symfony
+        // built from `$_FILES`, keyed by the index the client sent — which is what lets a per-file
+        // 422 name `files.0`. Nothing in this body opens one, sizes one, names one or asks it what
+        // type it is: every one of those is a step of the gate, and a step performed here would be a
+        // step performed twice or a step performed instead.
+        $files = $request->file('files');
 
-        $source = $sources->create($organization, $input, $this->actorId(), $request);
+        $source = $sources->create(
+            $organization,
+            $input,
+            $this->actorId(),
+            $request,
+            is_array($files) ? $files : [],
+        );
 
         return response()->json([
             'data' => (new SourceResource($source))->toArray($request),
@@ -352,10 +366,13 @@ final class SourceController extends Controller
         properties: ['data' => SourceResource::class],
         description: 'The source after phase 1, wrapped in `data`: `status` is `deleting`, '
             .'`deleted_at` is set, and `purged_at` is still null because nothing has been PROVEN '
-            .'removed yet. It is already excluded from retrieval — that is one column and it takes '
-            .'effect on the next query, with no job needing to succeed first. 409 when the '
-            .'organization is not active; 422 when the source has no legal edge to `deleting`, '
-            .'which includes a second delete of the same row.',
+            .'removed yet. PostgreSQL records the removal immediately and no job has to succeed for '
+            .'that to be true — but NOTHING IN THIS DEPLOYMENT YET PERFORMS THE RETRIEVAL '
+            .'EXCLUSION: `source_status` is a Qdrant payload field written at upsert, and the '
+            .'resolved active-version set that would make the exclusion immediate is not built on '
+            .'this side either. See the `TODO(phase-c)` markers on `SourceService::disable()`. '
+            .'409 when the organization is not active; 422 when the source has no legal edge to '
+            .'`deleting`, which includes a second delete of the same row.',
         errors: [401, 403, 404, 409, 422, 429, 500, 503],
     )]
     public function destroy(

@@ -98,9 +98,17 @@ final class SourceStatusController extends Controller
     #[ResponseShape(
         status: 200,
         properties: ['data' => SourceResource::class],
-        description: 'The source after the move, wrapped in `data`. A DISABLE takes effect on the '
-            .'next query — it is one column, every vector is retained, and no job has to succeed '
-            .'first. An ENABLE is sent as `ready` whatever the source published as: which of the '
+        description: 'The source after the move, wrapped in `data`. A DISABLE writes one column and '
+            .'retains every vector, so re-enabling is a metadata write rather than a re-ingest — '
+            .'but NOTHING IN THIS DEPLOYMENT YET PERFORMS THE RETRIEVAL EXCLUSION, and this '
+            .'description used to claim it took effect on the next query. `source_status` is a '
+            .'Qdrant payload field written at upsert time, this path issues no payload write and '
+            .'dispatches no job that would, and the resolved active-version set that would make a '
+            .'disable immediate without touching any payload is not built on this side either. The '
+            .'column is the durable record of the intent and the exclusion lands with the chat '
+            .'path; see the `TODO(phase-c)` markers on `SourceService::disable()` and `::enable()` '
+            .'for which owner owes which half. An ENABLE is sent as `ready` whatever the source '
+            .'published as: which of the '
             .'two ready states it lands in is READ FROM ITS LIVE VERSIONS, because "did this '
             .'document parse cleanly" is a fact about the content rather than a choice, and '
             .'`status` in the response says which one it chose. 409 when the organization is not '

@@ -6,6 +6,7 @@ namespace App\Http\Requests;
 
 use App\Enums\SourceType;
 use App\Services\Sources\NewSource;
+use App\Services\Sources\Upload\UploadLimits;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
@@ -22,21 +23,24 @@ use Illuminate\Validation\Rule;
  * about "the upload". Laravel's own array validation produces exactly `files.0` for `files.*`, so
  * the rule set below IS the contract rather than a description of it.
  *
- * ── `type: file` IS DECLARED HERE AND REFUSED IN THE CONTROLLER ──────────────────────────────
+ * ── THE RULES BELOW ARE THE SHAPE; THE INTAKE GATE IS THE CONTENT ───────────────────────────
  *
- * The upload INTAKE — the six-step gate of `kb-security-baseline`
- * (size, extension allow-list, content-sniffed MIME, extension/MIME cross-check, OPC macro and
- * embedded-object refusal, content hash), the object write, the `source.upload.accepted` and
- * `source.upload.rejected` audit rows — is a separate unit of work and is not in this change. What
- * this change owes is that the ROUTE and this REQUEST do not CONTRADICT the shape the console was
- * already written against, so that landing the intake is a controller change rather than a wire
- * change on both sides.
+ * `files` and `files.*` pin the multipart shape and the per-file size. Everything else about an
+ * uploaded file — the extension allow-list on the NFKC-normalized name, the MIME sniffed from
+ * content by libmagic, the extension/MIME cross-check, the OPC macro and embedded-object refusal,
+ * the decompression caps, the SHA-256 — is `App\Services\Sources\Upload\UploadIntake`, in one
+ * method, in one order, because THE ORDER IS THE SECURITY PROPERTY and a gate split between a
+ * FormRequest and a service is a gate whose order nobody can read.
  *
- * So the rules are complete and the refusal is one `TODO(phase-c)` in the controller. The
- * alternative — omitting `files` from `rules()` — would be worse in the specific way an absent rule
- * always is here: `validated()` SILENTLY DISCARDS an undeclared field, so a console posting files
- * against this endpoint would receive a 201 for a source with no content and no version, and would
- * discover it only when the bot could not answer.
+ * A rule that LOOKED like a MIME check here would be worse than none: `mimes:` guesses from the
+ * client's filename and `mimetypes:` from a guesser that reads the first bytes, and neither is the
+ * content sniff §8.10 requires — so the real check would then read as a duplicate somebody may
+ * remove. See the comment on `files.*` below, which has said so since before the intake existed.
+ *
+ * Omitting `files` from `rules()` altogether would be worse still, in the specific way an absent
+ * rule always is here: `validated()` SILENTLY DISCARDS an undeclared field, so a console posting
+ * files against this endpoint would receive a 201 for a source with no content and no version, and
+ * would discover it only when the bot could not answer.
  *
  * ── NO `unique:` AND NO `exists:` RULE, ANYWHERE IN THIS FILE ────────────────────────────────
  *
@@ -59,20 +63,34 @@ final class StoreSourceRequest extends FormRequest
     /**
      * The most files one multipart request may carry.
      *
-     * THE CANONICAL VALUE LIVES HERE ONLY UNTIL THE UPLOAD SURFACE LANDS. The console reads
-     * `max_bytes`, `allowed_mime` and `max_batch` from an `OrgUploadLimits` endpoint so it can
-     * refuse a file before spending the operator's bandwidth on it, and that endpoint belongs with
-     * the intake. It must publish THESE constants rather than a second copy of the numbers — two
-     * copies of a limit drift, and the drifting copy is the one that ships: a console that believes
-     * the batch cap is 20 while the server enforces 10 renders a green upload that 422s.
+     * IT IS THE SAME VALUE `UploadLimits::MAX_BATCH` HOLDS, BECAUSE IT IS THAT CONSTANT. The
+     * console reads `max_bytes`, `allowed_mime` and `max_batch` from
+     * `GET .../sources/upload-limits` so it can refuse a file before spending the operator's
+     * bandwidth on it, and that endpoint renders `OrgUploadLimitsResource` out of
+     * `App\Services\Sources\Upload\UploadLimits`. Nothing on that path holds a second copy of a
+     * number — two copies of a limit drift, and the drifting copy is the one that ships: a console
+     * that believes the batch cap is 20 while the server enforces 10 renders a green upload that
+     * 422s. `UploadLimitsEndpointTest` asserts the rendered values against THESE constants, so a
+     * hardcoded copy on either side fails the suite instead of shipping.
+     *
+     * THE DEFINITION SITE IS THE SERVICE AND NOT THIS FILE, and that is `arch()->preset()->
+     * laravel()`'s doing rather than a preference: a FormRequest may not be used outside
+     * `App\Http`, so `UploadLimits` reading a constant from here fails the arch suite while this
+     * reading one from there does not. The name stays `MAX_FILES` because that is what the rule
+     * counting the array calls it.
      */
-    public const MAX_FILES = 10;
+    public const MAX_FILES = UploadLimits::MAX_BATCH;
 
     /**
      * Per-file ceiling, in KILOBYTES, because that is the unit Laravel's `max:` rule speaks for an
-     * uploaded file. 25 MB.
+     * uploaded file. 25 MB, and the same constant `UploadLimits::MAX_FILE_KILOBYTES` holds.
+     *
+     * KIBIBYTES, PRECISELY: `ValidatesAttributes::getSize()` divides `UploadedFile::getSize()` by
+     * **1024**, so this is 26,214,400 bytes and not 25,600,000. The wire publishes bytes, because a
+     * browser's `File.size` is bytes; the conversion happens in exactly one place,
+     * `UploadLimits::maxBytes()`, and nothing else on this path multiplies or divides by 1024.
      */
-    public const MAX_FILE_KILOBYTES = 25_600;
+    public const MAX_FILE_KILOBYTES = UploadLimits::MAX_FILE_KILOBYTES;
 
     /**
      * The pasted-text ceiling, in CHARACTERS.
@@ -144,8 +162,8 @@ final class StoreSourceRequest extends FormRequest
 
             // ── THE MULTIPART HALF ──────────────────────────────────────────────────────────
             //
-            // Declared so the shape is pinned and the dumped rules manifest carries it; the intake
-            // itself is refused in the controller with a `TODO(phase-c)`. See the class docblock.
+            // The BATCH cap. `MAX_FILES` and not a literal, so the endpoint that publishes it to
+            // the console and the rule that enforces it are one value. See the class docblock.
             'files' => [
                 'bail',
                 'required_if:type,'.SourceType::File->value,
@@ -158,7 +176,8 @@ final class StoreSourceRequest extends FormRequest
             // reads the first bytes — neither is the content sniff the security baseline requires,
             // and a rule that LOOKS like a MIME check is worse than none, because the real check
             // then reads as a duplicate somebody may remove. The allow-list is enforced at intake,
-            // against libmagic, and its refusal is a `source.upload.rejected` audit row.
+            // against libmagic, and its refusal is a `source.upload.rejected` audit row carrying a
+            // closed reason token naming which step said no.
             'files.*' => ['bail', 'file', 'max:'.self::MAX_FILE_KILOBYTES],
 
             // ── LABELS ──────────────────────────────────────────────────────────────────────

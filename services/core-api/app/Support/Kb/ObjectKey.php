@@ -164,6 +164,42 @@ final class ObjectKey
     }
 
     /**
+     * The stored bytes of ONE UPLOADED FILE, exactly as they arrived.
+     *
+     * ── THE SAME PREFIX AS `originalText()`, AND THAT IS THE WHOLE REASON IT IS A SIBLING ─────
+     *
+     * A source is either pasted or uploaded, never both, so the two methods can never collide
+     * within one source — and putting them under one prefix is what lets the phase-2 sweep and its
+     * verification say `original/` once. A separate `uploads/` segment would be a second string to
+     * keep in step with `_purge_objects(..., include_original=…)` on the other side of the seam, and
+     * the class docblock's defect 1 is precisely what a prefix nobody swept produced.
+     *
+     * ── NO SUFFIX, WHICH IS THE ONE DIFFERENCE FROM `originalText()` ──────────────────────────
+     *
+     * A pasted body's `.txt` is honest because WE generated those bytes from a validated UTF-8
+     * string, so the suffix restates something already known. An upload's type is a SNIFF —
+     * `kb-security-baseline` refuses the client's `Content-Type` and refuses the filename's
+     * extension, and step 4 of the intake gate exists because the two disagree on hostile input.
+     * Appending an extension here would put a value derived from attacker-influenced text into a
+     * PATH, which is the class of mistake the generated-key rule exists to make unrepresentable,
+     * and it would do so for zero benefit: `source_items.mime` is the authority for every reader,
+     * and the sniffed type is echoed onto the `source.upload.accepted` audit row besides.
+     *
+     * CONTENT-ADDRESSED WITHIN ONE SOURCE, like its sibling. Two files in one batch with identical
+     * bytes therefore name ONE key, which is why the intake refuses a repeated content hash inside
+     * a batch (`UploadIntake`, reason `duplicate`) rather than letting the second write silently
+     * overwrite the first and leave two `source_items` rows pointing at one object with no
+     * reference count — the same unowned-object shape as this class's defect 2, one level down.
+     *
+     * @return non-empty-string always — every segment is guarded by `segment()` below, and PHPStan
+     *                          is told so because a caller comparing prefixes needs it
+     */
+    public static function originalUpload(string $organizationId, string $sourceId, string $contentHash): string
+    {
+        return self::originalPrefix($organizationId, $sourceId).self::segment($contentHash, 'content hash');
+    }
+
+    /**
      * Everything DERIVED from one source version: the parse output, OCR text, extracted images, a
      * crawl snapshot. `version_prefix()` in `services/ai-service/app/storage/objects.py` is the
      * same string, and it is the twin `seaweedfs-s3`:180 asks for.

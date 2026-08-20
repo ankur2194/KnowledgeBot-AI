@@ -129,8 +129,15 @@ export type {
  * no source form ships yet. `SourceStatus` is pinned to the server by the enum comparison in
  * test/resource-drift.test.ts and by nothing else, which is the correct amount of pinning for a
  * vocabulary nothing iterates.
+ *
+ * `OrgUploadLimits` IS THE ONE SHAPE HERE THAT IS ALSO REACHABLE THROUGH `@kb/contracts/forms`, and
+ * that is a re-export of this declaration rather than a second one — `src/forms/upload.ts` needs it
+ * as `uploadSchema`'s parameter and its callers already import it from there. Both doors, one
+ * definition; the alternative was an `OrgUploadLimitsResource` interface beside an `OrgUploadLimits`
+ * one, which is the two-spellings-of-a-shape drift this package's suites exist to catch.
  */
 export type {
+  OrgUploadLimits,
   SourceCollectionResource,
   SourceResource,
   SourceStatus,

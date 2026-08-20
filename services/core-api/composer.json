@@ -7,6 +7,7 @@
     "require": {
         "php": "^8.4.1",
         "ext-bcmath": "*",
+        "ext-fileinfo": "*",
         "ext-intl": "*",
         "ext-json": "*",
         "ext-pcntl": "*",
@@ -14,6 +15,7 @@
         "ext-pdo_pgsql": "*",
         "ext-posix": "*",
         "ext-redis": "*",
+        "ext-zip": "*",
         "guzzlehttp/guzzle": "^7.9",
         "laravel/framework": "^13.24",
         "laravel/horizon": "^5.48",
@@ -80,6 +82,7 @@
             "larastan": "^3.10 — corrected from ^4.0, which does not exist on Packagist. Larastan's major tracks PHPStan's, not Laravel's: 3.x is the PHPStan 2.x line, and v3.10.0 already accepts `illuminate/* ^13`. Bump only when Larastan 4 ships against PHPStan 3, and change phpstan.neon's rule level in the same commit.",
             "collision": "^8.9.5 — corrected from ^9.0, which does not exist. Collision 8.x is Laravel 13-compatible by declaration: v8.9.5 conflicts with `laravel/framework <11.48.0 || >=14.0.0`, so 13.x is inside its supported window. Pest v5.0.3 requires `nunomaduro/collision ^8.9.5`; this pin matches it so the test runner and artisan's exception renderer stay on one copy.",
             "platform": "config.platform pins php 8.4.1 and ext-opentelemetry 1.2.1 so the open-telemetry/opentelemetry-auto-* packages resolve on a developer machine or CI image where the PECL extension is not installed. The runtime image must actually carry the extension: `php -m | grep opentelemetry` in CI. The php pin is the LOWEST supported runtime, not the newest available, and it must stay equal to the `require.php` floor — resolve against a higher version than production runs and the lock can contain packages production cannot install.",
+            "upload-extensions": "ext-fileinfo and ext-zip are DECLARED because the upload intake gate depends on both and fails CLOSED without them. fileinfo IS libmagic: `UploadIntake::sniff()` throws rather than falling back to the extension, because an extension-derived MIME is the client's claim wearing the server's voice and is the exact check docs/03 8.10 requires. zip is what enumerates OPC part names for the vbaProject.bin / /embeddings/ refusal and reads the central directory for the three decompression caps. Both are enabled in php:8.4-fpm-bookworm (fileinfo by default, zip installed explicitly in the Dockerfile) and both are asserted at BUILD time in the same loop as pdo_pgsql, so a base-image change that dropped either fails the build rather than every upload.",
             "php-floor": "8.4.1, not 8.4.0: pestphp/pest v5.0.3 requires symfony/process ^8.1.0, and symfony/process v8.1.0 requires php >=8.4.1. The floor is therefore set by a dev dependency, but `require.php` still carries it — a composer.json that advertises 8.4.0 while the lock needs 8.4.1 fails at install time on a platform check instead of at resolution. laravel/framework v13.24.0 itself only needs php ^8.3; the runtime image (php:8.4-fpm-bookworm) is comfortably above the floor.",
             "deliberately-absent": "laravel/fortify + laravel/passkeys (no login UI yet — add with the auth surface), laravel/sail (Compose lives in infrastructure/docker and is platform-devops's), spatie/laravel-permission (roles are hand-rolled per laravel-rbac-policies: its team scoping is ambient static state), phpunit/phpunit as a direct dependency (Pest owns that constraint; a direct pin is how the two drift).",
             "http-client-adapter": "open-telemetry/exporter-otlp needs a PSR-18 client + PSR-17 factories. Guzzle 7 provides PSR-7/17 but discovery may still ask for php-http/guzzle7-adapter. If `composer install` reports an unsatisfied psr/http-client-implementation, add php-http/guzzle7-adapter — it is the expected resolution, not a surprise. OUTCOME at first lock generation: not needed. open-telemetry/sdk 1.15.0's `psr/http-client-implementation ^1.0` and `psr/http-factory-implementation ^1.0` are satisfied virtually by guzzlehttp/guzzle 7.15.3 and guzzlehttp/psr7 2.13.0, which is the second reason guzzle is required explicitly. php-http/discovery 1.20.0 is in the lock as a transitive of the exporter and is allow-listed as a plugin; it is the RUNTIME discovery that could still fail if guzzle were ever dropped."

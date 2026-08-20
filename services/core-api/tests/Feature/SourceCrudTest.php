@@ -272,16 +272,24 @@ it('refuses a body whose content does not match its declared type, in both direc
     Queue::assertNothingPushed();
 });
 
-it('refuses a file upload by name, on the shape the console already posts', function (): void {
+it('refuses a `file` source that carries no files, rather than creating one with no item', function (): void {
     $f = sourceCrudFixture();
 
     SpaSession::establish(currentTest(), $f['ownerA']);
 
     // THE PART NAME IS `files[0]`, INDEXED EVEN FOR ONE FILE. The FormRequest declares `files` and
-    // `files.*`, so a validation failure keys on `files.0` and the console can render it against
-    // the row an operator can see. The INTAKE has not landed and the refusal says so — but the
-    // SHAPE is pinned, because an absent `files` rule would make `validated()` DISCARD the parts
-    // silently and answer 201 for a source with no content at all.
+    // `files.*`, so a validation failure keys on `files.0` and the console can render it against the
+    // row an operator can see. THE SHAPE IS PINNED rather than merely documented: an absent `files`
+    // rule would make `validated()` DISCARD the parts silently and answer 201 for a source with no
+    // content at all.
+    //
+    // What this asserts now that the intake has landed is the OTHER half of the same pairing — a
+    // declared `file` source with no parts. It would otherwise reach the repository with an empty
+    // item list, and "every source has at least one item, including a single-file upload" is the one
+    // rule the `source_items` migration says must never acquire a special case.
+    //
+    // The intake gate itself is tests/Unit/UploadIntakeGateTest.php and the endpoint's half is
+    // tests/Feature/SourceUploadTest.php.
     $response = currentTest()->postJson(
         "/api/v1/organizations/{$f['orgA']->id}/sources",
         ['type' => 'file', 'name' => 'Handbook'],

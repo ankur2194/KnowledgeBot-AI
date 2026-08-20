@@ -3814,10 +3814,20 @@ describe('ownership columns are unrepresentable', () => {
    *
    * `uploadSchema` is a FACTORY over `OrgUploadLimits` (§8.10 makes the size and MIME limits
    * per-organization, so no byte or MIME constant may exist in this package), which is why it is
-   * instantiated here rather than referenced. This closes only its OWNERSHIP property — the claim at
-   * `src/forms/upload.ts:10` that nothing asserts the file at all is now narrower but still true of the
-   * property that matters there: nothing parses one File against two different limit DTOs and expects
-   * opposite results. The limits below are therefore arbitrary; only the path set is under test.
+   * instantiated here rather than referenced. This closes only its OWNERSHIP property — the claim in
+   * `src/forms/upload.ts` (the paragraph headed *THIS IS ASSERTED NOW*) that nothing asserts the file
+   * at all is now narrower but still true of the property that matters there: nothing parses one File
+   * against two different limit DTOs and expects opposite results. The limits below are therefore
+   * arbitrary; only the path set is under test.
+   *
+   * THE CITATION USED TO CARRY A LINE NUMBER and it went stale the moment that file gained an import,
+   * which is the whole argument against a `file:line` anchor in a comment nothing recomputes — the
+   * paragraph heading above is greppable and does not drift. `OrgUploadLimits` also stopped being
+   * declared in that file in the same change: it is a published component now
+   * (`OrgUploadLimitsResource`), so its one definition moved to `src/resources/sources.ts` and
+   * `src/forms/upload.ts` re-exports it. The annotation on the entry below still reads correctly —
+   * `StoreSourceRequest` remains NO_CLIENT_FORM as OWED, because what it is owed is a create form
+   * covering all three arms, not the limits endpoint that has now landed.
    */
   const everySchema = (): readonly (readonly [string, z.ZodType])[] => [
     ...Object.entries(MIRRORS).map(

@@ -13,6 +13,7 @@ use App\Services\Sources\IllegalSourceTransition;
 use App\Services\Sources\IngestionApplication;
 use App\Services\Sources\IngestionProgress;
 use App\Services\Sources\NewSource;
+use App\Services\Sources\NewSourceItem;
 use App\Services\Sources\SourceChildSummary;
 use App\Services\Sources\SourceEdit;
 use App\Services\Sources\VersionIdentity;
@@ -87,24 +88,20 @@ final class EloquentKnowledgeSourceRepository implements KnowledgeSourceReposito
     }
 
     /**
-     * @param  Closure(KnowledgeSource): void  $audit
+     * @param  non-empty-list<NewSourceItem>  $items
+     * @param  Closure(KnowledgeSource, list<SourceItem>): void  $audit
      */
     public function create(
         string $organizationId,
         string $sourceId,
         NewSource $input,
         ?string $createdBy,
-        string $canonicalKey,
-        ?string $storageKey,
-        ?string $contentHash,
-        ?string $mime,
-        ?int $byteSize,
+        array $items,
         string $jobId,
         Closure $audit,
     ): KnowledgeSource {
         return DB::transaction(function () use (
-            $organizationId, $sourceId, $input, $createdBy, $canonicalKey, $storageKey,
-            $contentHash, $mime, $byteSize, $jobId, $audit,
+            $organizationId, $sourceId, $input, $createdBy, $items, $jobId, $audit,
         ): KnowledgeSource {
             $source = new KnowledgeSource;
 
@@ -150,32 +147,55 @@ final class EloquentKnowledgeSourceRepository implements KnowledgeSourceReposito
 
             $source->save();
 
-            // ── THE FIRST ITEM. EVERY SOURCE HAS ONE, INCLUDING A SINGLE-FILE UPLOAD ─────────
+            // ── THE ITEMS. EVERY SOURCE HAS AT LEAST ONE, INCLUDING A SINGLE-FILE UPLOAD ────
+            //
+            // ONE LOOP AND NO ONE-ITEM SHORTCUT ANYWHERE. A paste arrives here as a list of one and
+            // takes the same statements a ten-file batch takes, which is what the `source_items`
+            // migration means by "there is no special case for a one-item source and there must
+            // never be one".
             //
             // `$fillable` on SourceItem is EMPTY on purpose — not one column on that table is a
             // form field — so every column is assigned explicitly and `Model::shouldBeStrict()`
             // turns a `fill()` naming any of them into an exception rather than a silent drop.
-            $item = new SourceItem;
-            $item->organization_id = $organizationId;
-            $item->source_id = $source->id;
-            $item->canonical_key = $canonicalKey;
-            // The live URL, separate from the canonical key because normalization is lossy on
-            // purpose and a citation has to link to something a human can open.
-            $item->url = $input->originUrl;
-            $item->title = $input->name;
-            $item->display_name = null;
-            $item->storage_key = $storageKey;
-            $item->content_hash = $contentHash;
-            $item->mime = $mime;
-            $item->byte_size = $byteSize;
-            $item->current_version_id = null;
-            $item->last_discovered_at = null;
-            $item->missing_count = 0;
-            // THE CALLBACK GUARD, CLAIMED BY THE SAME STATEMENT THAT CREATES THE ROW. A job id with
-            // no sequence reset, or a reset with no job id, is half a guard.
-            $item->current_job_id = $jobId;
-            $item->progress_sequence = 0;
-            $item->save();
+            //
+            // CREATED IN THE CALLER'S ORDER, one INSERT each rather than a bulk insert, because
+            // `HasUlids` mints the id in PHP per model: a ULID sorts by creation time, `itemsFor()`
+            // reads them back ordered by `id`, and `IngestionSubmission::fingerprint()` hashes them
+            // in that order. A bulk insert would not run the trait at all.
+            $rows = [];
+
+            foreach ($items as $item) {
+                $row = new SourceItem;
+                $row->organization_id = $organizationId;
+                $row->source_id = $source->id;
+                $row->canonical_key = $item->canonicalKey;
+                // The live URL, separate from the canonical key because normalization is lossy on
+                // purpose and a citation has to link to something a human can open. Null for an
+                // upload: a file has no origin to link back to.
+                $row->url = $item->url;
+                $row->title = $item->title;
+                // THE USER'S FILENAME, AND NEVER A PATH. Null for anything that did not arrive as a
+                // file; `source_items_display_name_is_not_a_path` refuses a separator, a control
+                // character and the two directory-relative names on the way in, and `UploadIntake`
+                // refuses the same shapes one layer earlier so the refusal is a 422 rather than a
+                // constraint violation.
+                $row->display_name = $item->displayName;
+                $row->storage_key = $item->storageKey;
+                $row->content_hash = $item->contentHash;
+                $row->mime = $item->mime;
+                $row->byte_size = $item->byteSize;
+                $row->current_version_id = null;
+                $row->last_discovered_at = null;
+                $row->missing_count = 0;
+                // THE CALLBACK GUARD, CLAIMED BY THE SAME STATEMENT THAT CREATES THE ROW. A job id
+                // with no sequence reset, or a reset with no job id, is half a guard. EVERY item of
+                // the batch carries the same job id, because one submission walks all of them.
+                $row->current_job_id = $jobId;
+                $row->progress_sequence = 0;
+                $row->save();
+
+                $rows[] = $row;
+            }
 
             // `Draft -> Queued` — an edge of the table, asked through the table. `$verified` is
             // false and it does not matter here: the verification gate is on the two `Ready` edges
@@ -184,9 +204,11 @@ final class EloquentKnowledgeSourceRepository implements KnowledgeSourceReposito
             $this->move($source, SourceState::Queued, verified: false);
             $source->save();
 
-            // INSIDE the transaction, after the INSERTs so both rows have their ULIDs, before the
-            // COMMIT so an ON_FAILURE_ABORT audit failure rethrows and takes the graph with it.
-            $audit($source);
+            // INSIDE the transaction, after the INSERTs so every row has its ULID, before the
+            // COMMIT so an ON_FAILURE_ABORT audit failure rethrows and takes the graph with it. The
+            // items go with it because `source.upload.accepted` is one row per file and names
+            // `source_item_id`.
+            $audit($source, $rows);
 
             return $source;
         });

@@ -9,6 +9,7 @@ use App\Models\KnowledgeSource;
 use App\Services\Sources\IngestionApplication;
 use App\Services\Sources\IngestionProgress;
 use App\Services\Sources\NewSource;
+use App\Services\Sources\NewSourceItem;
 use App\Services\Sources\SourceChildSummary;
 use App\Services\Sources\SourceEdit;
 use App\Support\Http\ListQuery;
@@ -93,23 +94,41 @@ interface KnowledgeSourceRepositoryInterface
      * assigns only when the key is empty, so a provided id means the model's generator never runs
      * for this row — one generation site, not two, and the format still belongs to the model.
      *
+     * ── THE ITEMS ARRIVE AS A LIST, AND THEY USED TO ARRIVE AS FIVE LOOSE SCALARS ────────────
+     *
+     * `$canonicalKey, $storageKey, $contentHash, $mime, $byteSize` described ONE item, which is
+     * every source this endpoint could create until the upload intake landed: a batch carries up to
+     * `StoreSourceRequest::MAX_FILES` files and each one is its own item, its own version chain and
+     * its own citation provenance. Widening the scalars into a second set, or looping this method,
+     * would both produce the divergence the `source_items` migration warns about — a one-item path
+     * and an n-item path that each work alone. There is one path and a paste takes it with a list of
+     * one.
+     *
      * @param  string  $sourceId  the ULID the caller has already used to build the storage key and
      *                            will use to dispatch; minted by `KnowledgeSource::newUniqueId()`
-     * @param  string  $jobId  the ULID this dispatch is identified by, stamped onto the item so a
+     * @param  non-empty-list<NewSourceItem>  $items  in the order the caller wants them created —
+     *                                                which is the order `IngestionSubmission::
+     *                                                fingerprint()` will later read them back in,
+     *                                                because ULIDs sort by creation. NON-EMPTY as a
+     *                                                type, because "every source has at least one
+     *                                                item" is the rule and a runtime check for it
+     *                                                would be a rule stated twice
+     * @param  string  $jobId  the ULID this dispatch is identified by, stamped onto every item so a
      *                         callback naming any other job is ignored rather than compared
-     * @param  Closure(KnowledgeSource): void  $audit  invoked inside the transaction, after the
-     *                                                 INSERTs so both rows carry their ULIDs
+     * @param  Closure(KnowledgeSource, list<\App\Models\SourceItem>): void  $audit  invoked inside
+     *                                                                               the transaction, after the INSERTs so every row carries its ULID. It
+     *                                                                               receives the ITEMS as well as the source because
+     *                                                                               `source.upload.accepted` is one row PER FILE and carries
+     *                                                                               `source_item_id` — a value that does not exist until this transaction
+     *                                                                               has run, and that an ON_FAILURE_ABORT operation may not be written
+     *                                                                               outside it
      */
     public function create(
         string $organizationId,
         string $sourceId,
         NewSource $input,
         ?string $createdBy,
-        string $canonicalKey,
-        ?string $storageKey,
-        ?string $contentHash,
-        ?string $mime,
-        ?int $byteSize,
+        array $items,
         string $jobId,
         Closure $audit,
     ): KnowledgeSource;

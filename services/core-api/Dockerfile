@@ -110,6 +110,16 @@ RUN set -eux; \
 #   pdo_pgsql    -> the DB_CONNECTION=pgsql driver is unresolvable and every boot 500s
 #   opcache      -> every request recompiles every file; the FPM pool sizing in fpm-api.conf is
 #                   arithmetic done against compiled-code memory, so without it the box swaps
+#   fileinfo     -> libmagic. The upload intake's step 3 sniffs a file's type FROM ITS CONTENT and
+#                   deliberately has NO FALLBACK to the extension, so without this every upload
+#                   500s. That is the correct failure — an extension-derived MIME is the client's
+#                   claim wearing the server's voice — and this line is what turns it into a build
+#                   failure instead. Enabled by default in php:*-fpm images, which is exactly why
+#                   it is asserted: nothing above installs it, so a base-image change is the way it
+#                   would disappear.
+#   zip          -> enumerates OPC part names for the vbaProject.bin / /embeddings/ refusal and
+#                   reads the ZIP central directory for the three decompression caps. Installed
+#                   explicitly above; asserted here so the two cannot drift.
 #
 # ZEND EXTENSIONS ARE NOT PHP MODULES, AND `php -m` PROVES IT. DO NOT "SIMPLIFY" THIS BACK.
 # ------------------------------------------------------------------------------------------------
@@ -132,7 +142,7 @@ RUN set -eux; \
 # can honestly assert; whether it is ENABLED for FPM is decided by php.ini, which is COPY'd from
 # the `infra` context below and asserted by the runtime healthcheck, not here.
 RUN set -eux; \
-    for ext in pcntl posix opentelemetry redis pdo_pgsql; do \
+    for ext in pcntl posix opentelemetry redis pdo_pgsql fileinfo zip; do \
         php -m | grep -qx "$ext" || { echo "FATAL: php extension '$ext' is missing"; exit 1; }; \
     done; \
     php -r 'exit(extension_loaded("Zend OPcache") ? 0 : 1);' \

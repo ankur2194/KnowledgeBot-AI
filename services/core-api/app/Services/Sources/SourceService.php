@@ -9,18 +9,23 @@ use App\Enums\SourceType;
 use App\Jobs\SubmitIngestionJob;
 use App\Models\KnowledgeSource;
 use App\Models\Organization;
+use App\Models\SourceItem;
 use App\Models\SourceVersion;
 use App\Repositories\Contracts\KnowledgeSourceRepositoryInterface;
 use App\Services\Audit\AuditLogger;
+use App\Services\Sources\Upload\SourceObjectWriter;
+use App\Services\Sources\Upload\UploadIntake;
 use App\Support\Http\ListQuery;
 use App\Support\Kb\CanonicalKey;
 use App\Support\Kb\ObjectKey;
 use Illuminate\Contracts\Filesystem\Filesystem;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Http\Request;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
+use RuntimeException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 /**
@@ -106,6 +111,12 @@ final class SourceService
     public function __construct(
         private KnowledgeSourceRepositoryInterface $sources,
         private AuditLogger $audit,
+        // THE INTAKE GATE AND THE WRITER, INJECTED RATHER THAN CONSTRUCTED, so a test can assert
+        // this service's behaviour against a real gate and a faked disk without either one being
+        // reachable from a route. Neither takes a constructor argument, so container resolution is
+        // the whole wiring.
+        private UploadIntake $intake,
+        private SourceObjectWriter $objectWriter,
     ) {}
 
     /**
@@ -147,6 +158,20 @@ final class SourceService
      * ingestion fails on every attempt with `error_class: storage` and needs an operator. Choose
      * the orphan.
      *
+     * ── THE UPLOADED FILES GO THROUGH THE GATE BEFORE ANY BYTE IS STORED ─────────────────────
+     *
+     * `UploadIntake::screen()` runs `kb-security-baseline`'s six-step gate over every part, IN
+     * ORDER, and the whole batch is all-or-nothing: one refusal and nothing is written — no object,
+     * no source row, no item. A partial success would leave a source whose name describes ten
+     * documents and whose corpus holds seven, with nothing anywhere recording which three are
+     * missing.
+     *
+     * EVERY REFUSAL WRITES `source.upload.rejected`, AND THAT IS THE POINT OF THE PAIR. Without it a
+     * caller grinding at the gate with crafted files leaves no trace anywhere, because nothing was
+     * written — `AuditLogger` says so at the constant. The row carries a CLOSED REASON TOKEN naming
+     * which step refused, never the exception message, which is unbounded and could echo a parser's
+     * reading of a hostile file into an append-only table.
+     *
      * ── THE SOURCE ID IS MINTED HERE, BEFORE THE BYTES ARE WRITTEN ────────────────────────────
      *
      * Exactly like `$jobId` on the line below it, and for a stronger reason. The storage key is
@@ -162,44 +187,53 @@ final class SourceService
      * passing a minted id means the trait's generator never runs for this row rather than running
      * and being overwritten.
      *
-     * @throws ValidationException 422 for a body whose content does not match its type
+     * @param  array<int, UploadedFile>  $files  the multipart parts, keyed by the index the client
+     *                                           sent them under, so a per-file 422 names `files.0`
+     *                                           and the console renders it against the row the
+     *                                           operator can see. Empty for every type but `file`,
+     *                                           and `assertContentMatchesType()` refuses both
+     *                                           mismatches rather than ignoring the field
+     *
+     * @throws ValidationException 422 for a body whose content does not match its type, and for a
+     *                             batch any of whose files the intake gate refused
      */
     public function create(
         Organization $organization,
         NewSource $input,
         ?string $actorId = null,
         ?Request $request = null,
+        array $files = [],
     ): KnowledgeSource {
         $organizationId = $organization->organizationId();
 
-        $this->assertContentMatchesType($input);
-
-        $storageKey = null;
-        $contentHash = null;
-        $mime = null;
-        $byteSize = null;
-        $canonicalKey = CanonicalKey::forUrl((string) $input->originUrl);
+        $this->assertContentMatchesType($input, $files);
 
         // MINTED BEFORE THE OBJECT IS WRITTEN, because the object's key is scoped to it. See the
         // docblock: the model's own generator is asked, so there is one definition of what a
         // source id looks like and the trait never generates a competing one.
         $sourceId = (new KnowledgeSource)->newUniqueId();
 
-        if ($input->type === SourceType::Text) {
-            $content = (string) $input->content;
-            // THE RAW BYTES, which is the hash rule for an upload. A crawl hashes the NORMALIZED
-            // content instead, because raw HTML carries rotating CSRF tokens, render timestamps and
-            // visitor counters, so every page of a site looks changed every night. A paste is the
-            // upload case: normalization is downstream of the parser, and the parser configuration
-            // is already a separate component of the ingest key.
-            $contentHash = hash('sha256', $content);
-            $byteSize = strlen($content);
-            $mime = self::TEXT_MIME;
-            $canonicalKey = CanonicalKey::TEXT;
-            $storageKey = $this->storeText($organizationId, $sourceId, $contentHash, $content);
-        }
+        $items = match ($input->type) {
+            SourceType::Text => [$this->pastedItem($organizationId, $sourceId, $input)],
+            SourceType::File => $this->uploadedItems(
+                $organizationId, $sourceId, $files, $actorId, $request,
+            ),
+            SourceType::Url => [new NewSourceItem(
+                canonicalKey: CanonicalKey::forUrl((string) $input->originUrl),
+                url: $input->originUrl,
+                title: $input->name,
+                displayName: null,
+                // FOUR NULLS TOGETHER, which `source_items_stored_object_is_complete` requires: a
+                // crawl target has no object until the crawler fetches one, and a half-populated
+                // row is what that CHECK exists to refuse.
+                storageKey: null,
+                contentHash: null,
+                mime: null,
+                byteSize: null,
+            )],
+        };
 
-        // MINTED BEFORE THE WRITE so it can be stamped onto the item inside the same transaction.
+        // MINTED BEFORE THE WRITE so it can be stamped onto every item inside the same transaction.
         $jobId = (string) Str::ulid();
 
         $source = $this->sources->create(
@@ -207,13 +241,10 @@ final class SourceService
             $sourceId,
             $input,
             $actorId,
-            $canonicalKey,
-            $storageKey,
-            $contentHash,
-            $mime,
-            $byteSize,
+            $items,
             $jobId,
-            function (KnowledgeSource $row) use ($organizationId, $actorId, $request): void {
+            /** @param list<SourceItem> $rows */
+            function (KnowledgeSource $row, array $rows) use ($organizationId, $actorId, $request): void {
                 $this->audit->record(
                     AuditLogger::SOURCE_CREATED,
                     organizationId: $organizationId,
@@ -223,6 +254,47 @@ final class SourceService
                     subjectId: $row->id,
                     request: $request,
                 );
+
+                // ONE `source.upload.accepted` ROW PER FILE, INSIDE THE SAME TRANSACTION.
+                //
+                // It has to be here and it cannot be earlier: the operation is ON_FAILURE_ABORT, so
+                // a failed audit write must roll the state change back, and it carries
+                // `source_item_id` — a value that does not exist until these INSERTs have run. Its
+                // `subject_id` is the SOURCE rather than the item, because that is what was
+                // authorized and what a reader searches by; the item id is in `details`.
+                //
+                // KEYED ON `display_name` BEING PRESENT rather than on the source type, because
+                // that column is what makes a row an upload: a paste and a crawl target both leave
+                // it null, so this loop cannot emit an upload row for something that was not one
+                // even if a future caller passes a mixed list.
+                foreach ($rows as $item) {
+                    if ($item->display_name === null) {
+                        continue;
+                    }
+
+                    $this->audit->record(
+                        AuditLogger::SOURCE_UPLOAD_ACCEPTED,
+                        organizationId: $organizationId,
+                        actorId: $actorId,
+                        details: [
+                            'source_item_id' => $item->id,
+                            'display_name' => $item->display_name,
+                            // THE SNIFFED TYPE. Recording the sniffed value is what makes the
+                            // cross-check auditable after the fact — an investigator asking "what
+                            // did this file actually turn out to be" has an answer that does not
+                            // require re-reading the object.
+                            'mime' => $item->mime,
+                            'byte_size' => $item->byte_size,
+                            'content_hash' => $item->content_hash,
+                            // A GENERATED path under this organization's own prefix, never the
+                            // uploaded filename. It names no object another tenant can reach.
+                            'storage_key' => $item->storage_key,
+                        ],
+                        subjectType: KnowledgeSource::class,
+                        subjectId: $row->id,
+                        request: $request,
+                    );
+                }
             },
         );
 
@@ -689,6 +761,146 @@ final class SourceService
     }
 
     /**
+     * The single item behind a pasted-text source: hash the bytes, store them, describe the row.
+     *
+     * ── THE RAW BYTES, WHICH IS THE HASH RULE FOR AN UPLOAD ───────────────────────────────────
+     *
+     * A crawl hashes the NORMALIZED content instead, because raw HTML carries rotating CSRF tokens,
+     * render timestamps and visitor counters, so every page of a site looks changed every night. A
+     * paste is the upload case: normalization is downstream of the parser, and the parser
+     * configuration is already a separate component of the ingest key.
+     *
+     * `display_name` IS NULL AND MUST STAY NULL. It is what makes a row an upload — the
+     * `source.upload.accepted` loop keys on it rather than on the source type — and a paste has no
+     * filename to record. Writing the source's name into it would put an upload row in the audit
+     * trail for a document nobody uploaded.
+     */
+    private function pastedItem(string $organizationId, string $sourceId, NewSource $input): NewSourceItem
+    {
+        $content = (string) $input->content;
+        $contentHash = hash('sha256', $content);
+
+        return new NewSourceItem(
+            canonicalKey: CanonicalKey::TEXT,
+            url: null,
+            title: $input->name,
+            displayName: null,
+            storageKey: $this->storeText($organizationId, $sourceId, $contentHash, $content),
+            contentHash: $contentHash,
+            // DERIVED AND NOT DECLARED, but derived trivially: we generated these bytes from a
+            // validated UTF-8 string. `kb-security-baseline` refuses the caller's `Content-Type`;
+            // there is no caller's `Content-Type` on this path at all.
+            mime: self::TEXT_MIME,
+            byteSize: strlen($content),
+        );
+    }
+
+    /**
+     * Run the intake gate over one multipart batch, store what passed, and describe the items.
+     *
+     * ── THE GATE FIRST, THE OBJECTS SECOND, THE ROWS THIRD, AND THE ORDER IS THE PROPERTY ────
+     *
+     * Nothing is written until EVERY file has passed. `kb-security-baseline`'s ordering argument is
+     * about the steps within one file; this is the batch-level counterpart, and its failure mode is
+     * different: a batch that stored three objects and then refused the fourth would leave three
+     * orphans under a source id that never became a row, at keys no `source_items` value names, in
+     * a prefix the phase-2 purge only ever visits for sources that exist. That is `ObjectKey`'s
+     * defect 1 arriving by a different road — an object nothing can delete and verification will
+     * certify clean over.
+     *
+     * ── THE REJECTION ROWS ARE WRITTEN BEFORE THE 422 AND OUTSIDE ANY TRANSACTION ────────────
+     *
+     * `source.upload.rejected` is ON_FAILURE_LOG, and `AuditLogger` explains why in the terms of
+     * its own rollback test: "there is no state change to undo. The refusal is already decided, no
+     * row was written, and aborting would turn a rejected file into a 500 — both a lie to the caller
+     * and still no audit row."
+     *
+     * @param  array<int, UploadedFile>  $files
+     * @return non-empty-list<NewSourceItem>
+     *
+     * @throws ValidationException 422, with one entry per refused file, keyed `files.{index}`
+     */
+    private function uploadedItems(
+        string $organizationId,
+        string $sourceId,
+        array $files,
+        ?string $actorId,
+        ?Request $request,
+    ): array {
+        $screening = $this->intake->screen($files);
+
+        if ($screening->hasRejections()) {
+            $errors = [];
+
+            foreach ($screening->rejected as $index => $refusal) {
+                $this->audit->record(
+                    AuditLogger::SOURCE_UPLOAD_REJECTED,
+                    organizationId: $organizationId,
+                    actorId: $actorId,
+                    details: $refusal->auditDetails(),
+                    // NO SUBJECT. There is no row to point at — that is what a rejection means —
+                    // and `AuditLogger::record()` refuses a type with no id, so naming the source
+                    // class with a ULID that was minted and then thrown away would be a subject an
+                    // investigator could never resolve.
+                    request: $request,
+                );
+
+                // `files.{index}` AND NOT A FLAT `files`. `StoreSourceRequest` pins the part name as
+                // `files[0]`, `files[1]`, … precisely so a per-file error renders against the row
+                // the operator can see; a flat key can only produce a banner about "the upload".
+                $errors['files.'.$index] = $refusal->getMessage();
+            }
+
+            throw ValidationException::withMessages($errors);
+        }
+
+        $items = [];
+
+        foreach ($screening->inOrder() as $upload) {
+            // THE KEY IS BUILT BY `ObjectKey` AND BY NOTHING ELSE. Source-scoped and
+            // content-addressed: `org/{org}/sources/{source}/original/{sha256}`. The user's filename
+            // is not in it, is not derivable from it, and goes to `display_name`, which is a column.
+            $key = ObjectKey::originalUpload($organizationId, $sourceId, $upload->contentHash);
+
+            $this->objectWriter->write($key, $upload);
+
+            $items[] = new NewSourceItem(
+                // THE GENERATED OBJECT KEY IS THE CANONICAL KEY for an upload — the `source_items`
+                // migration says so, and it is what makes `source_items_org_source_canonical` refuse
+                // the same object twice inside one source.
+                canonicalKey: $key,
+                // NULL, and not the storage key wearing a URL's hat. `url` is what a citation links
+                // to and what a human opens; an uploaded file has no such address, and putting an
+                // object key there would fail `source_items_url_scheme` besides.
+                url: null,
+                title: $upload->displayName,
+                displayName: $upload->displayName,
+                storageKey: $key,
+                contentHash: $upload->contentHash,
+                // SNIFFED FROM CONTENT BY libmagic. Never the request's `Content-Type` and never
+                // the extension.
+                mime: $upload->mime,
+                byteSize: $upload->byteSize,
+            );
+        }
+
+        if ($items === []) {
+            // UNREACHABLE THROUGH THE ONE CALLER — `assertContentMatchesType()` has already refused
+            // an empty batch — and it is a guard rather than an assertion because the rule it
+            // protects is structural: `KnowledgeSourceRepositoryInterface::create()` takes a
+            // NON-EMPTY list, because "every source has at least one item" is the `source_items`
+            // migration's rule and a source with none is a state nothing downstream can read.
+            throw new RuntimeException(
+                'An upload batch produced no items. Nothing has been written; a source with no item '
+                    .'would be a row the pointer switch, the missing-page counter and citation '
+                    .'provenance all key off and none of them could resolve.',
+            );
+        }
+
+        return $items;
+    }
+
+    /**
      * Persist a pasted-text body and return its tenant-scoped storage key.
      *
      * ── THE KEY IS NOT BUILT HERE, AND THAT IS THE POINT ──────────────────────────────────────
@@ -763,13 +975,25 @@ final class SourceService
     /**
      * A body whose content does not match the type it declares.
      *
-     * BOTH DIRECTIONS, and the second is the one worth refusing rather than ignoring: a `url`
-     * source carrying pasted prose is a caller who believes they submitted text, and silently
-     * dropping the field would crawl the URL and never tell them the paste went nowhere.
+     * BOTH DIRECTIONS FOR BOTH FIELDS, and the prohibiting halves are the ones worth refusing
+     * rather than ignoring: a `url` source carrying pasted prose is a caller who believes they
+     * submitted text, and silently dropping the field would crawl the URL and never tell them the
+     * paste went nowhere.
+     *
+     * ── THIS RESTATES `StoreSourceRequest`'s RULES AND IS NOT REDUNDANT ──────────────────────
+     *
+     * The FormRequest carries `required_if` / `prohibited_unless` on `content` and on `files`, and
+     * this method is what makes the service TRUE ON ITS OWN — nothing here may assume a particular
+     * caller ran a particular FormRequest. The `files` half additionally guards a structural rule
+     * the FormRequest cannot state: a `file` source with no parts would reach the repository with an
+     * EMPTY item list, and "every source has at least one item" is exactly the invariant the
+     * `source_items` migration says must never acquire a special case.
+     *
+     * @param  array<int, UploadedFile>  $files
      *
      * @throws ValidationException
      */
-    private function assertContentMatchesType(NewSource $input): void
+    private function assertContentMatchesType(NewSource $input, array $files = []): void
     {
         if ($input->type === SourceType::Text && ($input->content === null || trim($input->content) === '')) {
             throw ValidationException::withMessages([
@@ -783,6 +1007,24 @@ final class SourceService
                 'content' => 'Only a `text` source carries inline content. A `url` source is '
                     .'fetched from its origin, and accepting a paste alongside it would index text '
                     .'the URL does not serve while reporting the URL as the citation.',
+            ]);
+        }
+
+        if ($input->type === SourceType::File && $files === []) {
+            throw ValidationException::withMessages([
+                'files' => 'A `file` source is its files: at least one part has to arrive with the '
+                    .'request. The parts are named `files[0]`, `files[1]`, … — indexed even for a '
+                    .'single file — and a request that declared `type: file` and carried none would '
+                    .'otherwise create a source with no item, which is a state nothing downstream '
+                    .'knows how to read.',
+            ]);
+        }
+
+        if ($input->type !== SourceType::File && $files !== []) {
+            throw ValidationException::withMessages([
+                'files' => 'Only a `file` source carries uploaded parts. Accepting them alongside a '
+                    .'`url` or `text` source would store bytes nothing would ever parse, under a '
+                    .'source whose content came from somewhere else entirely.',
             ]);
         }
     }

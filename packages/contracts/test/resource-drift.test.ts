@@ -40,6 +40,7 @@ import type {
   SessionUser,
 } from '../src/resources/session.js';
 import type {
+  OrgUploadLimits,
   SourceCollectionResource,
   SourceResource,
   SourceStatus,
@@ -838,6 +839,41 @@ describe('the hand-written source types', () => {
     for (const member of members) expect(Object.keys(statuses)).toContain(member);
   });
 
+  it('OrgUploadLimits declares exactly the three ceilings the server publishes', () => {
+    // PIN 1, TYPE-LEVEL, and it is the ONLY type-level link this shape has: it declares no nullable
+    // property, so the `NULLABLE` map in section 2 has no entry for it, and the `MIRRORED` comparison
+    // there is a list of STRINGS that would go on passing if the interface were renamed out from
+    // under it. `Record<keyof OrgUploadLimits, true>` closes that — a renamed or added member fails
+    // the TYPECHECK here, in a file a reader is looking at.
+    const keys: Record<keyof OrgUploadLimits, true> = {
+      max_bytes: true,
+      allowed_mime: true,
+      max_batch: true,
+    };
+    expect(Object.keys(keys)).toHaveLength(3);
+
+    // PIN 2, WIRE-LEVEL, on the two things the property-name comparison cannot say. `max_bytes` is
+    // BYTES on this wire while the server's rule is enforced in kibibytes — the conversion happens
+    // once, server-side — so an `integer` here is the number a `File.size` is compared against and a
+    // client that converts again is 1024× off. `allowed_mime` is an ARRAY: a string would be a
+    // comma-joined list every reader would split differently, and `accept=` would be the only one
+    // that happened to work.
+    const wire = schemas['OrgUploadLimitsResource'];
+    expect(wire?.properties?.['max_bytes']).toMatchObject({ type: 'integer' });
+    expect(wire?.properties?.['max_batch']).toMatchObject({ type: 'integer' });
+    expect(wire?.properties?.['allowed_mime']).toMatchObject({
+      type: 'array',
+      items: { type: 'string' },
+    });
+
+    // THE OPERATION ITSELF IS NOT ASSERTED HERE, and the omission is deliberate rather than an
+    // oversight. `GET .../sources/upload-limits` (`admin.sources.upload-limits`) is what makes this a
+    // mirror rather than an invention, but no suite in this file reads `paths` — the harness types
+    // `components.schemas` and nothing else — and growing a path-item type for one operation would be
+    // a second document reader that only this test uses. A component that stopped being served would
+    // stop being emitted, and the set comparison in section 2 fails on it by name.
+  });
+
   it('SourceCollectionResource wraps the array under a named key, beside the SHARED meta', () => {
     const keys: Record<keyof SourceCollectionResource, true> = { sources: true, meta: true };
     expect(Object.keys(keys).sort()).toEqual(['meta', 'sources']);
@@ -1058,6 +1094,43 @@ describe('every published component is mirrored here or exempt with a reason', (
     // `OWNERSHIP_KEYS`, so it is readable here and unrepresentable in every form schema in this
     // package — which is the same readable-never-writable asymmetry `retrieval_configuration_version`
     // holds on `BotResource`, arrived at from the opposite direction.
+    // ── the upload ceilings, mirrored by `OrgUploadLimits` in the SAME module ──────────────────
+    // MIRRORED, AND FOR ONCE THE USUAL QUESTION — "is there a reader today?" — is not the one that
+    // decides it. The reader has existed for batches: `uploadSchema` in src/forms/upload.ts is a
+    // FACTORY over this exact shape (§8.10 makes the cap and the media types per-organization, so
+    // there is no byte constant in this package to build a fixed schema from), and apps/web's
+    // dropzone reads `max_bytes`, `allowed_mime` and `max_batch` off it today. What was missing was
+    // the other half: nothing published the shape, so the client's copy was an INVENTION nobody could
+    // compare to anything. A `NO_CLIENT_TYPE` entry would therefore have been false the moment it was
+    // written — not "no client yet" but "the client got there first".
+    //
+    // THE NAMING COLLISION IS THE PART WORTH RECORDING. The dumper keys components by short class
+    // name, so the published component is `OrgUploadLimitsResource` while the type is
+    // `OrgUploadLimits` — the same asymmetry `InvitationPreviewResource` ↔ `InvitationPreview`
+    // carries, and this register is keyed by WIRE name precisely so the mapping is an assertion
+    // rather than a convention. The two shapes were compared field by field before this entry landed
+    // and are IDENTICAL: three properties, all three required on both sides, none nullable,
+    // `additionalProperties: false` against an interface with no index signature, and the two
+    // `integer`s are `number` because TypeScript has no narrower spelling. Had they differed by one
+    // optionality, the finding would have been that `uploadSchema` was validating against a shape the
+    // server does not send — which is worse than a missing mirror, and is why the comparison happened
+    // before the entry rather than after it.
+    //
+    // The type MOVED for this entry, from src/forms/upload.ts to src/resources/sources.ts, and the
+    // move is what makes "one shape, one definition" true rather than asserted. It sat behind the Zod
+    // subpath while it was a factory PARAMETER the client had invented; it is a published response
+    // now, so it belongs where the other mirrors are and where these three pins can reach it.
+    // src/forms/upload.ts re-exports it — erased, so no bundle moves — and every existing
+    // `import type { OrgUploadLimits } from '@kb/contracts/forms'` is unaffected.
+    //
+    // THREE PROPERTIES, AND THE SERVER'S ADMISSION RULE HAS FOUR TERMS. There is no
+    // `allowed_extensions` here, so a picker built from `allowed_mime` alone over-accepts wherever
+    // one sniffed type covers several extensions. That is recorded where a reader building the picker
+    // will hit it (the `OrgUploadLimits` docblock and `uploadSchema`'s), NOT asserted here as a banned
+    // field: the extension list is one the server could legitimately publish tomorrow, and a
+    // `not.toContain` would fail that day with a message saying the opposite of what was wrong.
+    OrgUploadLimitsResource: ['max_bytes', 'allowed_mime', 'max_batch'],
+
     SourceResource: [
       'id',
       'type',

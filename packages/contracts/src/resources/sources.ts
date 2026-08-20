@@ -191,3 +191,78 @@ export interface SourceCollectionResource {
   readonly sources: readonly SourceResource[];
   readonly meta: ListMetaResource;
 }
+
+/**
+ * The upload ceilings this deployment enforces, from
+ * `GET /api/v1/organizations/{organization}/sources/upload-limits`, unwrapped from `data`.
+ *
+ * ── THE PUBLISHED COMPONENT IS `OrgUploadLimitsResource`; THIS TYPE IS `OrgUploadLimits` ────────
+ * The same asymmetry `InvitationPreviewResource` ↔ `InvitationPreview` already carries, kept for the
+ * same reason: the suffix names a PHP class, and nothing on a client is a "resource". The mapping is
+ * not left to this sentence — the register in test/resource-drift.test.ts is keyed by WIRE name, so
+ * the day the two spellings stop describing one shape is a red test rather than a reading.
+ *
+ * ── IT MOVED HERE FROM `src/forms/upload.ts`, AND WHY IT COULD LIVE THERE UNTIL NOW IS THE POINT ─
+ * It was hand-written as the PARAMETER of a schema factory before any endpoint returned it: a shape
+ * the client had invented so that `uploadSchema` could be a function of the organization's limits
+ * rather than of a constant. Nothing published it, so nothing could pin it, and there was no second
+ * copy for it to disagree with. Both facts changed with the intake. It is a published component now,
+ * so the shape is the SERVER's; a mirror of a published response belongs where every other one lives,
+ * under the three pins, and not behind the Zod subpath where only a form can reach it.
+ *
+ * ONE DEFINITION, TWO DOORS. `src/forms/upload.ts` re-exports the type (erased, so it costs the
+ * `/forms` bundle nothing) and `uploadSchema`'s signature is byte-for-byte what it was — the four
+ * call sites in apps/web that import `OrgUploadLimits` from `@kb/contracts/forms` keep working. What
+ * is gone is the possibility of two spellings: there is no `OrgUploadLimitsResource` interface in
+ * this package and there must not be one.
+ *
+ * ── READ THESE NUMBERS; NEVER RESTATE THEM ──────────────────────────────────────────────────────
+ * §8.10 makes the per-file cap and the accepted media types PER-ORGANIZATION, so there is no byte
+ * constant and no MIME constant anywhere in this package or in apps/web. A hard-coded ceiling renders
+ * a form that accepts what the server refuses, or refuses what it accepts, for every organization but
+ * the one the constant was copied from.
+ *
+ * ── `allowed_mime` IS NOT THE WHOLE ADMISSION RULE, AND A PICKER BUILT FROM IT ALONE OVER-ACCEPTS ─
+ * The server admits a part only if the SNIFFED type is on this list AND the filename's final
+ * extension is on a SECOND allow-list AND the two agree. The second list is not published on this
+ * shape and this package must not invent it: three fields is what the component declares, and a
+ * fourth here would be a client claiming to know a server rule nobody sent it.
+ *
+ * The consequence is concrete rather than theoretical, because the two sets are not in bijection:
+ * distinct extensions share one sniffed type (`.md` and `.csv` both read as `text/plain` through
+ * libmagic), so `accept="…,text/plain,…"` invites a `.txt` the extension step then refuses. That
+ * refusal is a 422 keyed on the part, like any other server field error, and it is the ONLY place the
+ * mismatch is visible — no client-side check can anticipate it. Render it; do not pre-empt it with a
+ * guessed extension list, and do not describe the picker's filter to the user as what will be
+ * accepted. If the over-acceptance is worth closing, it is closed by the server publishing the
+ * extension allow-list on this component, which is `control-plane-engineer`'s call and not ours.
+ */
+export interface OrgUploadLimits {
+  /**
+   * The per-file ceiling in BYTES, directly comparable with a browser `File.size`.
+   *
+   * BYTES ON THIS WIRE EVEN THOUGH THE RULE IS ENFORCED IN KIBIBYTES — Laravel's file `max:` rule
+   * speaks kibibytes and the conversion happens once, on the server, so this number and the enforced
+   * one are the same number. A client that converts again enforces a ceiling 1024× off in whichever
+   * direction it guessed.
+   */
+  readonly max_bytes: number;
+  /**
+   * Every media type the server may read out of an uploaded file's CONTENT, sorted.
+   *
+   * THESE ARE libmagic's ANSWERS, NOT THE BROWSER'S. `File.type` is derived from the extension on
+   * most platforms and is forgeable by any caller; the server never reads it. So this list is an
+   * `accept` hint and a fast local message, never the check — and never the whole rule even
+   * server-side, per the extension paragraph above.
+   */
+  readonly allowed_mime: readonly string[];
+  /**
+   * The most files one `POST .../sources` may carry, as parts named `files[0]`, `files[1]`, … —
+   * indexed even for a single file.
+   *
+   * A BATCH WITH ANY REFUSED PART CREATES NOTHING AT ALL, so this is a cap on what the user may
+   * assemble before submitting rather than a number to trim a response against. A dropzone that lets
+   * more than this be selected is offering an all-or-nothing request that cannot succeed.
+   */
+  readonly max_batch: number;
+}

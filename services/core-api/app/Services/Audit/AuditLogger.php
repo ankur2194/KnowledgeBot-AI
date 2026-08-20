@@ -641,11 +641,21 @@ final class AuditLogger
      * credential_rotation_failed` exists to close on the credential surface, and it is the reason
      * this pair is two operations rather than one with an outcome field.
      *
-     * `reason` IS A CLOSED TOKEN AND NOT A MESSAGE. It names which of the six steps refused —
-     * `size`, `extension`, `mime_sniff`, `mime_mismatch`, `macro_payload`, `duplicate` — and it is
-     * the field an operator groups by. An exception message would be unbounded, would vary by
-     * library version, and could echo the parser's reading of a hostile file back into the audit
-     * table.
+     * `reason` IS A CLOSED TOKEN AND NOT A MESSAGE, and the set is closed by
+     * `App\Enums\UploadRejectionReason` rather than by this allow-list — which
+     * names the FIELD and has no way to constrain its members. It is the field an operator groups
+     * by. An exception message would be unbounded, would vary by library version, and could echo the
+     * parser's reading of a hostile file back into the audit table.
+     *
+     * SEVEN TOKENS, NOT SIX, AND THE SEVENTH IS RECORDED RATHER THAN SLIPPED IN. This docblock used
+     * to name one per step of the six-step gate — `size`, `extension`, `mime_sniff`,
+     * `mime_mismatch`, `macro_payload`, `duplicate` — and the intake adds `archive_bomb` for the
+     * decompression caps (512 MiB declared, ratio 100, 2000 entries), which
+     * `kb-security-baseline/references/file-upload-safety.md` requires and which are not one of the
+     * six steps. Filing them under `macro_payload` would put a resource refusal and an
+     * active-content refusal in one bucket and make the bucket unreadable: the two have different
+     * attackers and different remedies, and "is somebody sending us zip bombs" is exactly the
+     * question a `GROUP BY reason` is asked.
      *
      * `display_name` IS TENANT-CONTROLLED FREE TEXT AND IS ECHOED ANYWAY, deliberately: on a
      * rejection it is the only thing that identifies the attempt, `source_items`' own CHECK already

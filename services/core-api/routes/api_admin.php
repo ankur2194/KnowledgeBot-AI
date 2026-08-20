@@ -16,6 +16,7 @@ use App\Http\Controllers\Api\V1\ResendInvitationController;
 use App\Http\Controllers\Api\V1\RotateProviderCredentialController;
 use App\Http\Controllers\Api\V1\SourceController;
 use App\Http\Controllers\Api\V1\SourceStatusController;
+use App\Http\Controllers\Api\V1\UploadLimitsController;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -582,11 +583,21 @@ Route::middleware(['auth:sanctum', 'surface:admin', 'org.member', 'verified', 't
          * `POST /sources` IS MULTIPART-SHAPED AND THE PART NAME IS `files[0]`, INDEXED EVEN FOR ONE
          * FILE. StoreSourceRequest declares `files` and `files.*` so the 422 keys read `files.0`,
          * which is what lets the console render a per-file error against the row an operator can
-         * see. TODO(phase-c): the upload INTAKE — the six-step gate of kb-security-baseline, the
-         * object write, and the source.upload.accepted / source.upload.rejected audit pair — has
-         * not landed, so `type: file` is refused with a 422 that says so. The shape is pinned
-         * anyway rather than omitted: an absent `files` rule would make `validated()` DISCARD the
-         * parts silently and answer 201 for a source with no content.
+         * see. The upload INTAKE runs behind it: kb-security-baseline's six-step gate — size,
+         * extension allow-list on the NFKC-normalized name, MIME sniffed from content by libmagic,
+         * the extension/MIME cross-check, the OPC macro and embedded-object refusal, the SHA-256 —
+         * in UploadIntake, in one method, in one order, because THE ORDER IS THE SECURITY PROPERTY.
+         * A batch with any refused part creates nothing at all, and every refusal writes a
+         * source.upload.rejected audit row carrying a closed reason token.
+         *
+         * GET /sources/upload-limits IS DECLARED BEFORE GET /sources/{source}, AND THE ORDER IS
+         * NOT COSMETIC. RouteCollection matches in registration order, so a literal segment sharing
+         * a prefix with a parameterised one has to come first — declared after it, `upload-limits`
+         * binds as `{source}`, misses the scoped `$organization->sources()` lookup and 404s with a
+         * body byte-identical to "no such route". It carries `sources.upload` rather than
+         * `sources.view`: it describes the act of uploading, and the permission that governs the
+         * POST should govern its precondition, so a role change cannot leave a console able to read
+         * the ceilings and unable to act on them.
          *
          * DELETE IS PHASE 1 OF A TWO-PHASE REMOVAL and returns the source rather than an
          * acknowledgement: `status` becomes `deleting`, `deleted_at` is stamped, `purged_at` stays
@@ -599,6 +610,11 @@ Route::middleware(['auth:sanctum', 'surface:admin', 'org.member', 'verified', 't
 
         Route::post('/sources', [SourceController::class, 'store'])
             ->name('sources.store');
+
+        // BEFORE `/sources/{source}`. See the block above — after it, this is a 404 that reads as
+        // "the endpoint does not exist".
+        Route::get('/sources/upload-limits', UploadLimitsController::class)
+            ->name('sources.upload-limits');
 
         Route::get('/sources/{source}', [SourceController::class, 'show'])
             ->name('sources.show');

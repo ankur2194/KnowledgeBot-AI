@@ -1,11 +1,9 @@
-import { z } from 'zod';
-
 /**
- * Per-organization upload limits, returned by the bootstrap/config endpoint. §8.10 makes maximum
- * file size and per-organization storage limits CONFIGURABLE, so there must be no byte constant
- * and no MIME constant anywhere in apps/web or packages/contracts — the schema below is a FACTORY
- * over this DTO. Hard-code either one and the form silently enforces a different limit from the
- * organization it is rendering for, which reads as a rejected upload nobody can explain.
+ * The upload form, and the per-organization limits it is a function of — which are a PUBLISHED shape
+ * now, defined once in `src/resources/sources.ts` and re-exported below rather than declared here.
+ * §8.10 makes maximum file size and the accepted media types CONFIGURABLE, so there is no byte
+ * constant and no MIME constant anywhere in apps/web or packages/contracts: the schema below is a
+ * FACTORY over that DTO, and a hard-coded ceiling enforces one organization's limits on every other.
  *
  * THIS IS ASSERTED NOW, AND THE SENTENCE THAT USED TO BE HERE WAS WRONG TWICE OVER. It read
  * "test/form-drift.test.ts does not import `uploadSchema` at all", which went false the day the
@@ -34,12 +32,35 @@ import { z } from 'zod';
  * Until then, drift against the server is a reviewer check on this file. (A CI job used to run over
  * packages/, and only over packages/design-tokens/generated — nothing in it read this file — and it
  * is gone regardless.)
+ *
+ * ONE OF THOSE THREE CONDITIONS HAS SINCE BEEN MET, and saying which keeps the paragraph above from
+ * reading as still-owed in full: the intake landed and `GET .../sources/upload-limits` publishes the
+ * server's own constants as `OrgUploadLimitsResource`. `StoreSourceRequest` stays `NO_CLIENT_FORM`
+ * as OWED, because the third condition — a create form covering all three arms — is what the
+ * eleven-path measurement is actually about, and it does not exist.
  */
-export interface OrgUploadLimits {
-  readonly max_bytes: number;
-  readonly allowed_mime: readonly string[];
-  readonly max_batch: number;
-}
+
+import { z } from 'zod';
+
+import type { OrgUploadLimits } from '../resources/sources.js';
+
+/**
+ * THE INTERFACE MOVED TO `src/resources/sources.ts` AND THIS IS THE ONLY TYPE-LEVEL TRACE OF IT.
+ *
+ * Not a rename and not a second declaration: a published component may have exactly one mirror in
+ * this package, and `test/resource-drift.test.ts` now holds `OrgUploadLimitsResource` in `MIRRORED`
+ * with the reasoning. What used to be an interface hand-written HERE — as the parameter of the
+ * factory below, invented by the client because no endpoint returned it — is the server's shape now,
+ * so it lives beside every other mirrored response and is pinned the same three ways.
+ *
+ * THE RE-EXPORT IS THE POINT AND NOT AN AFTERTHOUGHT. `uploadSchema`'s signature is public API inside
+ * this monorepo and apps/web already imports the parameter type from `@kb/contracts/forms` in both
+ * source and test — `rg 'OrgUploadLimits' apps/web` is the list, and it is a list rather than a
+ * number here on purpose — so the door stays where callers already knock rather than a rename being
+ * charged to an app this package cannot edit. `export type` is erased under `verbatimModuleSyntax`,
+ * so `@kb/contracts/forms` gains nothing at runtime and the root entry's <=1 kB budget never sees it.
+ */
+export type { OrgUploadLimits } from '../resources/sources.js';
 
 /**
  * `.mime()` reads `File.type`, which the browser derives from the EXTENSION on most platforms and
@@ -48,6 +69,16 @@ export interface OrgUploadLimits {
  * malware hook are the control (kb-security-baseline). A .pdf that is really a ZIP passes every
  * check here and must still be rejected server-side, so this form renders server field errors like
  * any other.
+ *
+ * `.mime(limits.allowed_mime)` IS ALSO NARROWER THAN THE SERVER'S ADMISSION RULE, and that gap is
+ * now measurable rather than theoretical. The intake admits a part only if the sniffed type is on
+ * this list AND the final extension is on a SECOND allow-list AND the two agree; the published shape
+ * carries three fields and no `allowed_extensions`, so this schema — and any `accept=` built from the
+ * same list — OVER-ACCEPTS wherever the two sets are not in bijection. `.md` and `.csv` both sniff as
+ * `text/plain`, so a picker offering `text/plain` offers a `.txt` the extension step refuses. The
+ * refusal arrives as a 422 keyed on the part and is the only place it can be seen. Render it; do not
+ * guess the extension list here, and do not tell the user the picker's filter is what will be
+ * accepted. See `OrgUploadLimits` in `src/resources/sources.ts` for the full statement.
  *
  * `z.file()` over `z.instanceof(FileList)`: `FileList` is a DOM type absent from Node, and
  * `z.instanceof` evaluates at module load — importing this file from a server component or a

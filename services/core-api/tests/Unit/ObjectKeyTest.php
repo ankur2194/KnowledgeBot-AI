@@ -43,6 +43,7 @@ it('puts every key inside the organization prefix the database CHECK re-derives'
         ObjectKey::sourcePrefix(OBJ_ORG, OBJ_SOURCE),
         ObjectKey::originalPrefix(OBJ_ORG, OBJ_SOURCE),
         ObjectKey::originalText(OBJ_ORG, OBJ_SOURCE, OBJ_HASH),
+        ObjectKey::originalUpload(OBJ_ORG, OBJ_SOURCE, OBJ_HASH),
         ObjectKey::versionPrefix(OBJ_ORG, OBJ_SOURCE, OBJ_VERSION),
     ];
 
@@ -63,6 +64,25 @@ it('scopes the pasted-text original to its own source, inside the prefix the pur
     expect($key)->toStartWith(ObjectKey::sourcePrefix(OBJ_ORG, OBJ_SOURCE));
 });
 
+it('scopes an uploaded original to its own source, under the same prefix as a paste and with no suffix', function (): void {
+    $key = ObjectKey::originalUpload(OBJ_ORG, OBJ_SOURCE, OBJ_HASH);
+
+    expect($key)->toBe('org/'.OBJ_ORG.'/sources/'.OBJ_SOURCE.'/original/'.OBJ_HASH);
+
+    // NO EXTENSION, AND THAT IS THE ONE DIFFERENCE FROM `originalText()`. A paste's `.txt` restates
+    // something we established by generating the bytes; an upload's type is a SNIFF, and appending
+    // an extension here would put a value derived from attacker-influenced text into a PATH for no
+    // benefit — `source_items.mime` is the authority for every reader.
+    expect($key)->not->toContain('.');
+
+    // THE SAME `original/` PREFIX AS A PASTE, which is what lets the phase-2 sweep and its
+    // verification say the string once. A source is either pasted or uploaded, never both, so the
+    // two can never collide inside one source.
+    expect($key)->toStartWith(ObjectKey::originalPrefix(OBJ_ORG, OBJ_SOURCE));
+    expect($key)->toStartWith(ObjectKey::sourcePrefix(OBJ_ORG, OBJ_SOURCE));
+    expect($key)->not->toContain('/versions/');
+});
+
 it('gives two sources with byte-identical content two different keys', function (): void {
     $otherSource = '01k2wm5r4t0000000000000009';
 
@@ -73,6 +93,13 @@ it('gives two sources with byte-identical content two different keys', function 
     // dedupe boundary is the source and not the tenant.
     expect(ObjectKey::originalText(OBJ_ORG, OBJ_SOURCE, OBJ_HASH))
         ->not->toBe(ObjectKey::originalText(OBJ_ORG, $otherSource, OBJ_HASH));
+
+    // AND THE SAME FOR AN UPLOAD, which is the case the intake gate's `duplicate` refusal is the
+    // other half of: two IDENTICAL files inside ONE source would collide at one key with no
+    // reference count, so the gate refuses the second rather than letting this method pretend the
+    // collision is fine.
+    expect(ObjectKey::originalUpload(OBJ_ORG, OBJ_SOURCE, OBJ_HASH))
+        ->not->toBe(ObjectKey::originalUpload(OBJ_ORG, $otherSource, OBJ_HASH));
 });
 
 it('keeps the original outside any version prefix, and derived artifacts inside one', function (): void {
@@ -101,6 +128,9 @@ it('refuses a segment that would name a location outside the prefix it was given
         ->toThrow(\InvalidArgumentException::class);
 
     expect(fn (): string => ObjectKey::originalText(OBJ_ORG, OBJ_SOURCE, $segment))
+        ->toThrow(\InvalidArgumentException::class);
+
+    expect(fn (): string => ObjectKey::originalUpload(OBJ_ORG, OBJ_SOURCE, $segment))
         ->toThrow(\InvalidArgumentException::class);
 })->with([
     'empty' => '',
