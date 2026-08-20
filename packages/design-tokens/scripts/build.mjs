@@ -52,6 +52,14 @@ const easings = Object.entries(src.motion.easings);
 // Plain custom properties in :root and .dark. No @theme here — that lives in theme.css, because
 // apps/widget imports THIS file and runs its own Tailwind build with its own narrower alias block.
 const css = [banner, ':root {'];
+// THE DERIVED STEPS HERE ARE THE ROOT-LEVEL VALUES ONLY, and they are NOT what `rounded-*` reads.
+// A custom property is substituted at the element that DECLARES it, so `--radius-sm` computed here
+// is a fixed length that descendants inherit — writing `--radius` onto a nested element (the bot
+// theme preview, `apps/web/src/components/bot-theme-scope.tsx`) cannot move it. These declarations
+// exist for the handful of stylesheets that read `var(--radius-md)` directly at the root
+// (`apps/web/src/app/globals.css`'s `kb-skeleton` and prose rules) and for byte-for-byte parity with
+// apps/widget, which imports this file. The utilities get the UNSUBSTITUTED calc from theme.css
+// instead — see the radius block there.
 css.push('  /* radius — tenant-set, everything else derives from it */');
 css.push(`  --radius: ${src.radius.default};`);
 for (const [name, value] of radii) css.push(`  --radius-${name}: ${value};`);
@@ -121,16 +129,28 @@ css.push('  }', '}', '');
 // radius or type size in a component" stops being a review convention and becomes a build error.
 //
 // THE SELF-REFERENCES BELOW ARE CORRECT AND DELIBERATE — do not "fix" them.
-// For every family whose token name already IS the Tailwind namespace name (--radius-lg,
-// --shadow-md, --text-h1, --font-sans, --ease-out) this block emits `--radius-lg: var(--radius-lg)`,
-// which reads like a cycle. It is inert, and the reason is the cascade rather than the compiler:
-// Tailwind emits the theme block inside `@layer theme`, while tokens.css declares the same names in
-// an UNLAYERED `:root` — and unlayered CSS beats layered CSS regardless of specificity, so the real
-// value always wins and the cycle never resolves. Verified against tailwindcss 4.3.3 by compiling
-// this file and reading the output: `.rounded-2xl{border-radius:var(--radius-2xl)}` resolving to
-// `max(0px, calc(var(--radius) + 10px))`, and `.text-h1` emitting all four paired properties.
-// The one way to break it is to import tokens.css INTO a layer — then the cycle wins and every
-// radius, shadow and type size silently disappears. Keep the import unlayered.
+// For every family whose token name already IS the Tailwind namespace name (--shadow-md, --text-h1,
+// --font-sans, --ease-out) this block emits `--shadow-md: var(--shadow-md)`, which reads like a
+// cycle. It is inert, and the reason is the cascade rather than the compiler: Tailwind emits the
+// theme block inside `@layer theme`, while tokens.css declares the same names in an UNLAYERED
+// `:root` — and unlayered CSS beats layered CSS regardless of specificity, so the real value always
+// wins and the cycle never resolves. Verified against tailwindcss 4.3.3 by compiling this file and
+// reading the output: `.shadow-md{box-shadow:var(--shadow-md)}` resolving to the ladder's step, and
+// `.text-h1` emitting all four paired properties. The one way to break it is to import tokens.css
+// INTO a layer — then the cycle wins and every shadow and type size silently disappears. Keep the
+// import unlayered.
+//
+// RADIUS IS THE ONE FAMILY THAT MUST NOT TAKE THAT SHAPE, and it is the only family whose steps are
+// DERIVED from another property at render time rather than being literal values. `--radius-sm:
+// var(--radius-sm)` compiles to `.rounded-sm{border-radius:var(--radius-sm)}`, and `--radius-sm` is
+// declared once on `:root` as `max(0px, calc(var(--radius) - 4px))` — substituted there, so every
+// descendant inherits the ROOT's arithmetic. Writing `--radius` onto a nested element then moves
+// nothing: `rounded-*` inside a bot theme scope silently keeps the platform radius, while the same
+// override at `:root` (hosted chat's `theme.css` route) works, which is why no whole-document test
+// can see it. Emitting the CALC ITSELF here puts the expression in the utility —
+// `.rounded-sm{border-radius:max(0px, calc(var(--radius) - 4px))}` — where it resolves against the
+// `--radius` the ELEMENT inherits. `tests/components/design-system-css.test.tsx` pins this by
+// setting the property on a nested element rather than on documentElement.
 const theme = [
   banner,
   '@theme inline {',
@@ -144,8 +164,12 @@ for (const [name] of colors) theme.push(`  --color-${name}: var(--${name});`);
 theme.push('', '  /* DEPRECATED — apps/widget parity only; nothing in apps/web may use these. */');
 for (const [name] of legacy) theme.push(`  --color-${name}: var(--${name});`);
 
-theme.push('', '  /* ---- radius: derived from the tenant --radius, closed ---- */', '  --radius-*: initial;');
-for (const [name] of radii) theme.push(`  --radius-${name}: var(--radius-${name});`);
+theme.push(
+  '',
+  '  /* ---- radius: the CALC, not var(--radius-n) — the utility must resolve at the element ---- */',
+  '  --radius-*: initial;',
+);
+for (const [name, value] of radii) theme.push(`  --radius-${name}: ${value};`);
 
 theme.push('', '  /* ---- elevation: pick a step, never blend or invent an offset ---- */', '  --shadow-*: initial;');
 for (const [name] of shadows) theme.push(`  --shadow-${name}: var(--shadow-${name});`);

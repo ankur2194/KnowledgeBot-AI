@@ -8,9 +8,14 @@ return [
 
     // The AI data plane. Exactly ONE class in this application may read `services.ai.url`:
     // App\Services\Internal\InternalAiClient. A controller, job or service that builds its own
-    // Http:: call bypasses signing, deadline propagation and the retry ban — CI greps for
-    // 'ai-api|services.ai.url' outside App\Services\Internal, and an arch test pins the Http facade
-    // to that namespace (laravel-control-plane DoD).
+    // Http:: call bypasses signing, deadline propagation and the retry ban — an arch test pins the
+    // Http facade to that namespace and tests/Arch/StringLevelDoctrineTest.php fails on a literal
+    // 'ai-api' or 'services.ai.url' anywhere in app/ outside it (laravel-control-plane DoD).
+    //
+    // THIS COMMENT USED TO SAY "CI GREPS FOR" THAT SECOND HALF, AND THERE IS NO CI: `.github/` was
+    // deleted on 2026-08-17 and nothing replaced it. The line below is the DEFINITION and lives in
+    // config/, which the test does not scan — a scan that included it would fail on the one read
+    // that must exist.
     'ai' => [
 
         'url' => env('AI_SERVICE_URL', 'http://ai-api:8000'),

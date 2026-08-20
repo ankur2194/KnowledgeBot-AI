@@ -43,8 +43,86 @@ export type {
   ResetPasswordOut,
 } from './auth.js';
 
-export { botFormDefaults, botSettingsSchema } from './bot.js';
-export type { BotFormSource, BotSettingsIn, BotSettingsOut } from './bot.js';
+/**
+ * BOTH bot schemas, plus the five closed vocabularies as runtime tuples.
+ *
+ * The tuples are the third, fourth, fifth, sixth and seventh runtime values in this barrel that are
+ * not a schema or a defaults factory (after `ORG_ROLES` and `PROVIDER_CONNECTION_STATUSES`), and
+ * they are here for the identical reason: `src/resources/bots.ts` declares each of them as a UNION
+ * with zero runtime values, because it is re-exported from the ROOT entry and budgeted at <=1 kB
+ * brotli inside apps/widget's app shell. A `<Select>` needs a list it can iterate; the resource type
+ * needs a union it can narrow. Neither spelling is the other's source — each is pinned to the server
+ * by its own drift suite.
+ */
+export {
+  BOT_ACCESS_MODES,
+  BOT_ANSWER_MODES,
+  BOT_STATUSES,
+  botCreateDefaults,
+  botCreateSchema,
+  botFormDefaults,
+  botSettingsSchema,
+  botStatusTransitionDefaults,
+  botStatusTransitionSchema,
+  EVIDENCE_THRESHOLD_SCALES,
+  THEME_RADII,
+} from './bot.js';
+export type {
+  BotCreateIn,
+  BotCreateOut,
+  BotFormSource,
+  BotSettingsIn,
+  BotSettingsOut,
+  BotStatusTransitionIn,
+  BotStatusTransitionOut,
+} from './bot.js';
+
+/**
+ * THE TWO CHILD COLLECTIONS UNDER A BOT, and they are separate modules rather than four more
+ * declarations in `bot.js` for the reason `provider-model.ts` is separate from
+ * `provider-connection.ts`: they are different resources with their own endpoints, their own
+ * lifecycles and their own manifests, and the only thing they share with the bot body is a URL
+ * prefix.
+ *
+ * `BOT_DOMAIN_STATUSES` is the eighth runtime value in this barrel that is not a schema or a
+ * defaults factory, and it is here for the identical reason as the seven before it:
+ * `src/resources/bots.ts` declares `BotDomainStatus` as a UNION with zero runtime values, because
+ * that module is re-exported from the ROOT entry and budgeted at <=1 kB brotli inside apps/widget's
+ * app shell.
+ *
+ * NEITHER MODULE MIRRORS ITS SERVER-SIDE GRAMMAR. `App\Rules\ExactWidgetOrigin` is a security
+ * control whose refusals are its content, and a third spelling of it here would be the copy nothing
+ * compares to the other two — see the module docblock in `bot-domain.ts`, which also records the one
+ * rule that DOES matter to a caller: render `origin` from the response, because the server
+ * normalises it on write.
+ */
+export {
+  BOT_DOMAIN_STATUSES,
+  botDomainCreateDefaults,
+  botDomainCreateSchema,
+  botDomainStatusDefaults,
+  botDomainStatusSchema,
+} from './bot-domain.js';
+export type {
+  BotDomainCreateIn,
+  BotDomainCreateOut,
+  BotDomainStatusIn,
+  BotDomainStatusOut,
+} from './bot-domain.js';
+
+export {
+  starterQuestionCreateDefaults,
+  starterQuestionCreateSchema,
+  starterQuestionUpdateDefaults,
+  starterQuestionUpdateSchema,
+} from './bot-starter-question.js';
+export type {
+  StarterQuestionCreateIn,
+  StarterQuestionCreateOut,
+  StarterQuestionSource,
+  StarterQuestionUpdateIn,
+  StarterQuestionUpdateOut,
+} from './bot-starter-question.js';
 
 export {
   embeddingDesignationDefaults,

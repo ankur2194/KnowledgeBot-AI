@@ -2,10 +2,14 @@
 
 declare(strict_types=1);
 
+use App\Enums\BotDomainStatus;
 use App\Enums\OrgRole;
 use App\Enums\Provider;
 use App\Enums\ProviderConnectionStatus;
 use App\Models\AuditLog;
+use App\Models\Bot;
+use App\Models\BotDomain;
+use App\Models\BotStarterQuestion;
 use App\Models\EmailVerificationToken;
 use App\Models\Organization;
 use App\Models\OrganizationInvitation;
@@ -187,7 +191,7 @@ const ATOMICITY_PROVIDER_CREDENTIAL = 'kb-atomicity-credential-DO-NOT-LOG-v8r2';
  * — running `pest tests/Feature/AuditAtomicityTest.php` alone would fatal on an undefined function —
  * and declaring a second copy under the same name in this file would be a redeclaration fatal in a
  * full run. tests/Support/tenancy.php's tenantPair() is the intended eventual home for both and
- * throws by design until the Bot and KnowledgeSource factories exist.
+ * is live for bots as of the bots-schema step; its KnowledgeSource half is still commented for Phase C, so a suite that needs INDEXED SOURCE content still builds its own fixture.
  *
  * @return array{
  *     orgA: Organization, orgB: Organization,
@@ -702,7 +706,7 @@ it('does not replace a stored credential when the rotation audit row cannot be w
  * has been loaded — running this file alone would fatal on an undefined function — and declaring a
  * second copy under the same name here would be a redeclaration fatal in a full run.
  * tests/Support/tenancy.php's tenantPair() is the intended eventual home for all of them and
- * throws by design until the Bot and KnowledgeSource factories exist.
+ * is live for bots as of the bots-schema step; its KnowledgeSource half is still commented for Phase C, so a suite that needs INDEXED SOURCE content still builds its own fixture.
  *
  * @return array{
  *     orgA: Organization, orgB: Organization,
@@ -904,6 +908,455 @@ it('deletes no provider model when its audit row cannot be written', function ()
 });
 
 // -------------------------------------------------------------------------------------------
+// ON_FAILURE_ABORT: BOTS
+// -------------------------------------------------------------------------------------------
+//
+// THE SAME TECHNIQUE AND A DIFFERENT SUBJECT AGAIN. `bot.created`, `.updated` and `.deleted` are
+// all ABORT and all written inside EloquentBotRepository's transaction, so each change must roll
+// back with its row.
+//
+// WHAT EACH OF THE THREE CAN PROVE, which is not the same for all three:
+//   create   — the row does not exist afterwards. It cannot distinguish "the audit write was inside
+//       the transaction" from "it happened before the INSERT", because there is nothing to observe
+//       before the INSERT.
+//   update   — the strongest of the three, and stronger here than on the catalog. `update()` calls
+//       save() BEFORE the audit closure AND may have bumped `retrieval_configuration_version`, so a
+//       rollback has to take both the column values and the version increment back. A version that
+//       moved without an audit row is the specific defect: the §21.5 regression gate would then
+//       replay a trace against a configuration identity no audit row explains.
+//   delete   — audit FIRST, children SECOND, bot THIRD, because a hard delete leaves the audit row
+//       as the only surviving description. So it proves "nothing committed" — including the CHILD
+//       rows, which no other test in this file has an equivalent of — and proves the write is not
+//       AFTER the commit, but cannot distinguish inside-the-transaction from just-before-it. The
+//       update test carries that half.
+
+/**
+ * TWO ORGANIZATIONS, one bot each, and the two bots share a SLUG.
+ *
+ * A bot slug is unique PER ORGANIZATION, so the pair is legal — and it is exactly the fixture that
+ * makes a missing organization predicate visible: a repository whose tenant term had been deleted
+ * would edit or delete a plausible-looking row and every assertion keyed on the slug would pass.
+ * Org B's bot is the control and every test below asserts it is still standing afterwards.
+ *
+ * ORG A'S BOT CARRIES ONE ROW IN EACH CHILD TABLE, which no other fixture in this file needs: the
+ * delete path removes three child collections inside the same transaction, and a rollback that took
+ * the bot back while leaving an orphaned domain would be invisible without them.
+ *
+ * A HELPER OF THIS FILE'S OWN, with a name of its own, for the reason
+ * providerModelAtomicityFixture() states: Pest declares test-file helpers at FILE SCOPE, so a
+ * second declaration of a name another test file already uses is a redeclaration fatal in a full
+ * run and only in a full run.
+ *
+ * @return array{orgA: Organization, orgB: Organization, ownerA: User, botA: Bot, botB: Bot}
+ */
+function botAtomicityFixture(): array
+{
+    $orgA = Organization::factory()->create(['name' => 'Bot Atomicity Org ALPHA']);
+    $orgB = Organization::factory()->create(['name' => 'Bot Atomicity Org BRAVO']);
+
+    return [
+        'orgA' => $orgA,
+        'orgB' => $orgB,
+        'ownerA' => User::factory()->recycle($orgA)->orgRole(OrgRole::Owner)
+            ->create(['email' => SpaSession::uniqueEmail('bot-atomicity-owner')]),
+
+        // ->recycle() on both, without exception: BotFactory REFUSES to run without a recycled
+        // organization, because a bot minted into a THIRD organization is what makes an isolation
+        // assertion pass with the tenant filter deleted.
+        'botA' => Bot::factory()->recycle($orgA)
+            ->withOrigins(['https://alpha.example.com'])
+            ->create(['name' => 'ALPHA atomicity bot', 'slug' => 'shared-handle']),
+        'botB' => Bot::factory()->recycle($orgB)
+            ->create(['name' => 'BRAVO atomicity bot', 'slug' => 'shared-handle']),
+    ];
+}
+
+it('creates no bot when its audit row cannot be written', function (): void {
+    $fixture = botAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    // POSITIVE CONTROL BEFORE THE BREAK: org A holds exactly one bot right now. Without it, "still
+    // one bot" below is satisfied by a fixture that created none and by an endpoint that has been
+    // 500ing since long before the partitions were dropped.
+    expect(Bot::query()->withoutGlobalScopes()->where('organization_id', '=', $fixture['orgA']->id)->count())
+        ->toBe(1, 'the fixture did not create org A\'s bot, so nothing below is a rollback');
+
+    auditWritesBroken();
+
+    currentTest()->postJson(
+        "/api/v1/organizations/{$fixture['orgA']->id}/bots",
+        ['name' => 'ALPHA unauditable bot', 'slug' => 'unauditable-bot'],
+        spaHeaders(),
+    )
+        // ON_FAILURE_ABORT rethrows the QueryException UNWRAPPED, so the taxonomy classifies the
+        // SQLSTATE rather than a service-layer wrapper.
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    // NOTHING COMMITTED. A bot that reached the table with no record of who created it is a
+    // retrieval scope nobody can attribute — and it is invisible in every other test, because the
+    // endpoint's own response would have been a 201.
+    assertDatabaseMissing('bots', ['slug' => 'unauditable-bot']);
+    assertDatabaseMissing('bots', ['name' => 'ALPHA unauditable bot']);
+
+    expect(Bot::query()->withoutGlobalScopes()->where('organization_id', '=', $fixture['orgA']->id)->count())
+        ->toBe(1, 'a bot was created without an audit row');
+
+    // AND ORG B SURVIVES. A rollback that reached beyond its own savepoint would take the other
+    // tenant's rows with it, and no assertion on org A can see that.
+    assertDatabaseHas('bots', [
+        'id' => $fixture['botB']->id,
+        'organization_id' => $fixture['orgB']->id,
+        'name' => 'BRAVO atomicity bot',
+    ]);
+});
+
+it('does not edit a bot, or move its configuration version, when the audit row cannot be written', function (): void {
+    $fixture = botAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    $bot = $fixture['botA'];
+
+    // POSITIVE CONTROL FIRST: the values this test claims survive are the values the row actually
+    // holds. Without it a rollback assertion passes against a fixture that never had them.
+    assertDatabaseHas('bots', [
+        'id' => $bot->id,
+        'organization_id' => $fixture['orgA']->id,
+        'name' => 'ALPHA atomicity bot',
+        'dense_top_k' => 20,
+        'retrieval_configuration_version' => 1,
+    ]);
+
+    auditWritesBroken();
+
+    currentTest()->patchJson(
+        "/api/v1/organizations/{$fixture['orgA']->id}/bots/{$bot->id}",
+        // A NAME CHANGE **AND** A RETRIEVAL KNOB, deliberately. The knob is what makes this the
+        // strongest of the three: `update()` bumps `retrieval_configuration_version` inside the same
+        // transaction, so a rollback has to take the increment back as well as the columns. A
+        // version that moved with no audit row explaining it is a configuration identity the §21.5
+        // regression gate would replay against and nobody could account for.
+        ['name' => 'ALPHA unauditable rename', 'dense_top_k' => 42],
+        spaHeaders(),
+    )
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    assertDatabaseHas('bots', [
+        'id' => $bot->id,
+        'organization_id' => $fixture['orgA']->id,
+        'name' => 'ALPHA atomicity bot',
+        'dense_top_k' => 20,
+        // THE ASSERTION THIS TEST EXISTS FOR. Everything above would also pass if the audit write
+        // had happened before the UPDATE; only a version that came back proves the write is inside
+        // the transaction that performed it.
+        'retrieval_configuration_version' => 1,
+    ]);
+
+    assertDatabaseMissing('bots', ['name' => 'ALPHA unauditable rename']);
+
+    assertDatabaseHas('bots', [
+        'id' => $fixture['botB']->id,
+        'organization_id' => $fixture['orgB']->id,
+        'name' => 'BRAVO atomicity bot',
+    ]);
+});
+
+it('deletes no bot, and no child of one, when its audit row cannot be written', function (): void {
+    $fixture = botAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    $bot = $fixture['botA'];
+
+    // POSITIVE CONTROL FIRST, ON BOTH THE BOT AND ITS CHILD. The child is the half no other test in
+    // this file has: the delete path removes three child collections inside the same transaction,
+    // and an orphaned allow-list entry left behind by a partial rollback is invisible from `bots`.
+    assertDatabaseHas('bots', [
+        'id' => $bot->id,
+        'organization_id' => $fixture['orgA']->id,
+        'slug' => 'shared-handle',
+    ]);
+    assertDatabaseHas('bot_domains', [
+        'bot_id' => $bot->id,
+        'organization_id' => $fixture['orgA']->id,
+        'origin' => 'https://alpha.example.com',
+    ]);
+
+    auditWritesBroken();
+
+    currentTest()->deleteJson(
+        "/api/v1/organizations/{$fixture['orgA']->id}/bots/{$bot->id}",
+        [],
+        spaHeaders(),
+    )
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    // THE HARD DELETE DID NOT HAPPEN, AND NEITHER DID THE CASCADE. This is the one operation whose
+    // audit row is the ONLY thing that would have survived it, so a delete that committed without
+    // one erases the bot, its origin allow-list, its starter questions and its fallback chain AND
+    // the record that any of them existed — `subject_id` would point at a ULID no table resolves.
+    assertDatabaseHas('bots', [
+        'id' => $bot->id,
+        'organization_id' => $fixture['orgA']->id,
+        'name' => 'ALPHA atomicity bot',
+    ]);
+    assertDatabaseHas('bot_domains', [
+        'bot_id' => $bot->id,
+        'origin' => 'https://alpha.example.com',
+    ]);
+
+    // ORG B SURVIVES. A delete whose predicate lost its organization term is invisible to every
+    // assertion above — and org B's bot carries the SAME slug, so a delete keyed on the handle
+    // alone would have taken it.
+    assertDatabaseHas('bots', [
+        'id' => $fixture['botB']->id,
+        'organization_id' => $fixture['orgB']->id,
+    ]);
+});
+
+// -------------------------------------------------------------------------------------------
+// ON_FAILURE_ABORT: THE BOT CHILD COLLECTIONS
+// -------------------------------------------------------------------------------------------
+//
+// THE SAME TECHNIQUE ONE LEVEL DOWN, AND FOR THE ORIGIN ALLOW-LIST IT IS THE POINT OF THE WHOLE
+// FEATURE. Finding L2 is that a bot delete destroyed its allow-list with no record of what it
+// permitted. The fix is that every origin ever granted has its own append-only row — so a grant
+// that COMMITS WITHOUT ITS ROW is the finding re-opened in the one shape nobody would notice: the
+// widget works, the console shows the origin, and the trail says it was never granted.
+//
+// WHAT EACH CASE CAN PROVE, and it is not the same for all six:
+//   domain create    the row does not exist afterwards. It cannot distinguish "inside the
+//                    transaction" from "before the INSERT" — there is nothing observable before it.
+//   domain status    the STRONGEST of the six: `changeStatus()` calls save() BEFORE the audit
+//                    closure, so the rollback has to take a column value back rather than merely
+//                    not insert a row. A promotion that stuck without its audit row is an origin
+//                    that started granting embeds with nothing recording who turned it on.
+//   domain delete    audit FIRST, row SECOND, so it proves "nothing committed" and proves the write
+//                    is not AFTER the commit.
+//   question create  as above; the list length is the observable.
+//   question update  the same strength as the domain status case, through the re-sequence.
+//   question delete  the same shape as the domain delete, plus the compaction that would otherwise
+//                    have rewritten the surviving rows' positions.
+
+/**
+ * One organization, one owner, one bot carrying one origin and two starter questions.
+ *
+ * A HELPER OF THIS FILE'S OWN, with a name of its own, for the reason botAtomicityFixture() states:
+ * Pest declares test-file helpers at FILE SCOPE, so a second declaration of a name another test
+ * file already uses is a redeclaration fatal in a full run and only in a full run.
+ *
+ * TWO QUESTIONS RATHER THAN ONE, because the delete path COMPACTS the survivors — with a single
+ * row there is no re-sequence to roll back and the delete case would prove strictly less.
+ *
+ * @return array{org: Organization, owner: User, bot: Bot, domain: BotDomain, first: BotStarterQuestion, second: BotStarterQuestion}
+ */
+function botChildAtomicityFixture(): array
+{
+    $org = Organization::factory()->create(['name' => 'Bot Child Atomicity Org']);
+
+    // ->recycle() on every child, without exception: BotFactory and both child factories REFUSE to
+    // run without a recycled organization, because a row minted into a THIRD organization is what
+    // makes an isolation assertion pass with the tenant filter deleted.
+    $bot = Bot::factory()->recycle($org)->create([
+        'name' => 'Child atomicity bot',
+        'slug' => 'child-atomicity-bot',
+    ]);
+
+    return [
+        'org' => $org,
+        'owner' => User::factory()->recycle($org)->orgRole(OrgRole::Owner)
+            ->create(['email' => SpaSession::uniqueEmail('bot-child-atomicity-owner')]),
+        'bot' => $bot,
+        'domain' => BotDomain::factory()->recycle($org)->recycle($bot)
+            ->origin('https://fixture-child.example')->create(),
+        'first' => BotStarterQuestion::factory()->recycle($org)->recycle($bot)
+            ->at(0)->asking('First fixture question?')->create(),
+        'second' => BotStarterQuestion::factory()->recycle($org)->recycle($bot)
+            ->at(1)->asking('Second fixture question?')->create(),
+    ];
+}
+
+it('grants no origin when the audit row cannot be written', function (): void {
+    $fixture = botChildAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['owner']);
+
+    // POSITIVE CONTROL BEFORE THE BREAK: the bot holds exactly one origin right now, so "still one"
+    // below is a rollback rather than a fixture that created none.
+    expect(BotDomain::query()->withoutGlobalScopes()->where('bot_id', '=', $fixture['bot']->id)->count())
+        ->toBe(1, 'the fixture did not create an origin, so nothing below is a rollback');
+
+    auditWritesBroken();
+
+    currentTest()->postJson(
+        "/api/v1/organizations/{$fixture['org']->id}/bots/{$fixture['bot']->id}/domains",
+        ['origin' => 'https://unauditable.example'],
+        spaHeaders(),
+    )
+        // ON_FAILURE_ABORT rethrows the QueryException UNWRAPPED, so the taxonomy classifies the
+        // SQLSTATE rather than a service-layer wrapper.
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    // NOTHING COMMITTED. A grant to a page on the public internet with no record of who made it is
+    // finding L2 re-opened, and it is invisible in every other test because the endpoint's own
+    // response would have been a 201.
+    assertDatabaseMissing('bot_domains', ['origin' => 'https://unauditable.example']);
+
+    expect(BotDomain::query()->withoutGlobalScopes()->where('bot_id', '=', $fixture['bot']->id)->count())
+        ->toBe(1, 'an origin was granted without an audit row');
+});
+
+it('does not promote an origin when the audit row cannot be written', function (): void {
+    $fixture = botChildAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['owner']);
+
+    // POSITIVE CONTROL: the row starts `pending`, which grants nothing. Without this the assertion
+    // below is satisfied by a fixture that was already pending for some other reason.
+    assertDatabaseHas('bot_domains', [
+        'id' => $fixture['domain']->id,
+        'status' => BotDomainStatus::Pending->value,
+    ]);
+
+    auditWritesBroken();
+
+    currentTest()->patchJson(
+        "/api/v1/organizations/{$fixture['org']->id}/bots/{$fixture['bot']->id}"
+            ."/domains/{$fixture['domain']->id}",
+        ['status' => BotDomainStatus::Active->value],
+        spaHeaders(),
+    )
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    // THE COLUMN CAME BACK. `changeStatus()` calls save() BEFORE the audit closure, so this is a
+    // real rollback of a written value rather than an INSERT that never happened — and the value in
+    // question is the one that decides whether this origin may boot a widget at all.
+    assertDatabaseHas('bot_domains', [
+        'id' => $fixture['domain']->id,
+        'status' => BotDomainStatus::Pending->value,
+    ]);
+});
+
+it('does not remove an origin when the audit row cannot be written', function (): void {
+    $fixture = botChildAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['owner']);
+
+    auditWritesBroken();
+
+    currentTest()->deleteJson(
+        "/api/v1/organizations/{$fixture['org']->id}/bots/{$fixture['bot']->id}"
+            ."/domains/{$fixture['domain']->id}",
+        [],
+        spaHeaders(),
+    )
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    // THE HARD DELETE DID NOT HAPPEN. This row's audit entry is the only thing that would have
+    // survived it — `subject_id` points at a ULID no table resolves afterwards — so a delete that
+    // committed without one erases both the grant and the record that it ever existed.
+    assertDatabaseHas('bot_domains', [
+        'id' => $fixture['domain']->id,
+        'origin' => 'https://fixture-child.example',
+    ]);
+});
+
+it('adds no starter question when the audit row cannot be written', function (): void {
+    $fixture = botChildAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['owner']);
+
+    expect(BotStarterQuestion::query()->withoutGlobalScopes()
+        ->where('bot_id', '=', $fixture['bot']->id)->count())
+        ->toBe(2, 'the fixture did not create the questions, so nothing below is a rollback');
+
+    auditWritesBroken();
+
+    currentTest()->postJson(
+        "/api/v1/organizations/{$fixture['org']->id}/bots/{$fixture['bot']->id}/starter-questions",
+        ['question' => 'Unauditable question?'],
+        spaHeaders(),
+    )
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    assertDatabaseMissing('bot_starter_questions', ['question' => 'Unauditable question?']);
+
+    expect(BotStarterQuestion::query()->withoutGlobalScopes()
+        ->where('bot_id', '=', $fixture['bot']->id)->count())
+        ->toBe(2, 'a starter question was added without an audit row');
+});
+
+it('does not move a starter question when the audit row cannot be written', function (): void {
+    $fixture = botChildAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['owner']);
+
+    auditWritesBroken();
+
+    currentTest()->patchJson(
+        "/api/v1/organizations/{$fixture['org']->id}/bots/{$fixture['bot']->id}"
+            ."/starter-questions/{$fixture['second']->id}",
+        ['question' => 'Renamed question?', 'sort_order' => 0],
+        spaHeaders(),
+    )
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    // BOTH HALVES CAME BACK, and the second is what makes this the strong case: the re-sequence
+    // rewrites EVERY row in the list, so a partial rollback would leave the two questions in an
+    // order nobody asked for with no audit row to explain it.
+    assertDatabaseHas('bot_starter_questions', [
+        'id' => $fixture['first']->id,
+        'question' => 'First fixture question?',
+        'sort_order' => 0,
+    ]);
+    assertDatabaseHas('bot_starter_questions', [
+        'id' => $fixture['second']->id,
+        'question' => 'Second fixture question?',
+        'sort_order' => 1,
+    ]);
+});
+
+it('does not remove a starter question when the audit row cannot be written', function (): void {
+    $fixture = botChildAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['owner']);
+
+    auditWritesBroken();
+
+    currentTest()->deleteJson(
+        "/api/v1/organizations/{$fixture['org']->id}/bots/{$fixture['bot']->id}"
+            ."/starter-questions/{$fixture['first']->id}",
+        [],
+        spaHeaders(),
+    )
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    // THE ROW SURVIVES AND SO DOES THE ORDER. The delete compacts the survivors in the same
+    // transaction, so a rollback that took the DELETE back but left the re-sequence would leave the
+    // second question at position 0 beside a first question that is also at 0 — which the unique
+    // index would have refused, meaning the observable failure would be a later 23505 from an
+    // unrelated request.
+    assertDatabaseHas('bot_starter_questions', [
+        'id' => $fixture['first']->id,
+        'sort_order' => 0,
+    ]);
+    assertDatabaseHas('bot_starter_questions', [
+        'id' => $fixture['second']->id,
+        'sort_order' => 1,
+    ]);
+});
+
+// -------------------------------------------------------------------------------------------
 // ON_FAILURE_LOG: the action stands, and the failure is loud
 // -------------------------------------------------------------------------------------------
 
@@ -1004,6 +1457,38 @@ it('has a test in this file for every ABORT-policy operation that has a producer
         AuditLogger::PROVIDER_MODEL_CREATED,
         AuditLogger::PROVIDER_MODEL_DELETED,
         AuditLogger::PROVIDER_MODEL_UPDATED,
+
+        // The three BOT operations. All three have live producers — BotController@store/@update/
+        // @destroy — so none of them belongs in $noProducer, and each has a test above that breaks
+        // the audit INSERT and asserts the bot is unchanged. The update test is the one that also
+        // proves the write is INSIDE the transaction rather than merely before the commit, because
+        // it asserts `retrieval_configuration_version` came back; the delete test additionally
+        // asserts the CHILD rows the same transaction removes came back, which no other operation
+        // in this file has an equivalent of.
+        AuditLogger::BOT_CREATED,
+        AuditLogger::BOT_DELETED,
+        AuditLogger::BOT_UPDATED,
+
+        // THE THREE ORIGIN-ALLOW-LIST OPERATIONS. All three have live producers —
+        // BotDomainController@store/@update/@destroy — and this is the family where the ABORT
+        // policy carries the most weight: a grant to a page on the public internet that committed
+        // without its audit row is finding L2 re-opened in the shape nobody notices, because the
+        // widget works and only the trail is wrong. The `status` case is the one that also proves
+        // the write is INSIDE the transaction rather than merely before the commit, because
+        // `changeStatus()` calls save() first and the assertion is that the column came back.
+        AuditLogger::BOT_DOMAIN_CREATED,
+        AuditLogger::BOT_DOMAIN_DELETED,
+        AuditLogger::BOT_DOMAIN_STATUS_CHANGED,
+
+        // THE THREE STARTER-QUESTION OPERATIONS. All three have live producers —
+        // BotStarterQuestionController@store/@update/@destroy. The update case is the strong one
+        // for the same structural reason as the domain status case, and additionally because a
+        // partial rollback of the RE-SEQUENCE would leave two rows claiming one position, which the
+        // unique index refuses — so the observable failure would be a 23505 on somebody else's
+        // later request.
+        AuditLogger::BOT_STARTER_QUESTION_CREATED,
+        AuditLogger::BOT_STARTER_QUESTION_DELETED,
+        AuditLogger::BOT_STARTER_QUESTION_UPDATED,
     ];
 
     // ROLE_CHANGED has no producer: PATCH /members/{user} is deliberately not built yet, because the

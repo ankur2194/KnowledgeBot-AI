@@ -29,8 +29,8 @@ use Tests\Support\SpaSession;
 | rather than as no row. A one-organization fixture passes every assertion below with the tenant
 | filter deleted.
 |
-| TODO(fixtures): tests/Support/tenancy.php's tenantPair() is the intended home for this, and it
-| throws by design until the bots and knowledge_sources migrations exist.
+| TODO(fixtures): tests/Support/tenancy.php's tenantPair() is the intended home for this; its bot
+| half is live and its KnowledgeSource half lands in Phase C.
 */
 
 beforeEach(function (): void {

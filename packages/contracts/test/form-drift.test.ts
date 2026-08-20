@@ -14,7 +14,32 @@ import {
   registerSchema,
   resetPasswordSchema,
 } from '../src/forms/auth.js';
-import { botSettingsSchema } from '../src/forms/bot.js';
+import {
+  BOT_ACCESS_MODES,
+  BOT_ANSWER_MODES,
+  BOT_STATUSES,
+  botCreateDefaults,
+  botCreateSchema,
+  botFormDefaults,
+  botSettingsSchema,
+  botStatusTransitionDefaults,
+  botStatusTransitionSchema,
+  EVIDENCE_THRESHOLD_SCALES,
+  THEME_RADII,
+} from '../src/forms/bot.js';
+import {
+  BOT_DOMAIN_STATUSES,
+  botDomainCreateDefaults,
+  botDomainCreateSchema,
+  botDomainStatusDefaults,
+  botDomainStatusSchema,
+} from '../src/forms/bot-domain.js';
+import {
+  starterQuestionCreateDefaults,
+  starterQuestionCreateSchema,
+  starterQuestionUpdateDefaults,
+  starterQuestionUpdateSchema,
+} from '../src/forms/bot-starter-question.js';
 import { embeddingDesignationSchema } from '../src/forms/embedding-designation.js';
 import { OWNERSHIP_KEYS, isOwnershipPath } from '../src/forms/ownership.js';
 import {
@@ -129,6 +154,155 @@ const passwordOfLength: Sizer = (size) =>
  * author verified it against the dumped rule, rather than inferred in the harness from a rule string.
  */
 const capabilityFlagOfLength: Sizer = (size) => 'a'.repeat(size);
+
+/**
+ * A `Sizer` for `slug` on both bot manifests, and the third worked example of the hook.
+ *
+ * The rule is `max:64|regex:/^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$/` — `bots_slug_shape` verbatim —
+ * and `regex` is a `FORMAT_RULES` member, so without this both `max:64` probes vanish: not reported,
+ * not failed, simply absent. `missingSizeProbes()` is what turns that into a red build.
+ *
+ * `'a'.repeat(n)` is length-exact AND matches the pattern for every n in 1…64 (one leading
+ * alphanumeric, up to 62 middle characters, one trailing alphanumeric), so `serverAccepts: true` at
+ * the boundary is a true claim about the server rather than a convenient one. At 65 it matches
+ * nothing, which is fine: the rejection probe only needs the server to say no, and it says no twice.
+ */
+const slugOfLength: Sizer = (size) => 'a'.repeat(size);
+
+/**
+ * A `Sizer` for `theme.primary` and `theme.accent`, and the only one in this file whose claim about
+ * the server was MEASURED AGAINST THE SERVER rather than reasoned about.
+ *
+ * Both paths carry `max:64` beside `App\Rules\ReadableThemeColor`, which demands a well-formed
+ * `oklch()` triple that can be given readable text. The generic `'a'.repeat(64)` satisfies neither
+ * half, so the boundary probe would claim an acceptance that does not happen — the exact false red
+ * `passwordOfLength` exists for, and the repair it invites is to delete the length bound from the
+ * schema.
+ *
+ * The padding goes BETWEEN the components, because that is the only axis with room: the grammar caps
+ * each component at three integer digits and six decimals, so all three plus an alpha reach nowhere
+ * near 64, while `\s+` between them matches a run of any length. `oklch(0.525 … 0.235 264)` is
+ * therefore length-exact and legal.
+ *
+ * VERIFIED, NOT REASONED: `php` against `services/core-api/vendor` ran `App\Rules\ReadableThemeColor`
+ * over the generated values and reported ACCEPT at 22, at 64 and at 65 — 65 is rejected by `max:64`
+ * alone, which is what the rejection probe needs — and REJECT for `'a'.repeat(64)`, which is the
+ * false red this generator removes. The same run confirmed the contrast half is live:
+ * `oklch(0.58 0.2 264)` is a legal colour and is refused, because L in [0.538, 0.634] is the band
+ * where neither platform foreground clears 4.5:1.
+ *
+ * L = 0.525 is deliberately just BELOW that band: it is the example the server's own error message
+ * gives, so a probe built on it is asserting against the value the rule's author had in mind.
+ */
+const THEME_COLOR_HEAD = 'oklch(0.525 0.235 264)';
+
+const themeColorOfLength: Sizer = (size) =>
+  size < THEME_COLOR_HEAD.length
+    ? undefined
+    : `oklch(0.525${' '.repeat(size - THEME_COLOR_HEAD.length + 1)}0.235 264)`;
+
+/** `https://` — the shortest scheme prefix `ExactOrigin` admits is `http://`, but every origin this
+ *  generator emits uses the longer one so one arithmetic serves both ends. */
+const ORIGIN_HEAD = 'https://';
+
+/** RFC 1035, and `ExactOrigin::HOST` carries it verbatim: `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?` is a
+ *  label of at most 63 characters. Unlike the email synthesizer's 62 this is NOT an upstream quirk —
+ *  the pattern is the server's own, so the RFC number is the real one here. */
+const HOST_LABEL_MAX = 63;
+
+/**
+ * A `Sizer` for `origin` on `StoreBotDomainRequest`, and the fourth worked example of why the hook
+ * exists — this time on a rule whose refusals are a SECURITY CONTROL rather than a format.
+ *
+ * `App\Rules\ExactWidgetOrigin` is a `FORMAT_RULES` member by declaration (see that set), so
+ * without this generator `sizerFor` returns `undefined` and both `max:255` probes vanish: not
+ * reported, not failed, simply absent. `missingSizeProbes()` is what turns that into a red build.
+ *
+ * The generic `'a'.repeat(255)` is worse than absent, which is the other half of the argument: the
+ * rule refuses it outright ("An origin starts with `http://` or `https://`"), so the boundary probe
+ * would claim an acceptance that does not happen and the repair it invites is to delete the length
+ * bound from the schema.
+ *
+ * The padding goes into the HOST, which is the only axis with room, and it is split into labels of
+ * at most 63 characters because that is what `ExactOrigin::HOST` admits. A run of `a`s satisfies the
+ * label grammar at every length in 1…63 — one leading alphanumeric, up to 61 middle characters, one
+ * trailing alphanumeric — and the dots between labels are free, so the result is length-exact and
+ * legal. An exact multiple would leave nothing for the final label and emit a trailing dot, which
+ * the host pattern refuses, so one character is borrowed from the previous label exactly as
+ * `domainOfLength` does.
+ *
+ * VERIFIED, NOT REASONED, like `themeColorOfLength`'s and `emailOfLength`'s: `php` against
+ * `services/core-api/vendor` ran `App\Support\Web\ExactOrigin::parse()` over the generated values
+ * and reported ACCEPT at 9, 22, 254 and 255, and REJECT at 256 — 256 is refused by `max:255` AND by
+ * the rule's own `MAX_LENGTH`, which is what the rejection probe needs — and REJECT for
+ * `'a'.repeat(255)`, which is the false red this generator removes. The same run confirmed the three
+ * normalisations are live: `HTTPS://EXAMPLE.COM:443` is ACCEPTED and stored as `https://example.com`,
+ * which is why nothing in this package echoes a submitted origin back to the operator.
+ */
+const originOfLength: Sizer = (size) => {
+  let left = size - ORIGIN_HEAD.length;
+  if (left < 1) return undefined;
+
+  const labels: string[] = [];
+  while (left > HOST_LABEL_MAX) {
+    labels.push('a'.repeat(HOST_LABEL_MAX));
+    left -= HOST_LABEL_MAX + 1;
+  }
+  if (left === 0) {
+    labels[labels.length - 1] = 'a'.repeat(HOST_LABEL_MAX - 1);
+    left = 1;
+  }
+  labels.push('a'.repeat(left));
+
+  return `${ORIGIN_HEAD}${labels.join('.')}`;
+};
+
+/**
+ * The bot body both requests share, and a FUNCTION rather than a constant because `mutate` clones it
+ * per probe and `theme` is a nested object — a shared literal would let one probe's `structuredClone`
+ * source be a previous probe's mutation if anything ever wrote through.
+ *
+ * Every value here is one the SERVER accepts: the retrieval depths sit inside docs/07 §12.7-12.12's
+ * bands (note `rerank_candidates` starts at 20 and `rerank_retain` at 6, so a plausible-looking 5
+ * would fail the baseline before a single probe ran), the theme colours are legal `oklch()` triples
+ * outside the unreadable band, and the evidence pair is the one argued for in the MIRRORS note below.
+ *
+ * `consent_text` IS SET WHILE `collect_end_user_data` IS FALSE, deliberately: that is a legal row —
+ * an operator who wrote the disclosure before switching collection on — and it keeps the baseline
+ * clear of the one pairing rule that is NOT in either manifest. `BotService` owns that check against
+ * the resulting row on both paths, and neither schema mirrors it; see the note on
+ * `collect_end_user_data` in src/forms/bot.ts.
+ */
+const botBaseline = (): Candidate => ({
+  name: 'Support desk',
+  slug: 'support-desk',
+  description: 'Answers questions about the employee handbook.',
+  welcome_message: 'Hi — ask me anything about the handbook.',
+  placeholder_text: 'Ask a question',
+  system_instruction: 'Answer only from the handbook, and say so when it does not cover something.',
+  answer_style_instruction: 'Be concise and use the reader’s own vocabulary.',
+  access_mode: 'private',
+  provider_connection_id: ULID,
+  provider_model_id: ULID,
+  answer_mode: 'strict',
+  dense_top_k: 20,
+  sparse_top_k: 20,
+  rerank_candidates: 20,
+  rerank_retain: 6,
+  evidence_threshold: 0.5,
+  evidence_threshold_scale: 'logit',
+  allow_general_answers: false,
+  theme: {
+    primary: 'oklch(0.525 0.235 264)',
+    accent: 'oklch(0.97 0.005 264)',
+    radius: '0.625rem',
+  },
+  rate_limit_per_minute: 60,
+  rate_limit_per_day: 5000,
+  retention_days: 90,
+  collect_end_user_data: false,
+  consent_text: 'We keep your email so we can follow up on this conversation.',
+});
 
 /**
  * Manifest class → the schema in src/forms/ that mirrors it. Every dumped manifest must appear
@@ -261,6 +435,201 @@ const MIRRORS: Readonly<Record<string, Mirror>> = {
     sized: { 'supported.*': capabilityFlagOfLength },
   },
 
+  /**
+   * THE TWO BOT REQUESTS, and the longest note in this map because three separate things about them
+   * are load-bearing and none is visible at the call site.
+   *
+   * ── THE BASELINE'S EVIDENCE PAIR IS CHOSEN, NOT ARBITRARY ──────────────────────────────────────
+   * `{evidence_threshold: 0.5, evidence_threshold_scale: 'logit'}` is the ONE combination that keeps
+   * both probe sets honest, and every other plausible pair makes one of them a false claim about the
+   * server:
+   *
+   *   the probes on `evidence_threshold` mutate the number and keep the baseline's SCALE. `min:-100`
+   *   and `max:100` claim the server ACCEPTS -100 and 100 — true on `logit`, which is unbounded, and
+   *   FALSE on either bounded scale, where `App\Rules\EvidenceThresholdWithinScale` refuses anything
+   *   outside [0, 1]. A `sigmoid` baseline reports the correct schema as blocking input the server
+   *   accepts, and the repair it invites is to delete the range mirror.
+   *
+   *   the probes on `evidence_threshold_scale` mutate the scale and keep the baseline's NUMBER. The
+   *   `in:` case claims the server accepts each of the three members in turn, which is true only for
+   *   a number inside [0, 1] — so a logit-shaped baseline like `-3.0` would assert an acceptance that
+   *   does not happen on two of the three members.
+   *
+   * 0.5 is inside [0, 1] and `logit` is unbounded, so both claims hold. This is the same burden a
+   * `sized` entry takes on, made here beside the mirror rather than inferred in the harness.
+   *
+   * VERIFIED, NOT REASONED, like `emailOfLength`'s: `php` against `services/core-api/vendor` ran
+   * `App\Rules\EvidenceThresholdWithinScale` over the whole probe matrix and reported ACCEPT for 0.5
+   * on all three scales, ACCEPT for -100 and 100 on `logit`, and REJECT for 1.7 on `sigmoid` and
+   * -0.1 on `unit_interval` — which is every claim this baseline makes about the server, in both
+   * directions. The same run reported ACCEPT from `App\Rules\ReadableThemeColor` for both baseline
+   * theme colours.
+   *
+   * ── TWO `sized` OVERRIDES EACH, FOR TWO DIFFERENT FORMAT COLLISIONS ────────────────────────────
+   * `slug` carries a `regex:`, which is a `FORMAT_RULES` member; `theme.primary` and `theme.accent`
+   * carry a rule OBJECT that is one by declaration (see FORMAT_RULES). Without the overrides the
+   * first pair of probes disappears and the second pair lies. `missingSizeProbes()` catches the
+   * disappearance; only a reader catches the lie, which is why `themeColorOfLength`'s claim was
+   * measured against the installed PHP rather than argued.
+   *
+   * ── THE BASELINE CARRIES EVERY KEY THE MANIFEST DECLARES ───────────────────────────────────────
+   * Including the ones a real form would omit. An `omitted` probe deletes a key, so a baseline
+   * missing that key makes the probe a no-op that passes while asserting nothing — the quiet
+   * variant of the suppression this file's two gates exist to prevent.
+   *
+   * ── ONE DIFFERENCE BETWEEN THE TWO BASELINES, AND IT IS THE WHOLE DIFFERENCE BETWEEN THE
+   *    REQUESTS ────────────────────────────────────────────────────────────────────────────────────
+   * This note used to read "`status` is on the PATCH and not on the POST: a bot is created `draft`,
+   * always", and BOTH BASELINES ARE NOW IDENTICAL. `status` is `["missing"]` on the PATCH — a
+   * lifecycle move is `PUT …/bots/{bot}/status` and nothing else — so a PATCH baseline that still
+   * carried one would fail `the baseline is a value both sides accept` against a server that answers
+   * 422. What is left as the whole difference between the two requests is `sometimes`, which is what
+   * the note on `UpdateBotRequest` below is about.
+   *
+   * The `missing` PROBES are what keep the new arrangement from being a claim nobody checks:
+   * `probesFor` generates an omission ACCEPTED and both a value and an explicit null REJECTED for the
+   * path, so a `botSettingsSchema` that re-declared `status` fails by name — as does the set
+   * comparison in `the schema declares exactly the fields the FormRequest validates`, which subtracts
+   * those paths from the manifest side for exactly this reason.
+   */
+  'App\\Http\\Requests\\StoreBotRequest': {
+    schema: botCreateSchema,
+    baseline: () => botBaseline(),
+    sized: {
+      slug: slugOfLength,
+      'theme.primary': themeColorOfLength,
+      'theme.accent': themeColorOfLength,
+    },
+  },
+
+  /**
+   * THE FIRST REAL `sometimes|required` MANIFEST IN THIS REPO, and the reason the fixture block near
+   * the bottom of this file was written before one existed. Twelve of its fields carry that pair, and
+   * reading it as `required` would make the whole settings form a replace: the schema would demand
+   * `name`, `slug`, `status` and nine more on every save, so editing one welcome message would be
+   * impossible — functionality removed, nothing reported, every probe green because both sides would
+   * "agree" the omission is a rejection.
+   *
+   * The fixture suite proves the harness answers that correctly; this entry is the first place it
+   * answers it about a schema that ships.
+   */
+  'App\\Http\\Requests\\UpdateBotRequest': {
+    schema: botSettingsSchema,
+    baseline: () => botBaseline(),
+    sized: {
+      slug: slugOfLength,
+      'theme.primary': themeColorOfLength,
+      'theme.accent': themeColorOfLength,
+    },
+  },
+
+
+  /**
+   * THE STATUS TRANSITION, AND IT IS THE ONLY PLACE `BOT_STATUSES` IS STILL COMPARED TO THE SERVER.
+   *
+   * The tuple used to be pinned through `botSettingsSchema`'s `status` field. That field is gone —
+   * `UpdateBotRequest` rules it `["missing"]` — and if this manifest had been exempted instead of
+   * mirrored, the five-member tuple every status pill and transition menu iterates would have become
+   * a list nothing in this repo compares to anything. The `in:` probes below are that comparison: a
+   * sixth lifecycle value added server-side fails HERE rather than being invisible until a `<Select>`
+   * omits it.
+   *
+   * NO `sized` OVERRIDE and no size rule at all: the field is `bail|required|string|in:…`. That is
+   * also why this manifest is the reason the teeth test learned a SECOND tampering, below — a
+   * manifest with no `max:` cannot be knocked one character off in the only way that test used to
+   * know.
+   *
+   * THE BASELINE IS `published` RATHER THAN `draft`, and it is arbitrary in a way the bot baselines
+   * are not: every probe on this field replaces the value outright and the object has no sibling for
+   * a verdict to depend on, so any member is as honest as any other. `published` is the one the
+   * console's most consequential transition targets.
+   */
+  'App\\Http\\Requests\\UpdateBotStatusRequest': {
+    schema: botStatusTransitionSchema,
+    baseline: () => ({ status: 'published' }),
+  },
+
+  /**
+   * THE WIDGET ORIGIN ALLOW-LIST, and the one mirror in this map whose unmirrored half is a SECURITY
+   * CONTROL rather than a format.
+   *
+   * `App\Rules\ExactWidgetOrigin` refuses a wildcard, a path, a query, a fragment, userinfo, an IPv6
+   * literal, a non-ASCII host, `:0` and `:00443`, each with its own sentence, and it NORMALISES what
+   * it accepts. `botDomainCreateSchema` mirrors the length, the type and the two-scheme prefix and
+   * nothing else; the module docblock in src/forms/bot-domain.ts argues that boundary and
+   * `UNPROBED_RULES` records the suppression.
+   *
+   * ONE `sized` OVERRIDE, and it is the same failure mode `slug`'s and `theme.primary`'s are: the
+   * rule is a `FORMAT_RULES` member, so without `originOfLength` both `max:255` probes disappear in
+   * silence and `missingSizeProbes()` is what turns that into a red build. Unlike `slug`'s, this
+   * generator's acceptance claim was MEASURED against the installed PHP rather than read off a
+   * pattern — see its docblock — because the rule is 200 lines of prose-carrying refusals rather
+   * than a regex anyone can check by eye.
+   */
+  'App\\Http\\Requests\\StoreBotDomainRequest': {
+    schema: botDomainCreateSchema,
+    baseline: () => ({ origin: 'https://example.com' }),
+    sized: { origin: originOfLength },
+  },
+
+  /**
+   * THE ALLOW-LIST ENTRY'S LIFECYCLE, mirrored for the reason `UpdateProviderConnectionRequest` is
+   * and not because a one-field enum body needs a resolver: a fourth value added server-side becomes
+   * a `<Select>` that cannot express a value the API returns, with nothing red anywhere. The `in:`
+   * probes are what pin `BOT_DOMAIN_STATUSES`.
+   *
+   * THE BASELINE IS `active`, WHICH IS THE ONE VALUE THAT GRANTS AN EMBED — chosen so the fixture in
+   * this file is never mistaken for a safe default. `pending` grants nothing and `disabled` is a
+   * withdrawn row; only `active` permits a widget to boot, and that is the transition this form
+   * exists to make deliberate.
+   *
+   * NO `origin` KEY, and `strictObject` is what makes that a parse failure rather than a silent
+   * strip: the origin is IMMUTABLE, the FormRequest declares no rule for it, and a body carrying one
+   * would change what a live grant points at while every audit row naming it still read the old
+   * string.
+   */
+  'App\\Http\\Requests\\UpdateBotDomainRequest': {
+    schema: botDomainStatusSchema,
+    baseline: () => ({ status: 'active' }),
+  },
+
+  /**
+   * THE STARTER-QUESTION CHIPS. Two manifests, and the PATCH is the interesting one.
+   *
+   * `StoreBotStarterQuestionRequest` is one `required|string|max:200` field and declares NO
+   * `sort_order`: a new question is appended by the server, which is the only position that cannot
+   * collide with an existing one. `strictObject` refuses a form that tried to choose one.
+   */
+  'App\\Http\\Requests\\StoreBotStarterQuestionRequest': {
+    schema: starterQuestionCreateSchema,
+    baseline: () => ({ question: 'How do I reset my password?' }),
+  },
+
+  /**
+   * THE PATCH, AND IT DELIBERATELY DOES NOT CARRY `sometimes` — which is the opposite of what every
+   * other PATCH manifest in this map does, so mirroring what looks symmetrical is exactly the
+   * mistake to avoid.
+   *
+   * `sometimes` short-circuits every remaining rule for an ABSENT key, `required_without` included.
+   * With it on both fields an empty PATCH body satisfied everything and returned 200 having changed
+   * nothing — which is what the server found and removed. So both fields are `required_without` the
+   * other with no `sometimes`, and the schema spells the same thing: both optional, plus a
+   * refinement for the body that names neither.
+   *
+   * BOTH FIELDS ARE CROSS_FIELD, so the harness suppresses every presence probe on both and the
+   * refinement is asserted BY HAND in the starter-question section below. What the probes do reach
+   * is `max:200` on the text and the `min:0`/`max:5` pair on the position — and `min:0` is the one
+   * worth naming: the positions are ZERO-BASED, so 0 is the first chip rather than an unset value,
+   * and `probesFor` generates the boundary but not the `-1` case for exactly that reason.
+   *
+   * NO `sized` OVERRIDE. Neither field carries a format rule, so the generic sizer answers both
+   * honestly — `'a'.repeat(n)` for the text and the number itself for the position.
+   */
+  'App\\Http\\Requests\\UpdateBotStarterQuestionRequest': {
+    schema: starterQuestionUpdateSchema,
+    baseline: () => ({ question: 'How do I reset my password?', sort_order: 2 }),
+  },
+
   'App\\Http\\Requests\\UpdateProviderModelRequest': {
     schema: providerModelEditSchema,
     // NO `model` KEY, and `strictObject` is what makes that a parse failure rather than a silent
@@ -328,6 +697,35 @@ const NO_CLIENT_FORM: Readonly<Record<string, string>> = {
   // those schemas existed, deliberately, so a schema with no scale check could not "agree" with the
   // server by being unprobed. It could not have gained them afterwards without somebody noticing
   // they were missing, which nobody would have.
+
+  // THE ONE MANIFEST THAT IS NOT A FORM AT ALL: it validates a QUERY STRING, and the client's
+  // correct behaviour on every one of its five fields is the OPPOSITE of what a mirroring schema
+  // would do.
+  //
+  // `page`, `per_page`, `sort`, `dir` and `filter` are read out of the URL by
+  // `apps/web/src/lib/table/params.ts`, which is the table's state and the request in one value. A
+  // query string is user input that somebody may simply have typed or bookmarked from a previous
+  // release, and it reaches two places that must not take unbounded values: the request Laravel
+  // validates, and the TanStack Query cache key. So that module CLAMPS — a `sort` outside the
+  // endpoint's sortable set degrades to the default, a `per_page` outside the declared page sizes
+  // degrades to the default, and a filter longer than `MAX_FILTER_LENGTH` is truncated.
+  //
+  // A Zod mirror of these rules would have to REJECT each of those, and rejecting is the wrong
+  // answer twice over: there is no field, no control and no per-field error to key a message to, and
+  // the visible result would be an error screen where the correct one is the default view. The drift
+  // harness cannot express "degrades to the default" — its whole vocabulary is accept/reject — so a
+  // mirror would either report the clamping module as drift or force it to start 422ing its own
+  // users.
+  //
+  // WHAT REPLACES IT: the server clamps too (`ListQuery::fromValidated()`), and `params.ts` mirrors
+  // `MAX_PER_PAGE` and `MAX_FILTER_LENGTH` as NUMBERS with the server named as the authority — a
+  // config whose `pageSizes` exceed the cap fail loudly at the call site instead of producing a
+  // response whose applied page size differs from the one the pager is doing arithmetic with. The
+  // one thing genuinely owed here is the SORTABLE SET (`id`, `name`, `slug`, `status`), which each
+  // table declares locally today; if a third list endpoint arrives, that is the piece worth lifting
+  // into this package — as a tuple, not as a schema.
+  'App\\Http\\Requests\\IndexBotsRequest':
+    'a query-string manifest, not a form: no control, no resolver and no per-field error, and the client CLAMPS every one of these five values to a declared set (apps/web/src/lib/table/params.ts) where a mirroring schema would have to reject — see the comment above',
 
   // THE ONE ENDPOINT WHOSE SUBJECT *IS* THE OWNERSHIP RELATION, and therefore the one that cannot
   // have a form schema at all. Its only field is `organization_id`, which is the first entry in
@@ -405,6 +803,96 @@ const SERVER_ONLY = new Set(['exists', 'unique', '@server-only', 'current_passwo
  * accept a null the server rejects, and only the second probe can see it.
  */
 const SOMETIMES = 'sometimes';
+
+/**
+ * `missing` is the rule that says "this key may not appear in the body at all", and the client-side
+ * mirror of it is not a field rule either — it is the ABSENCE of a path from a `strictObject`. So it
+ * drives the presence probes the way `sometimes` does rather than generating a value probe, and it
+ * changes two things about how a manifest is read.
+ *
+ * ── IT USED TO BE `prohibited`, AND THE RENAME IS THE WHOLE REASON THIS NOTE MOVED ──────────────
+ * `Illuminate\Validation\Concerns\ValidatesAttributes::validateProhibited` is literally
+ * `! validateRequired`, so it means "missing OR EMPTY": measured against the installed factory,
+ * `{status: null}`, `{status: ""}` and `{status: []}` all PASS, and `validated()` KEEPS the key.
+ * That reached a `NOT NULL` column and turned an accompanying rename into a lost edit behind a 500.
+ * `validateMissing` is `! Arr::has($this->data, $attribute)` — the key itself, present or not — so
+ * the same four probes now read: omitted PASSES, and null, `""` and `[]` all FAIL. The server rules
+ * `'status' => ['missing']` and this harness follows the rule NAME rather than the shape it used to
+ * have.
+ *
+ * ── WHAT IT IS FOR, IN THE ONE CASE THIS REPO HAS ───────────────────────────────────────────────
+ * `UpdateBotRequest.status` is `["missing"]` because a lifecycle move became `PUT
+ * …/bots/{bot}/status`. The rule is there rather than the field simply being deleted from `rules()`,
+ * and the difference is the whole point: an ABSENT rule makes `validated()` discard the key in
+ * silence, so a console would publish a bot, get a 200, and find it still in draft. `missing` turns
+ * that into a 422.
+ *
+ * ── THE THREE PROBES IT GENERATES, AND WHAT EACH ONE ACTUALLY CATCHES ───────────────────────────
+ * An omission is ACCEPTED; a non-empty value is REJECTED; an explicit null is REJECTED. All three
+ * are true of a schema that does not declare the path.
+ *
+ * THE NULL PROBE IS NEW WITH THE RENAME AND IS NOT DECORATION. Under `prohibited` it had to be
+ * SUPPRESSED — the server accepted null there, so the probe would have claimed the faithful mirror
+ * "blocks input the server accepts" and invited the re-declaration this rule exists to prevent.
+ * Under `missing` the server rejects it, so the probe is honest, and it reaches a re-declaration the
+ * value probe cannot: `z.enum(BOT_STATUSES).nullable().optional()` accepts null and is caught here.
+ *
+ * THE VALUE PROBE IS THE WEAKEST OF THE THREE AND THE LIMIT WAS MEASURED, NOT ASSUMED. `MISSING_VALUE`
+ * is a string this harness invents, so it catches a re-declaration typed loosely enough to accept one
+ * (`z.string().optional()`, `z.unknown()`) and NOT a re-declaration typed as the real vocabulary —
+ * `z.enum(BOT_STATUSES).optional()` refuses `'__missing__'` too, so both sides "agree" and the probe
+ * is silent. Reaching that case would mean the harness knowing the field's legal values, which live
+ * in a DIFFERENT manifest (`UpdateBotStatusRequest`), and a cross-manifest probe generator is a
+ * second harness.
+ *
+ * What closes it is not a probe at all: `the schema declares exactly the fields the FormRequest
+ * validates` subtracts these paths from the manifest side, so ANY declaration of the path — of any
+ * type — is a superset and fails by name. The omitted probe closes the other repair that failure
+ * invites, which is to declare the path as REQUIRED. All five cases are proved against fixtures in
+ * `the `missing` branch of the rule classifier` below, because "the probe was silent" and "the probe
+ * passed" are indistinguishable in the output.
+ *
+ * ── AND THE IMPLICIT-RULE DIFFERENCE, WHICH CHANGES WHY THE OMITTED PROBE PASSES ────────────────
+ * `Missing` is in `Validator::$implicitRules` and `Prohibited` was not. Under the old rule an
+ * omission passed because a non-implicit rule is SKIPPED entirely for an absent key; under this one
+ * it passes because the rule RAN and returned true. The verdict is the same and the reason is not,
+ * which matters the day someone writes `sometimes|missing`: `sometimes` short-circuits an absent
+ * key before any rule runs, so it would make the whole declaration inert. `UpdateBotRequest` rules
+ * this field `["missing"]` alone, and it must stay alone.
+ */
+const MISSING = 'missing';
+
+/**
+ * A value `missing` really does refuse. Any value would do — `validateMissing` looks at the KEY and
+ * never at what it holds, so `null` and `""` are rejected by it exactly as this string is.
+ *
+ * A STRING even on a field the manifest gives no type for. `missing` short-circuits before any type
+ * rule, so the server's verdict is the same for every value — and the client's is too, since a
+ * `strictObject` rejects an undeclared KEY whatever it holds.
+ */
+const MISSING_VALUE = '__missing__';
+
+/** The paths a manifest forbids the caller from sending at all. */
+const missingPaths = (manifest: Manifest): ReadonlySet<string> =>
+  new Set(
+    Object.entries(manifest.rules)
+      .filter(([, rules]) => rules.map(nameOf).includes(MISSING))
+      .map(([path]) => path),
+  );
+
+/**
+ * The paths a manifest VALIDATES, which is its key set minus the ones it rules `missing` — and
+ * therefore the set a mirroring schema must declare exactly.
+ *
+ * A function rather than an inline filter so the fixture block below can prove the subtraction has
+ * teeth against a manifest of its own, the same way `driftFailures` is a function so the tampering
+ * test can prove the probes do.
+ */
+const validatedPaths = (manifest: Manifest): readonly string[] => {
+  const forbidden = missingPaths(manifest);
+
+  return Object.keys(manifest.rules).filter((path) => !forbidden.has(path));
+};
 
 /**
  * Rules whose verdict depends on ANOTHER field. The baseline supplies the sibling, so value probes
@@ -546,7 +1034,40 @@ const sized = (kind: Kind, size: number): unknown => {
  * so on a field carrying one of these AND a `min:`/`max:`, the generic sizer produces a value the
  * SERVER rejects while the probe claims the server accepts it — see `sizerFor`.
  */
-const FORMAT_RULES = new Set([...VALUE_EXEMPT, 'regex']);
+const FORMAT_RULES = new Set([
+  ...VALUE_EXEMPT,
+  'regex',
+  /**
+   * A RULE OBJECT, listed by the class name `kb:dump-form-rules` records it under, and the reason it
+   * belongs in this set is that it is a format rule wearing a different spelling: it demands a
+   * well-formed `oklch()` triple that can be given readable text, and `'a'.repeat(64)` is neither.
+   *
+   * Both fields carrying it already declare a `sized` generator in their Mirror, so `sizerFor`
+   * returns that first and this membership changes nothing today. It is here for the NEXT field: a
+   * manifest that grows this rule without an override would otherwise get the generic sizer, whose
+   * boundary probe claims an acceptance the server does not give — a false red on a correct schema,
+   * which is the harder failure to diagnose. With this entry the probe is suppressed instead and
+   * `missingSizeProbes()` reports it by name.
+   *
+   * `App\Rules\EvidenceThresholdWithinScale` is deliberately NOT here. It constrains a number's
+   * RANGE against a sibling, not its form, and the generic numeric sizer answers its co-declared
+   * `min:-100`/`max:100` honestly for a `logit` baseline — see the MIRRORS note.
+   */
+  'App\\Rules\\ReadableThemeColor',
+  /**
+   * The second rule OBJECT in this set, and it belongs here for the same reason with a sharper edge:
+   * it demands a full RFC 6454 origin — scheme, host, optional port, no path, no wildcard, no
+   * userinfo — and `'a'.repeat(255)` is refused by its very first check. Measured, not assumed:
+   * `ExactOrigin::parse('a'.repeat(255))` returns "An origin starts with `http://` or `https://`".
+   *
+   * The one field carrying it declares `originOfLength` in its Mirror, so `sizerFor` returns that
+   * first and this membership changes nothing today. It is here for the next field to grow the rule:
+   * without it the generic sizer would claim a `max:` acceptance the server does not give, which is
+   * a false red on a correct schema and the harder failure to diagnose. With it the probe is
+   * suppressed instead and `missingSizeProbes()` reports it by name.
+   */
+  'App\\Rules\\ExactWidgetOrigin',
+]);
 
 /**
  * Egulias measures a non-leading domain label WITH the dot that precedes it, so a 63-character label
@@ -673,7 +1194,19 @@ function probesFor(path: string, rules: readonly string[], mirror: Mirror): Prob
   // Presence. Suppressed when a cross-field rule makes "is this field required?" depend on a
   // sibling — the harness cannot answer that from one field's rule list.
   if (!crossField) {
-    if (names.includes(SOMETIMES)) {
+    if (names.includes(MISSING)) {
+      // All three presence probes, INCLUDING the null one, which this branch generates itself rather
+      // than leaving to the generic line below — see the note on MISSING. The generic one reads
+      // `nullable`, and a `missing|nullable` co-declaration (nonsense, but expressible) would flip it
+      // into claiming an acceptance the server does not make; here the verdict comes from the rule
+      // that actually decides, which looks at the KEY and never at the value.
+      //
+      // `here` rather than `value`: `confirmed` never co-occurs with this rule, and a field the
+      // caller may not send has no `_confirmation` sibling to keep in step.
+      probes.push(probe(here, 'omitted (missing)', OMITTED, true));
+      probes.push(probe(here, 'missing: a key the caller may not send', MISSING_VALUE, false));
+      probes.push(probe(here, 'missing: an explicit null is still a present key', null, false));
+    } else if (names.includes(SOMETIMES)) {
       // Omission is accepted UNCONDITIONALLY: `sometimes` skips every remaining rule, so a
       // co-declared `required` never runs. See the note on SOMETIMES above.
       probes.push(probe(here, 'omitted (sometimes)', OMITTED, true));
@@ -684,8 +1217,11 @@ function probesFor(path: string, rules: readonly string[], mirror: Mirror): Prob
     }
 
     // An explicit null is PRESENT, so `sometimes` does not fire and the verdict is unchanged:
-    // accepted only if the server said `nullable`.
-    probes.push(probe(here, 'null', null, names.includes('nullable')));
+    // accepted only if the server said `nullable`. A `missing` field already generated its own null
+    // probe above, where the verdict is the rule's rather than `nullable`'s.
+    if (!names.includes(MISSING)) {
+      probes.push(probe(here, 'null', null, names.includes('nullable')));
+    }
   }
 
   for (const rule of rules) {
@@ -809,20 +1345,46 @@ function driftFailures(manifest: Manifest, mirror: Mirror): string[] {
  * and `supported.*` carries the element rules, and they are different questions.
  *
  * `.element` rather than a `def` walk because that is ZodArray's public accessor and it survives
- * `.max()` (which returns a new ZodArray carrying the same element). `ZodOptional`/`ZodNullable`
- * wrappers expose neither `.shape` nor `.element`, so a wrapped array reads as a leaf — no manifest
- * in this repo has one, and the day one does, this assertion goes red naming the field rather than
- * passing with the element rules unprobed.
+ * `.max()` (which returns a new ZodArray carrying the same element).
+ *
+ * ── THE UNWRAPPING LOOP, AND THE DAY THIS FILE SAID IT WOULD BE NEEDED ──────────────────────────
+ * This docblock used to end "`ZodOptional`/`ZodNullable` wrappers expose neither `.shape` nor
+ * `.element`, so a wrapped array reads as a leaf — no manifest in this repo has one, and the day one
+ * does, this assertion goes red naming the field rather than passing with the element rules
+ * unprobed." That day is the bot manifests: `theme` is `sometimes`, so its mirror is an OPTIONAL
+ * object, and read as a leaf it contributes one path where the manifest declares four.
+ *
+ * The red was the design working; the repair is unwrapping rather than either of the two the failure
+ * invites. Subtracting the `theme.*` keys from the manifest side would stop probing the colour rules
+ * altogether, and making `theme` mandatory to keep it unwrapped would be a form that cannot save a
+ * bot without re-sending its appearance.
+ *
+ * ONLY `ZodOptional` AND `ZodNullable`. `ZodDefault` also has `.unwrap()` and is deliberately absent:
+ * nothing in this package uses `.default()`, and if something starts to, this assertion goes red
+ * naming the field — which is the same property the paragraph above is a record of.
+ *
+ * ── A NESTED OBJECT CONTRIBUTES ITS OWN PATH TOO ────────────────────────────────────────────────
+ * Exactly as an array does, and for the same reason: Laravel dumps `theme` (carrying
+ * `array:primary,accent,radius`) and `theme.primary` as separate keys with different rules, so a
+ * schema that produced only the leaves would be missing one. The ROOT object is the exception —
+ * `prefix === ''` names nothing — which is why the branch is conditional rather than unconditional.
  */
 function schemaPaths(schema: z.ZodType, prefix = ''): string[] {
-  const shape = (schema as unknown as { shape?: Record<string, z.ZodType> }).shape;
-  if (shape) {
-    return Object.entries(shape).flatMap(([key, child]) =>
-      schemaPaths(child, prefix === '' ? key : `${prefix}.${key}`),
-    );
+  let node: z.ZodType = schema;
+  while (node instanceof z.ZodOptional || node instanceof z.ZodNullable) {
+    node = node.unwrap() as z.ZodType;
   }
 
-  const element = (schema as unknown as { element?: z.ZodType }).element;
+  const shape = (node as unknown as { shape?: Record<string, z.ZodType> }).shape;
+  if (shape) {
+    const children = Object.entries(shape).flatMap(([key, child]) =>
+      schemaPaths(child, prefix === '' ? key : `${prefix}.${key}`),
+    );
+
+    return prefix === '' ? children : [prefix, ...children];
+  }
+
+  const element = (node as unknown as { element?: z.ZodType }).element;
   if (element !== undefined && prefix !== '') {
     return [prefix, ...schemaPaths(element, `${prefix}.*`)];
   }
@@ -869,18 +1431,73 @@ describe.each(manifests.filter(([, manifest]) => manifest.class in MIRRORS))(
     });
 
     it('the schema declares exactly the fields the FormRequest validates', () => {
-      expect(new Set(schemaPaths(mirror.schema))).toEqual(new Set(Object.keys(manifest.rules)));
+      /**
+       * `missing` PATHS ARE SUBTRACTED FROM THE MANIFEST SIDE, and that is a strengthening rather
+       * than an exemption.
+       *
+       * `missing` is the one rule whose correct mirror is the ABSENCE of a path: the server says
+       * "you may not send this key", and a `strictObject` says the same thing by not declaring it.
+       * Compared against the raw key set, a correct schema fails here and the repair the failure
+       * invites is to declare the field — which is precisely the body the server now answers 422 to.
+       *
+       * Subtracting does not weaken the comparison, because the set stays CLOSED IN BOTH DIRECTIONS:
+       * a schema that declares one of these paths is now a SUPERSET and fails here. That is not a
+       * duplicate of the `missing` probes — it is the check that catches the case they cannot,
+       * because a path re-declared with its real vocabulary (`z.enum(BOT_STATUSES).optional()`)
+       * refuses the harness's invented probe value and both sides silently agree. See the note on
+       * MISSING, and the fixture block that proves the boundary between the two.
+       */
+      const forbidden = missingPaths(manifest);
+
+      expect(new Set(schemaPaths(mirror.schema))).toEqual(new Set(validatedPaths(manifest)));
+
+      // Named separately from the comparison above, because "the schema grew a field" and "the
+      // schema declares a field the server forbids" are the same red with very different repairs.
+      expect(
+        schemaPaths(mirror.schema).filter((path) => forbidden.has(path)),
+        `${manifest.class}: a path ruled \`missing\` may not be declared by any schema`,
+      ).toEqual([]);
     });
 
     it('client and server answer every probe the same way', () => {
       expect(driftFailures(manifest, mirror)).toEqual([]);
     });
 
-    it('the probe harness fails on a deliberate one-character rule change', () => {
+    /**
+     * TWO TAMPERINGS, NOT ONE, AND THE SECOND ARRIVED WITH A MANIFEST THAT HAS NO `max:` AT ALL.
+     *
+     * This test used to knock every `max:` down by one, which is a one-character change that must
+     * produce a failure on any mirror worth having. `UpdateBotStatusRequest` and
+     * `UpdateBotDomainRequest` are `bail|required|string|in:…` and carry no size rule, so on those
+     * two the "tampered" manifest was byte-identical to the real one and the assertion would have
+     * failed for the right reason with entirely the wrong message: not "this mirror has no teeth"
+     * but "this test cannot bite this shape".
+     *
+     * The second tampering ADDS one character to the last `in:` member. Adding rather than removing
+     * is the direction that works: `probesFor` generates one probe per member the manifest DECLARES,
+     * so dropping a member deletes its probe and produces no failure at all, while a bogus member
+     * generates a probe claiming the server accepts a value the mirror's `z.enum` refuses.
+     *
+     * Both are applied to every manifest. A mirror with both kinds of rule simply fails twice, which
+     * costs nothing; a manifest with NEITHER still fails this assertion by producing no failures at
+     * all, which is the honest report for a mirror nothing in this file can hold to account.
+     */
+    it('the probe harness fails on a deliberately altered rule', () => {
       const rules = Object.fromEntries(
         Object.entries(manifest.rules).map(([path, list]) => [
           path,
-          list.map((rule) => (rule.startsWith('max:') ? `max:${Number(argOf(rule)) - 1}` : rule)),
+          list.map((rule) => {
+            if (rule.startsWith('max:')) return `max:${Number(argOf(rule)) - 1}`;
+            if (!rule.startsWith('in:')) return rule;
+
+            // `in:"a","b"` — quoted members. Re-quote the mutated one so the probe's own
+            // quote-stripping sees the shape it expects rather than a mangled string that would
+            // "fail" for a reason nobody chose.
+            const members = argOf(rule).split(',');
+            const last = (members.pop() as string).replace(/^"|"$/g, '');
+
+            return `in:${[...members, `"${last}x"`].join(',')}`;
+          }),
         ]),
       );
 
@@ -915,6 +1532,26 @@ describe('what the harness declines to probe', () => {
       'no generic generator satisfies an arbitrary pattern. A field carrying one supplies a `sized` generator in its Mirror so its size rules stay probed, and the patterns themselves are asserted in test/auth-schemas.test.ts — the one residual gap is proved and named in `the sizers` below',
     not_regex:
       'the negative form of `regex`, and unprobeable for the same reason plus one: a REJECTION probe would have to synthesize a value that MATCHES an arbitrary pattern. The only `not_regex` in the tree guards the masked display string (`^…`) on the two credential requests, neither of which has a client schema at all — and the client-side property that matters there is structural rather than validated: no type in this package puts `masked_key` and `credential` in one shape, so there is nothing to seed the input from. See NO_CLIENT_FORM',
+    /**
+     * ── THE TWO RULE OBJECTS, WHICH ARE THE FIRST NON-STRING RULES THIS FILE HAS SEEN ────────────
+     *
+     * `kb:dump-form-rules` records a rule OBJECT by class name and a closure as the bare string
+     * `Closure`, and both server classes say in their own docblocks that they are objects rather than
+     * closures FOR THIS FILE — a class name is something a generated client and this harness can key
+     * on, where a closure is "a rule no client can be generated from". So an entry here is the answer
+     * they were written to make possible, and it has to be a real answer.
+     *
+     * Both entries are narrower than they look: neither says "cannot be checked", both say "cannot be
+     * PROBED GENERICALLY", and each names where the check actually lives instead.
+     */
+    'App\\Rules\\EvidenceThresholdWithinScale':
+      'a DataAwareRule: the bound is [0, 1] on a bounded scale and unbounded on `logit`, so the verdict depends on the VALUE of `evidence_threshold_scale` rather than on this field alone. `probesFor` builds every probe from one field\'s rule list and has no vocabulary for "accepted with this sibling, rejected with that one" — the CROSS_FIELD set is the nearest thing and it only SUPPRESSES presence probes, which are already suppressed here by the mutual `required_with`. Teaching a generic probe would mean synthesizing a second field per rule, which is the sibling-aware generator this harness deliberately does not have. IT IS MIRRORED ANYWAY (`thresholdWithinScale` in src/forms/bot.ts) and asserted BY HAND in the bot cross-field section below, in both directions and on both schemas — an entry here suppresses the PROBE, not the check',
+    'App\\Rules\\ReadableThemeColor':
+      'two rules in one object, and neither can be probed. The GRAMMAR half needs a generator for an arbitrary pattern, which is `regex`\'s reason one line above. The CONTRAST half needs a value that is a legal `oklch()` triple AND lands in the band where neither platform foreground clears 4.5:1 — synthesizing one means implementing CSS Color 4 §13.2 gamut mapping and WCAG relative luminance inside this file, which is a second copy of `App\\Support\\Theme\\OklchColor` and would be asserting its own arithmetic. THE SCHEMA DOES NOT MIRROR THIS RULE EITHER, which is the residual and is stated in src/forms/bot.ts: the grammar already exists twice on purpose (apps/web/src/lib/color.ts at render time, OklchColor at write time, held together by tests/Contract/ThemeGrammarParityTest.php), a third spelling here would be the one that parity test does not read, and the console composes its field check from the copy that IS watched. The consequence is bounded and is the tolerable direction: an unreadable-but-legal colour submits and comes back a 422 keyed to `theme.primary`. What IS probed is the co-declared `max:64`, through the `themeColorOfLength` generator, whose acceptance claim was measured against the installed PHP rule rather than reasoned about',
+
+    'App\\Rules\\ExactWidgetOrigin':
+      'the widget origin grammar, and the entry that comes closest to the line this map draws — because a probe for it COULD be written and would be a second implementation of a security control. `App\\Support\\Web\\ExactOrigin` refuses a wildcard, a path, a query, a fragment, userinfo, an IPv6 literal, a non-ASCII host, `:0` and `:00443`, each with its own sentence, and NORMALISES what it accepts (case folded, default port dropped, one trailing slash dropped). Generating a rejection probe means picking one of those refusals and asserting the client reproduces it; the client deliberately reproduces NONE of them, for the reason src/forms/bot-domain.ts argues at length — a third spelling of a control whose refusals are its content is the copy nothing compares to the other two, and it fails in the bad direction, refusing an origin the operator really can embed on with no 422 to explain it. So the residual is exactly the theme-colour one: an origin that is malformed, wildcarded or pathed submits and comes back a 422 keyed `origin` carrying the server’s own sentence, which `ExactOrigin::parse()` returns precisely so a form can render it. WHAT IS PROBED ANYWAY is the co-declared `max:255`, through `originOfLength`, whose acceptance at 255 and rejection at 256 were MEASURED against the installed PHP rather than reasoned about — and the boundary of the decision is asserted by hand in the widget-origin section below, so the gap stays the gap that was argued for rather than widening into "the client checks nothing about an origin"',
+
     size: 'the `size:` fields are the 64-hex invitation/verification token and `price_currency`\'s `size:3`, and NEITHER can be probed generically. The token: registerSchema mirrors it DELIBERATELY LOOSER (src/forms/auth.ts), because a wrong-LENGTH token must reach the server and come back as the byte-identical "no longer valid" refusal rather than being rejected locally by a check that tells its holder the token is the wrong SHAPE — probing it would report that decision as drift. `price_currency` NOW HAS A MIRROR (providerModelCreateSchema/providerModelEditSchema) and is still unprobed, which is a narrower claim than the one that used to stand here: `size:3` is co-declared with `regex:/^[A-Z]{3}$/`, so the only honest acceptance value at length 3 is a three-letter UPPER-CASE code and the only honest rejection is a value of another length that also matches nothing — teaching `probesFor` a `size` case to reach it would apply that case to the four token manifests too, where the deliberate looseness above would then read as drift. The schema mirrors both halves as one regex and the cross-field section asserts it by hand',
   };
 
@@ -939,6 +1576,18 @@ describe('what the harness declines to probe', () => {
     'present',
     'nullable',
     SOMETIMES,
+    /**
+     * TAUGHT RATHER THAN EXEMPTED, and the choice was a real one: an entry in UNPROBED_RULES is
+     * silent forever, and `missing` is the rule that says "a client sending this key gets a 422" —
+     * precisely the thing a drift suite exists to catch a schema forgetting. It drives all three
+     * presence probes (see the note on MISSING), so a schema that re-declares one of these paths
+     * fails on a value probe as well as on the path-set comparison.
+     *
+     * It replaced `prohibited` here, and the replacement was not a rename in this file alone: the
+     * old rule accepted a null the new one refuses, so the branch it drives generates a probe it
+     * used to suppress.
+     */
+    MISSING,
   ]);
 
   const unknownRuleNames = (rules: readonly string[]): string[] => {
@@ -1260,6 +1909,162 @@ describe('the `sometimes` branch of the rule classifier', () => {
     expect(driftFailures(PATCH_MANIFEST, looseMax)).toEqual([
       'form accepts input the server rejects: name — max:120 + 1',
     ]);
+  });
+});
+
+/**
+ * The `missing` branch of the rule classifier, proved against a manifest fixture — and unlike the
+ * `sometimes` block above, this one exists to write down where the probes STOP.
+ *
+ * `UpdateBotRequest.status` is the real instance, and a fixture is used here for the same reason the
+ * `sometimes` block uses one: writing it to `rules/` would make the "every manifest is mirrored or
+ * exempt" suite assert against a FormRequest that does not exist. All five specs run through
+ * `driftFailures` and `validatedPaths`, the same two functions the real manifests use.
+ *
+ * IT WAS THE `prohibited` BRANCH UNTIL THE SERVER CHANGED THE RULE, and the fifth spec is the one
+ * that moved rather than being renamed: `prohibited` ACCEPTED an explicit null and this branch had
+ * to suppress the null probe to stay honest, while `missing` refuses one — so the spec that recorded
+ * a suppression now records a probe, and the fourth spec below is the tooth that suppression cost.
+ */
+describe('the `missing` branch of the rule classifier', () => {
+  const MISSING_MANIFEST: Manifest = {
+    class: 'App\\Http\\Requests\\Fixture\\UpdateBotRequest',
+    rules: {
+      name: ['sometimes', 'required', 'string', 'max:120'],
+      // The real shape: a field the server used to accept and now refuses, because the write moved
+      // to its own endpoint. The rule is present rather than the field being deleted from `rules()`,
+      // and that difference is the reason this branch exists at all — an absent rule makes
+      // `validated()` discard the key in silence.
+      //
+      // ALONE, with no `sometimes` beside it. `missing` is an implicit rule and `sometimes` would
+      // short-circuit it for exactly the body it is meant to judge.
+      status: ['missing'],
+    },
+  };
+
+  const baseline = (): Candidate => ({ name: 'Support bot' });
+
+  /** A faithful mirror does not declare the path at all. */
+  const faithful: Mirror = {
+    schema: z.strictObject({ name: z.string().trim().min(1).max(120).optional() }),
+    baseline,
+  };
+
+  it('accepts the faithful mirror — the client-side spelling of `missing` is an absent path', () => {
+    expect(driftFailures(MISSING_MANIFEST, faithful)).toEqual([]);
+    // …and the path-set comparison agrees with it, which is the assertion the real suite makes.
+    expect(validatedPaths(MISSING_MANIFEST)).toEqual(['name']);
+    expect(new Set(schemaPaths(faithful.schema))).toEqual(new Set(validatedPaths(MISSING_MANIFEST)));
+  });
+
+  it('catches a re-declaration loose enough to accept the probe value', () => {
+    const loose: Mirror = {
+      schema: z.strictObject({
+        name: z.string().trim().min(1).max(120).optional(),
+        status: z.string().optional(),
+      }),
+      baseline,
+    };
+
+    expect(driftFailures(MISSING_MANIFEST, loose)).toEqual([
+      'form accepts input the server rejects: status — missing: a key the caller may not send',
+    ]);
+  });
+
+  it('catches a re-declaration that is nullable, which the old `prohibited` probes could not', () => {
+    // THE TOOTH THE RENAME BOUGHT. `z.enum(BOT_STATUSES).nullable().optional()` refuses the invented
+    // probe value exactly as the server does, so the value probe is silent on it — and under
+    // `prohibited` the null probe was suppressed, so this schema passed every probe and was caught
+    // only by the path-set comparison. `missing` rejects a present null, so the null probe now names
+    // it directly. It is the schema shape a form gets when somebody mirrors "the server sends null
+    // here" into the resolver.
+    const nullableTyped: Mirror = {
+      schema: z.strictObject({
+        name: z.string().trim().min(1).max(120).optional(),
+        status: z.enum(BOT_STATUSES).nullable().optional(),
+      }),
+      baseline,
+    };
+
+    expect(driftFailures(MISSING_MANIFEST, nullableTyped)).toEqual([
+      'form accepts input the server rejects: status — missing: an explicit null is still a present key',
+    ]);
+  });
+
+  it('is SILENT on a re-declaration typed as the real vocabulary — and the path set is not', () => {
+    // THE MEASURED LIMIT, and the reason the path-set subtraction is not a duplicate of these probes.
+    // `z.enum(BOT_STATUSES)` refuses `'__missing__'` exactly as the server does, and `.optional()`
+    // without `.nullable()` refuses the null too, so both sides agree and every probe passes — which
+    // is the shape this schema would actually have if somebody simply left the old field in place
+    // after the server moved the write.
+    const typed: Mirror = {
+      schema: z.strictObject({
+        name: z.string().trim().min(1).max(120).optional(),
+        status: z.enum(BOT_STATUSES).optional(),
+      }),
+      baseline,
+    };
+
+    expect(driftFailures(MISSING_MANIFEST, typed)).toEqual([]);
+
+    // …and this is what fails instead, by name, in `the schema declares exactly the fields the
+    // FormRequest validates`.
+    expect(new Set(schemaPaths(typed.schema))).not.toEqual(
+      new Set(validatedPaths(MISSING_MANIFEST)),
+    );
+    expect(schemaPaths(typed.schema).filter((path) => missingPaths(MISSING_MANIFEST).has(path))).toEqual(
+      ['status'],
+    );
+  });
+
+  it('catches the repair that failure invites, which is to make the path REQUIRED', () => {
+    // The obvious reading of "the server refuses my body" is "I must be sending the wrong shape", and
+    // the obvious fix is to stop making the field optional. The omitted probe is what says no: the
+    // server ACCEPTS a body with no `status`, because that is the only body it accepts.
+    const mandatory: Mirror = {
+      schema: z.strictObject({
+        name: z.string().trim().min(1).max(120).optional(),
+        status: z.string(),
+      }),
+      baseline,
+    };
+
+    // `toContain` rather than a whole-array comparison, and the reason is worth a line: a REQUIRED
+    // path the server forbids makes the BASELINE itself unparseable, so every probe on every other
+    // field fails too. That cascade is noise — it names `name` for a mistake that is entirely about
+    // `status` — and the two assertions below are the ones that identify the cause.
+    const failures = driftFailures(MISSING_MANIFEST, mandatory);
+
+    expect(failures).toContain('form blocks input the server accepts: status — omitted (missing)');
+    expect(failures).toContain(
+      'form accepts input the server rejects: status — missing: a key the caller may not send',
+    );
+  });
+
+  it('generates exactly three presence probes, and the null one is REJECTED by both sides', () => {
+    // MEASURED against the installed `Illuminate\Validation\Factory` rather than read off the rule
+    // name: under `['missing']`, `{}` passes and `{status: null}`, `{status: ''}`, `{status: []}` and
+    // `{status: 'published'}` all fail. Under `['prohibited']` the first FOUR of those passed and
+    // `validated()` kept the key, which is the data-loss shape the server moved off.
+    //
+    // Asserted as an exact list, because the count is the thing: the branch generates these three and
+    // must NOT also pick up the generic `null` probe below it, whose verdict comes from `nullable`
+    // rather than from the rule that actually decides.
+    const labels = probesFor('status', ['missing'], faithful).map((generated) => generated.label);
+
+    expect(labels).toEqual([
+      'omitted (missing)',
+      'missing: a key the caller may not send',
+      'missing: an explicit null is still a present key',
+    ]);
+
+    // The verdicts, not merely the labels: the null probe is only worth generating if it claims a
+    // REJECTION. A probe claiming the server accepts null would report the faithful mirror above as
+    // blocking input the server accepts, and invite exactly the re-declaration this block is about —
+    // which is what the old rule forced and this one does not.
+    expect(
+      probesFor('status', ['missing'], faithful).map((generated) => generated.serverAccepts),
+    ).toEqual([true, false, false]);
   });
 });
 
@@ -1681,6 +2486,698 @@ describe('the model catalog: the rules a single-field probe cannot express', () 
   });
 });
 
+/**
+ * The bot requests' own unprobeable rules, and there are FIVE kinds here — one more than the model
+ * catalog, which is why this is now the longest block in the file.
+ *
+ *   1. `required_with` in BOTH directions on the evidence pair. Every presence probe on a CROSS_FIELD
+ *      field is suppressed, so the whole rule is here.
+ *   2. `required_with` in ONE direction from `provider_model_id` to `provider_connection_id`. Same
+ *      suppression, opposite asymmetry to the model catalog's currency rule. ON THE POST ONLY:
+ *      `UpdateBotRequest` dropped it, because on a PATCH the rule sees only the keys the caller
+ *      sent and the pair that matters is the RESULTING one, which `BotService` decides against the
+ *      stored row. So every assertion below is `create(...)`, and `botSettingsSchema` must NOT
+ *      mirror it — the probe harness reports that as "form blocks input the server accepts".
+ *   3. `App\Rules\EvidenceThresholdWithinScale` — a sibling-dependent RANGE, which `probesFor` has no
+ *      vocabulary for at all. `UNPROBED_RULES` records the suppression; this is the check.
+ *   4. `App\Rules\ReadableThemeColor` — the one rule in this file that is unprobed AND unmirrored.
+ *      What is asserted here is the boundary of that decision, so the residual is a test rather than
+ *      a paragraph.
+ *   5. The `sometimes|required` READING, on a schema that ships. The fixture suite above proves the
+ *      harness answers it correctly; these prove the settings form actually is a PATCH.
+ */
+describe('the bot requests: the rules a single-field probe cannot express', () => {
+  const create = (value: unknown) => botCreateSchema.safeParse(value);
+  const settings = (value: unknown) => botSettingsSchema.safeParse(value);
+
+  const CREATE_BASE = { name: 'Support desk', slug: 'support-desk' };
+
+  it('is a PATCH: the settings schema accepts a body carrying ONE field', () => {
+    // The assertion the whole `sometimes` block exists for, on a real schema. Twelve fields carry
+    // `sometimes|required`, and reading that as `required` would make every one of these a 422 that
+    // the drift harness would call agreement.
+    expect(settings({ welcome_message: 'Hi there' }).success).toBe(true);
+    expect(settings({ access_mode: 'public' }).success).toBe(true);
+    expect(settings({ name: 'Support desk' }).success).toBe(true);
+    // …and the empty body, which is what a form submitted with nothing changed produces. The server
+    // accepts it (every field is `sometimes`) and answers 200 with no change; refusing it here would
+    // be this package inventing a rule.
+    expect(settings({}).success).toBe(true);
+  });
+
+  it('…but `sometimes|required` still refuses the value it calls empty', () => {
+    // The other half of the pair, and the one a schema that merely made everything `.optional()`
+    // would lose: sending `name` means sending a name. `TrimStrings` runs before `min:1`, so a field
+    // of spaces is empty server-side and must be empty here.
+    expect(settings({ name: '' }).success).toBe(false);
+    expect(settings({ name: '   ' }).success).toBe(false);
+    expect(settings({ slug: '' }).success).toBe(false);
+    // An explicit null is PRESENT, so `sometimes` does not fire and `nullable` was never declared.
+    expect(settings({ name: null }).success).toBe(false);
+  });
+
+  it('the create schema demands `name` and `slug` and nothing else', () => {
+    expect(create(CREATE_BASE).success).toBe(true);
+    expect(create({ name: 'Support desk' }).success).toBe(false);
+    expect(create({ slug: 'support-desk' }).success).toBe(false);
+    expect(create({}).success).toBe(false);
+  });
+
+  it('carries no `status` on EITHER schema, and refuses one rather than stripping it', () => {
+    // ── THE CREATE HALF IS UNCHANGED ──────────────────────────────────────────────────────────
+    // A bot is created `draft`, always: creating one directly into `published` would run the publish
+    // guard against a source assignment that cannot exist yet. `StoreBotRequest` declares no rule for
+    // the field, so `strictObject` is what turns `create({...settingsValues})` into a parse failure
+    // instead of a body whose extra key is dropped in silence.
+    expect(create({ ...CREATE_BASE, status: 'draft' }).success).toBe(false);
+
+    // ── THE PATCH HALF IS NEW, AND IT IS THE ASSERTION THAT USED TO SAY THE OPPOSITE ──────────
+    // This line read `expect(settings({status:'draft'}).success).toBe(true)` while `status` was a
+    // PATCH field. `UpdateBotRequest` now rules it `["missing"]` — a lifecycle move is
+    // `PUT …/bots/{bot}/status` and nothing else — and the rule is there rather than the field being
+    // deleted from `rules()` because an ABSENT rule makes `validated()` discard the key in silence:
+    // a console would publish a bot, get a 200, and find it still in draft.
+    for (const status of BOT_STATUSES) {
+      expect(settings({ status }).success, status).toBe(false);
+    }
+    // …including alongside fields the schema does declare, which is the shape a form would actually
+    // post if `status` were still in its panel's field tuple.
+    expect(settings({ name: 'Support desk', status: 'published' }).success).toBe(false);
+  });
+
+  it('refuses every server-owned identifier on both schemas', () => {
+    // `public_bot_id` is the one that would not be harmless: it is the token every live embed on the
+    // customer's own site carries, server-minted once, and a form that round-tripped it could break
+    // all of them with a 200.
+    for (const key of [
+      'id',
+      'public_bot_id',
+      'retrieval_configuration_version',
+      'created_at',
+      'updated_at',
+    ]) {
+      expect(create({ ...CREATE_BASE, [key]: 'x' }).success, `create ${key}`).toBe(false);
+      expect(settings({ [key]: 'x' }).success, `settings ${key}`).toBe(false);
+    }
+  });
+
+  it('refuses half an evidence pair in both directions, and accepts both or neither', () => {
+    // `bots_evidence_threshold_paired` CHECKs `num_nonnulls(threshold, scale) <> 1` one layer down.
+    // The pair is not tidiness: the same float is an unbounded logit on one provider and a bounded
+    // relevance score on another, so half a pair is a number in no units at all.
+    expect(create({ ...CREATE_BASE, evidence_threshold: 0.5 }).success).toBe(false);
+    expect(create({ ...CREATE_BASE, evidence_threshold_scale: 'logit' }).success).toBe(false);
+    expect(
+      create({ ...CREATE_BASE, evidence_threshold: 0.5, evidence_threshold_scale: 'sigmoid' })
+        .success,
+    ).toBe(true);
+    // Neither is the unset state, and clearing BOTH is how an operator gets back to it on a PATCH.
+    expect(create(CREATE_BASE).success).toBe(true);
+    expect(
+      settings({ evidence_threshold: null, evidence_threshold_scale: null }).success,
+    ).toBe(true);
+    // A cleared number input posts "" and `ConvertEmptyStringsToNull` makes it null before any rule
+    // runs, so a half-cleared pair must be refused rather than posted as an empty string.
+    expect(settings({ evidence_threshold: '', evidence_threshold_scale: 'logit' }).success).toBe(
+      false,
+    );
+  });
+
+  it('keys that refusal to the field the operator still has to fill in', () => {
+    const refused = create({ ...CREATE_BASE, evidence_threshold: 0.5 });
+    expect(refused.success).toBe(false);
+    expect(refused.success === false && refused.error.issues[0]?.path).toEqual([
+      'evidence_threshold_scale',
+    ]);
+  });
+
+  /**
+   * `App\Rules\EvidenceThresholdWithinScale`, which `UNPROBED_RULES` declines to probe and this
+   * mirrors. Both directions matter and they are different failures: `1.7` on a bounded scale is the
+   * catchable half, and `1.7` on `logit` is a perfectly ordinary threshold that a schema which
+   * clamped everything to [0, 1] would refuse — functionality removed, nothing reported.
+   */
+  it('bounds the threshold by its own scale, and only when that scale is bounded', () => {
+    const withScale = (evidence_threshold: number, evidence_threshold_scale: string) =>
+      create({ ...CREATE_BASE, evidence_threshold, evidence_threshold_scale }).success;
+
+    for (const scale of ['sigmoid', 'unit_interval']) {
+      expect(withScale(0, scale), `${scale} lower bound`).toBe(true);
+      expect(withScale(1, scale), `${scale} upper bound`).toBe(true);
+      expect(withScale(1.7, scale), `${scale} above`).toBe(false);
+      expect(withScale(-0.1, scale), `${scale} below`).toBe(false);
+    }
+
+    // `logit` is unbounded and signed — NVIDIA's ranking endpoint returns one — so the only bounds
+    // are the absurdity pair the manifest declares, which the generated probes already cover.
+    expect(withScale(1.7, 'logit')).toBe(true);
+    expect(withScale(-3.2, 'logit')).toBe(true);
+    expect(withScale(-100, 'logit')).toBe(true);
+    expect(withScale(-101, 'logit')).toBe(false);
+
+    // The same rule on the PATCH, because the refinement is shared and a second copy is how the two
+    // schemas start to disagree.
+    expect(
+      settings({ evidence_threshold: 1.7, evidence_threshold_scale: 'unit_interval' }).success,
+    ).toBe(false);
+  });
+
+  it('the scale tuple is exactly the enum both schemas accept', () => {
+    // The tuple is what a `<Select>` iterates and the enum is what the resolver checks; two
+    // spellings of one list is how an option that cannot be submitted gets rendered. There is
+    // deliberately no `uncalibrated` member: that would be the statement that no characterization
+    // exists, which makes a stored threshold a contradiction rather than a value.
+    for (const scale of EVIDENCE_THRESHOLD_SCALES) {
+      expect(create({ ...CREATE_BASE, evidence_threshold: 0.5, evidence_threshold_scale: scale })
+        .success).toBe(true);
+    }
+    expect(EVIDENCE_THRESHOLD_SCALES).toHaveLength(3);
+    expect(EVIDENCE_THRESHOLD_SCALES).not.toContain('uncalibrated');
+  });
+
+  it('refuses a model with no connection, and permits a connection with no model', () => {
+    // ONE DIRECTION ONLY, and the asymmetry is the rule. A connection with no model is a real and
+    // common state — "I have chosen the vendor, not the model yet" — and both columns are nullable
+    // with MATCH SIMPLE foreign keys precisely so a half-configured draft is expressible. A MODEL
+    // with no connection is not a state at all: a catalog row names a credential only through its
+    // parent, so the pair would name no credential.
+    expect(create({ ...CREATE_BASE, provider_model_id: ULID }).success).toBe(false);
+    expect(create({ ...CREATE_BASE, provider_connection_id: ULID }).success).toBe(true);
+    expect(
+      create({ ...CREATE_BASE, provider_connection_id: ULID, provider_model_id: ULID }).success,
+    ).toBe(true);
+
+    const refused = create({ ...CREATE_BASE, provider_model_id: ULID });
+    // Keyed to the connection, because the model the operator picked is not the mistake.
+    expect(refused.success === false && refused.error.issues[0]?.path).toEqual([
+      'provider_connection_id',
+    ]);
+  });
+
+  it('treats a cleared model select ("") as null, exactly as ConvertEmptyStringsToNull does', () => {
+    const cleared = create({
+      ...CREATE_BASE,
+      provider_connection_id: '',
+      provider_model_id: '',
+    });
+    expect(cleared.success).toBe(true);
+    expect(cleared.success && cleared.data.provider_connection_id).toBeNull();
+    // …and therefore clearing the connection while a model is selected is refused rather than posted
+    // as an empty string, which the server would read as null and refuse anyway.
+    expect(create({ ...CREATE_BASE, provider_connection_id: '', provider_model_id: ULID }).success)
+      .toBe(false);
+  });
+
+  it('closes the theme key set and rejects an explicit null theme', () => {
+    // `array:primary,accent,radius` closes the key set, which is what makes an unknown key a 422
+    // instead of a value stored forever and rendered nowhere. Every other custom property the
+    // renderer writes — the whole `-foreground` and accent-ramp family — is DERIVED at render time
+    // and is never form-settable, because contrast is derived and never chosen.
+    expect(create({ ...CREATE_BASE, theme: {} }).success).toBe(true);
+    expect(create({ ...CREATE_BASE, theme: { radius: '0rem' } }).success).toBe(true);
+    expect(create({ ...CREATE_BASE, theme: { foreground: 'oklch(1 0 0)' } }).success).toBe(false);
+    expect(create({ ...CREATE_BASE, theme: { primary_foreground: 'x' } }).success).toBe(false);
+    // Neither request declares `nullable` on this path: absent leaves the stored theme alone, `{}` is
+    // the unthemed state, and null is neither.
+    expect(create({ ...CREATE_BASE, theme: null }).success).toBe(false);
+    // A cleared colour input posts "", which the server reads as null and then refuses with the
+    // `string` rule — so the lower bound here is mirroring a behaviour rather than a `min:` rule.
+    expect(create({ ...CREATE_BASE, theme: { primary: '' } }).success).toBe(false);
+  });
+
+  it('the radius tuple is exactly the six values the design tokens publish', () => {
+    for (const radius of THEME_RADII) {
+      expect(create({ ...CREATE_BASE, theme: { radius } }).success, radius).toBe(true);
+    }
+    expect(THEME_RADII).toHaveLength(6);
+    // The renderer matches this string EXACTLY against that set and drops anything else, so an
+    // arbitrary CSS length is refused on write rather than silently ignored on render.
+    expect(create({ ...CREATE_BASE, theme: { radius: '0.5em' } }).success).toBe(false);
+    expect(create({ ...CREATE_BASE, theme: { radius: '8px' } }).success).toBe(false);
+  });
+
+  /**
+   * THE RESIDUAL, AS A TEST RATHER THAN A PARAGRAPH. `App\Rules\ReadableThemeColor` is the one rule
+   * this package neither probes nor mirrors, and the reason is written out in `UNPROBED_RULES` and in
+   * src/forms/bot.ts. What can be asserted is the SHAPE of the gap, so it stays the gap that was
+   * argued for rather than quietly widening into "the client checks nothing about a theme".
+   */
+  it('does NOT mirror the oklch grammar or the contrast floor — the named residual', () => {
+    // Measured against the installed `App\Rules\ReadableThemeColor`: the first is refused for its
+    // grammar, the second is a legal colour refused for landing in the band where neither platform
+    // foreground clears 4.5:1. Both are accepted here, and both are a visible 422 keyed to the field.
+    expect(create({ ...CREATE_BASE, theme: { primary: 'rebeccapurple' } }).success).toBe(true);
+    expect(create({ ...CREATE_BASE, theme: { primary: 'oklch(0.58 0.2 264)' } }).success).toBe(true);
+    // What IS mirrored is the length, which is the half a generated probe can keep honest.
+    expect(create({ ...CREATE_BASE, theme: { primary: 'a'.repeat(65) } }).success).toBe(false);
+    expect(create({ ...CREATE_BASE, theme: { primary: 'a'.repeat(64) } }).success).toBe(true);
+  });
+
+  it('does NOT mirror the consent pairing, because neither manifest declares it', () => {
+    // The server's own note on `consent_text`: the rule would be correct on the POST and WRONG on the
+    // PATCH, where enabling collection on a bot that already carries a disclosure would be refused
+    // for a field the caller had no reason to resend. So the whole check lives in `BotService`,
+    // evaluated against the RESULTING row, with `bots_consent_text_present_when_collecting` as the
+    // database's copy — and a client-side version would block a body the server accepts.
+    expect(create({ ...CREATE_BASE, collect_end_user_data: true }).success).toBe(true);
+    expect(settings({ collect_end_user_data: true }).success).toBe(true);
+    // The other direction is a legal row and not a special case: an operator who wrote the disclosure
+    // before switching collection on.
+    expect(
+      create({ ...CREATE_BASE, collect_end_user_data: false, consent_text: 'We keep your email.' })
+        .success,
+    ).toBe(true);
+  });
+
+  it('the mode tuples are exactly the enums the settings schema accepts', () => {
+    // `BOT_STATUSES` USED TO BE ASSERTED HERE and has moved to the transition section below, with
+    // the field. The tuple did not move out of the package with it, deliberately: every status pill
+    // and transition menu iterates it, and a tuple pinned to nothing is how a sixth lifecycle value
+    // becomes a `<Select>` option that cannot be submitted.
+    for (const access_mode of BOT_ACCESS_MODES) {
+      expect(settings({ access_mode }).success, access_mode).toBe(true);
+    }
+    for (const answer_mode of BOT_ANSWER_MODES) {
+      expect(settings({ answer_mode }).success, answer_mode).toBe(true);
+    }
+    expect(BOT_ACCESS_MODES).toHaveLength(2);
+    expect(BOT_ANSWER_MODES).toHaveLength(2);
+  });
+
+  it('clears a nullable number rather than coercing the empty input to zero', () => {
+    // `Number('')` is 0, and a rate limit of ZERO is not a limit — it is a bot that answers nobody,
+    // and it is a plausible typo for "no limit", which is spelled null. `min:1` here and
+    // `bots_rate_limits_positive` in the database both refuse the zero; this asserts the CLEARED
+    // input does not become one on the way past.
+    const cleared = settings({ rate_limit_per_minute: '', retention_days: '' });
+    expect(cleared.success).toBe(true);
+    expect(cleared.success && cleared.data.rate_limit_per_minute).toBeNull();
+    expect(cleared.success && cleared.data.retention_days).toBeNull();
+    expect(settings({ rate_limit_per_minute: 0 }).success).toBe(false);
+    expect(settings({ rate_limit_per_minute: null }).success).toBe(true);
+  });
+
+  it('clears a nullable text field to null rather than to the blank string', () => {
+    // `TrimStrings` then `ConvertEmptyStringsToNull` run before every rule, so a cleared textarea is
+    // null server-side. A schema that kept `''` would round-trip a value `bots_text_not_blank`
+    // refuses for every writer that is not an HTTP request.
+    const cleared = settings({ welcome_message: '   ', description: '' });
+    expect(cleared.success).toBe(true);
+    expect(cleared.success && cleared.data.welcome_message).toBeNull();
+    expect(cleared.success && cleared.data.description).toBeNull();
+  });
+
+  /**
+   * A `BotResource`-shaped row, at describe scope so the two `botFormDefaults` specs below read the
+   * SAME row and differ only in the projection flag.
+   *
+   * It carries `status` deliberately — a real resource has one — so the pick is asserted to DROP it
+   * rather than asserted against a fixture that could not have leaked it. Both instruction fields
+   * carry text for the same reason: the withheld spec overrides them to `null`, which is what the
+   * wire actually does, and a fixture that was already null could not tell the two states apart.
+   */
+  const SEEDABLE_ROW = {
+    name: 'Support desk',
+    slug: 'support-desk',
+    status: 'published',
+    description: null,
+    welcome_message: 'Hi',
+    placeholder_text: null,
+    system_instruction: 'You are a support agent.',
+    answer_style_instruction: 'Two short paragraphs.',
+    // The server's own statement that the two values above are this bot's rather than the
+    // projection's. The withheld case is the spec below.
+    instructions_visible: true,
+    access_mode: 'public',
+    answer_mode: 'rag_first',
+    allow_general_answers: true,
+    provider_connection_id: ULID,
+    provider_model_id: ULID,
+    dense_top_k: 30,
+    sparse_top_k: 25,
+    rerank_candidates: 24,
+    rerank_retain: 8,
+    evidence_threshold: 0.42,
+    evidence_threshold_scale: 'sigmoid',
+    theme: { primary: 'oklch(0.525 0.235 264)', radius: '1rem' },
+    rate_limit_per_minute: 60,
+    rate_limit_per_day: null,
+    retention_days: 30,
+    collect_end_user_data: true,
+    consent_text: 'We keep your email.',
+  } as const;
+
+  it('the defaults factory reaches exactly the 24 mutable fields, and no identifier', () => {
+    // The ONLY path from server data into this form's state. A `reset({...bot})` would keep `id`,
+    // `public_bot_id`, `retrieval_configuration_version`, `created_at` and `updated_at`, and the
+    // second of those is the one that matters: it is the token every live embed carries.
+    //
+    // TWENTY-FOUR AND NOT TWENTY-FIVE: `status` left with the PATCH field.
+    const source = SEEDABLE_ROW;
+    const seeded = botFormDefaults(source);
+
+    expect(Object.keys(seeded)).toHaveLength(24);
+    for (const banned of [
+      // `status` is FIRST because it is the newest and the least obvious: it is not server-owned in
+      // the way the five below are — an operator moves it — but it is not this form's to send, and a
+      // seeded `status` would ride a rename back into a PATCH that answers 422.
+      'status',
+      // The flag itself is a STATEMENT ABOUT the body, not a field of the bot: `UpdateBotRequest`
+      // rules no such key, so a seeded one would be an unknown key `strictObject` rejects.
+      'instructions_visible',
+      'id',
+      'public_bot_id',
+      'retrieval_configuration_version',
+      'created_at',
+      'updated_at',
+      'organization_id',
+    ]) {
+      expect(Object.keys(seeded), banned).not.toContain(banned);
+    }
+
+    // It is a value the schema itself accepts — the property a settings form depends on, and the one
+    // a pick that dropped a required-shaped field would break.
+    expect(settings(seeded).success).toBe(true);
+
+    // THE THEME IS COPIED, not passed through: the resource's object is shared with the query cache,
+    // and handing it to a form that then edits a colour would mutate the cached row in place —
+    // TanStack Query would then compare the "new" data against a value that had already changed.
+    expect(seeded.theme).toEqual(source.theme);
+    expect(seeded.theme).not.toBe(source.theme);
+  });
+
+  it('OMITS both instruction fields on a withheld row, rather than seeding the projected null', () => {
+    // THE DATA-LOSS PATH, ASSERTED AT ITS SOURCE. A body with `instructions_visible: false` carries
+    // `null` for both fields whatever is stored — the projection, not the bot's state. Seeding those
+    // nulls makes them form values, and `UpdateBotRequest` rules both `sometimes|nullable|string`:
+    // an OMITTED key is left alone, a PRESENT null CLEARS the column and returns 200. So saving an
+    // unrelated rename would wipe two operator-authored prompts.
+    //
+    // The assertion is about the KEYS and not the values, because that is the whole distinction: a
+    // `system_instruction: null` in this object would be indistinguishable from the withheld row in
+    // the PATCH body, which is exactly the bug.
+    const withheld = botFormDefaults({
+      ...SEEDABLE_ROW,
+      instructions_visible: false,
+      system_instruction: null,
+      answer_style_instruction: null,
+    });
+
+    expect(Object.keys(withheld)).not.toContain('system_instruction');
+    expect(Object.keys(withheld)).not.toContain('answer_style_instruction');
+    // Both or neither: a partial refusal would leave one prompt writable from a value nobody read.
+    expect(Object.keys(withheld)).toHaveLength(22);
+
+    // Everything else is seeded exactly as before — the refusal is two keys wide, not a degraded
+    // form. `name` is the field whose save is the one that used to destroy the prompts.
+    expect(withheld.name).toBe(SEEDABLE_ROW.name);
+    expect(withheld.consent_text).toBe(SEEDABLE_ROW.consent_text);
+
+    // And the narrowed object is still a body the schema accepts: `sometimes` on every field is what
+    // makes a subset a legitimate PATCH, and `strictObject` is what would have caught a stray key.
+    expect(settings(withheld).success).toBe(true);
+  });
+
+  it('the create defaults are a value the schema accepts once the two identifiers are typed', () => {
+    const empty = botCreateDefaults();
+    // NOT accepted as-is: `name` and `slug` are `required`, and an empty create form is not a
+    // submittable body. That is the point of rendering it.
+    expect(create(empty).success).toBe(false);
+    expect(create({ ...empty, ...CREATE_BASE }).success).toBe(true);
+
+    // The blank text inputs become nulls rather than empty strings: "not set", not "set to blank".
+    const filled = create({ ...empty, ...CREATE_BASE });
+    expect(filled.success && filled.data.description).toBeNull();
+    expect(filled.success && filled.data.consent_text).toBeNull();
+    // The four retrieval depths are seeded with the server's own defaults rather than left empty,
+    // because `rerank_retain`'s band starts at 6 — a blank control there is outside the range, not
+    // merely unhelpful.
+    expect(empty.rerank_retain).toBe(6);
+    expect(empty.rerank_candidates).toBe(20);
+    // The unthemed state is `{}`, which renders the platform theme and is the normal one.
+    expect(empty.theme).toEqual({});
+    // No `status`: a bot is created `draft` and the field is not in the create body at all.
+    expect(Object.keys(empty)).not.toContain('status');
+  });
+});
+
+/**
+ * THE LIFECYCLE TRANSITION, WHICH IS A WHOLE ENDPOINT AND A ONE-FIELD SCHEMA.
+ *
+ * Everything interesting about it is unprobeable, because the server judges the MOVE against the row
+ * as it stands and a schema only ever sees the submitted value. What can be asserted here is the
+ * value set and the shape — and the value set is the load-bearing half, because this is now the only
+ * place `BOT_STATUSES` is compared against the server at all.
+ */
+describe('the bot status transition: what a one-field schema can and cannot mirror', () => {
+  const transition = (value: unknown) => botStatusTransitionSchema.safeParse(value);
+
+  it('accepts exactly the five members the FormRequest lists, and the tuple is the same five', () => {
+    // The tuple is what a `<Select>` iterates and the enum is what the resolver checks; two
+    // spellings of one list is how an option that cannot be submitted gets rendered. The `in:` probes
+    // pin the ENUM to the server; this pins the TUPLE to the enum, and the pair is what makes the
+    // transition menu honest.
+    for (const status of BOT_STATUSES) expect(transition({ status }).success, status).toBe(true);
+    expect(BOT_STATUSES).toHaveLength(5);
+    expect(transition({ status: 'deleted' }).success).toBe(false);
+    expect(transition({ status: 'unpublished' }).success).toBe(false);
+  });
+
+  it('requires the field, because this request says `required` and not `sometimes`', () => {
+    // Unlike every other PATCH-shaped body in this package. A transition with no target is not a
+    // partial update, it is not a request.
+    expect(transition({}).success).toBe(false);
+    expect(transition({ status: null }).success).toBe(false);
+    expect(transition({ status: '' }).success).toBe(false);
+  });
+
+  it('refuses a settings field rather than stripping it, which is the whole point of the split', () => {
+    // The body a form would post if somebody wired this control into the settings form by habit.
+    // `strictObject` makes it a parse failure here rather than a request that renames the bot as a
+    // side effect of publishing it.
+    expect(transition({ status: 'published', name: 'Support desk' }).success).toBe(false);
+    expect(transition({ status: 'published', organization_id: '01JSOMEONEELSE' }).success).toBe(
+      false,
+    );
+  });
+
+  it('does NOT mirror the transition rules, and cannot — the named residual', () => {
+    // Three of the server's four refusals are properties of the STORED ROW: `archived` is terminal,
+    // the publish guard refuses `published` for a bot with no provider connection and model or with
+    // `rag_first` and `allow_general_answers` still false (both 409), and re-asserting the status a
+    // bot already holds is a 422 because a no-op would write an audit row describing a change that
+    // did not happen.
+    //
+    // All four are ACCEPTED here, which is the tolerable direction: a refused move is a visible 409
+    // or 422 carrying Laravel's own sentence, keyed to the control. The alternative — a client that
+    // greys out the options it believes are unreachable — is a console computing the publish guard
+    // from a cached row, and it fails by hiding a move the server would have allowed.
+    expect(transition({ status: 'draft' }).success).toBe(true);
+    expect(transition({ status: 'published' }).success).toBe(true);
+  });
+
+  it('opens on the status the bot is IN, which is deliberately a value the server refuses', () => {
+    // Submitting it unchanged is the no-op 422, and that is correct rather than awkward: the control
+    // shows where the bot stands, and "save without choosing anything" is not a transition. Seeding
+    // some other member instead would put a lifecycle move one mis-click away AND would misreport
+    // the current state while it sat there.
+    const seeded = botStatusTransitionDefaults({ status: 'testing' });
+    expect(seeded).toEqual({ status: 'testing' });
+    expect(transition(seeded).success).toBe(true);
+    // A narrow pick, not a spread: a `BotResource` handed to `reset()` would round-trip
+    // `public_bot_id`, and `strictObject` is what turns the shortcut into a parse failure.
+    expect(Object.keys(seeded)).toEqual(['status']);
+  });
+});
+
+/**
+ * THE WIDGET ORIGIN ALLOW-LIST, and the block is mostly a NEGATIVE one: it asserts the SHAPE of a
+ * deliberate gap, so the gap stays the one that was argued for rather than quietly widening into
+ * "the client checks nothing about an origin".
+ *
+ * Same treatment as `ReadableThemeColor`'s residual test one section up, and for a stronger reason:
+ * this rule is a security control. A third spelling of it here would be the copy nothing compares to
+ * `App\Support\Web\ExactOrigin` or to `bot_domains_origin_exact`, and its failure direction is the
+ * bad one — one case stricter than the server refuses an origin the operator really can embed on,
+ * with no 422 to explain it.
+ */
+describe('the widget origin: what is mirrored, and the security control that is not', () => {
+  const domain = (value: unknown) => botDomainCreateSchema.safeParse(value);
+  const lifecycle = (value: unknown) => botDomainStatusSchema.safeParse(value);
+
+  it('mirrors the length, the type and the two-scheme prefix — and nothing else', () => {
+    expect(domain({ origin: 'https://example.com' }).success).toBe(true);
+    expect(domain({ origin: 'http://localhost:3000' }).success).toBe(true);
+    // `max:255`, which the generated probes also reach through `originOfLength`.
+    expect(domain({ origin: `https://${'a'.repeat(60)}.example.com` }).success).toBe(true);
+    expect(domain({ origin: `https://${'a'.repeat(300)}.example` }).success).toBe(false);
+    // The prefix, which is the mistake operators actually make.
+    expect(domain({ origin: 'example.com' }).success).toBe(false);
+    expect(domain({ origin: 'ftp://example.com' }).success).toBe(false);
+    expect(domain({ origin: 1234 }).success).toBe(false);
+  });
+
+  it('accepts the scheme in any case, because the server matches case-insensitively', () => {
+    // `preg_match('#^(https?)://(.*)$#i', …)`. A case-SENSITIVE mirror would refuse a value the
+    // server accepts and stores, which is the failure direction this whole file is organised around.
+    expect(domain({ origin: 'HTTPS://Example.COM' }).success).toBe(true);
+    expect(domain({ origin: 'Http://localhost:3000' }).success).toBe(true);
+  });
+
+  it('does NOT mirror the wildcard, path, userinfo, IPv6 or port refusals — the named residual', () => {
+    // Measured against the installed `App\Support\Web\ExactOrigin`: every one of these is REFUSED
+    // server-side, each with its own sentence, and every one of them parses here. That is the
+    // tolerable direction — a visible 422 keyed `origin`, carrying the message the rule returns
+    // precisely so a form can render it — and it is the whole reason `ExactWidgetOrigin` sits in
+    // UNPROBED_RULES rather than being reproduced in Zod.
+    for (const origin of [
+      'https://*.example.com', // a wildcard: there is no wildcard grammar anywhere in this system
+      'https://example.com/widget', // a path, REFUSED rather than trimmed: trimming widens the grant
+      'https://example.com?utm=1', // a query
+      'https://trusted.example@evil.test', // userinfo, the classic host-confusion primitive
+      'http://[::1]:3000', // a legal origin, deliberately not storable
+      'https://example.com:0', // not a port a browser emits
+      'https://example.com:00443', // a second spelling of 443, a row that never matches
+      'https://bücher.example', // an IDN; the browser sends the punycode form
+    ]) {
+      expect(domain({ origin }).success, origin).toBe(true);
+    }
+  });
+
+  it('does NOT normalise, which is why nothing may render the submitted value', () => {
+    // The server lower-cases the scheme and host, drops a single trailing slash, and drops a default
+    // port — `HTTPS://Example.COM:443/` is STORED as `https://example.com`. This schema reproduces
+    // none of that and must not: a client-side normaliser is a fourth spelling of a serialisation
+    // that has to be byte-equal to what the browser sends.
+    //
+    // The consequence is the rule every caller has to obey: render `origin` from the POST's 201
+    // body, never from the value that was submitted.
+    const parsed = domain({ origin: 'HTTPS://Example.COM:443/' });
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data.origin).toBe('HTTPS://Example.COM:443/');
+  });
+
+  it('treats a cleared input as empty rather than as a blank origin', () => {
+    // `TrimStrings` then `ConvertEmptyStringsToNull` run before any rule, so a cleared input is null
+    // server-side and `required` refuses it. `.min(1)` after `.trim()` is where that becomes visible
+    // on this side instead of after a round trip.
+    expect(domain({ origin: '' }).success).toBe(false);
+    expect(domain({ origin: '   ' }).success).toBe(false);
+    expect(domain({}).success).toBe(false);
+    expect(domain({ origin: null }).success).toBe(false);
+    // …and the create form opens on exactly that state.
+    expect(botDomainCreateDefaults()).toEqual({ origin: '' });
+    expect(domain(botDomainCreateDefaults()).success).toBe(false);
+  });
+
+  it('the lifecycle tuple is exactly the enum the status schema accepts', () => {
+    for (const status of BOT_DOMAIN_STATUSES) expect(lifecycle({ status }).success, status).toBe(true);
+    expect(BOT_DOMAIN_STATUSES).toHaveLength(3);
+    expect(lifecycle({ status: 'revoked' }).success).toBe(false);
+    expect(lifecycle({}).success).toBe(false);
+  });
+
+  it('refuses an origin or a derived flag on the status body rather than stripping either', () => {
+    // The origin is IMMUTABLE — this request declares no rule for it — so an edit that tried to
+    // correct a typo would change what a live grant points at while every audit row naming it still
+    // read the old string. `permits_embedding` is DERIVED from `status`, so round-tripping it posts a
+    // second, stale spelling of the field being changed.
+    expect(lifecycle({ status: 'active', origin: 'https://example.com' }).success).toBe(false);
+    expect(lifecycle({ status: 'active', permits_embedding: true }).success).toBe(false);
+    expect(lifecycle({ status: 'active', id: '01JDOMAINAAAAAAAAAAAAAAAAA' }).success).toBe(false);
+  });
+
+  it('opens the status control on the row it is editing', () => {
+    const seeded = botDomainStatusDefaults({ status: 'pending' });
+    expect(seeded).toEqual({ status: 'pending' });
+    expect(Object.keys(seeded)).toEqual(['status']);
+    expect(lifecycle(seeded).success).toBe(true);
+  });
+});
+
+/**
+ * THE STARTER-QUESTION CHIPS, and the PATCH here is the mirror image of every other PATCH in this
+ * package: it deliberately does NOT carry `sometimes`, so the assertions that look symmetrical are
+ * the wrong ones.
+ *
+ * `probesFor` suppresses every presence probe on a CROSS_FIELD field, and both fields are
+ * `required_without` the other, so the entire presence question is asserted here by hand.
+ */
+describe('the starter questions: the rules a single-field probe cannot express', () => {
+  const create = (value: unknown) => starterQuestionCreateSchema.safeParse(value);
+  const update = (value: unknown) => starterQuestionUpdateSchema.safeParse(value);
+
+  it('accepts either field alone — a rename and a move are both legitimate bodies', () => {
+    expect(update({ question: 'How do I reset my password?' }).success).toBe(true);
+    expect(update({ sort_order: 0 }).success).toBe(true);
+    expect(update({ question: 'How do I reset my password?', sort_order: 3 }).success).toBe(true);
+  });
+
+  it('rejects the body that names NEITHER, which is the bug `sometimes` used to hide', () => {
+    // The server found this one: with `sometimes` on both fields an empty PATCH satisfied everything
+    // — `sometimes` short-circuits every remaining rule for an absent key, `required_without`
+    // included — and returned 200 having changed nothing. Mirroring what looked symmetrical is what
+    // this assertion exists to prevent a second time.
+    expect(update({}).success).toBe(false);
+
+    const refused = update({});
+    // Keyed to the text, because that is the control an operator is looking at when they submit an
+    // edit that names nothing.
+    expect(refused.success === false && refused.error.issues[0]?.path).toEqual(['question']);
+  });
+
+  it('refuses a blank chip label on both schemas', () => {
+    // `TrimStrings` then `ConvertEmptyStringsToNull` make a whitespace-only label null server-side,
+    // where `required_without` or `string` refuses it, and
+    // `bot_starter_questions_question_not_blank` refuses it again for every writer that is not an
+    // HTTP request. A chip with no label is a control an end user can see, can click, and cannot
+    // read.
+    expect(create({ question: '' }).success).toBe(false);
+    expect(create({ question: '   ' }).success).toBe(false);
+    expect(update({ question: '', sort_order: 1 }).success).toBe(false);
+    expect(create({ question: 'a'.repeat(200) }).success).toBe(true);
+    expect(create({ question: 'a'.repeat(201) }).success).toBe(false);
+  });
+
+  it('keeps position ZERO expressible, which is the whole reason the field is preprocessed', () => {
+    // `min:0` is zero-BASED, so 0 is the first chip rather than an unset value. `Number('')` is 0,
+    // so a bare coercion would read a cleared input as "move this to the front" — a real and
+    // destructive position rather than a missing one.
+    expect(update({ sort_order: 0 }).success).toBe(true);
+    expect(update({ sort_order: '' }).success).toBe(false);
+    expect(update({ sort_order: null }).success).toBe(false);
+    expect(update({ sort_order: -1 }).success).toBe(false);
+    expect(update({ sort_order: 1.5 }).success).toBe(false);
+    // `max:5` is a CEILING ON THE LIST wearing a bound on one row: positions are 0..n-1 and the
+    // collection publishes `maxItems: 6`, which is the number of chips kb-ai-chat-ux renders.
+    expect(update({ sort_order: 5 }).success).toBe(true);
+    expect(update({ sort_order: 6 }).success).toBe(false);
+  });
+
+  it('carries no `sort_order` on create, and refuses one rather than stripping it', () => {
+    // A new question is APPENDED by the server, which is the only position that cannot collide with
+    // an existing one. The POST declares no rule for the field.
+    expect(create({ question: 'Where are my invoices?', sort_order: 0 }).success).toBe(false);
+    expect(starterQuestionCreateDefaults()).toEqual({ question: '' });
+  });
+
+  it('refuses a server-owned field on either schema', () => {
+    // `reset(resource)` is the shortcut this makes impossible: `BotStarterQuestionResource` carries
+    // `id`, `created_at` and `updated_at`, RHF keeps every key it is handed, and submit posts them
+    // back — a 200, an audit row and no change.
+    for (const key of ['id', 'created_at', 'updated_at', 'organization_id']) {
+      expect(create({ question: 'Where are my invoices?', [key]: 'x' }).success, key).toBe(false);
+      expect(update({ question: 'Where are my invoices?', [key]: 'x' }).success, key).toBe(false);
+    }
+  });
+
+  it('seeds an edit from both stored fields, and the seed is a body the schema accepts', () => {
+    const seeded = starterQuestionUpdateDefaults({ question: 'Where are my invoices?', sort_order: 4 });
+    expect(seeded).toEqual({ question: 'Where are my invoices?', sort_order: 4 });
+    expect(update(seeded).success).toBe(true);
+  });
+});
+
 describe('ownership columns are unrepresentable', () => {
   /**
    * DERIVED FROM `MIRRORS`, NOT A HAND-WRITTEN LIST, and that is the whole repair.
@@ -1693,8 +3190,14 @@ describe('ownership columns are unrepresentable', () => {
    *
    * Iterating `MIRRORS` means the next mirrored schema is covered the moment its entry lands, with no
    * second list to remember — the same closure argument the manifest set-equality assertion above makes.
-   * The two non-mirrored schemas are named explicitly because they have no manifest yet and therefore
-   * cannot be reached through `MIRRORS`; when they get one, they move and these lines go away.
+   * The one non-mirrored schema is named explicitly because it has no manifest yet and therefore
+   * cannot be reached through `MIRRORS`; when it gets one, it moves and these lines go away.
+   *
+   * `botSettingsSchema` USED TO BE THE SECOND NAME HERE, carrying the label "(no manifest yet)". It
+   * has two now — `StoreBotRequest` and `UpdateBotRequest` — so it is reached through `MIRRORS` like
+   * every other real schema, and it arrived with a sibling (`botCreateSchema`) that this list would
+   * have had no reason to know about. That is the closure argument working: the hand-written half
+   * shrinks as the mechanical half grows.
    *
    * `uploadSchema` is a FACTORY over `OrgUploadLimits` (§8.10 makes the size and MIME limits
    * per-organization, so no byte or MIME constant may exist in this package), which is why it is
@@ -1707,7 +3210,6 @@ describe('ownership columns are unrepresentable', () => {
     ...Object.entries(MIRRORS).map(
       ([className, mirror]) => [className, mirror.schema] as readonly [string, z.ZodType],
     ),
-    ['botSettingsSchema (no manifest yet)', botSettingsSchema],
     [
       'uploadSchema (no manifest yet; a factory, so instantiated)',
       uploadSchema({ max_bytes: 1, allowed_mime: ['application/pdf'], max_batch: 1 }),
@@ -1718,12 +3220,18 @@ describe('ownership columns are unrepresentable', () => {
     const checked = everySchema();
 
     // A positive control on the LOOP, not on the schemas: an empty or truncated list would make every
-    // assertion below vacuous, and `toEqual([])` on nothing passes. Eleven is the whole package today
-    // — the nine MIRRORS plus the two schemas with no manifest. It is asserted rather than commented
-    // because the number is the only thing standing between this loop and passing on an empty list;
-    // when MIRRORS grows, this goes red once and the new count is a one-character edit with a diff that
-    // says which schema arrived. It just did, twice: the two model-catalog schemas took it from 9.
-    expect(checked.length, 'every schema in the package must be reached').toBe(11);
+    // assertion below vacuous, and `toEqual([])` on nothing passes. Twelve is the whole package today
+    // — the eleven MIRRORS plus `uploadSchema`, which has no manifest. It is asserted rather than
+    // commented because the number is the only thing standing between this loop and passing on an
+    // empty list; when MIRRORS grows, this goes red once and the new count is a one-character edit
+    // with a diff that says which schema arrived. It just did, twice: the two model-catalog schemas
+    // took it from 9 to 11, and the two bot schemas took it to 12 while REMOVING a hand-written line
+    // — `botSettingsSchema` stopped being named here and became a MIRRORS entry, so the net is +1.
+    // Then FIVE arrived at once with the bot editor's child collections and the status transition
+    // (12 -> 17), which is the closure argument paying off a second time: none of the five needed a
+    // line here, and all five are now inside the ownership assertion the moment their MIRRORS entry
+    // landed.
+    expect(checked.length, 'every schema in the package must be reached').toBe(17);
 
     for (const [label, schema] of checked) {
       expect(schemaPaths(schema).filter(isOwnershipPath), label).toEqual([]);
@@ -1731,16 +3239,36 @@ describe('ownership columns are unrepresentable', () => {
   });
 
   it('a strictObject rejects an ownership key instead of silently stripping it', () => {
+    // THE BODY WITHOUT THE OWNERSHIP KEY MUST PARSE, and that half is new. The fixture this replaced
+    // carried `starter_questions` and `retrieval.top_k` — two fields the shipped FormRequests do not
+    // have — so after the schema was expanded it would have failed for the unknown keys rather than
+    // for `organization_id`, and asserted nothing about ownership at all. A negative control needs a
+    // positive one beside it or it is only a claim that SOMETHING was wrong.
+    // NO `status`: `UpdateBotRequest` rules it `missing`, so a positive control carrying one would
+    // fail
+    // for that rather than proving anything about ownership.
+    const legitimate = { name: 'Support bot', access_mode: 'public', welcome_message: 'Hi' };
+    expect(botSettingsSchema.safeParse(legitimate).success).toBe(true);
+
     const result = botSettingsSchema.safeParse({
-      name: 'Support bot',
-      status: 'draft',
-      welcome_message: 'Hi',
-      starter_questions: [],
-      retrieval: { top_k: 5 },
+      ...legitimate,
       organization_id: '01JSOMEONEELSE',
     });
     // z.object() would strip it and hide the escalation attempt until something bypasses the parse.
     expect(result.success).toBe(false);
+
+    // The create schema is a separate object and gets the same treatment: `strictObject` is a
+    // property of each schema, not of the package.
+    expect(
+      botCreateSchema.safeParse({ name: 'Support bot', slug: 'support-bot' }).success,
+    ).toBe(true);
+    expect(
+      botCreateSchema.safeParse({
+        name: 'Support bot',
+        slug: 'support-bot',
+        organization_id: '01JSOMEONEELSE',
+      }).success,
+    ).toBe(false);
 
     expect(
       embeddingDesignationSchema.safeParse({

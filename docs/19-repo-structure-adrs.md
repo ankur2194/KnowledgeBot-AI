@@ -1450,3 +1450,500 @@ thing to be than either fully or not at all. **Revisit when** a second family jo
 question — the moment anything else makes the data plane answer a per-connection capability question
 on a path an operator already waits for, the marginal cost of asking about rerank there is near zero
 and this decision inverts.
+
+### ADR-055: The Ordered Fallback Chain Is a Table, Because `jsonb` Cannot Carry a Foreign Key
+
+**Status: `Accepted`. Supersedes nothing.**
+
+**Decision:** the optional fallback model chain (`docs/02` §8.3, `docs/11` §16.3) is
+`bot_fallback_models` — a real table with its own ULID primary key, a denormalized
+`organization_id`, a zero-based `position`, and **two** composite foreign keys,
+`(organization_id, bot_id) → bots (organization_id, id)` and
+`(organization_id, provider_model_id) → provider_models (organization_id, id)`, both `RESTRICT`. Two
+unique indexes hold it (one position per bot; one appearance per model per bot) plus the FK-child
+index on `(organization_id, provider_model_id)` that the catalogue delete path probes. It is **not**
+a `jsonb` array on `bots`. Migration `2026_08_19_001700`; the file's docblock carries the ranked
+argument and this ADR carries the decision.
+
+**Reason:** three reasons, ranked, and the first one settles it on its own. **(1) `jsonb` cannot
+carry a foreign key.** Every other model reference in this schema is guarded by a composite key
+against `(organization_id, id)` of its parent — `bots_model_same_org` for the primary model,
+`provider_models_connection_same_org` one level down — precisely so that a row cannot name another
+tenant's. `["01J…","01J…"]` naming a model row in another organization is a perfectly valid `jsonb`
+value, the database has no opinion about it, and the failure that follows is **this tenant's
+conversations answered on that tenant's credential**, billed to them, visible in their provider
+dashboard, with every downstream layer agreeing because it was told whose credential answers. A
+`jsonb` chain leaves the *primary* model guarded by the database and its *replacements* guarded by
+whichever service last wrote them. **(2) It is joined on.** The catalogue delete path has to answer
+*"is any bot still using this model"* before removing a `provider_models` row; against a table that
+question is `ON DELETE RESTRICT` and costs nothing, and against `jsonb` it is a containment scan over
+every bot in the organization that has to be remembered by whoever writes the delete. **(3) It is
+edited one element at a time.** A snapshot is written whole; a chain is reordered, appended to and
+pruned by an operator in a form, and read-modify-write of a `jsonb` array is a lost update the moment
+two tabs are open.
+
+**The counter-argument, on the record rather than dismissed:** the chain *is* part of the
+configuration snapshot that crosses the internal seam, and `postgresql-patterns` admits `jsonb` for
+exactly that shape — a provider/bot configuration snapshot written once and read whole. It does not
+win, and the reason generalizes: **a snapshot is assembled at request time from the source of truth;
+it is not the source of truth.** `retrieval_traces.filters` is `jsonb` for the same reason, and
+nobody would propose storing `bots.provider_model_id` there.
+
+**Rejected:** the `jsonb` array (above); a `belongsToMany` **pivot** keyed
+`(bot_id, provider_model_id)` — `attach()` writes neither a ULID nor the denormalized
+`organization_id`, so the pivot spelling produces rows this schema refuses while looking entirely
+correct at the call site; and a **CHECK excluding the bot's primary model** from its own chain, which
+would have to read `bots.provider_model_id` from another table (a CHECK may not) and whose trigger
+spelling would put a piece of validation logic somewhere nobody looks for it.
+
+**Trade-off:** reading a bot's configuration for the snapshot is no longer one row, so the chain is a
+join on a path that had none. The denormalized `organization_id` is the price of the second composite
+key — a third copy of a fact that the foreign keys then make impossible to get wrong, but that still
+has to be *set*, and the idiom most likely to be reached for (`attach()`) does not set it. And the
+primary model is still **not** excluded from its own chain by the database: a chain that re-lists the
+bot's primary model is a legal row today, refused only by the write service, which is the next step's
+work and does not exist yet. **Revisit when** configuration-snapshot assembly shows this join in the
+chat path's p95. The answer then is a materialized snapshot *derived from* this table, never a
+replacement for it — and that distinction is the whole ADR.
+
+### ADR-056: `bots.view` Is Held by All Four Roles, Which **Extends** §6.4 and §6.5 Rather Than Reading Them
+
+**Status: `Accepted`. Supersedes nothing. It is an extension of the specification, decided with the
+repo owner, and it is labelled as one at all three sites that encode it** — `Permission::BotsView`,
+`OrgRole::grants()`, and `tests/Unit/RolePermissionMatrixTest.php`, which states the matrix
+independently so the two have to agree.
+
+**Decision:** two permissions. `bots.manage` — every write, including publish, pause, archive,
+delete, the origin allow-list, the starter questions, the retrieval configuration and the fallback
+chain — goes to **Owner and Admin**, and that *is* the spec: §6.2 lists "Create and publish bots" as
+an Owner capability and §6.3 lists "Manage bots" as an Organization Administrator one. (Two shipped
+docblocks additionally say §6.4 *"excludes bot publish from the Knowledge Manager explicitly"*. **It
+does not** — §6.4 is silent, which is the same silence those docblocks correctly describe one
+paragraph later; the grant is right and one sentence of its justification is not. `docs/22` § **K6**.)
+`bots.view` goes to **all four roles**. §6.4 and §6.5 never mention bots **in either direction**, so
+the Knowledge Manager and Analyst grants are an addition to the specification and not a reading of
+its silence.
+
+**Reason:** two named upcoming surfaces, neither of which works without it. **Phase C6** has a
+Knowledge Manager assign knowledge sources *to* bots; the assignment screen is a list of bots, so a
+role that cannot read one cannot do the job §6.4 *does* give them. **Phase E** has an Analyst review
+conversations *per bot*; a transcript is uninterpretable without the bot that produced it — the name,
+the model and the answer mode are what make it readable. Neither grant widens what a member of the
+organization may see: a bot's configuration carries no credential (`provider_connection_id` is a
+reference and the key behind it never leaves the vault) and no end-user content.
+
+**Rejected:** **reading the silence as a denial**, which leaves the Knowledge Manager holding a Phase
+C6 job they cannot perform and invites the worse repair — gating a bot-list endpoint on a *sources*
+permission, so that a screen's authorization no longer matches what the screen shows. A narrower
+**`bots.list`** returning names and ids only: two permissions where the surfaces need one, and the
+Analyst genuinely needs the model and the answer mode rather than the name. A separate
+**`bots.publish`** case: it would be granted to exactly the same two roles as `bots.manage`, and a
+permission nobody grants differently is a permission that fails silently in both directions — what
+makes publishing stricter than a rename is the **publish guard** (no model, no assigned source,
+`allow_general_answers` still false in RAG-first mode), which is check 5 of the six and has no
+argument position in `OrgScopedPolicy::permit()`. And **deferring the grant to Phase C/E**, which
+would put the policy, the matrix test and every role-enumerating dataset under edit by whoever is
+building the screen, at the time they are building it.
+
+**Trade-off, stated as the named cost:** this is a rule that lives in the repository and nowhere in
+the specification, so a reviewer who checks §6.4 finds nothing supporting it — which is exactly why
+it is written out three times and why the matrix test states the whole Analyst row independently.
+Second, and this is the most surprising diff in that file: **the Analyst row is no longer all-false.**
+"An analyst holds nothing" was a true shortcut and is now a false one, so a dataset built on it will
+go green for the wrong reason. Third, the origin allow-list — a real security control — sits behind
+`bots.manage` rather than behind something stricter, deliberately: the roles that would hold the
+stricter permission are the same two, so splitting it would only move where the reviewer looks.
+**Revisit when** §6.4 or §6.5 is amended upstream, or — the more likely trigger — when a role must
+see *some* bots and not others. `bots.view` is organization-wide; the first agency-shaped request
+("this member may see one client's bot") is a **scoping** change, not a permission change, and this
+permission cannot express it.
+
+**Amended 2026-08-19 — the grant as first implemented disclosed the operator-authored prompt to a
+reporting-only role, and the repair narrows the PROJECTION rather than the grant.** Everything above
+stands unchanged: both roles keep `bots.view`, and no permission moved.
+
+**What was found.** The security read of the same batch that shipped the bot endpoints (finding
+**L1**, `docs/22` § _The security read of the bots surface_) found `App\Http\Resources\BotResource` publishing `system_instruction` and
+`answer_style_instruction` **unconditionally** — no `when()`, no Gate call, nothing conditional in
+the file — while both read endpoints authorize `bots.view` and nothing more. `BotCollectionResource`
+maps that resource per row, so an **Analyst** (the role this ADR extended the grant to; it holds
+`bots.view` and *no other permission in the entire catalog*) could read every bot's full
+operator-authored system prompt with one `GET /organizations/{org}/bots?per_page=100`. That was
+**live, not latent**, from the moment the endpoints landed.
+
+**Why it is more than a mis-set flag: the codebase already contradicted itself about this exact
+string.** `App\Services\Audit\AuditLogger`'s bot allow-list **refuses** `system_instruction` from
+`details`, on the stated ground that it is *"the exact string a prompt-injection review is about"*
+and that the audit table is append-only, long-lived and exportable — a table read by the
+organization's own administrators. It is not defensible to withhold a string from *that* table on
+that reasoning and hand the same string, unredacted, to the narrowest role in the catalog over the
+API. And the grant's justification above never covered it: it argues from the assignment screen
+(*"the assignment screen is a list of bots"*) and from transcript review (*"the name, the model and
+the answer mode are what make it readable"*), and defends the width with *"a bot's configuration
+carries no credential … and no end-user content"* — true, and **silent about the prompt**. The
+widest read permission in this catalog acquired its width from a justification that never mentioned
+the field with the highest blast radius on the row.
+
+**Decision.** `system_instruction` and `answer_style_instruction` become a **management-only
+projection**: a caller holding `bots.manage` receives the stored value, every other caller receives
+`null`. **Both keys stay present in every response** — dropping one would make the response *shape*
+vary by caller, and `packages/contracts/src/resources/bots.ts` already types both as nullable, so a
+null costs no contract change while an absent key would. The flag is a **required** constructor
+argument on `BotResource` (a default would let a new call site inherit a decision it never made) and
+is computed **once per request** in `BotController`: `Gate::allows('update', $bot)` on `show`, the
+new `OrganizationPolicy::manageBots()` on `index`, and the literal `true` on `store`/`update`, where
+the `Gate::authorize()` one line above has already proved `bots.manage`. That placement is
+mechanical rather than stylistic — `OrgScopedPolicy::permit()` resolves membership per check and is
+deliberately never memoized across organizations, so the obvious spelling
+(`$request->user()->can('update', $bot)` inside `toArray()`) is one `organization_users` read **per
+row** on a hundred-row page, and no correctness test can see the difference. `manageBots` authorizes
+nothing and must never produce a 403; it carries `Permission::BotsManage` exactly as `createBot`
+does, because this is one permission with two call-site spellings. `consent_text` is **not** in
+scope: it is rendered to end users before their first message, so hiding it would be theatre.
+
+**Rejected — and the first one is what a reader reaches for.** **Revoking `bots.view` from the
+Knowledge Manager and the Analyst**, i.e. reverting this ADR. That re-reads the silence as a denial,
+which the section above rejected for reasons the disclosure does not touch: Phase C6's assignment
+screen and Phase E's per-bot transcript review still need the name, the model and the answer mode,
+and *none of that is the prompt*. One mis-projected field is not evidence that the other
+twenty-eight were wrong, and trading a real capability for a fix that a projection provides is how a
+defensible grant gets deleted by the next incident review. **A separate `bots.view_instructions`
+permission**: it would be granted to exactly the roles that already hold `bots.manage`, which is the
+failure this ADR's own rejection of `bots.publish` names — a permission nobody grants differently
+fails silently in both directions. **Dropping the keys rather than nulling them**, which is the
+shape-varies-by-caller problem above. **A second, narrower resource for the reading roles**
+(`BotSummaryResource`): two components in the generated client for one table, guaranteed to diverge
+at the next column, and it answers the *list* while leaving `show` — which the same roles reach —
+untouched. **Asking the Gate inside `toArray()`**, which is correct, is what every reviewer would
+have written, and is a hundred membership reads per page; it is rejected here in writing so the next
+person to "simplify" the flag away finds the reason first.
+
+**Trade-off, stated as the named cost.** A client cannot distinguish *"this bot has no system
+instruction"* from *"you may not see it"* — both are `null`. That is accepted rather than papered
+over: the majority of bots genuinely have no instruction, so the ambiguity exists on the wire
+regardless, and the alternative (a `*_visible` sibling flag) publishes the permission matrix to
+every caller for no gain the console cannot get from the role it already knows. Second, the
+permission is now consulted in **two** places for one field — the policy that authorizes the read
+and the projection that shapes it — so a future permission change has two call sites to move;
+`tests/Security/BotEndpointAccessTest.php` asserts the projection per role, on **both** reads, from
+a four-role dataset, because a single-role fixture cannot fail that test, and
+`tests/Feature/BotCrudTest.php` asserts the membership-read count does not scale with the page.
+**Revisit when** a role must read the prompt without being able to write it — the
+review-before-publish shape — at which point the flag stops being derived from `bots.manage` and
+becomes its own permission, and this projection is the seam it plugs into.
+
+### ADR-057: The Evidence Threshold Ships Nullable, With No Default, Stored Beside Its Scale
+
+**Status: `Accepted`. Supersedes nothing; it is ADR-030's consequence reaching the control-plane
+schema, and it is the same argument ADR-031 makes about `(provider, model)` being the vector space.**
+
+**Decision:** `bots.evidence_threshold double precision` is **nullable with no column default**, and
+`bots.evidence_threshold_scale text` sits beside it. Three CHECKs hold the pair:
+`bots_evidence_threshold_paired` (`num_nonnulls(...) <> 1` — either alone is uninterpretable),
+`bots_evidence_threshold_scale_check` (the vocabulary, generated at migration time from
+`EvidenceThresholdScale::values()`), and `bots_evidence_threshold_range` ([0, 1] on a bounded scale,
+unconstrained on a logit). `App\Enums\EvidenceThresholdScale` is the data plane's `RerankScale`
+(`services/ai-service/app/providers/contract.py`) **minus `uncalibrated`**, with the same string
+values for the three members it keeps.
+
+**Reason:** `evidence.min_score = 0.30 on the sigmoid scale` was a property of `bge-reranker-v2-m3`
+under `normalize=True`. ADR-030 replaced that one local model with a per-organization **provider**,
+and the providers do not agree with it or with each other — an unbounded signed logit for one, a
+bounded relevance score for another. The scale is therefore a property of the `(provider, model)`
+pair, `CALIBRATIONS` in the data plane is **empty on purpose**, and `RerankCalibration` refuses
+construction on an uncalibrated pair rather than defaulting. **A column default here would fail no
+test, and that is precisely why it must not exist:** `0.30` is a valid float on every scale, so
+applying it to a logit passes almost everything and applying a logit threshold to a bounded score
+refuses almost everything. Nothing raises. Only the refusal rate moves, only in aggregate, and since
+ADR-030 it moves for **one tenant** and not the rest — the first evidence would be a customer saying
+the answers got worse. `uncalibrated` is absent from the enum by construction: it is not a scale, it
+is the statement that no characterization exists, so a row reading
+`evidence_threshold = 0.30, scale = uncalibrated` would be a stored contradiction — a number nobody
+may compare anything to. **The enum and the CHECK must move together.** The constraint is generated
+from `EvidenceThresholdScale::values()` *at migration time*, so an existing database keeps the
+vocabulary it was migrated with: a fourth thresholdable member is an enum case **and** an `ALTER`, in
+one migration, or the two drift with nothing to notice.
+
+**Rejected:** the column default (above); defaulting the **scale** alone and leaving the number null,
+which the pair constraint refuses and correctly — a scale with no number is as uninterpretable as a
+number with no scale; storing a **normalized 0–1** value and converting at read time, which needs the
+calibration that is exactly what does not exist, so the stored number would be fabricated; a
+**NOT NULL column with a sentinel** (`-1`, `0`) meaning unset, which is the same failure one level
+down because a sentinel is a valid float on the logit scale; and **deriving the scale at read time**
+from the bot's current `(provider, model)` instead of storing it — the model can be changed without
+re-deciding the threshold, and a number calibrated on one scale would then be read silently against
+another. Storing the scale is what makes that mismatch detectable at all.
+
+**Trade-off:** a bot ships with no threshold, so *"no configured floor"* is now a state the query
+path has to handle explicitly rather than a number it can always read — this ADR moves that question
+to the data plane rather than answering it, which is the point and is also a real hole in the
+control-plane surface until the write endpoint decides what an operator is shown. Second,
+`bots_evidence_threshold_range` catches only the bounded half: a nonsense logit of `1e6` is accepted,
+correctly, because a logit has no bounds to check against — the portability problem is only *partly*
+constrainable and the constraint should not be mistaken for the whole guard. Third, two columns
+encode one concept, and while the database refuses a half-populated pair, nothing in the resource or
+service layer does. **Revisit when** `CALIBRATIONS` gains its first non-empty entry. That is the
+moment a default becomes derivable — and the right shape then is a default **resolved from the
+`(provider, model)` pair**, not a value stored on the bot, which is a different decision from this
+one and needs its own number.
+
+### ADR-058: `tenantPair()` Is Activated in Half, and the Canary Lives in a Bot's Welcome Message Until Phase C
+
+**Status: `Accepted`. Closes `docs/22` § H9 in part — the fixture no longer throws; the position the
+canary was designed for is still Phase C's.**
+
+**Decision:** `tenantPair()`'s **signature is unchanged** and its body no longer raises. It builds two
+organizations, one bot in each, one admin in each, and a per-test canary planted in **Org B's bot
+welcome message**. The `KnowledgeSource` half of the shipped design stays commented, carrying a
+`TODO(phase-c)` that says to **move** the canary when `KnowledgeSourceFactory::indexed()` lands —
+never to plant a second one. All **six** `TenantPair` properties are narrowed from `object` to
+`Organization`, `Bot` and `User`.
+
+**Reason, on the canary's position:** the design has always been that it lives in Org B's *indexed
+source content*, so that a leak through retrieval, a citation title, a cached completion or an export
+trips it. That needs the `knowledge_sources → source_items → source_versions → chunks` migrations,
+`App\Models\KnowledgeSource`, and a real Qdrant container in the `test` profile — all Phase C. The
+welcome message is the closest analogue available now and is not a token gesture: it is
+**tenant-authored text that crosses the wire** on the bot list, the bot detail, the widget bootstrap
+and the hosted-chat first-run screen, four of the surfaces this phase is about to build, so a leak
+through any of them trips it today. **Reason, on the type narrowing** — which is wider than the two
+properties the brief named: static analysis runs over `tests/` at level 8 and **rejects a property
+read on `object`**, so a partial narrowing leaves the fixture unusable from the tests that consume
+it. More importantly, `object` lets a test hand `$t->botB` to anything that wanted `$t->botA` — and
+the mistake that matters most is exactly that one: a negative assertion run as the organization that
+*planted* the canary passes while proving the opposite of what it claims, and it type-checks in
+silence.
+
+**Rejected:** leaving `tenantPair()` throwing until Phase C with every two-org test built inline —
+that is where § H9 left it, and inline fixtures multiply, against a helper whose entire purpose is
+that a leaky test is harder to write than a correct one. **Two canaries**, one in a bot field and one
+later in source content: two assertions to keep in step and a test that can pass on the wrong one,
+which is why the TODO says *move*. A **second helper** for the bot-only pair — the thing everyone
+imports and nobody migrates off, and the same argument `pest-testing` makes against a
+one-organization helper. And **widening the properties back to `object`** to satisfy the
+commented-out `expect('App\Models')->toOnlyBeUsedIn([…])` rule in `tests/Arch/DoctrineTest.php`: that
+is the wrong fix, it is flagged in the file as such, and the right one is the rule's allow-list
+carrying `Tests\Support`.
+
+**Trade-off:** the fixture is now **half a fixture that looks whole**. A test written against it
+asserts isolation over a control-plane text field, while the surfaces the canary was designed to
+police — retrieval, citations, exports — are not covered by it and will not be until Phase C; the
+commented block is the only thing that says so, and a reader who sees a green isolation suite will
+not go looking for it. Second, the three `App\Models` imports make `TenantPair.php` the first
+violation of that arch rule on the day it is enabled. **Revisit when**
+`KnowledgeSourceFactory::indexed()` lands against a real Qdrant container — that is the move. The
+observable that says it is overdue is a Phase C isolation test building its own source fixture
+inline: the § H9 shape, one layer up.
+
+### ADR-059: A Paginated List Is an Object Envelope With a Shared `meta` Block That Echoes the Query the Server Applied
+
+**Status: `Accepted`. Supersedes nothing; it completes the room
+`ProviderConnectionCollectionResource` and `ProviderModelCollectionResource` left for it, and the
+array did not move.**
+
+**Decision:** the body is `{"data": {"<key>": [...], "meta": {...}}}`. `meta` is **one published
+component** — `ListMetaResource` — carrying `page`, `per_page`, `total`, `total_pages`, `sort`, `dir`
+and `filter`, referenced by every paginated list the API will publish. `App\Support\Http\ListQuery`
+is the validated request primitive: **1-based** pages matching `LengthAwarePaginator`, a **required
+positional** list of this endpoint's sortable columns closed with `Rule::in`, `SortDirection` closing
+the direction, and `DEFAULT_PER_PAGE` / `MAX_PER_PAGE` / `MAX_FILTER_LENGTH` as named constants —
+read them rather than restating them here (ADR-036). `PaginatedCollection` is a **trait**. There are
+**no links**.
+
+**Reason:** four, and two of them are mechanical rather than aesthetic. **The wrapper is an object
+because the tooling cannot express an array:** `#[ResponseShape]` maps a response *key* to a resource
+class, so it cannot say "an array of", and `tests/Contract/OpenApiDocumentTest.php` requires every
+published component to carry `additionalProperties: false`, which an array-typed schema cannot.
+**The applied query is echoed because the server's values and the client's request can legitimately
+differ:** `ListQuery::fromValidated()` clamps `per_page` for callers that never ran a FormRequest and
+applies the endpoint's default sort when the client named none, so a client that assumed its own
+parameters were in force computes the wrong page count from the first clamped response and keeps
+computing it. `filter` is echoed **normalized** — trimmed, and `null` rather than an empty string —
+so a "showing results for X" chip matches the rows that came back. `total` **and** `total_pages` are
+both published rather than derived, because `ceil(total / per_page)` uses a `per_page` the client may
+not have. **The sortable-column list is an argument with no default and no wildcard**, because a
+caller-chosen `sort` reaches an `ORDER BY`: an open set is a caller choosing the index at best and
+injecting at worst, and making the argument required and positional means an endpoint cannot obtain a
+working list query without stating its sortable columns out loud. **It is a trait because of how the
+OpenAPI discovery works:** `OpenApiDocumentTest` globs `app_path('Http/Resources')/*.php`
+non-recursively and asserts against `ProvidesOpenApiSchema` implementors, so an inherited
+`openApiSchemas()` would report a subclass that forgot to name its own component as *the parent's*
+name being missing. A trait keeps the declaration in the file whose `toArray()` it describes, which
+is the property that whole test file rests on; `Concerns/` is one level down and is not scanned.
+
+**Rejected:** a **bare top-level array** (above); Laravel's own `ResourceCollection` envelope with
+generated `links` — three clients navigate by their own routing and reach the API through a proxy
+whose external origin the server does not reliably know, so a generated absolute URL is either wrong
+or an **internal hostname on the wire**; **cursor pagination**, which cannot produce the `total` the
+admin tables display, for lists that are per-organization and small; **0-based pages**, which would
+disagree with the paginator, with every `?page=` it generates and with `meta.page`, and would put an
+off-by-one in every repository instead of in `offset()` alone; a shared abstract **`ListRequest`** —
+`kb:dump-form-rules` ignores abstract classes while the test asserting every FormRequest has a dumped
+document still counts them, so the base-class spelling breaks the contract gate; and
+**pattern-constraining `filter`**, which is a free-text term a human types and whose character class
+would refuse the strings customers actually search for — what makes it safe is that it never reaches
+SQL *as* SQL (bound as a parameter, `LIKE` metacharacters escaped by the repository) and what bounds
+it is `MAX_FILTER_LENGTH`.
+
+**Trade-off:** `per_page` is bounded in two places that are deliberately **not flush** — the
+validation rule produces a 422 for an HTTP caller, and `fromValidated()` clamps **silently** for a
+service or job that never ran one. That is ADR-050's width-gap shape one layer up, and it is also the
+thing that will confuse the first non-HTTP caller, who will ask for a thousand rows, receive the
+maximum, and be told nothing. Second, `total` is a `COUNT(*)` on every page request; fine at these
+cardinalities and not fine at conversation scale. Third, the envelope now nests twice
+(`data.bots`), so every client destructures one level deeper than it does for a single resource, and
+no existing single-resource response looks like it. **Revisit when** the first list whose `total` is
+expensive — conversations or messages — reaches this envelope. `total_pages` and a cursor are
+mutually exclusive answers, and the right move is a **second** envelope for keyset lists rather than
+a `total` that stalls or lies; the observable is the count appearing in that endpoint's p95.
+
+---
+
+ADR-060 and ADR-061 come from the **Phase B audits** — the two read-only reads over the whole bots
+console effort. `git log --oneline b976735..HEAD` is the phase (read the range, not a number: the
+count moved between the brief that commissioned this record and the record being written, and it
+moves again on the next commit); `docs/22` § _The Phase B audits — M1–M7_ is the findings log and the
+coverage. **Neither audit returned a Blocking issue**, and both ADRs below are the durable half of a
+single finding — the data-loss path, `docs/22` § **M3** — split at the seam it broke on: the server
+saying what it withheld (ADR-060) and the client refusing to seed what was withheld (ADR-061).
+
+**ADR-060 is the third narrow supersession in this register**, after ADR-033 and ADR-037. It
+overturns **one named rejection** inside ADR-056's 2026-08-19 amendment. Nothing else in ADR-056
+moves: `bots.view` is still held by all four roles, the two instruction fields are still a
+management-only projection, and both keys are still present in every response.
+
+### ADR-060: A Response States Its Own Projection; a Client Never Re-Derives One From a Role
+
+**Status: `Accepted`. Supersedes the `*_visible` rejection in ADR-056's amendment, and only that
+claim.** ADR-056's decision, its grant and its projection all stand as written.
+
+**Decision:** where a response body varies by caller, **the body says how it varied**.
+`App\Http\Resources\BotResource` publishes `instructions_visible`, a boolean set from the same
+`$withInstructions` flag that decides the projection, declared one line below the two fields it
+describes. It is a **required** constructor argument (a default would let a new call site inherit a
+decision it never made) and is computed **once per request** in `BotController`, exactly where
+ADR-056's amendment already computes the projection. Clients read that flag; **no client re-derives
+the projection from a permission, a role, or a session**.
+
+**Reason — ADR-056's amendment rejected this flag, and both halves of the stated reason turned out
+to be wrong.** The rejection read: a `*_visible` sibling flag *"publishes the permission matrix to
+every caller for no gain the console cannot get from the role it already knows."*
+
+**(1) It publishes no matrix.** The flag carries one bit about the **caller's own** grant on the
+**row in hand** — a fact that caller can already establish by attempting the write. It says nothing
+about any other caller, any other role, or any other row. What it actually resolves is an ambiguity
+that ADR-056's amendment *itself* named as its accepted cost: a client could not distinguish *"this
+bot has no system instruction"* from *"you may not see it"*, because both were `null`. That
+ambiguity was already on the wire; the flag splits it and adds nothing to it.
+
+**(2) "The role it already knows" answers a question about the session; the projection is resolved
+per record, per request.** The two are allowed to disagree — a role promoted mid-session, a cached
+detail row, any refetch skew — and when they did, the console's hand-written third spelling of the
+server's grant map seeded a **withheld `null`** into a form control. `sometimes|nullable|string`
+accepted it, and **saving a rename wrote `null` over both operator-authored prompts and returned
+200.** That is the finding, in full at `docs/22` § **M3**; it was live on the shipped console and it
+is the reason a documentation-level preference became a data-integrity rule.
+
+**The generalization, which is the part worth carrying:** a client that infers the *shape* of a body
+from a permission it believes it holds is deriving a per-record fact from a per-session one. The
+server knows the answer for free — it just applied it — and every spelling on the client is a copy
+that can be stale by one round trip.
+
+**Rejected:**
+
+- **Keep the derivation and fix the console's copy of the grant map.** Repairs the instance and
+  leaves the class: the grant map was already a *third* spelling, so this is a fourth, and the next
+  panel copies whichever one it finds. It also cannot be made correct — no client-side copy of a
+  role can answer a question the server resolved against a row.
+- **Drop the withheld keys rather than nulling them**, so their absence is the signal. That is the
+  shape-varies-by-caller problem ADR-056's amendment rejected on grounds that have **not** moved:
+  `packages/contracts/src/resources/bots.ts` types both as nullable, so a null costs no contract
+  change while an absent key does, and a per-caller key set is the thing `strictObject` and the
+  resource-drift suite exist to refuse.
+- **A sentinel string** (`"«withheld»"`). It is a legal value of a free-text column, so it is
+  indistinguishable from a prompt an operator typed, and the first bot whose instruction quotes it
+  is a support ticket nobody can reproduce.
+- **A conditional write guard alone** — an ETag or a `retrieval_configuration_version`-style
+  pre-image check that refuses the destructive PATCH server-side. That is the right **backstop** and
+  it is not this decision: it turns silent data loss into a 409 after the operator has already typed
+  the change, and it cannot tell the *panel* whether to render a control, which is the question that
+  has to be answered before the request exists.
+- **A per-field map** (`{"system_instruction": false, "answer_style_instruction": false}`). One flag
+  covers both fields because **one permission** does; a map invites a per-field permission model
+  nothing implements, and ADR-056's rejection of a separate `bots.view_instructions` still stands.
+
+**Trade-off, as the named cost.** The flag is now a required member of **two** contracts — the PHP
+resource's constructor and the client's form-source type — so a new call site cannot inherit the
+decision, but neither can it be written without stating one; that friction is deliberate and it will
+read as boilerplate to the next person who adds a bot-shaped response. Second, the wire now carries a
+key whose only consumer is our own console, so a third-party client generated from the OpenAPI
+document sees a field it will never use. Third, and this is the one that can actually bite:
+**nothing structurally binds `instructions_visible` to the two nulls it describes** — they are three
+independent expressions in one `toArray()`, and a future edit can move one without the others.
+`tests/Security/BotEndpointAccessTest.php` asserts the flag and the projection **together, per role,
+on both reads**, from a four-role dataset; that test is the only thing holding them, and a
+single-role fixture could not fail it.
+
+**Revisit when** a **second** field on any resource acquires a per-caller projection. One boolean per
+field does not scale, and the right shape at that point is a single `withheld: [...]` list on the
+envelope rather than N sibling booleans — a different decision needing its own number, into which
+`instructions_visible` becomes the first entry. The observable that says it is due is a second
+`*_visible` key appearing anywhere in `app/Http/Resources`.
+
+### ADR-061: A Withheld Field Is OMITTED From Client Form State, Never Seeded as `null`
+
+**Status: `Accepted`. Supersedes nothing; it is ADR-060's client half, and neither is sufficient
+alone.**
+
+**Decision:** the shared panel-defaults builder in `apps/web` **omits the key** for any field the
+server reported as withheld, rather than seeding it `null`. `instructions_visible: false` means the
+two instruction keys are **absent** from the form's `defaultValues`, and the flag is a **required**
+member of the form-source type so that a call site cannot inherit the decision. It is done **once, at
+the source**, so no panel has to remember it. Omission alone is not sufficient, and the panel carries
+a second line: the card body renders **conditionally** — either the two controls, or a sentence
+stating that the fields were not sent and are not empty.
+
+**Reason:** `sometimes` leaves an absent key alone; a **present `null` clears the column**. That
+asymmetry is the entire decision, and it is invisible at the call site — an omitted key and a `null`
+key look equally harmless in a defaults object, and only one of them is a destructive write. The
+second line exists because **React Hook Form submits a registered input's DOM value whether or not
+`defaultValues` named it**, and the app's clearable-text helper maps `""` to `null` — so a
+rendered-but-unseeded textarea walks straight back into the path omission just closed. Rendering
+*nothing* is also the only honest option available: for a caller without the grant, a bot with a
+4,000-character prompt and a bot with none are byte-identical on the wire, so any control at all
+would be asserting something the server declined to say.
+
+**Rejected:**
+
+- **A disabled textarea.** It is still registered, so RHF still submits its DOM value — `disabled` is
+  an affordance, not a guard. Worse, it renders an empty box, which a viewer reads as *"this bot has
+  no system prompt"*: the precise statement the projection refuses to make.
+- **Filtering the withheld keys out of the request body at submit time.** Correct, and one layer too
+  late. It is a fourth place to remember, it lives in the file most likely to be copied for the next
+  panel, and it is invisible from the defaults builder that caused the problem — so the same bug
+  ships again the first time somebody writes a panel without reading the submit handler.
+- **Seeding `undefined` instead of omitting the key.** Indistinguishable at the type level while
+  `Object.keys()`, every spread and every serializer disagree. The type has to say the key **may be
+  absent**, or a call site reads a value that is not there.
+- **Making the server reject a `null` on those two fields outright.** It converts silent data loss
+  into a 422, which is strictly better, and it belongs on the server's list rather than this one —
+  but it also forbids the legitimate *"clear this prompt"* write that the nullable column exists for,
+  so it is a narrowing of the API to compensate for a client defect.
+- **Refusing to render the panel at all without `bots.manage`.** Already true, structurally, since
+  commit `c9634d5`: without the permission the panel branches to a component that mounts no form, no
+  resolver and no defaults. It does **not** cover the case this ADR is about — a caller who *does*
+  hold `bots.manage` but whose row was fetched while the projection said otherwise.
+
+**Trade-off:** an operator without the grant is shown a sentence where a control would be, so the
+screen tells them a field exists and declines to say whether it is set; that is accepted, because the
+alternative is a guess. Second, form state and resource state now differ in **key set** and not only
+in value, so anything that diffs the two must compare keys — the phase's window tests assert on
+**keys and never on values** for exactly this reason, since a body carrying `system_instruction:
+null` is byte-identical to the destructive request and a value assertion would pass against the bug.
+Third, the rule is enforced by one builder and by review; nothing prevents a panel from constructing
+its own `defaultValues`.
+
+**Revisit when** a form field's value can be legitimately absent for a reason that is **not** a
+permission — a sparse read, a projection by cost rather than by grant. Omission would then mean two
+things and the form could not tell them apart. The observable is the first `?fields=` or
+sparse-fieldset parameter on any read endpoint in `services/core-api/routes`.

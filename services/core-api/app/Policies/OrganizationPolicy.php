@@ -55,6 +55,71 @@ final class OrganizationPolicy extends OrgScopedPolicy
     }
 
     /**
+     * LIST the organization's bots.
+     *
+     * Here and not on BotPolicy because a list has no row to take an organization from — the same
+     * reason `viewProviderConnections` and `viewMembers` live here. `BotPolicy::view()` is the
+     * per-row half and carries the identical permission, so the two never disagree about who may
+     * read a bot; what differs is only which record supplied the organization.
+     *
+     * A `viewAny` on BotPolicy would be the alternative spelling and is not used, for the reason
+     * `viewProviderConnections` records: Laravel resolves `viewAny` from a CLASS NAME rather than an
+     * instance, so the organization would have to come from somewhere other than a record — which
+     * is precisely the shape OrgScopedPolicy exists to make unrepresentable.
+     */
+    public function viewBots(?User $user, Organization $organization): Response
+    {
+        return $this->permit($user, $organization, Permission::BotsView);
+    }
+
+    /**
+     * Create a bot.
+     *
+     * The record is the ORGANIZATION and not a bot, because there is no bot yet — the same split
+     * `ProviderConnectionPolicy::createModel()` makes one level down, except that there the parent
+     * is a connection and here the organization IS the parent. `Organization` already implements
+     * OrgOwned, so `Gate::authorize('createBot', $organization)` resolves to this class with no
+     * OrgContext shim.
+     */
+    public function createBot(?User $user, Organization $organization): Response
+    {
+        return $this->permit($user, $organization, Permission::BotsManage);
+    }
+
+    /**
+     * May this caller WRITE bots in this organization — asked of a LIST, and asked once.
+     *
+     * ── THIS ABILITY AUTHORIZES NOTHING. IT DECIDES A PROJECTION ──────────────────────────────
+     *
+     * `BotResource` renders `system_instruction` and `answer_style_instruction` only to a caller
+     * holding `bots.manage` (the resource's docblock carries the reasoning). `show` can ask that
+     * question of the ROW — `Gate::allows('update', $bot)` — because there is exactly one row. A
+     * hundred-row page cannot: `OrgScopedPolicy::permit()` resolves membership per check and is
+     * deliberately never memoized across organizations, so a per-row check is a hundred
+     * `organization_users` reads for one answer that cannot differ between them. Every row on that
+     * page belongs to the organization in the path, so ONE check against the organization is the
+     * same answer, arrived at once.
+     *
+     * ── WHY NOT REUSE `createBot`, WHICH CARRIES THE IDENTICAL PERMISSION ─────────────────────
+     *
+     * It does carry the identical permission, and that is exactly the trap. An ability name is
+     * read at the call site as the action being performed, so `Gate::allows('createBot', $org)`
+     * inside a GET reads as a creation check somebody forgot to remove — and the next reader either
+     * deletes it or "fixes" the endpoint. The two must never diverge, which is why both delegate to
+     * `Permission::BotsManage` and neither adds a condition of its own: this is one permission with
+     * two call-site spellings, not two permissions.
+     *
+     * NOT A REPLACEMENT FOR `createBot` ON `store`, AND NOT A REPLACEMENT FOR `BotPolicy::update()`
+     * ON `update`. An authorization gate names the action it is guarding; this one names a question
+     * about rendering, and a 403 must never be produced from it — `Gate::allows()`, never
+     * `Gate::authorize()`.
+     */
+    public function manageBots(?User $user, Organization $organization): Response
+    {
+        return $this->permit($user, $organization, Permission::BotsManage);
+    }
+
+    /**
      * The three membership abilities have no MODEL of their own — listing members and creating an
      * invitation both act on the organization itself — so they live here rather than on
      * OrganizationInvitationPolicy, which can only authorize a row that already exists. `Organization`

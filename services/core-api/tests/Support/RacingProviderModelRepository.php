@@ -107,6 +107,17 @@ final class RacingProviderModelRepository implements ProviderModelRepositoryInte
     }
 
     /**
+     * Delegated unaltered: this double wedges a competing writer into ONE gap, the duplicate
+     * pre-flight above, and every other method has to behave exactly as the real repository does or
+     * the test is measuring the double rather than the code. `BotService` reads this method to
+     * refuse a bot naming a model row registered under a different connection.
+     */
+    public function entryExists(string $organizationId, string $connectionId, string $modelId): bool
+    {
+        return $this->inner->entryExists($organizationId, $connectionId, $modelId);
+    }
+
+    /**
      * @param  Closure(ProviderModelEntry): void  $audit
      */
     public function create(

@@ -37,7 +37,7 @@ use Tests\Support\SpaSession;
 | in particular assert that org B's connection and its model rows are still standing afterwards,
 | which is the only way a delete keyed on the wrong predicate becomes visible.
 |
-| TODO(fixtures): tests/Support/tenancy.php's tenantPair() is the intended home for this and throws
+| TODO(fixtures): tests/Support/tenancy.php's tenantPair() is the intended home for this and is now live for bots; it still lacks
 | by design until the Bot and KnowledgeSource factories exist. The hand-rolled pair below copies
 | invitationOrgPair()'s shape and must be replaced by tenantPair() when it lands.
 */

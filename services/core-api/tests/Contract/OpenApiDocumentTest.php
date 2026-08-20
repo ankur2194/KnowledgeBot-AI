@@ -2,12 +2,25 @@
 
 declare(strict_types=1);
 
+use App\Enums\BotDomainStatus;
+use App\Enums\EvidenceThresholdScale;
+use App\Enums\SortDirection;
 use App\Exceptions\KbException;
+use App\Http\Requests\IndexBotsRequest;
+use App\Http\Resources\BotCollectionResource;
+use App\Http\Resources\BotDomainCollectionResource;
+use App\Http\Resources\BotDomainResource;
+use App\Http\Resources\BotResource;
+use App\Http\Resources\BotStarterQuestionCollectionResource;
+use App\Http\Resources\BotStarterQuestionResource;
 use App\Http\Resources\EmbeddingReadinessResource;
 use App\Http\Resources\ProviderConnectionCollectionResource;
 use App\Http\Resources\ProviderConnectionResource;
 use App\Http\Resources\ProviderModelCollectionResource;
 use App\Http\Resources\ProviderModelResource;
+use App\Models\Bot;
+use App\Models\BotDomain;
+use App\Models\BotStarterQuestion;
 use App\Models\Organization;
 use App\Models\ProviderConnection;
 use App\Models\ProviderModelEntry;
@@ -16,8 +29,10 @@ use App\Services\Embedding\EmbeddingDesignation;
 use App\Services\Embedding\EmbeddingReadiness;
 use App\Services\Embedding\EmbeddingRejection;
 use App\Support\Contracts\ProvidesOpenApiSchema;
+use App\Support\Http\ListQuery;
 use Database\Factories\ProviderConnectionFactory;
 use Illuminate\Http\Request;
+use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Route;
@@ -108,6 +123,14 @@ function schemaViolations(mixed $value, array $schema, array $components, string
     $actual = match (true) {
         is_bool($value) => 'boolean',
         is_int($value) => 'integer',
+        // ADDED WITH THE FIRST RESOURCE THAT PUBLISHES A JSON `number`, and it was a real gap
+        // rather than a missing convenience: without this arm a float fell to `get_debug_type()`
+        // and reported as the type `float`, which matches no JSON Schema keyword at all — so the
+        // only way to make such a field pass was to declare a type JSON Schema does not have.
+        // `bots.evidence_threshold` is that field: a CUTOFF compared once against a double, where
+        // the decimal-string representation the prices use would claim a precision the score does
+        // not have.
+        is_float($value) => 'number',
         is_string($value) => 'string',
         $value === null => 'null',
         is_array($value) => array_is_list($value) ? 'array' : 'object',
@@ -118,6 +141,14 @@ function schemaViolations(mixed $value, array $schema, array $components, string
     // whichever of the two the schema declares rather than guessing from the value.
     if ($actual === 'array' && $value === [] && in_array('object', $types, true)) {
         $actual = 'object';
+    }
+
+    // JSON Schema's `integer` is a SUBTYPE of `number`, so a whole-numbered value emitted as a PHP
+    // int satisfies a `number` declaration. Written as a widening of the ACTUAL type rather than of
+    // the declared set, so a schema that declares `integer` still refuses a float — which is the
+    // direction that matters: a client generated from `integer` and served 0.5 is a parse error.
+    if ($actual === 'integer' && ! in_array('integer', $types, true) && in_array('number', $types, true)) {
+        $actual = 'number';
     }
 
     if ($types !== [] && ! in_array($actual, $types, true)) {
@@ -455,6 +486,231 @@ it('publishes exactly the keys ProviderModelResource emits, priced and unpriced'
         expect(schemaViolations($emitted, $collection['ProviderModelCollectionResource'], $collection))
             ->toBe([], "the collection schema disagrees with toArray() for fixture set {$index}");
     }
+});
+
+it('publishes exactly the keys BotResource emits, unconfigured and fully configured', function (): void {
+    $org = Organization::factory()->create();
+    $connection = ProviderConnection::factory()->recycle($org)->create();
+    $model = ProviderModelEntry::factory()->recycle($org)->recycle($connection)
+        ->supporting(['text'])->create(['model' => 'gpt-5.1']);
+
+    $components = BotResource::openApiSchemas();
+
+    // TWO FIXTURES, BECAUSE ONE CANNOT DISTINGUISH THE BRANCH THAT MATTERS. Almost every column on
+    // this table is nullable and the UNCONFIGURED state — draft, no model, no threshold, no limits,
+    // no theme — is the state EVERY bot is in when it is created, so a schema validated only
+    // against a populated row would type half the resource as non-nullable and break on the
+    // majority of real rows. The configured one proves the populated branch and, in particular,
+    // that `theme` is published as an OBJECT: PHP cannot tell an empty array from an empty map, so
+    // the unthemed case is the one that would silently emit a JSON array.
+    $fixtures = [
+        'unconfigured draft' => Bot::factory()->recycle($org)->create(),
+        'configured, thresholded, themed, collecting' => Bot::factory()->recycle($org)
+            ->usingModel($connection, $model)
+            ->published()
+            ->thresholdedAt(0.3, EvidenceThresholdScale::Sigmoid)
+            ->collecting('We store your email to follow up.')
+            ->create([
+                'theme' => ['primary' => 'oklch(0.525 0.235 264)', 'radius' => '1rem'],
+                'rate_limit_per_minute' => 30,
+                'rate_limit_per_day' => 5000,
+                'retention_days' => 90,
+                'system_instruction' => 'Answer only from the handbook.',
+            ]),
+    ];
+
+    // BOTH SIDES OF THE INSTRUCTION PROJECTION, AGAINST ONE COMPONENT. `BotResource` nulls
+    // `system_instruction` and `answer_style_instruction` for a caller without `bots.manage`, and
+    // there is exactly ONE published component for both renderings — which is only sound because
+    // both fields are declared `["string", "null"]`. Validating only the management rendering would
+    // let the projection publish a value the schema forbids and nothing would say so until a
+    // generated client hit it.
+    foreach ([true, false] as $withInstructions) {
+        foreach ($fixtures as $label => $bot) {
+            // THROUGH json_encode AND BACK, deliberately, and this is the only assertion in this
+            // file that does it. `toArray()` returns `theme` as a stdClass so the wire carries `{}`
+            // rather than `[]` for an unthemed bot, and schemaViolations() types a stdClass as its
+            // class name — so validating the PHP array would report a type violation for a body
+            // that is correct. Round-tripping validates the shape the client actually receives,
+            // which is the shape the document describes.
+            /** @var array<string, mixed> $emitted */
+            $emitted = (array) json_decode(
+                (string) json_encode(
+                    (new BotResource($bot, $withInstructions))->toArray(Request::create('/')),
+                    JSON_THROW_ON_ERROR,
+                ),
+                true,
+                flags: JSON_THROW_ON_ERROR,
+            );
+
+            // THE KEYS ARE PRESENT IN BOTH RENDERINGS. `additionalProperties: false` plus the
+            // component's `required` list already forces this through schemaViolations(), but it is
+            // asserted directly too: a projection that DROPPED a key would make the response shape
+            // vary by caller, which is the one thing a generated client cannot absorb.
+            expect($emitted)->toHaveKeys(['system_instruction', 'answer_style_instruction']);
+
+            expect(schemaViolations($emitted, $components['BotResource'], $components))->toBe(
+                [],
+                sprintf(
+                    'the published schema disagrees with toArray() for: %s (withInstructions: %s)',
+                    $label,
+                    $withInstructions ? 'true' : 'false',
+                ),
+            );
+        }
+    }
+
+    // The null branch of the timestamps, which the factory cannot produce.
+    /** @var array<string, mixed> $emitted */
+    $emitted = (array) json_decode(
+        (string) json_encode(
+            (new BotResource($fixtures['unconfigured draft'], true))->toArray(Request::create('/')),
+            JSON_THROW_ON_ERROR,
+        ),
+        true,
+        flags: JSON_THROW_ON_ERROR,
+    );
+    $emitted['created_at'] = null;
+    $emitted['updated_at'] = null;
+
+    expect(schemaViolations($emitted, $components['BotResource'], $components))->toBe([]);
+});
+
+it('publishes exactly the keys BotDomainResource emits, on all three statuses', function (): void {
+    $org = Organization::factory()->create();
+    $bot = Bot::factory()->recycle($org)->create();
+
+    $components = BotDomainResource::openApiSchemas();
+
+    // ONE FIXTURE PER STATUS, BECAUSE `permits_embedding` IS THE FIELD THAT MATTERS AND IT IS TRUE
+    // FOR EXACTLY ONE OF THEM. A single-status fixture would validate the schema against whichever
+    // branch the factory happened to default to, and the branch a client actually gates on — the
+    // one that decides whether a widget may boot — is the one that would go unchecked.
+    $fixtures = [
+        'pending, and grants nothing' => BotDomain::factory()->recycle($org)->recycle($bot)
+            ->origin('http://localhost:3000')->create(),
+        'active, the one status that permits an embed' => BotDomain::factory()->recycle($org)->recycle($bot)
+            ->active()->origin('https://alpha.example.com')->create(),
+        'disabled, retained so audit entries still resolve' => BotDomain::factory()->recycle($org)->recycle($bot)
+            ->disabled()->origin('https://bravo.example.com:8443')->create(),
+    ];
+
+    foreach ($fixtures as $label => $row) {
+        $emitted = (new BotDomainResource($row))->toArray(Request::create('/'));
+
+        expect(schemaViolations($emitted, $components['BotDomainResource'], $components))
+            ->toBe([], "the published schema disagrees with toArray() for: {$label}");
+
+        // AND THE PUBLISHED PREDICATE AGREES WITH THE ENUM'S, per row. A resource that recomputed
+        // it as `status !== 'disabled'` would validate against this schema perfectly and hand a
+        // client the wrong answer for `pending` — the exact negative-test hole
+        // `BotDomainStatus::permitsEmbedding()` is written positively to avoid.
+        expect($emitted['permits_embedding'])
+            ->toBe($row->status === BotDomainStatus::Active, "permits_embedding is wrong for: {$label}");
+    }
+
+    // The null branch of the two timestamps, which the factory cannot produce.
+    $emitted = (new BotDomainResource($fixtures['pending, and grants nothing']))->toArray(Request::create('/'));
+    $emitted['created_at'] = null;
+    $emitted['updated_at'] = null;
+
+    expect(schemaViolations($emitted, $components['BotDomainResource'], $components))->toBe([]);
+
+    // AND THE COLLECTION WRAPPER, over the populated set AND the empty one. The empty case is not a
+    // formality here: an empty allow-list DENIES EVERY ORIGIN, so it is a state clients must be
+    // able to receive and describe rather than one they only meet as a bug.
+    $collection = BotDomainCollectionResource::openApiSchemas();
+
+    foreach ([[], array_values($fixtures)] as $index => $rows) {
+        $emitted = (new BotDomainCollectionResource($rows))->toArray(Request::create('/'));
+
+        expect(schemaViolations($emitted, $collection['BotDomainCollectionResource'], $collection))
+            ->toBe([], "the collection schema disagrees with toArray() for fixture set {$index}");
+    }
+});
+
+it('publishes exactly the keys BotStarterQuestionResource emits', function (): void {
+    $org = Organization::factory()->create();
+    $bot = Bot::factory()->recycle($org)->create();
+
+    $components = BotStarterQuestionResource::openApiSchemas();
+
+    $rows = [
+        BotStarterQuestion::factory()->recycle($org)->recycle($bot)
+            ->at(0)->asking('How do I get a refund?')->create(),
+        BotStarterQuestion::factory()->recycle($org)->recycle($bot)
+            ->at(1)->asking('What are your opening hours?')->create(),
+    ];
+
+    foreach ($rows as $row) {
+        $emitted = (new BotStarterQuestionResource($row))->toArray(Request::create('/'));
+
+        expect(schemaViolations($emitted, $components['BotStarterQuestionResource'], $components))
+            ->toBe([], 'the published schema disagrees with toArray()');
+    }
+
+    // The null branch of the two timestamps, which the factory cannot produce.
+    $emitted = (new BotStarterQuestionResource($rows[0]))->toArray(Request::create('/'));
+    $emitted['created_at'] = null;
+    $emitted['updated_at'] = null;
+
+    expect(schemaViolations($emitted, $components['BotStarterQuestionResource'], $components))->toBe([]);
+
+    $collection = BotStarterQuestionCollectionResource::openApiSchemas();
+
+    // THE EMPTY CASE IS THE DEFAULT STATE OF EVERY BOT, so a schema validated only against a
+    // populated list would describe the shape almost no bot is actually in.
+    foreach ([[], $rows] as $index => $set) {
+        $emitted = (new BotStarterQuestionCollectionResource($set))->toArray(Request::create('/'));
+
+        expect(schemaViolations($emitted, $collection['BotStarterQuestionCollectionResource'], $collection))
+            ->toBe([], "the collection schema disagrees with toArray() for fixture set {$index}");
+    }
+});
+
+it('publishes the paginated envelope with `meta` beside the collection inside `data`', function (): void {
+    $org = Organization::factory()->create();
+
+    $bots = Bot::factory()->recycle($org)->count(3)->create()->all();
+
+    $components = BotCollectionResource::openApiSchemas();
+
+    $query = ListQuery::fromValidated(['per_page' => 2, 'page' => 1], defaultSort: 'id');
+
+    // BOTH THE POPULATED AND THE EMPTY PAGE. `meta` is present on an empty page too — a client that
+    // had to branch on its absence would be branching on "did this list have results", which is
+    // exactly the question `total` answers — so a schema validated only against a populated page
+    // would let the empty one drift.
+    foreach (['a populated page' => $bots, 'an empty page' => []] as $label => $rows) {
+        $paginator = new LengthAwarePaginator($rows, count($bots), 2, 1);
+
+        /** @var array<string, mixed> $emitted */
+        $emitted = (array) json_decode(
+            (string) json_encode(
+                (new BotCollectionResource($paginator, $query, true))->toArray(Request::create('/')),
+                JSON_THROW_ON_ERROR,
+            ),
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+
+        // THE ENVELOPE THE ADMIN CONSOLE IS ALREADY WRITTEN AGAINST, asserted as a shape before the
+        // schema check: apps/web/src/lib/table/envelope.ts reads `data.<collection>` and
+        // `data.meta` and THROWS rather than degrading, so `meta` promoted out of `data` would
+        // render the error state on every table in the console.
+        expect(array_keys($emitted))->toBe(['bots', 'meta'], "the envelope moved for: {$label}");
+
+        expect(schemaViolations($emitted, $components['BotCollectionResource'], $components))
+            ->toBe([], "the published schema disagrees with toArray() for: {$label}");
+    }
+
+    // AND THE ITEM COMPONENT IS CONTRIBUTED RATHER THAN RE-DECLARED, so `BotResource` is ONE
+    // component in the generated client — the same one the create, read and update actions return.
+    // A second, divergent declaration would be a build failure in the dumper; an identical one is a
+    // no-op, and neither is what this asserts. What this asserts is that the envelope's `$ref`
+    // resolves at all: a dangling `$ref` is not a dump failure, it is a generated client with a
+    // missing type, discovered by the person importing it.
+    expect($components)->toHaveKeys(['BotResource', 'BotCollectionResource', 'ListMetaResource']);
 });
 
 it('names its own component, so the generated type has the name the client imports', function (): void {
@@ -946,6 +1202,134 @@ it('names no credential anywhere in the document', function (): void {
         expect((bool) preg_match('/^(credential|api_key|apiKey|secret|token|password|ciphertext|kek)/i', $fragment))
             ->toBeFalse("the published document names a credential-shaped schema key: {$fragment}");
     }
+});
+
+// ── query parameters: the half `$route->parameterNames()` cannot see ──────────────────────────────
+
+it('publishes all five list-query parameters on the bots index, not just the path one', function (): void {
+    // ── WHAT THIS IS THE ABSENCE OF ──────────────────────────────────────────────────────────
+    //
+    // `DumpOpenApiCommand::parameters()` derived its whole output from `$route->parameterNames()`,
+    // which returns URI PLACEHOLDERS and nothing else, and hard-coded `in: path`. So the first
+    // endpoint in this API with a query string published `organization` alone: a generated client
+    // got `listBots(organization)` with no way to ask for page 2, choose a sort column, or pass a
+    // filter — against an endpoint that validates and honours all five. Functionality removed with
+    // nothing reported, which is the drift direction this file exists to catch.
+    //
+    // THE VALUES ARE ASSERTED AGAINST `ListQuery`'S OWN CONSTANTS AND `IndexBotsRequest::SORTABLE`,
+    // never against literals. A published `maximum: 100` that stopped matching `MAX_PER_PAGE` would
+    // be a document describing a ceiling the server does not enforce, and a hard-coded 100 here
+    // would agree with the document while both were wrong.
+    $document = dumpDocument()['document'];
+    $paths = $document['paths'] ?? null;
+
+    assert(is_array($paths));
+
+    $parameters = $paths['/api/v1/organizations/{organization}/bots']['get']['parameters'] ?? null;
+
+    assert(is_array($parameters));
+
+    /** @var array<string, array<string, mixed>> $byName */
+    $byName = [];
+
+    foreach ($parameters as $parameter) {
+        assert(is_array($parameter) && is_string($parameter['name'] ?? null));
+        $byName[$parameter['name']] = $parameter;
+    }
+
+    // ORDER AND NAMES TOGETHER. The path parameter stays FIRST — the committed document is compared
+    // byte for byte, so an implementation that prepended the query half would rewrite an operation
+    // that did not change.
+    expect(array_column($parameters, 'name'))
+        ->toBe(['organization', 'page', 'per_page', 'sort', 'dir', 'filter'])
+        // …and every name appears once. A declared parameter colliding with a URI placeholder would
+        // publish the name twice, which most generators resolve by silently keeping one.
+        ->and(array_keys($byName))->toHaveCount(count($parameters));
+
+    // THE PATH PARAMETER IS UNTOUCHED, asserted as a whole object rather than field by field: this
+    // change must be purely additive to it.
+    expect($byName['organization'])->toBe([
+        'name' => 'organization',
+        'in' => 'path',
+        'required' => true,
+        'schema' => ['type' => 'string'],
+        'description' => 'ULID of the organization. The tenant scope for everything below this path; a '
+            .'value the caller is not a current member of is denied, never served.',
+    ]);
+
+    foreach (['page', 'per_page', 'sort', 'dir', 'filter'] as $name) {
+        expect($byName[$name]['in'] ?? null)->toBe('query', "{$name} is not published as a query parameter")
+            // `required: false` WRITTEN OUT rather than left to OpenAPI's default, for the reason
+            // `securityFor()` gives about an omitted `security` key: silence is indistinguishable
+            // from a generator that never asked.
+            ->and($byName[$name]['required'] ?? null)->toBe(false, "{$name} does not state `required`")
+            ->and($byName[$name]['description'] ?? null)->toBeString();
+    }
+
+    // THE BOUNDS AND THE DEFAULTS, from the constants the rules read.
+    expect($byName['page']['schema'] ?? null)
+        ->toBe(['type' => 'integer', 'minimum' => 1, 'default' => 1]);
+
+    expect($byName['per_page']['schema'] ?? null)->toBe([
+        'type' => 'integer',
+        'minimum' => 1,
+        'maximum' => ListQuery::MAX_PER_PAGE,
+        'default' => ListQuery::DEFAULT_PER_PAGE,
+    ]);
+
+    // THE ENUM IS THE ENDPOINT'S OWN CLOSED SET, not a shared vocabulary: `sort` reaches an
+    // `ORDER BY`, and a document publishing a column this endpoint does not permit would invite a
+    // client to send a value that 422s.
+    expect($byName['sort']['schema'] ?? null)->toBe([
+        'type' => 'string',
+        'enum' => IndexBotsRequest::SORTABLE,
+        'default' => IndexBotsRequest::DEFAULT_SORT,
+    ]);
+
+    expect($byName['dir']['schema'] ?? null)->toBe([
+        'type' => 'string',
+        'enum' => SortDirection::values(),
+        'default' => SortDirection::Asc->value,
+    ]);
+
+    expect($byName['filter']['schema'] ?? null)
+        ->toBe(['type' => 'string', 'maxLength' => ListQuery::MAX_FILTER_LENGTH]);
+});
+
+it('publishes query parameters only where a request declares them', function (): void {
+    // THE OTHER DIRECTION, and the one a single-endpoint assertion cannot see: a `parameters()` that
+    // appended the list-query block to every operation would satisfy the test above and would put
+    // `page` on `POST …/bots`. Only requests implementing `ProvidesOpenApiQueryParameters` may
+    // contribute, and `IndexBotsRequest` is currently the only one — Phases C4, D and E2 are
+    // expected to add more, which is why this asserts the RULE rather than the count.
+    $document = dumpDocument()['document'];
+    $paths = $document['paths'] ?? null;
+
+    assert(is_array($paths));
+
+    $withQuery = [];
+
+    foreach ($paths as $path => $operations) {
+        assert(is_array($operations));
+
+        foreach ($operations as $verb => $operation) {
+            assert(is_array($operation));
+
+            foreach ($operation['parameters'] ?? [] as $parameter) {
+                assert(is_array($parameter));
+
+                if (($parameter['in'] ?? null) === 'query') {
+                    $withQuery[] = strtoupper((string) $verb).' '.$path;
+                    break;
+                }
+            }
+        }
+    }
+
+    // PINNED BY NAME AND NOT COUNTED (D29): a count says "expected 1, got 2" and a deliberate new
+    // paginated list fails identically to the block leaking onto an operation that never asked.
+    expect(array_values(array_unique($withQuery)))
+        ->toBe(['GET /api/v1/organizations/{organization}/bots']);
 });
 
 it('is byte-identical across two runs and --check is a real gate', function (): void {

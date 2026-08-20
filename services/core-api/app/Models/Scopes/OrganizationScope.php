@@ -15,7 +15,16 @@ use Illuminate\Database\Eloquent\Scope;
  * The mechanism is the explicit `forOrg($orgId)` argument on every repository method. This scope
  * catches the query somebody forgot to route through one. It fails silently for `DB::table()`,
  * `DB::select()`, raw SQL and `withoutGlobalScopes()` — none of which touch the Eloquent builder —
- * which is why CI greps for all three as well.
+ * which is why all three are checked outside it.
+ *
+ * THIS SENTENCE USED TO SAY "CI GREPS FOR ALL THREE AS WELL", AND THERE IS NO CI: `.github/` was
+ * deleted on 2026-08-17 and nothing replaced it. Two of the three are now held by a TEST instead,
+ * which is stronger than the grep was — `tests/Arch/DoctrineTest.php` pins the `DB` facade to
+ * `App\Repositories\Eloquent`, and `tests/Arch/StringLevelDoctrineTest.php` tokenizes `app/` and
+ * fails on a `withoutGlobalScopes(` or `withoutGlobalScope(` CALL (the published grep matched this
+ * very docblock, because a grep cannot tell code from a comment). RAW SQL INSIDE
+ * `App\Repositories\Eloquent` REMAINS A REVIEW OBLIGATION and nothing mechanical will object to it:
+ * `rg 'DB::(raw|select|statement|unprepared)\(' services/core-api/app` is how a human checks it.
  *
  * THE CONTEXT IS RESOLVED INSIDE apply(), NOT INJECTED. `HasGlobalScopes::addGlobalScope()`
  * instantiates a `#[ScopedBy]` class with a bare `new $scope` and caches that instance in a STATIC

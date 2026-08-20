@@ -67,6 +67,29 @@ interface ProviderModelRepositoryInterface
     public function modelExists(string $organizationId, string $connectionId, string $model): bool;
 
     /**
+     * Whether ONE catalog ROW — addressed by its ULID, not by the vendor's model identifier —
+     * exists under this organization's connection.
+     *
+     * ── THE SIBLING ABOVE ANSWERS A DIFFERENT QUESTION AND THE TWO ARE NOT INTERCHANGEABLE ────
+     *
+     * `modelExists()` keys on the vendor's string (`gpt-5.1`) and exists so a DUPLICATE
+     * registration is a 422. This keys on the row's ULID and exists so a BOT naming a catalog row
+     * is checked against both parents before the write. Collapsing them would mean one of the two
+     * call sites was comparing the wrong column.
+     *
+     * ── WHY THE CONNECTION ARGUMENT IS REQUIRED, WHEN THE ORGANIZATION ALONE WOULD "WORK" ─────
+     *
+     * `bots_model_same_org` guards `(organization_id, provider_model_id)` and
+     * `bots_connection_same_org` guards `(organization_id, provider_connection_id)` — SEPARATELY.
+     * Neither checks the two against EACH OTHER, so a bot naming connection A and a model row
+     * registered under connection B is a row the database accepts. `BotFactory::usingModel()`
+     * refuses that pairing for exactly this reason and says so: "No constraint on `bots` refuses
+     * that pairing, which is precisely why the fixture must." This method is how the service
+     * refuses it on the write path, and it is the only place the pair is checked at all.
+     */
+    public function entryExists(string $organizationId, string $connectionId, string $modelId): bool;
+
+    /**
      * Store one catalog row, in one transaction, for ONE organization's connection.
      *
      * @param  Closure(ProviderModelEntry): void  $audit  invoked inside the transaction

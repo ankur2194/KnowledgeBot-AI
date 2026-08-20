@@ -52,6 +52,20 @@ final class EloquentProviderModelRepository implements ProviderModelRepositoryIn
             ->exists();
     }
 
+    public function entryExists(string $organizationId, string $connectionId, string $modelId): bool
+    {
+        // ALL THREE PREDICATES. The organization is the tenant scope, the connection is the pair
+        // check no constraint on `bots` performs, and the key is the row. Dropping the connection
+        // term would silently accept a bot naming connection A with a model registered under
+        // connection B — a configuration the database will store and the data plane cannot
+        // interpret, because the credential and the model would come from different accounts.
+        return ProviderModelEntry::query()
+            ->where('organization_id', '=', $organizationId)
+            ->where('provider_connection_id', '=', $connectionId)
+            ->whereKey($modelId)
+            ->exists();
+    }
+
     /**
      * @param  Closure(ProviderModelEntry): void  $audit
      */

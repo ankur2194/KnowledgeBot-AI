@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { ULID_PATTERN } from './laravel-rules.js';
+
 /**
  * Mirrors `DesignateEmbeddingConnectionRequest` in services/core-api
  * (PUT /api/v1/organizations/{organization}/embedding-configuration).
@@ -16,16 +18,10 @@ import { z } from 'zod';
  */
 
 /**
- * Laravel's `ulid` rule is `Str::isUlid()` → `Symfony\Component\Uid\Ulid::isValid()`: 26 Crockford
- * base32 characters (no I, L, O, U), either case, AND a first character whose uppercase form is
- * <= '7' — the 48-bit timestamp cannot overflow.
- *
- * NOT `z.ulid()`. zod 4.4.3's regex is `/^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$/` with no overflow
- * guard, so it accepts 26 'Z's, which the server rejects. That is the loose direction — a visible
- * 422 rather than lost functionality — but it is still a disagreement, and the drift suite probes
- * exactly that value.
+ * The `ulid` rule's mirror MOVED to `./laravel-rules.js` when the bot manifests landed carrying two
+ * more fields under the same rule. Its reasoning — Crockford base32, either case, first character
+ * <= '7' so the 48-bit timestamp cannot overflow, and why `z.ulid()` is not it — travelled with it.
  */
-const ULID = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/i;
 
 /**
  * Laravel's global `ConvertEmptyStringsToNull` turns "" into null BEFORE any rule runs, and
@@ -39,7 +35,7 @@ const clearable = <T extends z.ZodType>(inner: T) =>
 const connectionId = z
   .string()
   .trim()
-  .regex(ULID, { error: 'Select a provider connection.' })
+  .regex(ULID_PATTERN, { error: 'Select a provider connection.' })
   .nullable();
 
 const model = z.string().trim().max(200).nullable();

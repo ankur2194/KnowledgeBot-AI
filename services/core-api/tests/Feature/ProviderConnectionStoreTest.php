@@ -145,8 +145,10 @@ it('seals the credential and renders only the last four', function (): void {
 
     // withoutGlobalScopes() HERE AND ONLY HERE, in a test, after the request has ended. The
     // OrganizationScope fails CLOSED when no tenant context is bound — which is the point of it —
-    // and the context was cleared in the middleware's `finally` when the response was returned. CI
-    // greps for this call under app/, where it would be a real finding.
+    // and the context was cleared in the middleware's `finally` when the response was returned.
+    // tests/Arch/StringLevelDoctrineTest.php FAILS on this call under app/, where it would be a real
+    // finding; tests/ is deliberately not scanned, because reading the raw row is how a test proves
+    // the filter hid it. That used to be a CI grep, and there is no CI.
     $connection = ProviderConnection::query()->withoutGlobalScopes()->findOrFail($id);
 
     // POSITIVE CONTROL. Assert the credential ACTUALLY reached storage and round-trips, before

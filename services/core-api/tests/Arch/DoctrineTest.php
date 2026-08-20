@@ -21,12 +21,23 @@ declare(strict_types=1);
 | (security finding B2 — the infrastructure delivers secrets as FILES and `docker compose config`
 | renders every interpolated VALUE in full).
 |
-| Two rules resist arch() because they are string-level and stay CI greps rather than tests:
+| FIVE RULES RESIST arch() BECAUSE THEY ARE STRING-LEVEL, AND THIS BLOCK USED TO SAY THEY "STAY CI
+| GREPS RATHER THAN TESTS". There is no CI — `.github/` was deleted on 2026-08-17 and nothing
+| replaced it — so that sentence described an invariant with no enforcement at all, which is worse
+| than an untested one because a reader concludes it is mechanically guarded. All five are now in
+| tests/Arch/StringLevelDoctrineTest.php, which tokenizes the tree instead of grepping it:
+|
 |   rg 'withoutGlobalScopes\(' services/core-api/app
 |   rg 'ai-api|services\.ai\.url' services/core-api/app | grep -v Services/Internal
 |   rg 'toEmbeddings\(|whereVectorSimilarTo\(' services/core-api/
 |   rg '\$this->authorize\(|authorizeResource\(' services/core-api/app/Http/Controllers
 |   rg 'forceFill\(|forceCreate\(' services/core-api/app
+|
+| The greps are kept verbatim because they are still how a human checks by hand, and because they
+| document what each rule means in one line. They are NOT how the rule is enforced, and they are not
+| equivalent: three of the five match their own documentation (this comment block is a hit for four
+| of them), which is the false positive that gets a grep ignored and then deleted. A token scan sees
+| no comments and no string literals, so the test says nothing about this block.
 */
 
 arch()->preset()->php();        // die, var_dump, debug helpers, deprecated functions

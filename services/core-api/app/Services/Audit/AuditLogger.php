@@ -311,6 +311,212 @@ final class AuditLogger
      */
     public const PROVIDER_MODEL_DELETED = 'provider.model.deleted';
 
+    /**
+     * ── THE THREE BOT OPERATIONS ───────────────────────────────────────────────────────────────
+     *
+     * A BOT IS NOT A CREDENTIAL EITHER, AND THESE ARE AUDITED FOR THE SAME KIND OF REASON THE
+     * PROVIDER-MODEL ONES ARE: what the row DECIDES rather than what it holds.
+     *
+     *   * `access_mode` moving from `private` to `public` makes the bot answerable by an anonymous
+     *     visitor with no account and no invitation, and `status` moving to `published` exposes it
+     *     on every channel the access mode and the origin allow-list permit. Neither transition
+     *     leaves a trace anywhere else in the system.
+     *   * `provider_connection_id` and `provider_model_id` decide which credential is BILLED for
+     *     every answer and which vendor sees the tenant's questions.
+     *   * the four retrieval depths and the evidence pair decide what the bot retrieves and when it
+     *     refuses, and a refusal rate that moved without an explanation is the hardest kind of
+     *     regression to attribute — `retrieval_configuration_version` is recorded beside them so
+     *     the trail can answer "which configuration was version 7" after the row has changed again.
+     *   * a DELETE is a hard delete that takes the origin allow-list, the starter questions and the
+     *     fallback chain with it, and leaves this row as the only surviving description.
+     *
+     * "Who made this bot answerable by the internet, and when" is exactly the question an incident
+     * asks, and without these rows the trail answers it with the `created` row from months earlier.
+     *
+     * ALL THREE ARE `ON_FAILURE_ABORT`, with no judgement call to make: every one of them is still
+     * inside `EloquentBotRepository`'s transaction when the row is written, so "can this still be
+     * rolled back" — the real test, see the class docblock — answers yes for all of them. Nothing
+     * here queues mail and nothing here has already happened irreversibly.
+     *
+     * ── WHAT THE ALLOW-LISTS DELIBERATELY CANNOT CARRY, AND THE FIRST ITEM IS THE POINT ────────
+     *
+     * `system_instruction` AND `answer_style_instruction` ARE ABSENT. They are the bot's
+     * operator-authored PROMPT — unbounded tenant text, and the exact string a prompt-injection
+     * review is about — and echoing one wholesale into an append-only, long-lived, exportable table
+     * is the shape of the defect this whole class exists to prevent, with the additional property
+     * that MAX_VALUE_LENGTH would truncate it into something that reads as the whole instruction
+     * and is not. "Who changed the prompt" is answerable from `updated_at` and the actor; "to what"
+     * is a question for a configuration history feature, not for the audit table.
+     *
+     * `welcome_message`, `placeholder_text`, `description` and `consent_text` are absent for the
+     * weaker version of the same reason: prose that decides nothing, in a table an investigator has
+     * to be able to read. `collect_end_user_data` IS carried, because the FLAG is the compliance
+     * fact and `bots_consent_text_present_when_collecting` already guarantees a disclosure exists
+     * whenever it is true.
+     *
+     * `theme` is absent because it is an ARRAY, which `sanitize()` drops outright — a structure in
+     * `details` is how `$request->all()` gets in one nesting level down, and it is also what would
+     * stop `details` json-encoding as an OBJECT, which the table CHECKs.
+     *
+     * `public_bot_id` IS ABSENT DELIBERATELY, and it is the one a reviewer will ask about. It is
+     * not a secret — it is printed into the customer's own page source — but it is a token-shaped
+     * string whose only use is addressing a bot anonymously, and the trail has no question it
+     * answers that `name` and `slug` do not. An append-only table is the wrong place to accumulate
+     * identifiers of that shape.
+     *
+     * The same nine names absent from the connection and model operations are absent here too —
+     * `credential`, `provider_credential`, `api_key`, `secret`, `password`, `last_four`,
+     * `masked_key`, `credential_ciphertext`, `data_key_ciphertext` — so no call site can put one in
+     * a row even by passing it under that key. Belt-and-braces rather than the mechanism: a `Bot`
+     * has no credential to offer at all, only a connection ULID.
+     *
+     * `name` and `slug` are TENANT-CONTROLLED FREE TEXT, bounded by MAX_VALUE_LENGTH and passing
+     * the shape backstop like any other echoed string. `evidence_threshold` is the first FLOAT in
+     * this table and takes `sanitize()`'s `is_float()` path, which refuses NAN and INF because
+     * neither is representable in JSON and either would fail the insert and take the whole audit
+     * row with it.
+     */
+    public const BOT_CREATED = 'bot.created';
+
+    /**
+     * ── WHY THIS ROW CARRIES NO `previous_status` OR `previous_access_mode`, WHICH IS A CALL ───
+     *
+     * `bot.domain.status_changed` one block down DOES carry `previous_status`, and the question
+     * this row cannot answer on its own is the stronger version of the one that field was added
+     * for: "who made this bot answerable by the internet" is `access_mode` going `private` →
+     * `public`, and reading this row alone you see only where it ended up. The asymmetry is
+     * deliberate and it is worth stating rather than leaving to be rediscovered.
+     *
+     * IT IS DERIVABLE, at the cost of an ordered read: every `bot.*` row for a subject carries
+     * `status` and `access_mode`, so the previous values are the previous row's, within one
+     * organization's own trail. That is the fallback, and it is why this is a readability decision
+     * rather than a coverage one — nothing is unrecorded.
+     *
+     * WHAT MAKES THE DOMAIN ROW DIFFERENT IS THAT IT IS A ONE-COLUMN TRANSITION. `status` is the
+     * only thing that row can be about, so "previous" is unambiguous on every instance of it. This
+     * row describes a PATCH over twenty-four columns, the overwhelming majority of which name
+     * neither `status` nor `access_mode`. A `previous_*` pair on every one of those is a "previous"
+     * for a field that did not move — a second spelling of the value beside it, which is exactly
+     * the reading the map below refuses on `bot.domain.deleted`. Emitting the pair only when the
+     * edit names the column is the other option and it is worse: the detail key set would then
+     * vary by request body, so a reader could not tell "this edit did not touch status" from "this
+     * row predates the field".
+     *
+     * AND THE CHEAP SPELLING IS THE WRONG ONE. `BotService::update()` has the ROUTE-BOUND `$bot` in
+     * scope when it builds the audit closure, so `$bot->status` looks like a free previous value —
+     * but it was read OUTSIDE the row lock, before `EloquentBotRepository::update()` opened its
+     * transaction. That is precisely the property `bot.domain.status_changed`'s `previous_status`
+     * exists to guarantee ("read UNDER THE SAME ROW LOCK that writes the new value, so it can never
+     * name a status the row did not hold"), and two concurrent PATCHes would produce a row naming a
+     * state the bot never held. The correct spelling changes `BotRepositoryInterface::update()`'s
+     * `Closure(Bot): void` callback to carry the pre-image, which is a contract shared with the
+     * transition path — a change worth making for a reason, not for a convenience.
+     *
+     * WHAT WOULD FLIP THIS: `access_mode` gaining real reach. Today no runtime surface consults it,
+     * so "who made this bot public" is a question about a column nothing reads yet. When the widget
+     * and hosted-chat runtimes ship, add `previous_access_mode` (and `previous_status` with it),
+     * read under the lock through a widened callback — not from `$bot` in the service.
+     */
+    public const BOT_UPDATED = 'bot.updated';
+
+    /**
+     * A HARD delete, so this row is the only surviving description of the bot.
+     *
+     * That is what makes `name` and `slug` load-bearing here rather than decorative: `subject_id`
+     * points at a ULID no table resolves any more, and without the echoed fields the trail says a
+     * bot was removed without being able to say which.
+     */
+    public const BOT_DELETED = 'bot.deleted';
+
+    /**
+     * ── THE THREE ORIGIN-ALLOW-LIST OPERATIONS, AND WHY THEY EXIST AT ALL ──────────────────────
+     *
+     * FINDING L2 (`docs/22` § *The security read of the bots surface*): deleting a bot destroys its
+     * widget origin allow-list with NO RECORD OF WHAT IT PERMITTED — which contradicts the reason
+     * `bot_domains` gives for its own `ON DELETE RESTRICT`, namely that a security review may later
+     * need to reconstruct it. The finding was latent only because no route created a domain; the
+     * endpoints that made it live are the ones these operations audit.
+     *
+     * The closure has two halves and THIS IS THE LOAD-BEARING ONE. The `bot.*` rows gained scalar
+     * summary fields (`domain_count`, `active_domain_count`, `active_origins`), and those are a
+     * TRIPWIRE — a reader who lands on `bot.deleted` and sees `domain_count: 4` knows to go looking.
+     * What they go looking FOR is these rows: one per origin, per action, each naming the actor, the
+     * origin verbatim and the time. They are append-only and they outlive the bot, so they are what
+     * actually answers "what could embed this, and who allowed it".
+     *
+     * ── A ROW HERE IS A GRANT, WHICH IS WHY `origin` IS ECHOED AND NOT SUMMARISED ──────────────
+     *
+     * It is tenant-controlled free text, bounded by :self::MAX_VALUE_LENGTH and passing the shape
+     * backstop like any other echoed string — and it is the SECURITY FACT itself rather than a
+     * description of one. A fingerprint would answer "was it THIS origin" and nothing else, which is
+     * the wrong question: an investigation asks WHICH origins a bot permitted, and it asks it
+     * without a candidate list to test against.
+     *
+     * The degradation that follows is the designed one and is named rather than fixed, exactly as
+     * finding L4 names it for a bot's slug: a LEGAL origin whose host matches the vendor-key pattern
+     * — `https://sk-abcdefghijkl.example` is a legal host, and `sk-` plus twelve characters is what
+     * `KbJsonFormatter::VENDOR_KEYS` catches — is FINGERPRINTED rather than echoed. That is tenant
+     * self-harm along a path the backstop exists for, and exempting this field is how the backstop
+     * stops being one.
+     *
+     * ── `status` IS ON ALL THREE, AND `previous_status` ONLY ON THE TRANSITION ─────────────────
+     *
+     * `pending` grants nothing and `active` grants everything this list can grant, so a row that
+     * recorded an origin without saying which of those it was would not answer the question it
+     * exists for. `previous_status` makes the transition row readable on its own — "who turned this
+     * origin on, and what was it before" — and it is read UNDER THE SAME ROW LOCK that writes the
+     * new value, so it can never name a status the row did not hold.
+     *
+     * ── ALL THREE ARE ON_FAILURE_ABORT ────────────────────────────────────────────────────────
+     *
+     * Each is written inside `EloquentBotDomainRepository`'s transaction, so "can this still be
+     * rolled back" — the real test, see the class docblock — answers yes. A LOG policy on `created`
+     * would permit a grant to exist with no record of who made it, which is the whole finding.
+     */
+    public const BOT_DOMAIN_CREATED = 'bot.domain.created';
+
+    public const BOT_DOMAIN_STATUS_CHANGED = 'bot.domain.status_changed';
+
+    /**
+     * A HARD delete, so this row is the only surviving description of the grant.
+     *
+     * `subject_id` points at a ULID no table resolves any more, which is what makes `origin` and
+     * `status` load-bearing here rather than decorative — without them the trail says an origin was
+     * removed without being able to say which, from whose allow-list, or whether it had been live.
+     */
+    public const BOT_DOMAIN_DELETED = 'bot.domain.deleted';
+
+    /**
+     * ── THE THREE STARTER-QUESTION OPERATIONS, AND THE ONE FIELD THEY DELIBERATELY OMIT ────────
+     *
+     * §18.11 requires BOT CONFIG CHANGES audited, and a starter question is bot configuration: it
+     * is what a first-time visitor is invited to ask, rendered as a suggestion chip on hosted chat,
+     * inside the widget and in the mobile app. Without these rows, editing the suggestions would be
+     * the one bot configuration change that left no trace anywhere — `bots` is untouched by it, so
+     * not even `bot.updated` fires.
+     *
+     * THE QUESTION TEXT IS NOT RECORDED, AND THAT IS THE DECISION THIS BLOCK EXISTS TO STATE. It is
+     * unbounded tenant PROSE that decides nothing: it authorizes nobody, it bills nothing, and it
+     * changes no retrieval behaviour. `welcome_message`, `placeholder_text`, `description` and
+     * `consent_text` are absent from the `bot.*` allow-lists on exactly that ground — an
+     * append-only table an investigator has to be able to READ is the wrong place to accumulate
+     * copy — and there is no reason a chip label should be treated differently from a welcome
+     * message. What the rows record is that somebody changed the suggestions, which one, in which
+     * direction, and how many there are afterwards.
+     *
+     * THE ASYMMETRY WITH `bot.domain.*` ONE BLOCK UP IS THE POINT, not an inconsistency. An origin
+     * is a GRANT and its string IS the security fact; a starter question is text on a button.
+     *
+     * All three are ON_FAILURE_ABORT: each is written inside
+     * `EloquentBotStarterQuestionRepository`'s transaction, so the change can still be rolled back
+     * when the row cannot be written.
+     */
+    public const BOT_STARTER_QUESTION_CREATED = 'bot.starter_question.created';
+
+    public const BOT_STARTER_QUESTION_UPDATED = 'bot.starter_question.updated';
+
+    public const BOT_STARTER_QUESTION_DELETED = 'bot.starter_question.deleted';
+
     public const OUTCOME_SUCCESS = 'success';
 
     public const OUTCOME_FAILURE = 'failure';
@@ -623,6 +829,291 @@ final class AuditLogger
                 'input_price_per_million' => self::ECHOED,
                 'output_price_per_million' => self::ECHOED,
                 'price_currency' => self::ECHOED,
+            ],
+        ],
+
+        // ── THE THREE BOT OPERATIONS ───────────────────────────────────────────────────────────
+        //
+        // ONE ALLOW-LIST, REPEATED THREE TIMES RATHER THAN SHARED THROUGH A CONSTANT — the same
+        // call the four connection operations and the three model operations make, and the same
+        // reason: the lists must be able to DIVERGE. A shared constant makes "add a field to the
+        // created row" silently add it to the deleted row too, and the whole design of this table
+        // is that each operation decides for itself what it may record.
+        //
+        // The three lists are IDENTICAL TODAY, deliberately. A hard delete leaves the third row as
+        // the only description of the bot, so it must carry everything that made the row readable —
+        // and a `created`/`updated` pair carrying LESS than the `deleted` row would make the three
+        // unreadable side by side when the question is "what changed before it was removed".
+        //
+        // See the BOT_CREATED docblock for what is deliberately NOT here, and why the first item on
+        // that list — the system instruction — is the one that matters.
+        self::BOT_CREATED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                // TENANT-CONTROLLED FREE TEXT, and the only surviving identification of the bot
+                // after a hard delete: `subject_id` resolves to nothing then.
+                'name' => self::ECHOED,
+                'slug' => self::ECHOED,
+
+                // WHO CAN REACH THIS BOT, AND HOW IT MAY ANSWER. Four separate facts and a bot is
+                // reachable only when they agree, so recording one without the others would make
+                // the row unreadable — "published" says nothing on its own about whether an
+                // anonymous visitor could get to it.
+                'status' => self::ECHOED,
+                'access_mode' => self::ECHOED,
+                'answer_mode' => self::ECHOED,
+                'allow_general_answers' => self::ECHOED,
+
+                // WHICH CREDENTIAL IS BILLED AND WHICH VENDOR SEES THE QUESTIONS. ULIDs, never key
+                // material: the credential behind the connection is envelope-encrypted and is not
+                // reachable from a Bot at all.
+                'provider_connection_id' => self::ECHOED,
+                'provider_model_id' => self::ECHOED,
+
+                // THE RETRIEVAL CONFIGURATION AND THE VERSION THAT MAKES IT REPLAYABLE. A refusal
+                // rate that moved without an explanation is the hardest regression to attribute,
+                // and the version is what lets a stored trace be matched to the configuration that
+                // produced it after the row has changed again.
+                'dense_top_k' => self::ECHOED,
+                'sparse_top_k' => self::ECHOED,
+                'rerank_candidates' => self::ECHOED,
+                'rerank_retain' => self::ECHOED,
+                // THE FIRST FLOAT IN THIS TABLE. sanitize()'s `is_float()` path keeps it and
+                // refuses NAN and INF, because neither is representable in JSON and either would
+                // fail the insert and take the whole audit row with it. Null is skipped silently —
+                // an uncalibrated bot, which is every bot today, simply omits the pair.
+                'evidence_threshold' => self::ECHOED,
+                'evidence_threshold_scale' => self::ECHOED,
+                'retrieval_configuration_version' => self::ECHOED,
+
+                // Integers, kept by the `is_int()` path. Null means "the platform default applies",
+                // which is a different fact from a configured limit that happens to equal it — and
+                // a null is skipped without being reported, so an unlimited bot omits all three.
+                'rate_limit_per_minute' => self::ECHOED,
+                'rate_limit_per_day' => self::ECHOED,
+                'retention_days' => self::ECHOED,
+
+                // A COMPLIANCE FLAG AND THEREFORE AN AUDIT FIELD. The consent TEXT it requires is
+                // NOT echoed: it is prose, and the CHECK constraint already guarantees it exists
+                // whenever this is true.
+                'collect_end_user_data' => self::ECHOED,
+
+                // ── THE THREE CHILD COLLECTIONS, AS SCALARS. THIS IS FINDING L2. ──────────────
+                //
+                // A bot delete is a HARD delete that takes the origin allow-list, the starter
+                // questions and the fallback chain with it, and `bot_domains` justifies its own
+                // ON DELETE RESTRICT by saying a security review may later need to RECONSTRUCT the
+                // allow-list. Before these fields the trail could not: `bot.deleted` described the
+                // bot in full and said nothing at all about what it permitted.
+                //
+                // THE COUNTS SIT BESIDE THE JOINED LISTS, AND THAT IS NOT REDUNDANCY. sanitize()
+                // truncates an echoed string at :self::MAX_VALUE_LENGTH SILENTLY, and a full
+                // allow-list does not fit in 512 characters — so the count is what makes a
+                // truncated `active_origins` DETECTABLE rather than merely wrong. An integer takes
+                // the `is_int()` path: never truncated, never redacted, and a 0 records as 0.
+                //
+                // ONLY THE ACTIVE ORIGINS ARE ECHOED. A pending or disabled row granted nothing;
+                // its existence is in `domain_count` and its own value is in its own
+                // `bot.domain.created` row. And ONLY the origins — the starter questions are
+                // COUNTED AND NEVER ECHOED, because a chip label is prose that decides nothing
+                // while an origin string IS the security fact. App\Services\Bots\BotChildSummary
+                // states both halves and is what builds these values.
+                'domain_count' => self::ECHOED,
+                'active_domain_count' => self::ECHOED,
+                'active_origins' => self::ECHOED,
+                'starter_question_count' => self::ECHOED,
+                // THE FALLBACK CHAIN NAMES `provider_models` ROWS — i.e. WHICH CREDENTIALS MAY BE
+                // BILLED for this bot's answers when the primary model fails. No endpoint writes it
+                // yet and the bot delete already destroys it, so it is summarised here on exactly
+                // the argument the allow-list makes. Whoever lands its write endpoints owes it the
+                // per-row `bot.fallback_model.*` operations the origins now have.
+                'fallback_model_count' => self::ECHOED,
+                'fallback_model_ids' => self::ECHOED,
+            ],
+        ],
+        self::BOT_UPDATED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            // The values AFTER the edit. Every field is carried on every row, including the ones
+            // this particular PATCH did not name, because a row that recorded only what changed
+            // would be unreadable next to the `created` and `deleted` rows for the same subject —
+            // and "what did it look like afterwards" is the question a reader actually has.
+            //
+            // WHICH IS ALSO WHY THERE IS NO `previous_status` OR `previous_access_mode` HERE while
+            // `bot.domain.status_changed` below carries one. It is a decision, not an omission, and
+            // the constant's own docblock states it in full: the previous values are derivable from
+            // the preceding `bot.*` row for this subject, the domain row is a ONE-COLUMN transition
+            // where "previous" is unambiguous and this one is not, and the only cheap way to
+            // populate it here would read the pre-image OUTSIDE the row lock.
+            'details' => [
+                'name' => self::ECHOED,
+                'slug' => self::ECHOED,
+                'status' => self::ECHOED,
+                'access_mode' => self::ECHOED,
+                'answer_mode' => self::ECHOED,
+                'allow_general_answers' => self::ECHOED,
+                'provider_connection_id' => self::ECHOED,
+                'provider_model_id' => self::ECHOED,
+                'dense_top_k' => self::ECHOED,
+                'sparse_top_k' => self::ECHOED,
+                'rerank_candidates' => self::ECHOED,
+                'rerank_retain' => self::ECHOED,
+                'evidence_threshold' => self::ECHOED,
+                'evidence_threshold_scale' => self::ECHOED,
+                'retrieval_configuration_version' => self::ECHOED,
+                'rate_limit_per_minute' => self::ECHOED,
+                'rate_limit_per_day' => self::ECHOED,
+                'retention_days' => self::ECHOED,
+                'collect_end_user_data' => self::ECHOED,
+                // THE CHILD COLLECTIONS — see BOT_CREATED above for the whole argument, and note
+                // that these are the values AFTER the write like every other field on this row.
+                'domain_count' => self::ECHOED,
+                'active_domain_count' => self::ECHOED,
+                'active_origins' => self::ECHOED,
+                'starter_question_count' => self::ECHOED,
+                'fallback_model_count' => self::ECHOED,
+                'fallback_model_ids' => self::ECHOED,
+            ],
+        ],
+        self::BOT_DELETED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                'name' => self::ECHOED,
+                'slug' => self::ECHOED,
+                'status' => self::ECHOED,
+                'access_mode' => self::ECHOED,
+                'answer_mode' => self::ECHOED,
+                'allow_general_answers' => self::ECHOED,
+                'provider_connection_id' => self::ECHOED,
+                'provider_model_id' => self::ECHOED,
+                'dense_top_k' => self::ECHOED,
+                'sparse_top_k' => self::ECHOED,
+                'rerank_candidates' => self::ECHOED,
+                'rerank_retain' => self::ECHOED,
+                'evidence_threshold' => self::ECHOED,
+                'evidence_threshold_scale' => self::ECHOED,
+                'retrieval_configuration_version' => self::ECHOED,
+                'rate_limit_per_minute' => self::ECHOED,
+                'rate_limit_per_day' => self::ECHOED,
+                'retention_days' => self::ECHOED,
+                'collect_end_user_data' => self::ECHOED,
+                // THE CHILD COLLECTIONS — see BOT_CREATED above for the whole argument, and note
+                // that these are the values AFTER the write like every other field on this row.
+                'domain_count' => self::ECHOED,
+                'active_domain_count' => self::ECHOED,
+                'active_origins' => self::ECHOED,
+                'starter_question_count' => self::ECHOED,
+                'fallback_model_count' => self::ECHOED,
+                'fallback_model_ids' => self::ECHOED,
+            ],
+        ],
+
+        // ── THE THREE ORIGIN-ALLOW-LIST OPERATIONS ─────────────────────────────────────────────
+        //
+        // ONE ALLOW-LIST, REPEATED THREE TIMES RATHER THAN SHARED THROUGH A CONSTANT — the same
+        // call every other family in this map makes, and the same reason: the lists must be able to
+        // DIVERGE, and a shared constant makes "add a field to the created row" silently add it to
+        // the deleted row too.
+        //
+        // THEY ARE NEARLY IDENTICAL, AND THE ONE DIFFERENCE IS THE POINT. `previous_status` is on
+        // the transition row alone, because only there is there a previous status to name; putting
+        // it on `created` would record a transition out of a state the row never held, and on
+        // `deleted` it would be a second spelling of `status`.
+        //
+        // `bot_id` IS ON ALL THREE AND IS LOAD-BEARING. `subject_id` is the allow-list entry's own
+        // ULID, and after the bot is hard-deleted it resolves to nothing — so without this the
+        // trail can say an origin was granted and cannot say WHICH BOT it was granted for, which is
+        // most of the question finding L2 asks.
+        self::BOT_DOMAIN_CREATED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                'bot_id' => self::ECHOED,
+                // THE GRANT ITSELF, echoed and never fingerprinted — see the constant's docblock
+                // for why a fingerprint answers the wrong question here, and for the one
+                // tenant-self-harm case where the shape backstop degrades it anyway.
+                'origin' => self::ECHOED,
+                // Always `pending` on this row. Recorded anyway, so the three rows for one entry
+                // read side by side without the reader having to remember which of them can vary.
+                'status' => self::ECHOED,
+            ],
+        ],
+        self::BOT_DOMAIN_STATUS_CHANGED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                'bot_id' => self::ECHOED,
+                'origin' => self::ECHOED,
+                // THE STATUS AFTER, matching every other `updated` row in this map.
+                'status' => self::ECHOED,
+                // AND THE STATUS BEFORE, read under the same row lock that wrote the new one — so
+                // two concurrent promotions serialise and neither row can name a status the entry
+                // never held. "Who turned this origin on, and what was it before" is the question
+                // an incident asks, and it is unanswerable from a row carrying only the result.
+                'previous_status' => self::ECHOED,
+            ],
+        ],
+        self::BOT_DOMAIN_DELETED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                'bot_id' => self::ECHOED,
+                'origin' => self::ECHOED,
+                // WHETHER IT WAS LIVE WHEN IT WENT. A removed `pending` row never granted
+                // anything; a removed `active` one did, and the difference is the whole reading of
+                // this row in an investigation.
+                'status' => self::ECHOED,
+            ],
+        ],
+
+        // ── THE THREE STARTER-QUESTION OPERATIONS ──────────────────────────────────────────────
+        //
+        // NO `question` FIELD ON ANY OF THEM, and its absence is the decision — see the constants'
+        // docblock. It is unbounded tenant PROSE that authorizes nobody and decides nothing, which
+        // is exactly the ground `welcome_message`, `placeholder_text` and `description` are refused
+        // from the `bot.*` rows on. What these rows answer is that somebody changed the
+        // suggestions, which one, in which direction, and how many there are afterwards.
+        //
+        // `bot_id` is load-bearing for the reason it is on the domain rows: after a hard delete
+        // `subject_id` resolves to nothing.
+        self::BOT_STARTER_QUESTION_CREATED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                'bot_id' => self::ECHOED,
+                // Zero-based, and on the create path it is always the end of the list — recorded
+                // because it is what makes two `created` rows for one bot orderable after the fact.
+                'sort_order' => self::ECHOED,
+                // THE RESULTING LENGTH OF THE LIST, which is what makes the row readable beside a
+                // `bot.*` row carrying `starter_question_count` for the same bot.
+                'question_count' => self::ECHOED,
+            ],
+        ],
+        self::BOT_STARTER_QUESTION_UPDATED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                'bot_id' => self::ECHOED,
+                'sort_order' => self::ECHOED,
+                'question_count' => self::ECHOED,
+                // WHICH FIELDS ACTUALLY MOVED, joined into a scalar by the caller — the
+                // `capabilities` shape, for the reason sanitize() drops arrays outright. Without
+                // it a text edit and a reorder produce byte-identical rows, and "who reordered the
+                // suggestions" becomes unanswerable from a trail that recorded both.
+                'changed' => self::ECHOED,
+            ],
+        ],
+        self::BOT_STARTER_QUESTION_DELETED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                'bot_id' => self::ECHOED,
+                // The position it HELD, which is the only thing left that distinguishes it from
+                // its siblings once the text is deliberately not recorded.
+                'sort_order' => self::ECHOED,
+                'question_count' => self::ECHOED,
             ],
         ],
     ];

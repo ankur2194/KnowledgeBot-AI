@@ -58,6 +58,36 @@ test('the fixture is immutable, so a test cannot repoint an actor mid-assertion'
     expect($class->isFinal())->toBeTrue();
 });
 
+test('every model property is narrowed to its model, and none is left as object', function (): void {
+    // WHY A TYPE IS A SECURITY PROPERTY HERE. `$t->botA` and `$t->botB` are the pair the whole
+    // fixture exists to keep distinct, and `object` lets a test hand either one to anything. Static
+    // analysis runs over tests/ at level 8 and cannot object to a property typed `object`, so the
+    // mistake that matters most — passing Org B's record into an assertion written for Org A, which
+    // makes a negative assertion run as the organization that PLANTED the canary and pass while
+    // proving the opposite of what it claims — would type-check silently.
+    //
+    // Asserted as "no property is `object`" rather than by naming each type, so the property that
+    // matters cannot be lost by a widening that also renames.
+    $class = new \ReflectionClass(TenantPair::class);
+
+    $expected = [
+        'a' => \App\Models\Organization::class,
+        'b' => \App\Models\Organization::class,
+        'botA' => \App\Models\Bot::class,
+        'botB' => \App\Models\Bot::class,
+        'actorA' => \App\Models\User::class,
+        'actorB' => \App\Models\User::class,
+    ];
+
+    foreach ($class->getProperties() as $property) {
+        expect((string) $property->getType())->not->toBe('object', $property->getName().' is untyped');
+    }
+
+    foreach ($expected as $name => $type) {
+        expect((string) $class->getProperty($name)->getType())->toBe($type);
+    }
+});
+
 test('the canary is a per-test string, not a shared constant', function (): void {
     $canary = (new \ReflectionClass(TenantPair::class))->getProperty('canary');
 

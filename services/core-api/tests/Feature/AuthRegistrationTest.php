@@ -27,8 +27,8 @@ use Tests\Support\SpaSession;
 |
 | TWO ORGANIZATIONS IN EVERY FIXTURE, with distinguishable names. A one-organization fixture cannot
 | fail "registration granted membership of the wrong tenant": there is no wrong tenant to grant.
-| TODO(fixtures): tests/Support/tenancy.php's tenantPair() when the bots and knowledge_sources
-| migrations exist. It throws by design until then.
+| TODO(fixtures): tests/Support/tenancy.php's tenantPair() once its KnowledgeSource half lands
+| in Phase C. Its bot half is already live.
 */
 
 beforeEach(function (): void {
@@ -113,8 +113,21 @@ it('rejects a token of the wrong size before any lookup', function (string $toke
         ->assertJsonPath('error_class', 'validation')
         ->assertJsonValidationErrors(['token']);
 })->with([
-    'too short' => str_repeat('a', 63),
-    'too long' => str_repeat('a', 65),
+    // THE CONTENT IS FRESH PER RUN AND THE LENGTH IS NOT, for the reason SpaSession::uniqueToken()
+    // states at length: the `invitation` limiter's second axis is the sha256 of the submitted token,
+    // which isolateRateLimits() does not move, so a fixed literal spends one unit of one permanent
+    // bucket on every run of the suite forever. The lengths are `OpaqueToken::LENGTH` ± 1 and are
+    // the whole point of the probe, so those are what must stay.
+    //
+    // CLOSURES RATHER THAN VALUES so each row is minted when the test runs, not when Pest collects
+    // the dataset — a value computed at collection time is shared by every repetition in one run.
+    'too short' => fn (): string => SpaSession::uniqueToken(OpaqueToken::LENGTH - 1),
+    'too long' => fn (): string => SpaSession::uniqueToken(OpaqueToken::LENGTH + 1),
+    // THE ONE ROW THAT CANNOT BE MADE UNIQUE, and it is left alone deliberately. Its bucket is the
+    // digest of the empty string, which is shared by every request that omits the field — that
+    // sharing is a documented FEATURE of the limiter (PreviewInvitationRequest's docblock), so a
+    // "unique" empty token is not a thing that exists. It costs one unit of a 10-per-MINUTE budget
+    // per run, which needs ten runs inside one minute to matter rather than six inside an hour.
     'empty' => '',
 ]);
 

@@ -885,6 +885,1927 @@
                 ]
             }
         },
+        "/api/v1/organizations/{organization}/bots": {
+            "get": {
+                "operationId": "admin.bots.index",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 1
+                        },
+                        "description": "1-based page number, matching `meta.page` in the response and Laravel's own paginator. There is no page 0."
+                    },
+                    {
+                        "name": "per_page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 100,
+                            "default": 25
+                        },
+                        "description": "Rows per page. A value above the maximum is REFUSED with a 422 rather than clamped silently, so a client asking for more than the platform serves finds out rather than paginating against a size it did not choose. The applied value is echoed as `meta.per_page`."
+                    },
+                    {
+                        "name": "sort",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "id",
+                                "name",
+                                "slug",
+                                "status"
+                            ],
+                            "default": "id"
+                        },
+                        "description": "Column to order by, from this endpoint's closed set. The set is closed because a caller-chosen sort reaches an `ORDER BY`, so every member here is a column with an index behind it."
+                    },
+                    {
+                        "name": "dir",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "asc",
+                                "desc"
+                            ],
+                            "default": "asc"
+                        },
+                        "description": "Sort direction."
+                    },
+                    {
+                        "name": "filter",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "maxLength": 200
+                        },
+                        "description": "Free-text search term. Deliberately unconstrained in character class — it is a string a human types — and bounded only in length; the endpoint documents which columns it searches. An empty or whitespace-only value is treated as no filter at all, and `meta.filter` comes back null."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "One page of this organization's bots, with `meta` beside the array inside `data`. Every lifecycle state is included — drafts and archived rows alike, because an operator asking \"where did that bot go\" has to be able to find it. `page` is 1-based; `per_page`, `sort`, `dir` and `filter` are echoed AS APPLIED, which may differ from what was asked for because the platform clamps the page size and falls back to the endpoint default sort. `system_instruction` and `answer_style_instruction` are `null` on every row unless the caller holds `bots.manage`; both keys are present either way, and `instructions_visible` says which of the two readings that null carries.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/BotCollectionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/IndexBotsRequest.json"
+            },
+            "post": {
+                "operationId": "admin.bots.store",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "The created bot, wrapped in `data`, in `draft` with a freshly minted `public_bot_id`. 409 when the organization is not active; 422 for a duplicate slug (keyed on `slug`), for a (connection, model) pair this organization cannot use, or for a theme colour the renderer would refuse.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/BotResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "The organization is not active. Its configuration may be read but not changed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/StoreBotRequest.json"
+            }
+        },
+        "/api/v1/organizations/{organization}/bots/{bot}": {
+            "delete": {
+                "operationId": "admin.bots.destroy",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "bot",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {bot} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The bot is gone, along with its origin allow-list, its starter questions and its fallback chain. 409 when the organization is not active. A foreign or unknown `{bot}` 404s at binding time, before this action runs, and so does a second delete of the same bot.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/AcknowledgementResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "The organization is not active. Its configuration may be read but not changed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            },
+            "get": {
+                "operationId": "admin.bots.show",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "bot",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {bot} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "One bot, wrapped in `data`. `system_instruction` and `answer_style_instruction` carry their stored values only for a caller holding `bots.manage` and are `null` for every other caller; both keys are always present, so the response shape does not vary by role, and `instructions_visible` distinguishes \"withheld\" from \"not set\" so a client cannot write the projection back. This is an authenticated-only shape either way — the public chat surfaces publish their own, much smaller, resource. A foreign or unknown `{bot}` 404s at binding time, before this action runs, and the body is byte-identical to the 404 for a path with no route.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/BotResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            },
+            "patch": {
+                "operationId": "admin.bots.update",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "bot",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {bot} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The bot after the edit, wrapped in `data`. `retrieval_configuration_version` has moved if and only if a retrieval knob's VALUE changed. 409 when the organization is not active, when the bot is archived (which is terminal and read-only, including its status), or when the publish guard refuses the resulting state; 422 for an empty body, a duplicate slug, an unusable (connection, model) pair, an evidence threshold without its scale, or a theme colour the renderer would refuse.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/BotResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "The organization is not active. Its configuration may be read but not changed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/UpdateBotRequest.json"
+            }
+        },
+        "/api/v1/organizations/{organization}/bots/{bot}/domains": {
+            "get": {
+                "operationId": "admin.bots.domains.index",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "bot",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {bot} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Every origin on this bot's widget allow-list, PENDING AND DISABLED ONES INCLUDED — an operator asking \"why is my widget refused on this site\" has to be able to find the row. Ordered by origin, deterministically; the order carries no precedence, because an allow-list is a set and the lookup is an exact match. AN EMPTY ARRAY DENIES EVERY ORIGIN and must never be read as \"unrestricted\".",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/BotDomainCollectionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            },
+            "post": {
+                "operationId": "admin.bots.domains.store",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "bot",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {bot} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "The stored entry, wrapped in `data`, always in `pending` — a new origin grants nothing until it is activated, because whether an origin is under the operator's control is not something the entry form knows. RENDER `origin` FROM THIS RESPONSE, not from what was posted: the value is normalised to the exact string a browser sends. 409 when the organization is not active; 422 for a duplicate origin (keyed on `origin`), for a full allow-list, or for anything that is not an exact origin — a wildcard, a path, a query string, userinfo, an IPv6 literal, a bad port or a host the grammar cannot store.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/BotDomainResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "The organization is not active. Its configuration may be read but not changed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/StoreBotDomainRequest.json"
+            }
+        },
+        "/api/v1/organizations/{organization}/bots/{bot}/domains/{domain}": {
+            "delete": {
+                "operationId": "admin.bots.domains.destroy",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "bot",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {bot} record, scoped to the organization above it."
+                    },
+                    {
+                        "name": "domain",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {domain} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The origin is off the allow-list. 409 when the organization is not active. A foreign or unknown `{bot}` or `{domain}` 404s at binding time, before this action runs, and so does a second delete of the same entry.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/AcknowledgementResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "The organization is not active. Its configuration may be read but not changed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            },
+            "patch": {
+                "operationId": "admin.bots.domains.update",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "bot",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {bot} record, scoped to the organization above it."
+                    },
+                    {
+                        "name": "domain",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {domain} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The entry after the change, wrapped in `data`. `origin` is immutable and the request body carries no field for it. 409 when the organization is not active; 422 when the entry already holds the requested status. A foreign or unknown `{bot}` or `{domain}` 404s at binding time, before this action runs — including an entry that exists but belongs to a DIFFERENT bot of the same organization.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/BotDomainResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "The organization is not active. Its configuration may be read but not changed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/UpdateBotDomainRequest.json"
+            }
+        },
+        "/api/v1/organizations/{organization}/bots/{bot}/starter-questions": {
+            "get": {
+                "operationId": "admin.bots.starter-questions.index",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "bot",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {bot} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Every starter question, ordered by `sort_order` ascending, which is the order they render in. Positions are always 0..n-1 with no gaps — every write re-sequences the whole list — so render straight from `sort_order` and treat a gap as a defect. An empty array is the default state of a new bot.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/BotStarterQuestionCollectionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            },
+            "post": {
+                "operationId": "admin.bots.starter-questions.store",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "bot",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {bot} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "The stored question, wrapped in `data`, appended at the end of the list — `sort_order` is the server's arithmetic and the request carries no field for it. 409 when the organization is not active; 422 for a blank question, one over the length cap, or a list that is already at the maximum the chat surface renders.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/BotStarterQuestionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "The organization is not active. Its configuration may be read but not changed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/StoreBotStarterQuestionRequest.json"
+            }
+        },
+        "/api/v1/organizations/{organization}/bots/{bot}/starter-questions/{starterQuestion}": {
+            "delete": {
+                "operationId": "admin.bots.starter-questions.destroy",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "bot",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {bot} record, scoped to the organization above it."
+                    },
+                    {
+                        "name": "starterQuestion",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {starterQuestion} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The question is gone and the remaining positions are closed up, so every surviving question after it has moved — re-read the collection. 409 when the organization is not active. A foreign or unknown `{bot}` or `{starterQuestion}` 404s at binding time, before this action runs, and so does a second delete of the same question.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/AcknowledgementResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "The organization is not active. Its configuration may be read but not changed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            },
+            "patch": {
+                "operationId": "admin.bots.starter-questions.update",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "bot",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {bot} record, scoped to the organization above it."
+                    },
+                    {
+                        "name": "starterQuestion",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {starterQuestion} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The question after the edit, wrapped in `data`. A move RE-SEQUENCES THE WHOLE LIST, so every other question's `sort_order` and `updated_at` may have changed too — re-read the collection rather than patching one row into a cached list. 409 when the organization is not active; 422 for an empty body, a blank question, or a position past the end of the list.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/BotStarterQuestionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "The organization is not active. Its configuration may be read but not changed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/UpdateBotStarterQuestionRequest.json"
+            }
+        },
+        "/api/v1/organizations/{organization}/bots/{bot}/status": {
+            "put": {
+                "operationId": "admin.bots.status.update",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "bot",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {bot} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The bot after the transition, wrapped in `data`, with `system_instruction` and `answer_style_instruction` populated — reaching this endpoint requires `bots.manage`, which is the permission that projection is gated on. 409 when the organization is not active, when the bot is ARCHIVED (which is terminal and read-only, including its status, so there is no un-archive transition), or when the publish guard refuses the resulting state: no provider connection and model, or `rag_first` answer mode with `allow_general_answers` still false. 422 when the bot already holds the requested status — this is a transition rather than a state assertion, and a no-op would write an audit row describing a change that did not happen.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/BotResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "The organization is not active. Its configuration may be read but not changed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/UpdateBotStatusRequest.json"
+            }
+        },
         "/api/v1/organizations/{organization}/embedding-configuration": {
             "get": {
                 "operationId": "admin.embedding-configuration.show",
@@ -3282,6 +5203,412 @@
                     }
                 }
             },
+            "BotCollectionResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One page of an organization's bots, with the pagination and applied-query state beside it. `meta` is present on an empty page too — a client that had to branch on its absence would be branching on \"did this list have results\", which is exactly the question `total` answers.",
+                "required": [
+                    "bots",
+                    "meta"
+                ],
+                "properties": {
+                    "bots": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/BotResource"
+                        },
+                        "description": "The bots on this page, in the applied order. Every lifecycle state is included, drafts and archived rows alike: an operator asking \"where did that bot go\" has to be able to find it, and hiding a state would make the question unanswerable from the console while the row sat in the table. The set is scoped to the organization in the path and to nothing else."
+                    },
+                    "meta": {
+                        "$ref": "#/components/schemas/ListMetaResource",
+                        "description": "Pagination and applied-query state for this page."
+                    }
+                }
+            },
+            "BotDomainCollectionResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One bot's widget origin allow-list. An OBJECT wrapping the array so pagination fields can join it later without moving the list or versioning the endpoint.",
+                "required": [
+                    "domains"
+                ],
+                "properties": {
+                    "domains": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/BotDomainResource"
+                        },
+                        "description": "Every entry on the allow-list, PENDING AND DISABLED ONES INCLUDED. Filtering them out would make \"why is my widget refused on this site\" unanswerable from the console while the row sat in the table. Ordered by origin, deterministically, so two reads of an unchanged set are byte-identical — the order carries NO precedence, because an allow-list is a set and the lookup is an exact match rather than a first-match walk. AN EMPTY ARRAY DENIES EVERY ORIGIN: the embed decision is \"some active row matches this exact origin\", which is false for the empty set. Never read it as \"unrestricted\"."
+                    }
+                }
+            },
+            "BotDomainResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One origin on a bot's widget allow-list. The row is a SECURITY CONTROL rather than a preference: it is what lets a page on the public internet boot a chat widget that speaks with this organization's credential, on its corpus, against its quota.",
+                "required": [
+                    "id",
+                    "origin",
+                    "status",
+                    "permits_embedding",
+                    "created_at",
+                    "updated_at"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "ULID of the allow-list entry."
+                    },
+                    "origin": {
+                        "type": "string",
+                        "description": "The exact origin, in the serialisation a browser sends: scheme, host and non-default port, lower-cased, with no path, no query, no fragment and no trailing slash. THERE IS NO WILDCARD GRAMMAR — the comparison is byte equality, and a pattern would turn it into a matcher. What was sent may differ from what is stored: the scheme and host are lower-cased, a single trailing slash is dropped, and a default port (`:80` for http, `:443` for https) is dropped because the browser omits it. A non-empty path is REFUSED rather than trimmed, because trimming it would widen the grant from one page to a whole host."
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "pending",
+                            "active",
+                            "disabled"
+                        ],
+                        "description": "Lifecycle of the entry. `pending` is where every row starts and it grants nothing — whether an origin is under the operator's control is not something the entry form knows. `active` is the ONE value that permits an embed. `disabled` is a withdrawn row kept so it can be turned back on without retyping and so audit entries naming it still resolve."
+                    },
+                    "permits_embedding": {
+                        "type": "boolean",
+                        "description": "Whether a widget served from this origin may boot, as far as THIS ROW is concerned. True for `active` and nothing else. Read this field rather than comparing `status` yourself: a check written as \"not disabled\" admits `pending`, and a status added later would be admitted by every negative test in every client. It is also only one term of the runtime decision — the bot's status, its access mode and an exact match on the origin are the others, and an EMPTY allow-list denies every origin."
+                    },
+                    "created_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "ISO 8601 with offset. When the origin was added."
+                    },
+                    "updated_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "ISO 8601 with offset. Moves when the status changes; the origin itself is immutable, so this is a status-change timestamp in practice."
+                    }
+                }
+            },
+            "BotResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One bot as the ADMIN surface sees it: identity, voice, lifecycle, model selection, retrieval configuration, appearance, limits and consent. It can carry the bot's SYSTEM INSTRUCTION and is therefore an authenticated-only shape — the hosted-chat, widget and stylesheet surfaces publish their own, much smaller, resource. The two instruction fields are further narrowed to callers holding `bots.manage` and are `null` for the rest; every key is present in every response, so the shape does not vary by caller, and `instructions_visible` says which of the two readings a null carries. Nothing of the parent provider connection appears here beyond its ULID: no vendor, no label, and no masked credential.",
+                "required": [
+                    "id",
+                    "public_bot_id",
+                    "name",
+                    "slug",
+                    "description",
+                    "welcome_message",
+                    "placeholder_text",
+                    "system_instruction",
+                    "answer_style_instruction",
+                    "instructions_visible",
+                    "status",
+                    "access_mode",
+                    "provider_connection_id",
+                    "provider_model_id",
+                    "answer_mode",
+                    "dense_top_k",
+                    "sparse_top_k",
+                    "rerank_candidates",
+                    "rerank_retain",
+                    "evidence_threshold",
+                    "evidence_threshold_scale",
+                    "retrieval_configuration_version",
+                    "allow_general_answers",
+                    "theme",
+                    "rate_limit_per_minute",
+                    "rate_limit_per_day",
+                    "retention_days",
+                    "collect_end_user_data",
+                    "consent_text",
+                    "created_at",
+                    "updated_at"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "ULID of the bot, and the key the ADMIN surface addresses it by. Never handed to an end user: it is also a term in every vector query issued on this bot's behalf, and its leading characters are a millisecond timestamp."
+                    },
+                    "public_bot_id": {
+                        "type": "string",
+                        "description": "The opaque token a hosted-chat URL, a widget snippet and a theme stylesheet request carry. Globally unique, because it is resolved with no organization in hand. Server-minted once and never editable — changing it would break every live embed on the customer's own site. It authorizes nothing on its own."
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Operator-supplied name. Tenant-controlled text: escape it on render."
+                    },
+                    "slug": {
+                        "type": "string",
+                        "description": "The human handle, lower-case with internal hyphens, unique PER ORGANIZATION. Another organization using the same handle is not a conflict — which is why every cache key and rate-limit counter derived from it carries the organization id first."
+                    },
+                    "description": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "Internal note for the console. Null means not set; the empty string is not a second spelling of it."
+                    },
+                    "welcome_message": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "The first-run greeting. Null renders the platform default, which is a real state and not a missing one."
+                    },
+                    "placeholder_text": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "The composer's placeholder. Null renders the platform default."
+                    },
+                    "system_instruction": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "The bot's own system prompt. AUTHENTICATED SURFACES ONLY, and within them MANAGEMENT ONLY: it is rendered to a caller holding `bots.manage` and is `null` for every other caller, so a client cannot read a null as \"this bot has no instruction\" — the majority of bots genuinely have none, and a reporting-only role sees the same null either way. It never appears on the hosted-chat, widget or stylesheet endpoints at all, and retrieved source text can never alter it — that boundary is the data plane's and is not expressible in this document."
+                    },
+                    "answer_style_instruction": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "Tone and formatting guidance, kept apart from the system instruction so a voice change is not a change to the grounding rules. Carries the same management-only projection as `system_instruction` and for the same reason: it is operator-authored prompt text."
+                    },
+                    "instructions_visible": {
+                        "type": "boolean",
+                        "description": "Whether the two instruction fields in THIS body carry their stored values. False means they were withheld — the caller does not hold `bots.manage` on this bot's organization — and the `null` you are reading is the projection rather than the bot's state. It exists because a null otherwise carries two facts a client cannot tell apart, and the wrong reading is destructive: PATCHing a form seeded from a withheld body sends `null`, which the edit endpoint accepts as \"clear it\" and answers 200. A client MUST NOT send `system_instruction` or `answer_style_instruction` back on a body that arrived with this false, and MUST NOT re-derive the answer from a role name it holds locally: the grant is resolved per record, against the record's own organization."
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "draft",
+                            "testing",
+                            "published",
+                            "paused",
+                            "archived"
+                        ],
+                        "description": "Lifecycle. Only `published` is reachable by an end user on a public channel; `testing` is the admin playground only. `paused` and `archived` both answer nobody and differ in intent — a paused bot is expected back — and `archived` is TERMINAL: an archived bot is read-only, including its status."
+                    },
+                    "access_mode": {
+                        "type": "string",
+                        "enum": [
+                            "public",
+                            "private"
+                        ],
+                        "description": "Whether an anonymous end user may converse. NOT the origin allow-list and not a substitute for it: a public bot with an empty allow-list is reachable from hosted chat and from no embedded widget."
+                    },
+                    "provider_connection_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "ULID of the provider connection whose credential answers for this bot. A REFERENCE and nothing more — the key itself is envelope-encrypted and is decrypted only inside the request that uses it, never here. Null on a bot that has not been configured yet, which is the first state every bot is in."
+                    },
+                    "provider_model_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "ULID of the catalog row this bot answers with, which must be registered under `provider_connection_id`. Null until configured. A model with no connection is refused: a catalog row names a credential only through its parent."
+                    },
+                    "answer_mode": {
+                        "type": "string",
+                        "enum": [
+                            "strict",
+                            "rag_first"
+                        ],
+                        "description": "Whether general model knowledge may be used at all. `strict` answers only from active knowledge sources and refuses when nothing clears the evidence gate. It does NOT by itself permit general answers in `rag_first` — `allow_general_answers` is the switch."
+                    },
+                    "dense_top_k": {
+                        "type": "integer",
+                        "description": "Candidates from the dense arm. A starting point rather than a finding: it moves through an evaluation run with an immutable configuration snapshot, never by intuition."
+                    },
+                    "sparse_top_k": {
+                        "type": "integer",
+                        "description": "Candidates from the BM25 arm, fused with the dense arm by RRF."
+                    },
+                    "rerank_candidates": {
+                        "type": "integer",
+                        "description": "How many fused candidates are sent to the reranker."
+                    },
+                    "rerank_retain": {
+                        "type": "integer",
+                        "description": "How many survive reranking into the context window. Never more than `rerank_candidates`: reranking can only reorder what retrieval handed it."
+                    },
+                    "evidence_threshold": {
+                        "type": [
+                            "number",
+                            "null"
+                        ],
+                        "description": "The score below which evidence is treated as insufficient and the bot refuses. NULL, WITH NO PLATFORM DEFAULT, and that is not an omission: the scale is a property of the (provider, model) pair, 0.30 is a valid float on every scale, and applying one scale's number to another moves only the refusal rate, only in aggregate, and raises nothing anywhere. Always read beside `evidence_threshold_scale`; either without the other is not a state this row can hold."
+                    },
+                    "evidence_threshold_scale": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "enum": [
+                            "logit",
+                            "sigmoid",
+                            "unit_interval",
+                            null
+                        ],
+                        "description": "What the threshold is measured in. `logit` is unbounded and signed; the other two are bounded 0-1 and are NOT interchangeable — only the bounds transfer, and the bounds are not the calibration. There is deliberately no `uncalibrated` member: that is the statement that no characterization exists, which makes a stored threshold a contradiction rather than a value."
+                    },
+                    "retrieval_configuration_version": {
+                        "type": "integer",
+                        "description": "Increments when — and only when — a retrieval knob's VALUE changes. It travels into the configuration snapshot and into every retrieval trace, and a trace without it cannot be replayed. Re-sending an unchanged value does not move it, so a console that submits its whole form on every save does not mint a new configuration identity for a configuration that did not move."
+                    },
+                    "allow_general_answers": {
+                        "type": "boolean",
+                        "description": "The one field an operator must set on purpose before a bot may answer from anything but its sources. A separate field from `answer_mode` so that \"RAG-first but not yet cleared to publish\" stays expressible; publishing the pair as `rag_first` + false is refused."
+                    },
+                    "theme": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "description": "The tenant-supplied theme: token VALUES, never CSS. A fixed key set of scalars, every one of them OPTIONAL and every one validated against an exact grammar on write. Always an OBJECT — `{}` when unthemed, which is the normal state and means \"render the platform theme\" — and never an empty array. Every other custom property the renderer writes (the whole `-foreground` and accent-ramp family) is DERIVED from these at render time and is never settable, because contrast is derived and never chosen.",
+                        "properties": {
+                            "primary": {
+                                "type": "string",
+                                "description": "The brand accent, as a CSS `oklch()` triple — for example `oklch(0.525 0.235 264)`. The whole accent ramp (hover, active, soft, and every `-foreground`) is derived from it. A colour whose lightness lands in the band where NEITHER platform text colour clears 4.5:1 is REFUSED on write rather than stored: the renderer would drop it and serve the platform accent, and the customer would have been told it was accepted."
+                            },
+                            "accent": {
+                                "type": "string",
+                                "description": "The neutral hover wash, as a CSS `oklch()` triple. NOT a second brand colour and independent of the accent ramp; its foreground is derived, so it carries the same contrast refusal."
+                            },
+                            "radius": {
+                                "type": "string",
+                                "enum": [
+                                    "0rem",
+                                    "0.25rem",
+                                    "0.5rem",
+                                    "0.625rem",
+                                    "0.75rem",
+                                    "1rem"
+                                ],
+                                "description": "The corner radius, matched EXACTLY against the values the design tokens publish. The renderer compares this string against that set and drops anything else, so an arbitrary CSS length is refused on write rather than silently ignored on render."
+                            }
+                        }
+                    },
+                    "rate_limit_per_minute": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ],
+                        "description": "Per-bot message limit. NULL means the platform default applies, which is a different fact from a configured limit that happens to equal it. Zero is not expressible: a limit of zero is a bot that answers nobody and is a plausible typo for \"no limit\"."
+                    },
+                    "rate_limit_per_day": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ],
+                        "description": "Per-bot daily message limit, same reading as the per-minute one."
+                    },
+                    "retention_days": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ],
+                        "description": "Conversation retention override in days. NULL means the organization's own retention policy decides."
+                    },
+                    "collect_end_user_data": {
+                        "type": "boolean",
+                        "description": "Whether the chat surface asks an end user for identifying details. True is only storable together with `consent_text`."
+                    },
+                    "consent_text": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "The disclosure rendered before the first message when `collect_end_user_data` is true. Non-null whenever that flag is true; permitted on its own, which is the state of a bot whose operator wrote the disclosure before switching collection on."
+                    },
+                    "created_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "ISO 8601 with offset. Null only for a record whose timestamp was never set."
+                    },
+                    "updated_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "ISO 8601 with offset."
+                    }
+                }
+            },
+            "BotStarterQuestionCollectionResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One bot's starter questions. An OBJECT wrapping the array so fields can join it later without moving the list.",
+                "required": [
+                    "starter_questions"
+                ],
+                "properties": {
+                    "starter_questions": {
+                        "type": "array",
+                        "maxItems": 6,
+                        "items": {
+                            "$ref": "#/components/schemas/BotStarterQuestionResource"
+                        },
+                        "description": "Every starter question, ordered by `sort_order` ascending — which is the order they render in. At most 6, matching the ceiling the chat surface renders (kb-ai-chat-ux: three to six chips), so what is stored is what is shown and the console cannot promise a seventh chip no client draws. An empty array is the default state of every new bot and simply means the first-run screen shows no suggestions."
+                    }
+                }
+            },
+            "BotStarterQuestionResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One suggested starter question, at the position the operator set.",
+                "required": [
+                    "id",
+                    "question",
+                    "sort_order",
+                    "created_at",
+                    "updated_at"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "ULID of the question."
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": "The chip label, exactly as the operator typed it. TENANT-AUTHORED TEXT: escape it at render, in every client, because only the renderer knows the context it is entering. Never blank — the database refuses a whitespace-only value, since a chip with no label is a control an end user can see, can click, and cannot read."
+                    },
+                    "sort_order": {
+                        "type": "integer",
+                        "description": "Zero-based position, unique within the bot. The set of positions is always 0..n-1 with no gaps: every write re-sequences the whole list inside one transaction, so render straight from this and treat a gap as a defect rather than a state."
+                    },
+                    "created_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "ISO 8601 with offset."
+                    },
+                    "updated_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "ISO 8601 with offset. Moves when the text or the position changes — including when another question was moved past this one, because a reorder rewrites every row in the list."
+                    }
+                }
+            },
             "EmbeddingCandidate": {
                 "type": "object",
                 "additionalProperties": false,
@@ -3600,6 +5927,61 @@
                     "invited_by_name": {
                         "type": "string",
                         "description": "Display name of the member who created the invitation. The name only — the accountable actor's ULID and address are not part of a list screen."
+                    }
+                }
+            },
+            "ListMetaResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Pagination and applied-query state for one page of a list. The four query fields are what the SERVER USED and not what the client asked for: `per_page` is clamped to the platform maximum and `sort`/`dir` fall back to the endpoint default, so a client that recomputed a page count from its own request parameters would be wrong on every clamped response.",
+                "required": [
+                    "page",
+                    "per_page",
+                    "total",
+                    "total_pages",
+                    "sort",
+                    "dir",
+                    "filter"
+                ],
+                "properties": {
+                    "page": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "The 1-BASED page number this body is. 1-based to match Laravel's paginator and every `?page=` a client sends back; the only 0-based number in this system is the row offset, which never crosses the wire."
+                    },
+                    "per_page": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Rows per page AS APPLIED. May be smaller than requested: the platform caps it, and the cap is what stops a list endpoint from being a query whose cost the caller chooses."
+                    },
+                    "total": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Total matching rows across all pages, within this organization and after the filter. This is TanStack Table's `rowCount` under `manualPagination`."
+                    },
+                    "total_pages": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Total pages at the APPLIED `per_page`. Published rather than derived, because the client's `per_page` may not be the one the server used. This is TanStack Table's `pageCount`. It is 1 and not 0 for an empty list — page one exists and is empty."
+                    },
+                    "sort": {
+                        "type": "string",
+                        "description": "The column the rows are ordered by, AS APPLIED. Always one of the endpoint's own closed sortable set — a caller-chosen value reaches an ORDER BY, so the set is closed per endpoint and published in that endpoint's request rules rather than here."
+                    },
+                    "dir": {
+                        "type": "string",
+                        "enum": [
+                            "asc",
+                            "desc"
+                        ],
+                        "description": "The order direction, as applied."
+                    },
+                    "filter": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "The free-text filter as applied: trimmed, and NULL rather than an empty string, because an empty filter is no filter and two spellings of \"unfiltered\" would make an unfiltered list's cache key depend on whether the client sent the parameter at all."
                     }
                 }
             },

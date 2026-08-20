@@ -402,6 +402,77 @@ every earlier run either skipped the parse or never reached document assembly. B
 the I6 run and neither failed the suite, so the narrowing is now confirmed in both directions on
 docling 2.118.0. That closes the quiet assumption underneath them, not a row that was ever written here.
 
+## Raised by the bots-schema effort — not markers in the tree
+
+Five entries, and they share one property worth naming before the table: **none of them is a claim
+about a vendor.** Each is a statement about what this host cannot exercise, so each is a place where a
+green suite proves less than a reader would assume. Two of them — the PostgreSQL major version and the
+Playwright browser build — are worse than "unrun", because the thing that *did* run was a **different
+thing wearing the same name**, and nothing in the output says so.
+
+| Claim | Class | Owner | How it closes |
+|---|---|---|---|
+| **The schema behaves on PostgreSQL 18 as it did on the 16 it was exercised against.** This host runs 16.13 (`psql -c 'select version()'`, client and server both); the project pins 18 (`postgresql-patterns` §1, and `grep -n 'image: postgres' infrastructure/docker/compose*.yaml`). **No construct was downgraded to fit** — every migration in this step uses SQL that 16 and 18 both accept, so the schema is not carrying a 16-shaped compromise. What is unverified is narrower and is in the *comments*: the index reasoning in `2026_08_19_001400` argues about PG 18's **b-tree skip scan** when it explains why `(organization_id, status)` is tenant-leading and why no separate ordering index exists. 16 has no skip scan, so the planner behaviour those paragraphs reason about was never observable here, and a plan captured on this host is evidence about 16 only. | **V** | `control-plane-engineer` | Run the migrations and the Feature suite against the pinned image once Docker is available, and re-capture `EXPLAIN` for the two list queries the comments name. The correctness half is expected to be a no-op; the plan half is the one to look at. |
+| **The component tests ran on the Chromium build the lockfile pins.** They did not. The vitest components project requests `chromium` (`apps/web/vitest.config.ts`), and `/opt/pw-browsers` holds `chromium-1194` plus a `chromium_headless_shell-1234` directory whose every entry is a **symlink into 1194** — the CDN download is blocked by egress policy, so the expected build number was satisfied by pointing it at the one already present. `ls -la /opt/pw-browsers/chromium_headless_shell-1234/chrome-headless-shell-linux64/` is the whole finding. Anything the pinned build fixes or breaks relative to 1194 is invisible here, and the run reports success either way. | **V** | `admin-web-engineer` | A run on a host that can reach the Playwright CDN, or a vendored browser bundle. Until then, treat a green component suite as evidence about the *components* and not about the browser. |
+| **No accessibility property of anything in this step has been verified.** There is no browser a human can look at and no human to look at it: no axe run, no keyboard-only pass, nothing viewed in dark mode, and nothing viewed at the responsive floors. The component suite loads **no CSS**, so which layout is visible at which width is asserted nowhere at all — a component can render, pass, and be laid out unusably. `kb-ui-accessibility`'s contrast matrix and focus-order requirements are unexercised by construction, not by omission. | **M** | `admin-web-engineer` with `test-engineer` | A Playwright run with axe against a real stylesheet, plus one manual keyboard-and-dark-mode pass. Neither is possible on this host; both are cheap on any host with a browser. |
+| **`ext-bcmath` is unmet here and the install ran with `--ignore-platform-req`.** `php -m` shows no `bcmath`. Nothing in `services/core-api/app` or `tests` calls a `bc*` function today, so no behaviour in this step depends on it — but the platform requirement is being *waived* rather than met, and the first code that does call one will fail at runtime on a host that looks like this one rather than at install time. | **V** | `platform-devops-engineer` | Install the extension in the image and drop the flag, or drop the requirement from `composer.json` if nothing needs it. The decision is which, and it is not this step's. |
+| **Docker is unavailable on this host, so nothing that needs the stack has been run.** `docker info` fails to reach `/var/run/docker.sock`. That leaves the Compose topology, the spoofed-`Host` routing test, the object-store anonymous-access check and the restore drill all untested here — the same standing gap earlier sections record, restated only because this step's migrations were exercised against a **local** PostgreSQL rather than the composed one, which is what makes the first row above a live question rather than a formality. | **M** | `platform-devops-engineer` | A host with a daemon. Unchanged from every earlier section that says so; it is listed again because the PG-version row depends on it. |
+
+**Note on classes:** three **V** and two **M**. The two **V** rows about a version are the ones that
+mislead in the same direction — in both cases something ran, reported success, and was not the thing
+named — so neither closes by reading and both close by re-running somewhere else.
+
+## Re-checked at the close of Phase B — the same five, wider
+
+**No new entries, deliberately.** The five rows above were raised by Phase B's first step and every
+one of them still holds at its last; re-tabling them under a second heading would be the parallel
+account `docs/00-index.md` warns against. What changed is **scope**, and scope is the whole reason
+this section exists rather than a line in a commit message: the bots-schema step was one migration
+set, whereas the phase went on to ship a list screen, an editor shell, a create path, three editor
+tabs and two child-resource surfaces (`git log --oneline b976735..HEAD` — read the range; the count
+in the commissioning brief was wrong and moves again on the next commit). **Every one of those
+screens inherits every row above.**
+
+Each command below was re-run on this host at the close of the phase and returned what it returned
+when the rows were written:
+
+```bash
+psql -c 'select version()'            # server unreachable now; psql --version is 16.13, the pin is 18
+php -m | grep -i bcmath               # silent — still unmet, still waived with --ignore-platform-req
+docker info                           # "failed to connect to the docker API at unix:///var/run/docker.sock"
+ls -la /opt/pw-browsers/chromium_headless_shell-1234/chrome-headless-shell-linux64/
+                                      # every entry a symlink into chromium_headless_shell-1194
+```
+
+**The accessibility row is the one whose scope moved most, and it is worth restating as a rule rather
+than as a gap.** *No accessibility property of anything Phase B shipped has been verified by any
+means* — no axe run, no keyboard-only walk, nothing viewed in dark mode, nothing viewed at the
+responsive floors — across the bots list, the editor shell, all three editor tabs, the create dialog,
+the origin allow-list and the starter-question editor. There is no browser session on this host and
+no person at it. Four of the phase's commits say so in their own *"owed to a human"* paragraphs
+rather than leaving it to be inferred, which is the right precedent and is the reason this row can be
+stated with confidence rather than by assumption.
+
+**And the sharpest half of it is not "unrun tests" but "untestable by construction":** the component
+suite loads **no CSS**, so both layouts of the server-driven table are in the DOM at once and
+**which one is visible at which width is asserted nowhere at all**. A component can render, pass its
+suite, and be laid out unusably; the below-768px card layout in particular is fed from the same row
+model as the table precisely so the two cannot disagree about *content*, and nothing anywhere checks
+that either is *seen*. `kb-ui-accessibility`'s contrast matrix and focus-order requirements are
+unexercised for the same reason.
+
+**The Playwright row now covers more than it did.** Every component test added in this phase ran on
+`chromium-1194` wearing the pinned build's directory name, because the CDN is blocked by egress
+policy. That is a larger body of evidence about a browser the lockfile does not pin than the row was
+written to describe, and the suite reports success either way.
+
+**One row is load-bearing for a *comment* rather than for behaviour, and it is easy to lose.** The
+index reasoning added in this phase argues about PostgreSQL 18's **b-tree skip scan** when it
+explains why the bots indexes are tenant-leading. 16 has no skip scan, so no plan captured here is
+evidence about the planner those paragraphs reason about — and the phase added more such comments
+than the row was written against. The correctness half remains expected to be a no-op; the plan half
+is the one to re-capture when Docker is available.
+
 ## Full list, by file
 
 Line numbers are accurate as of this commit and will drift as files are edited.

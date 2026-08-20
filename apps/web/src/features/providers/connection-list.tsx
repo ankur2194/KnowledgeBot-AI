@@ -27,11 +27,11 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { actionErrorCopy } from '@/features/auth/action-error';
+import { actionableConflictMessage } from '@/lib/api/actionable-conflict';
 
 import {
   connectionStatusKind,
   connectionStatusLabel,
-  deleteConflictMessage,
   deleteConnection,
   formatTimestamp,
   providerLabel,
@@ -227,7 +227,7 @@ function ConnectionRow({
    * THE 409 SENTENCE, RENDERED VERBATIM, and it is the only thing that tells the operator what to do
    * next: clear the embedding designation first, read the readiness verdict, then delete.
    *
-   * `deleteConflictMessage` returns null for everything else, so a real failure still gets the
+   * `actionableConflictMessage` returns null for everything else, so a real failure still gets the
    * class-mapped sentence plus the `request_id` through `actionErrorCopy`. The envelope for this 409
    * carries `error_class: "internal_dependency"` and `retryable: false` — deliberate, documented, and
    * NOT a server fault: there is no retry affordance here, because retrying cannot help while the
@@ -236,7 +236,7 @@ function ConnectionRow({
   const deleteError =
     remove.error === null
       ? null
-      : (deleteConflictMessage(remove.error) ?? actionErrorCopy(remove.error));
+      : (actionableConflictMessage(remove.error) ?? actionErrorCopy(remove.error));
 
   return (
     <TableRow>

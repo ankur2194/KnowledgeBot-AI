@@ -2,6 +2,7 @@ import {
   AlertTriangleIcon,
   CheckCircle2Icon,
   CircleDashedIcon,
+  CircleDotIcon,
   LoaderIcon,
   TrendingDownIcon,
   TrendingUpIcon,
@@ -21,13 +22,50 @@ import { cn } from '@/lib/utils';
  * (kb-ui-accessibility, *Colour independence*). It is supplied by this table rather than by the
  * caller precisely so it cannot be left off.
  */
-export type StatusKind = 'pending' | 'running' | 'ready' | 'degraded' | 'failed' | 'disabled';
+export type StatusKind =
+  | 'pending'
+  | 'running'
+  | 'info'
+  | 'ready'
+  | 'degraded'
+  | 'failed'
+  | 'disabled';
 
+/**
+ * ── `info` IS THE SEVENTH KIND, AND IT EXISTS BECAUSE `running` COULD NOT BE BORROWED ───────────
+ *
+ * There are TWO informational states, not one, and until this entry landed the vocabulary only had
+ * the moving one. `running` is info-coloured and its glyph SPINS, which is correct for a stage that
+ * is genuinely in flight and wrong for anything that merely *is* the info tone: an endless spinner
+ * on a static list row reads as "this page is stuck", so the caller's only other option was the
+ * slate bucket. That is what `features/bots/api.ts` did for `testing`, and it left three bot
+ * statuses (`draft`, `testing`, `archived`) sharing one colour AND one glyph, distinguished by
+ * their word alone — colour-independence-compliant and weak to scan, which is a real cost on a
+ * table an operator reads by sweeping the status column.
+ *
+ * So `info` is `running` minus the motion: same `--info-soft` fill, a STILL glyph.
+ *
+ * WHY `CircleDotIcon` AND NOT `InfoIcon`. A circled lowercase "i" means "there is an explanation
+ * here" — it is the affordance an `<Alert variant="info">` carries, and putting it on a lifecycle
+ * pill states the wrong thing twice over: every pill is information, and nothing on this one is
+ * expandable. A filled centre inside a ring reads as "marked, and not moving", which is what a
+ * trialled-but-unpublished thing is. It is also distinguishable in greyscale from all four other
+ * still glyphs (dashed ring, tick, triangle, cross), which is the whole reason the glyph is
+ * supplied by this table rather than by the caller.
+ *
+ * WHAT THIS DOES NOT FIX, said out loud rather than left to be rediscovered: `pending` and
+ * `disabled` still share `CircleDashedIcon` and the neutral fill, so `draft` and `archived` remain
+ * separated by their word alone. Repairing THAT means giving `disabled` its own glyph, which is a
+ * change to a bucket four other features already render (`connectionStatusKind`,
+ * `invitationStatusKind`, `membershipStatusKind`, and the model catalogue) — a wider blast radius
+ * than the one entry this repair was scoped to. Reported, not reached for.
+ */
 const STATUS: Readonly<
   Record<StatusKind, { readonly variant: 'default' | 'info' | 'success' | 'warning' | 'destructive'; readonly glyph: LucideIcon; readonly spin?: boolean }>
 > = Object.freeze({
   pending: { variant: 'default', glyph: CircleDashedIcon },
   running: { variant: 'info', glyph: LoaderIcon, spin: true },
+  info: { variant: 'info', glyph: CircleDotIcon },
   ready: { variant: 'success', glyph: CheckCircle2Icon },
   degraded: { variant: 'warning', glyph: AlertTriangleIcon },
   failed: { variant: 'destructive', glyph: XCircleIcon },

@@ -271,7 +271,17 @@ it('404s an unknown, expired or consumed verification token with one body', func
 ]);
 
 it('rejects a malformed verification token as validation', function (): void {
-    currentTest()->postJson('/api/v1/auth/email/verify', ['token' => 'too-short'], spaHeaders())
+    // A FRESH SHORT TOKEN PER RUN, NOT THE LITERAL 'too-short' THIS USED TO POST. The `verification`
+    // limiter's second axis is `hash('sha256', $request->input('token'))` at 6 per SIXTY MINUTES,
+    // and isolateRateLimits() moves only the `ip:` axis — so a fixed literal spent one unit of one
+    // permanent bucket per run and the seventh run inside an hour got a 429 where this asserts a
+    // 422. Measured; see Tests\Support\SpaSession::uniqueToken(). The length is what makes the
+    // value malformed (`size:OpaqueToken::LENGTH` is 64), so it is the half that must not vary.
+    currentTest()->postJson(
+        '/api/v1/auth/email/verify',
+        ['token' => SpaSession::uniqueToken(9)],
+        spaHeaders(),
+    )
         ->assertStatus(422)
         ->assertJsonPath('error_class', 'validation')
         ->assertJsonValidationErrors(['token']);

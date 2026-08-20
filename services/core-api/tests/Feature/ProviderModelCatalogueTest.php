@@ -44,7 +44,7 @@ use Tests\Support\SpaSession;
 | this repo. Every absence assertion carries a POSITIVE CONTROL asserted first.
 |
 | TODO(fixtures): tests/Support/tenancy.php's tenantPair() is the intended home for this pair and
-| throws by design until the Bot and KnowledgeSource factories exist. The hand-rolled pair below
+| is live for bots as of the bots-schema step; its KnowledgeSource half is still commented for Phase C, so a suite that needs INDEXED SOURCE content still builds its own fixture. The hand-rolled pair below
 | copies providerOrgPair()'s shape — and carries a DIFFERENT NAME on purpose: Pest declares
 | test-file helpers at FILE SCOPE, so that one exists only when its own file has been loaded
 | (running this file alone would fatal on an undefined function) and a second declaration under the

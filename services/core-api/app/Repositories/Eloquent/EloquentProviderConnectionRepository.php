@@ -85,6 +85,17 @@ final class EloquentProviderConnectionRepository implements ProviderConnectionRe
         return $rows;
     }
 
+    public function existsForOrg(string $organizationId, string $connectionId): bool
+    {
+        // The explicit organization predicate is the point of the method, not a formality: without
+        // it this is `ProviderConnection::find($id)`, which answers "does this exist anywhere" and
+        // turns a bot's model-selection form into an existence oracle over every tenant.
+        return ProviderConnection::query()
+            ->where('organization_id', '=', $organizationId)
+            ->whereKey($connectionId)
+            ->exists();
+    }
+
     /**
      * @param  Closure(ProviderConnection): void  $audit
      */

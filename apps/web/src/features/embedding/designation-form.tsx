@@ -17,7 +17,7 @@ import { Button } from '@/components/ui/button';
 import { Form, FormField, FormItem, FormMessage } from '@/components/ui/form';
 import { Label } from '@/components/ui/label';
 import { applyAuthError } from '@/features/auth/auth-error';
-import { deleteConflictMessage } from '@/features/providers/api';
+import { actionableConflictMessage } from '@/lib/api/actionable-conflict';
 
 import {
   EMBEDDING_DESIGNATION_KNOWN_PATHS,
@@ -154,7 +154,7 @@ export function DesignationForm({
         // A suspended organization may not move its vector space, and `abort_unless(..., 409)`
         // renders as `internal_dependency` / `retryable: false` — indistinguishable from a 500 on
         // `(error_class, retryable)` alone, because `KbError` carries no status. A3 solved that with
-        // `deleteConflictMessage`, which returns the server's own sentence only when it is not the
+        // `actionableConflictMessage`, which returns the server's own sentence only when it is not the
         // fixed >=500 constant; it is imported here, not reimplemented, and it is deliberately NOT
         // renamed because `features/models/model-list.tsx` imports it and that file is finished.
         //
@@ -163,7 +163,7 @@ export function DesignationForm({
         // show, and inventing "this organization is suspended" would be a cause the server never
         // stated. Reported as a contract gap; the day that abort gains a sentence, this line picks
         // it up with no change here.
-        copyFor: (kbError) => deleteConflictMessage(kbError) ?? undefined,
+        copyFor: (kbError) => actionableConflictMessage(kbError) ?? undefined,
       });
     },
     onSettled: () => {

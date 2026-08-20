@@ -52,7 +52,7 @@ export const envelope = (
   request_id: '01JREQFROMLARAVEL',
   // FALSE BY DEFAULT, matching the server's own default reading of an absent field and matching what
   // the DEFAULT MESSAGE above is: operator detail naming an internal host, which no screen may
-  // render. A spec that wants the deliberate-4xx path — the one `deleteConflictMessage` reads —
+  // render. A spec that wants the deliberate-4xx path — the one `actionableConflictMessage` reads —
   // opts in explicitly with `{ actionable: true }`, which is also the shape the server sends.
   actionable: false,
   ...overrides,

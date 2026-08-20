@@ -28,7 +28,8 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { actionErrorCopy } from '@/features/auth/action-error';
-import { deleteConflictMessage, formatTimestamp } from '@/features/providers/api';
+import { formatTimestamp } from '@/features/providers/api';
+import { actionableConflictMessage } from '@/lib/api/actionable-conflict';
 
 import {
   capabilityLabel,
@@ -326,7 +327,7 @@ function ModelRow({
    * THE 409 SENTENCE, RENDERED VERBATIM, and it is the only thing that tells the operator what to do
    * next: clear the embedding designation first, read the readiness verdict, then delete.
    *
-   * `deleteConflictMessage` IS IMPORTED FROM `features/providers/api.ts` AND IS NOT A SECOND COPY —
+   * `actionableConflictMessage` IS IMPORTED FROM `lib/api/actionable-conflict.ts` AND IS NOT A SECOND COPY —
    * that is the point, and it is worth the cross-feature import. The inference it performs is
    * subtle: `KbError` carries no HTTP status, the taxonomy has no 409 row (409 is a RENDERING of
    * `internal_dependency` for an unclassified 4xx our own code raised), and `retryable` is false for
@@ -343,7 +344,7 @@ function ModelRow({
   const deleteError =
     remove.error === null
       ? null
-      : (deleteConflictMessage(remove.error) ?? actionErrorCopy(remove.error));
+      : (actionableConflictMessage(remove.error) ?? actionErrorCopy(remove.error));
 
   /** The toggle's own failure. It has no 409 case of its own, so it is always the class-mapped copy. */
   const toggleError = toggle.error === null ? null : actionErrorCopy(toggle.error);

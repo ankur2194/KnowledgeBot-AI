@@ -2,6 +2,10 @@
 
 declare(strict_types=1);
 
+use App\Http\Controllers\Api\V1\BotController;
+use App\Http\Controllers\Api\V1\BotDomainController;
+use App\Http\Controllers\Api\V1\BotStarterQuestionController;
+use App\Http\Controllers\Api\V1\BotStatusController;
 use App\Http\Controllers\Api\V1\EmbeddingConfigurationController;
 use App\Http\Controllers\Api\V1\InvitationController;
 use App\Http\Controllers\Api\V1\MemberController;
@@ -255,6 +259,230 @@ Route::middleware(['auth:sanctum', 'surface:admin', 'org.member', 'verified', 't
 
         Route::delete('/provider-connections/{providerConnection}/models/{model}', [ProviderModelController::class, 'destroy'])
             ->name('provider-connections.models.destroy');
+
+        /*
+         * BOTS — the retrieval scope (docs/02 §8.3, docs/11 §16.3).
+         *
+         * `{bot}` RESOLVES THROUGH `$organization->bots()` because the group calls
+         * ->scopeBindings(). That is the load-bearing part and it matters more here than anywhere
+         * else on this surface: `bot_ids` is one of the four mandatory Qdrant filter terms, so a
+         * bot resolved out of the wrong organization does not produce a wrong answer — it produces
+         * a correct-looking answer, at normal latency, with a 200, citing a document the
+         * organization never uploaded. A foreign or unknown id 404s at BINDING time, before any
+         * policy is constructed and before the row is in memory.
+         *
+         * THE SEGMENT NAME IS THE WIRING. `Model::childRouteBindingRelationshipName()` is
+         * `Str::plural(Str::camel($childType))`, so `{bot}` resolves through `bots()` —
+         * App\Models\Organization::bots(), which exists for exactly this and whose docblock says
+         * so. `{knowledgeBot}` would derive `knowledgeBots()`, which does not exist, and every
+         * request here would 404.
+         *
+         * `public_bot_id` IS NOT THE ROUTE KEY AND `getRouteKeyName()` IS NOT OVERRIDDEN. The
+         * admin surface addresses a bot by its ULID, under an organization the caller has proven
+         * membership of; the opaque public token addresses it on the UNAUTHENTICATED surfaces —
+         * hosted chat, the widget bootstrap, the theme stylesheet — and those resolve their own
+         * binding, organization-agnostically, because there is no organization in hand at that
+         * point. Merging the two keys would make one leaked widget snippet address the
+         * configuration endpoint too. App\Models\Bot records this at length.
+         *
+         * `index` and `show` demand `bots.view`, which ALL FOUR roles hold — Phase C6 has a
+         * Knowledge Manager assign sources TO bots and Phase E has an Analyst review conversations
+         * PER bot, and §6.4/§6.5 mention bots in neither direction, so both grants are an
+         * extension of the specification recorded in App\Enums\Permission. The three write verbs
+         * demand `bots.manage`, which neither of those roles holds. The split is per action rather
+         * than per controller, so tests/Security/BotEndpointAccessTest.php asserts it per action —
+         * a uniform dataset goes green against a `view` silently mapped to `bots.manage`, and
+         * every role that holds `bots.manage` also holds `bots.view`, so the mis-mapping would
+         * show up only for the two roles a hand-written dataset under-covers.
+         *
+         * `update` IS A PATCH AND NOT A PUT, which is the OPPOSITE of the call the provider-model
+         * routes above make, and the difference is the field count. There, seven mutable
+         * attributes made "a body that changes nothing is refused" expressible as
+         * `required_without_all` naming six siblings on each of seven fields, and a PUT was the
+         * readable alternative. Here there are twenty-five, so that spelling is unreadable — and a
+         * PUT is not available either, because a bot's complete state includes `public_bot_id`,
+         * `organization_id` and `retrieval_configuration_version`, none of which this endpoint may
+         * ever accept. So it is a PATCH, and the empty-body refusal moves into the controller as a
+         * 422 that carries a real per-field map. BotController::update() states the whole
+         * argument.
+         *
+         * NO SECOND LIMITER, unlike the credential rotation above. Nothing on these five routes
+         * touches a credential or verifies a password, so `throttle:admin`'s (organization, user)
+         * budget is the whole of check 6 here. The one destructive action removes a row this
+         * organization owns outright rather than a key that authenticates it, so §18.3
+         * re-authentication does not apply — a confirmation belongs in the console.
+         *
+         * A GUARDED HARD DELETE, and the guard is not a refusal: the three child tables reference
+         * `bots (organization_id, id)` with ON DELETE RESTRICT, so the repository removes them in
+         * dependency order inside the same transaction. That is a deliberate cascade written at
+         * one call site rather than a property of the schema, and EloquentBotRepository::delete()
+         * records why the keys are not CASCADE. What IS refused, with a 409, is any edit to an
+         * archived bot and any write that would leave the bot `published` with no model — both in
+         * BotService, both decided against the state the write leaves behind rather than against
+         * the request body.
+         */
+        Route::get('/bots', [BotController::class, 'index'])
+            ->name('bots.index');
+
+        Route::post('/bots', [BotController::class, 'store'])
+            ->name('bots.store');
+
+        Route::get('/bots/{bot}', [BotController::class, 'show'])
+            ->name('bots.show');
+
+        Route::patch('/bots/{bot}', [BotController::class, 'update'])
+            ->name('bots.update');
+
+        Route::delete('/bots/{bot}', [BotController::class, 'destroy'])
+            ->name('bots.destroy');
+
+        /*
+         * THE LIFECYCLE TRANSITION, ON ITS OWN ROUTE.
+         *
+         * `status` used to be one of twenty-five optional fields on the PATCH above, and it was
+         * the only one of them that decides whether an END USER can reach the bot at all.
+         * `UpdateBotRequest` now declares it `prohibited` — a 422 naming this route rather than a
+         * silent drop, because an absent rule means `validated()` discards the field and a client
+         * that had not been updated would publish a bot, get a 200, and find it still in `draft`.
+         *
+         * A PUT AND NOT A PATCH: the body is the complete desired state of the one thing this
+         * route addresses. It is NOT idempotent in the strict sense — re-sending the status a bot
+         * already holds is a 422 — and that is a deliberate trade stated in
+         * `BotService::transition()`: a no-op would write a `bot.updated` audit row describing a
+         * change that did not happen, which makes the trail wrong in the one direction nobody
+         * checks it in. A transition endpoint is not a state assertion.
+         *
+         * THE GUARD IS NOT DUPLICATED HERE. `BotService::transition()` builds a one-column
+         * `BotEdit` and hands it to `BotService::update()`, so the archived read-only rule, the
+         * publish guard, the row lock and the audit row are the same code on both paths. The guard
+         * evaluates the RESULTING state rather than the transition, which is what makes "clear the
+         * model on an already-published bot" refuse by the same check that refuses "publish a
+         * model-less draft" — and its third refusal, "no assigned source", is still missing because
+         * `bot_source_assignments` is Phase C's table. The `TODO(phase-c)` in
+         * `BotService::assertPublishable()` stays.
+         *
+         * A SINGLE-ACTION CONTROLLER because `arch()->preset()->laravel()` limits a controller's
+         * public methods to the seven resource verbs plus `__construct`, `__invoke` and
+         * `middleware` — the same reason RotateProviderCredentialController exists. `[Class,
+         * '__invoke']` rather than the bare class string is no longer load-bearing
+         * (DumpOpenApiCommand reads `uses`) and is kept because it says which method runs at the
+         * call site.
+         *
+         * NO SECOND LIMITER. Publishing exposes a bot this organization owns; it touches no
+         * credential and verifies no password, so `throttle:admin`'s (organization, user) budget is
+         * the whole of check 6.
+         */
+        Route::put('/bots/{bot}/status', [BotStatusController::class, '__invoke'])
+            ->name('bots.status.update');
+
+        /*
+         * THE WIDGET ORIGIN ALLOW-LIST — a SECURITY CONTROL, not a preference (docs/02 §8.3,
+         * docs/11 §16.3).
+         *
+         * A row here is what lets a page on the public internet boot a chat widget that speaks with
+         * this organization's credential, on its corpus, against its quota — and every downstream
+         * check AGREES with it, because it has been told that this origin belongs to that bot.
+         * There is no later layer that catches a bad row.
+         *
+         * `{domain}` RESOLVES THROUGH `$bot->domains()` because the group calls ->scopeBindings(),
+         * and `{bot}` resolves through `$organization->bots()`. THE PARENT IS THE PRECEDING BOUND
+         * PARAMETER, NOT THE FIRST ONE: `Route::parentOfParameter()` returns
+         * `array_values($this->parameters)[$key - 1]`, so this is two scoped hops. That is what
+         * makes an allow-list entry belonging to ANOTHER BOT OF THE SAME ORGANIZATION a 404 at
+         * binding time — the case the composite foreign key `(organization_id, bot_id)` and the
+         * scoped binding exist for together, and the case no cross-tenant test can see. Losing it
+         * does not expose another tenant's row (`#[ScopedBy(OrganizationScope::class)]` still
+         * appends the organization predicate) — what is lost is the BOT predicate, which
+         * tests/Security/BotChildEndpointAccessTest.php asserts on its own.
+         *
+         * THE SEGMENT NAME IS THE WIRING. `Model::childRouteBindingRelationshipName()` is
+         * `Str::plural(Str::camel($childType))`, so `{domain}` derives `domains()` —
+         * App\Models\Bot::domains(), which exists for exactly this. `{botDomain}` would derive
+         * `botDomains()`, which does not, and every request here would 404.
+         *
+         * THERE IS NO WILDCARD GRAMMAR, in the request, in the schema, or in the eventual matcher.
+         * `App\Support\Web\ExactOrigin` refuses `*` outright and normalises what it accepts into
+         * the RFC 6454 serialisation a browser actually sends — lower-cased, one trailing slash
+         * dropped, a default port dropped — while REFUSING a non-empty path rather than trimming
+         * it, because trimming would widen the grant from one page to a whole host.
+         *
+         * `index` demands `bots.view`, which ALL FOUR roles hold: `App\Enums\Permission::BotsView`
+         * names "a bot's configuration, its origin allow-list, and its starter questions" in as
+         * many words. The three write verbs demand `bots.manage` through
+         * `BotPolicy::manageChildren()` — an ability that existed with NO CALL SITE until this
+         * route file, and one that authorizes against the PARENT BOT rather than the child row.
+         * That is its design: the three child models have no policies of their own, so
+         * `Gate::authorize('update', $domain)` would silently DENY (no policy means deny), and
+         * authorizing against the ORGANIZATION instead would pass for a caller addressing a bot
+         * they were never shown. The split is per action, so it is asserted per action.
+         *
+         * `update` CARRIES ONLY `status` AND `origin` IS IMMUTABLE. Editing an origin in place
+         * would carry an existing promotion across to a different origin — a grant moved silently.
+         * Remove and re-add; the trail then says both things happened.
+         *
+         * EVERY WRITE HERE IS AUDITED PER ROW, and that is finding L2 (`docs/22` § *The security
+         * read of the bots surface*) being closed rather than a general principle: a bot delete
+         * destroyed its allow-list with no record of what it permitted, contradicting the reason
+         * `bot_domains` gives for its own ON DELETE RESTRICT. `bot.domain.created`,
+         * `bot.domain.status_changed` and `bot.domain.deleted` carry one origin each, verbatim,
+         * with the actor and the time, and they outlive the bot; the `bot.*` rows now carry scalar
+         * summaries so a reader landing on `bot.deleted` knows to go looking for them.
+         */
+        Route::get('/bots/{bot}/domains', [BotDomainController::class, 'index'])
+            ->name('bots.domains.index');
+
+        Route::post('/bots/{bot}/domains', [BotDomainController::class, 'store'])
+            ->name('bots.domains.store');
+
+        Route::patch('/bots/{bot}/domains/{domain}', [BotDomainController::class, 'update'])
+            ->name('bots.domains.update');
+
+        Route::delete('/bots/{bot}/domains/{domain}', [BotDomainController::class, 'destroy'])
+            ->name('bots.domains.destroy');
+
+        /*
+         * THE STARTER QUESTIONS — the first-run suggestion chips (docs/02 §8.3, docs/11 §16.3).
+         *
+         * The LOWER-STAKES of the two child surfaces: a question authorizes nobody and bills
+         * nothing. It is still bot CONFIGURATION under §18.11, so the writes are audited — without
+         * the question TEXT, which is unbounded tenant prose of exactly the kind `AuditLogger`
+         * refuses from the `bot.*` rows. The asymmetry with the allow-list above is the point
+         * rather than an inconsistency: an origin string IS the security fact; a chip label is text
+         * on a button.
+         *
+         * `{starterQuestion}` DERIVES `starterQuestions()` through
+         * `Str::plural(Str::camel($childType))` — App\Models\Bot::starterQuestions(), which
+         * already orders by `sort_order`. Two scoped hops, exactly as for `{domain}` above.
+         *
+         * `sort_order` IS NOT A CREATE FIELD AND IS A "MOVE TO" INTENT ON THE PATCH.
+         * `bot_starter_questions_org_bot_position` is UNIQUE per bot and DELIBERATELY NOT
+         * DEFERRABLE — the migration records the trade — so a direct write collides with whichever
+         * row holds the target position, as SQLSTATE 23505 rendered as a 500 for a request the
+         * operator has every right to make. Every mutation re-sequences the whole list to 0..n-1
+         * inside one transaction under the bot's row lock, so a reorder or a delete moves the
+         * OTHER questions too and the console must re-read the collection rather than patch one
+         * row into a cached list.
+         *
+         * `index` demands `bots.view` and the three writes demand `bots.manage` through
+         * `manageChildren`, exactly as above.
+         */
+        Route::get('/bots/{bot}/starter-questions', [BotStarterQuestionController::class, 'index'])
+            ->name('bots.starter-questions.index');
+
+        Route::post('/bots/{bot}/starter-questions', [BotStarterQuestionController::class, 'store'])
+            ->name('bots.starter-questions.store');
+
+        Route::patch(
+            '/bots/{bot}/starter-questions/{starterQuestion}',
+            [BotStarterQuestionController::class, 'update'],
+        )
+            ->name('bots.starter-questions.update');
+
+        Route::delete(
+            '/bots/{bot}/starter-questions/{starterQuestion}',
+            [BotStarterQuestionController::class, 'destroy'],
+        )
+            ->name('bots.starter-questions.destroy');
 
         /*
          * MEMBERS AND INVITATIONS — org-scoped tenant data, so they go where all org-scoped data

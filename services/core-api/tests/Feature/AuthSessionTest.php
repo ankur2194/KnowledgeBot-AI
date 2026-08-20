@@ -31,8 +31,8 @@ use Tests\Support\SpaSession;
 | THE FIXTURES ARE TWO-ORGANIZATION WHEREVER A QUERY IS SCOPED, and org B's data is deliberately
 | distinguishable — a different name, a different actor, a different role. A one-organization
 | fixture cannot fail an isolation assertion: it passes with every tenant filter deleted.
-| TODO(fixtures): fold these into tests/Support/tenancy.php's tenantPair() once the bots and
-| knowledge_sources migrations exist and it can be implemented. It throws by design until then.
+| TODO(fixtures): fold these into tests/Support/tenancy.php's tenantPair() once the
+| knowledge_sources half lands in Phase C. Its bot half is already live.
 */
 
 beforeEach(function (): void {

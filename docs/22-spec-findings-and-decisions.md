@@ -4939,8 +4939,17 @@ registrable domain as the admin console, so a `.${DOMAIN}` cookie would reach it
 
 ### H9 — `tenantPair()` still throws, and the two-org fixtures are inline with a pointer
 
+**CLOSED IN PART on 2026-08-19 by ADR-058.** The `bots` migrations landed, the helper no longer
+raises, and its signature is unchanged. What is *not* closed is the canary's position: it sits in Org
+B's bot welcome message rather than in indexed source content, because the latter needs Phase C's
+migrations and a real Qdrant container — so a leak through retrieval, a citation title or an export
+is still not covered by this fixture. The finding text below is kept as written, because the reason a
+second helper was refused is the reason the Phase C move must be a *move* and not a second canary.
+The measuring command inverts on closure:
+
 ```bash
-grep -n 'not implemented' services/core-api/tests/Support/tenancy.php
+grep -n 'not implemented' services/core-api/tests/Support/tenancy.php   # was the finding; now silent
+grep -n 'TODO(phase-c)' services/core-api/tests/Support/tenancy.php     # what is still owed
 ```
 
 Unchanged and still blocked on the `bots`/`knowledge_sources` migrations, which this scope does not
@@ -5837,3 +5846,956 @@ Both are legitimate readings of §18.3, and only the rule form runs before the r
 says so and recommends the rule form wherever the action has a FormRequest.
 
 Owner: ruled by the session that owns `.claude/skills/**`; no code changed.
+
+## The bots-schema decisions — ADR-055…059
+
+Five decisions from 2026-08-19, from the step that landed the `bots` schema, its models, its policy,
+its permission grant, its factories, and the two primitives the rest of Phase B is built on. **No
+endpoint shipped in it** — routes and controllers are the next step — so everything here is schema,
+authorization vocabulary, test harness or wire shape, which is exactly the set a later change can
+*violate* without noticing. **The numbering starts at 055 because 044…046 are the shutdown-determinism
+effort of 2026-08-14 and 047…054 the provider-lifecycle effort earlier the same day**; check
+`grep -c '^### ADR-' docs/19-repo-structure-adrs.md` rather than trusting a number in prose (ADR-036).
+
+**The one that generalizes furthest is ADR-055, and it is a rule about `jsonb` rather than about
+fallback chains.** `postgresql-patterns` admits `jsonb` for three shapes, one of which is a
+configuration snapshot written once and read whole — and the fallback chain genuinely *is* part of the
+configuration snapshot that crosses the internal seam. That is the strongest argument for the `jsonb`
+spelling and it still loses, because **a snapshot is assembled from the source of truth and is not the
+source of truth.** What settles it is narrower and harder: `jsonb` cannot carry a foreign key, every
+other model reference in this schema is guarded by a composite key against `(organization_id, id)`
+precisely so a row cannot name another tenant's, and a `jsonb` chain would leave the *primary* model
+guarded by the database and its *replacements* guarded by whichever service last wrote them. The
+failure that follows is one tenant's conversations answered on another tenant's credential, with every
+downstream layer agreeing because it was told whose credential answers.
+
+**ADR-056 is the one to read if you only read one, because it is an extension of the specification
+rather than an interpretation of it.** §6.3 gives an Organization Administrator "Manage bots", so
+`bots.manage → Owner/Admin` is the spec as written. §6.4 and §6.5 **never mention bots in either
+direction**, and `bots.view` is granted to the Knowledge Manager and the Analyst anyway, against two
+named upcoming surfaces (Phase C6's source-to-bot assignment; Phase E's per-bot conversation review).
+It is labelled an extension at all three sites that encode it — `Permission::BotsView`,
+`OrgRole::grants()` and `RolePermissionMatrixTest`, which states the matrix independently — because a
+silence somebody filled in must not read later as something the spec said. Its most surprising
+consequence is one line: **the Analyst row is no longer all-false**, so "an analyst holds nothing" has
+gone from a true shortcut to a false one, and any dataset resting on it now passes for the wrong
+reason.
+
+**ADR-057 is ADR-030's consequence arriving in the control-plane schema**, and its load-bearing
+sentence is a negative: a `0.30` column default on `bots.evidence_threshold` **would fail no test**.
+`0.30` is a valid float on every scale, applying it to a logit passes almost everything, applying a
+logit threshold to a bounded score refuses almost everything, and nothing raises — only the refusal
+rate moves, only in aggregate, and since ADR-030 it moves for one tenant and not the rest. So the
+column is nullable with no default and stores its scale beside it, and
+`App\Enums\EvidenceThresholdScale` is deliberately the data plane's `RerankScale` **minus
+`uncalibrated`**: that member is not a scale, it is the statement that no characterization exists, so
+a threshold carrying it would be a stored contradiction. The enum and `bots_evidence_threshold_scale_check`
+are generated from one another at migration time and **must move together** — a fourth thresholdable
+member is an enum case *and* an `ALTER`, in one migration, or they drift silently.
+
+**ADR-058 closes § H9 in part and is the one whose trade-off is easiest to miss.** `tenantPair()` no
+longer throws, its signature is unchanged, and all six `TenantPair` properties were narrowed from
+`object` — not the two the brief named, because level 8 rejects a property read on `object` and a
+partial narrowing leaves the fixture unusable. The half that stays open is the canary's *position*:
+it is in Org B's bot welcome message, not in indexed source content, so the surfaces the canary was
+designed to police — retrieval, citations, exports — remain uncovered until Phase C. **The fixture is
+now half a fixture that looks whole**, and a green isolation suite is what makes that dangerous.
+
+**ADR-059** is the repo's first paginated envelope and is therefore the shape both planes are now
+built against: an object wrapper (because `#[ResponseShape]` cannot express "an array of" and
+`additionalProperties: false` cannot apply to an array schema), one shared `meta` component, and the
+**applied** query echoed back rather than the requested one, because `ListQuery::fromValidated()`
+clamps `per_page` silently for callers that never ran a FormRequest.
+
+**What this step did not touch:** finding **#79** stays pinned exactly as the 2026-08-12 ruling left
+it (§ *The rulings of 2026-08-12*, G1). Nothing here goes near `chunks`, `document_elements` or the
+`source_versions → source_items → knowledge_sources` cascade, and `ALLOWED_TABLES` is unchanged.
+
+## Found while landing the bots schema — 2026-08-19
+
+**K1 is a pre-existing flake this work only surfaced**; K2 was a schema asymmetry that had been
+invisible for as long as nothing referenced a model row; K3 is an encoding trap whose failure reads as
+a constraint bug; K4 and K5 are the two halves of the theme handoff that are *not* yet enforced
+anywhere, one of them named against a column that does not exist. **K6 was found by writing ADR-056
+rather than by the effort** — two docblocks cite §6.4 as an explicit exclusion where §6.4 is silent —
+which is a shape this document has recorded before — § **H14** (*"found by writing this section rather
+than by the effort"*) and § **G10–G15** (*"what recording them turned up"*) are the same thing: a
+defect surfaced by writing the record rather than by the work the record is about.
+
+### K1 — two auth specs post fixed literals against limiters keyed on those literals, so the suite 429s on a later run
+
+**Confirmed, not suspected**, and **not caused by this change.** The `control-plane-engineer` who
+found it reproduced it and then confirmed the diagnosis by flushing the limiter store and re-running
+clean. The two tests:
+
+```bash
+grep -n "malformed verification token" services/core-api/tests/Feature/AuthEmailVerificationTest.php
+grep -n "malformed address"            services/core-api/tests/Feature/AuthPasswordResetTest.php
+grep -n "RateLimiter::for('verification'\|RateLimiter::for('password-request'" \
+     services/core-api/app/Providers/AppServiceProvider.php
+```
+
+Both post a **fixed literal** — `'too-short'` as a token, `'not-an-address'` as an email — and both
+limiters key on exactly that value: `verification` on `'tok:'.hash('sha256', $token)`,
+`password-request` on `'acct:'.Str::lower($email)`. The store is persistent, so the budget carries
+across runs of the suite, and `SpaSession::isolateRateLimits()` randomizes **only the IP axis**
+(`REMOTE_ADDR` to a fresh `2001:db8::/32` address) — which is the axis that is not binding here. Every
+*other* test in `AuthPasswordResetTest` already uses `SpaSession::uniqueEmail()`; these two are the
+ones that did not.
+
+**A correction to the brief that reported this, and it makes the flake worse rather than better.** The
+brief described both as "6 per 60 minutes against `hash('sha256', …)`". That is the `verification`
+limiter only. `password-request`'s account axis is a *different* limiter with a *shorter* window and a
+*smaller* budget, keyed on the lower-cased submitted address and not on a digest — read the two
+`RateLimiter::for` blocks for the live numbers (ADR-036; `SpaSession::uniqueEmail()`'s own docblock
+states the same hazard). So the reset spec turns red after **fewer** consecutive runs than the
+verification one, in a **shorter** window, which is the direction that matters when somebody is
+deciding whether they can reproduce it.
+
+**Fix:** unique literals in those two tests, the same way every neighbouring test already does it. It
+is a one-line change in each and it is deliberately **not** made here. **Owner:** whoever owns the
+auth suite (`test-engineer` with `control-plane-engineer`); this step does not touch `tests/Feature/Auth*`.
+
+### K2 — `provider_models` carried no `UNIQUE (organization_id, id)`, so the composite FK that stops cross-tenant model naming failed with 42830
+
+**Closed by migration `2026_08_19_001300`.**
+
+```bash
+grep -rn 'org_scoped_key' services/core-api/database/migrations
+```
+
+PostgreSQL requires a referenced column list to be backed by a unique constraint, so
+`FOREIGN KEY (organization_id, provider_model_id) REFERENCES provider_models (organization_id, id)`
+fails outright with **42830 — "there is no unique constraint matching given keys"**. `bots` carries
+that key, `bot_fallback_models` carries it a second time, and the index has to exist before either
+table is created.
+
+**Why the asymmetry survived is the transferable part.** `provider_connections` got its identical
+index inside its own `CREATE TABLE` (`2026_08_07_000300`, which writes the reasoning out at length),
+because the tables pointing at it were already planned. `provider_models` did not, because at the time
+**nothing referenced a model row at all** — the catalogue was a leaf. A bot naming a model is what
+promotes it to an interior node, and the missing index is the other half of that promotion. The
+general shape: *a tenancy guard that is only needed by a referent is absent for exactly as long as
+there is no referent, and its absence is invisible until the first one arrives — as a raw SQLSTATE
+from a migration, not as a security finding.* Nothing sweeps for it; the check is to ask, whenever a
+table gains its first inbound composite key, whether the target index exists.
+
+It is its own migration rather than a line in `create_bots_table` because it is an **ALTER on a
+populated table and therefore has a lock story** — `SET lock_timeout`, `CREATE INDEX` taking a `SHARE`
+lock, and the deliberate refusal of `CONCURRENTLY` (which cannot run inside the transaction every
+migration in that directory runs inside). Folding it into a lock-free `CREATE` would hide that
+paragraph in a file whose every other statement has no lock story, which is exactly where the next
+reader would stop looking for one.
+
+### K3 — `bots.theme` cannot use Laravel's built-in `array` cast, and the failure reads as a constraint bug
+
+**Closed by `App\Support\Casts\JsonObjectCast`. Both halves were verified against the running server,
+not reasoned about.**
+
+PHP cannot distinguish an empty array from an empty map, and Eloquent's built-in `array` cast is
+`json_encode($value)`. So `$bot->theme = []` — the overwhelmingly common state, *"this bot uses the
+platform theme"* — encodes as `[]`, whose `jsonb_typeof` is `'array'`, while a themed bot encodes as
+`{}`. The column would then silently hold **two JSON types** depending on whether anybody had themed
+the bot.
+
+`bots_theme_vocabulary` is a **key-set subset test written without a subquery** (a CHECK may not
+contain one): `theme - 'primary' - 'accent' - 'radius' = '{}'::jsonb`. `'[]'::jsonb` is not
+`'{}'::jsonb`, so **with the built-in cast every unthemed bot is refused by the database** — and the
+error points at a constraint, so the first diagnosis is that the constraint is wrong rather than that
+the encoding is. Without the constraint it would be worse rather than better: `theme -> 'primary'`
+over an array returns NULL, a client generated from the OpenAPI document would declare an object and
+receive an array, and `Object.entries([])` happens to equal `[]` — so the renderer would work, on the
+empty case, forever, and break the first time a migration assumed the column's type.
+
+The cast is `(object)` on write, and that is the whole mechanism: it makes `[]` encode as `{}`, and it
+makes a **list** like `['primary','accent']` encode as `{"0":"primary","1":"accent"}`, which the
+key-set CHECK then refuses **by name** — the correct outcome, because a list is not a map and the
+refusal says so, whereas `["primary","accent"]` would produce a type failure whose message points at
+the type rather than at the keys. Three alternatives were rejected in the file's own docblock: a
+column default (present, and useless, because an explicit `[]` from a FormRequest overrides it); a
+mutator on the one model (which every future `jsonb` map would have to repeat, and the one somebody
+forgets fails in production); and `AsArrayObject` (Laravel's own answer, which encodes `{}` correctly
+and changes the PHP-side type at every read site to fix an encoding detail at one).
+
+### K4 — the theme's enforcement is split, and the half that is not yet built is the half a customer notices
+
+**Open. Owner: `control-plane-engineer`, on the bot write endpoint.**
+
+The database CHECK covers **the key set and the value types**: `theme` is an object, its keys are a
+subset of `{primary, accent, radius}`, and each present value is a string. It does **not** cover the
+value **grammar**, and three rules therefore live nowhere yet:
+
+* whether `primary` / `accent` are legal `oklch()` triples,
+* whether `radius` is one of the values `packages/design-tokens` publishes,
+* and the one easiest to miss — whether the supplied colour can be given **readable text at all**.
+
+The third is a refusal the renderer already makes. `apps/web/src/lib/theme.ts` measures an unreachable
+band (its docblock records L in [0.538, 0.634] for some chroma/hue combinations, bottoming out at
+4.143:1) and returns `null` rather than shipping unreadable text, and it flags the control plane
+explicitly for the matching write-side refusal. Until the FormRequest lands, **a customer can be told
+their colour was accepted and then be served the platform default**, with nothing anywhere saying why.
+
+The migration's docblock names this so that the PR writing the FormRequest cannot claim nobody said;
+this finding exists so that the gap is visible from the findings log too, rather than only from a
+comment inside the file that has the gap.
+
+**Work on the closing half was already in the working tree when this was written**, uncommitted and
+concurrent — `App\Rules\ReadableThemeColor`, `App\Support\Theme\OklchColor` and
+`App\Support\Theme\ThemeVocabulary` exist while no bot FormRequest does yet. So the honest status is
+*in flight, not neglected*, and the closing condition is a rule reaching a request class rather than a
+rule class existing:
+
+```bash
+ls services/core-api/app/Http/Requests | grep -i bot
+grep -rn 'ReadableThemeColor\|ThemeVocabulary' services/core-api/app/Http/Requests
+```
+
+Both silent means the refusal still has nowhere to run.
+
+### K5 — `apps/web`'s theme module flags the control plane about a column that is not called that
+
+**Open, and it is a pointer defect rather than a behaviour defect. Owner: `admin-web-engineer`** —
+`docs/` does not edit `apps/`.
+
+```bash
+grep -rn 'theme_configuration' apps/web/src/lib/theme.ts services/core-api
+```
+
+`apps/web/src/lib/theme.ts` reads *"Laravel validates `bots.theme_configuration` on write"*. The
+shipped column is `bots.theme` (migration `2026_08_19_001400`), and `theme_configuration` exists
+nowhere in `services/core-api`. `docs/11` §16.3 lists the field in prose as *"Theme configuration"*
+and names no column, so neither spelling contradicts the spec — but a cross-tree flag addressed to
+another agent that names a non-existent column is the kind of pointer that sends the reader looking
+for a migration that was never written, which is precisely the failure the K4 flag exists to prevent.
+Fix the name in the flag, not the column: `theme` is what the CHECK, the cast and the model all use.
+
+### K6 — two docblocks say §6.4 *explicitly excludes* bot publish; §6.4 is silent, and the same docblocks say so one paragraph later
+
+**Open, and found while writing ADR-056 rather than by the effort. Owner: `control-plane-engineer`
+(two comment lines). The grant is correct; one sentence of its stated justification is not.**
+
+```bash
+grep -rn 'excludes bot publish' services/core-api/app
+sed -n '/^### 6.4 Knowledge Manager/,/^### 6.5/p' docs/01-product-scope.md
+```
+
+`Permission::BotsManage` and `OrgRole::grants()` both justify `bots.manage → Owner/Admin` with *"§6.3
+lists 'Manage bots' as an Organization Administrator capability, and §6.4 **excludes bot publish**
+from the Knowledge Manager explicitly."* Read §6.4: it is a six-item responsibility list about
+uploads, websites, parsed content, reprocessing, source deletion and freshness. **Bots do not appear
+in it in either direction** — which is precisely what the *next* paragraph of both docblocks says,
+correctly, when it labels the `bots.view` grant an extension of the specification. One file therefore
+reads §6.4's silence as an explicit exclusion for `manage` and as a genuine silence for `view`, two
+paragraphs apart.
+
+**Nothing about the shipped grants changes.** `bots.manage → Owner/Admin` is supported by §6.2
+(*"Create and publish bots"*, Owner) and §6.3 (*"Manage bots"*, Administrator) without needing §6.4
+at all; the argument is *positive grant to two roles*, not *explicit denial to a third*. **Why it is
+worth two comment edits anyway:** an "explicitly excludes" claim is the sentence a later reviewer
+cites when refusing a Phase C6 or Phase E request, and citing it sends them to a section that says
+nothing — the exact failure mode ADR-056 exists to prevent, since the whole point of labelling the
+`bots.view` grant an extension is that a silence somebody filled in must not read later as something
+the spec said. A justification that overstates the spec in the *strict* direction is the mirror image
+of the one this repo has been careful about, and it is no more true.
+
+The fix is to say what §6.2 and §6.3 say and to stop citing §6.4 for `manage`. ADR-056's Decision
+paragraph already carries the corrected wording and a pointer here.
+
+## The security read of the bots surface — L1–L6, 2026-08-19
+
+A read-only audit of the two commits that landed the bots schema and its endpoints. Verdict was
+**needs-changes**: two Should-fix, no Blocking. Recorded under **L** because `S1`–`S17` above are the
+second scaffolding audit round and mean something else entirely — an earlier draft of ADR-056's
+amendment cited "finding S2" and landed on the evidence-threshold-scale finding, which is the
+pointer-goes-somewhere-false failure ADR-036 exists to prevent.
+
+What the read did **not** find is worth stating, because an audit that reports only its hits reads as
+a list of defects rather than as coverage: no dropped tenant predicate, no unscoped binding, no role
+mapped to the wrong permission, and no credential or prompt reaching a response, an audit row or a
+log. The composite-key claim was checked against the **live schema** (`psql \d bots`) rather than the
+migration source, and the grouped-OR filter against **dumped SQL** — the tenant predicate is `AND`ed
+outside the disjunction, which is the spelling that does not drop it off the second arm.
+
+| # | Finding | State |
+| --- | --- | --- |
+| **L1** | `BotResource` published `system_instruction` and `answer_style_instruction` unconditionally, so an **Analyst** — a role holding `bots.view` and no other permission in the catalog — could read every bot's operator-authored system prompt. Live, not latent. The codebase already contradicted itself: `AuditLogger` refuses that same field from `details` because it is "the exact string a prompt-injection review is about", while the API handed it over unredacted. ADR-056's justification named "the name, the model and the answer mode" and never mentioned it | **Closed** by the management-only projection amended into ADR-056. Verified by mutation: reverting the field to unconditional turns the knowledge_manager and analyst rows red |
+| **L2** | Deleting a bot destroys its widget origin allow-list with no record of what it permitted — contradicting the reason `bot_domains` gives for its own `ON DELETE RESTRICT`, which is that a security review may later need to reconstruct it. Latent: no route creates a domain yet | **Open**, owned by the step that lands the bot-domains endpoints. It goes live exactly when it is easiest to forget, because the delete path is already written and green |
+| **L3** | The bot delete path's TODO named conversations but not the Qdrant `bot_ids` payload term, the four Valkey key families, or any verification step | **Closed** as an enumeration. The Qdrant step is a payload-term **removal**, not a delete-by-filter — `bot_ids` is a list on each point, so filtering on it would destroy chunks other bots still answer from |
+| **L4** | A legal slug can match the log redactor's vendor-key shape (`sk-` + 12 chars), so a `bot.deleted` row can degrade to two bare fingerprints with no `_redacted` sibling | **Documented, not fixed.** Tenant self-harm along the designed degradation path |
+| **L5** | FormRequest validation runs before `Gate::authorize`, so a `bots.view`-only member gets 422 rather than 403 on a malformed body | **Accepted.** Ordering hygiene, not a leak: no query runs and the rule sets deliberately carry no `unique:`/`exists:` |
+| **L6** | No per-organization bot quota; the admin throttle is the only bound, and every bot row is a retrieval scope | **Open**, owned by the quotas step |
+
+**Carried forward to whoever builds the public runtime surface.** The publish guard deliberately says
+nothing about `access_mode`, and `published` + `public` is what makes a bot answerable anonymously.
+When that surface lands, an **empty** `bot_domains` allow-list must deny every origin — expressed as
+"some active row matches this exact origin", which is false for the empty set, and never as "no row
+forbids it", which is true for it. `BotDomainStatus::permitsEmbedding()` now carries that rule and
+still has no consumer.
+
+**One thing the read judged and did not flag**, recorded so the judgement is reviewable rather than
+invisible: `provider_connection_id` and `provider_model_id` are visible to an Analyst, who holds no
+`providers.view` and therefore cannot resolve either ULID to a vendor, a label or a `last_four`
+through any endpoint. What they learn is configuration topology — which bots share a connection. It
+is the only remaining thing on the row that ADR-056's justification does not name.
+
+## The Phase B audits — M1–M7, 2026-08-19
+
+Two read-only reads over the whole bots console effort. `git log --oneline b976735..HEAD` is the
+phase — **read the range rather than a count**: the number arrived in the commissioning brief as
+*fourteen*, was *thirteen* when measured, and moves again on the next commit, which makes it the
+worked example of the rule this file keeps applying to other people's sentences (ADR-036).
+
+**The verdicts, which are the half an audit write-up usually loses.** Security: **clean, with nits.**
+Contract: **consistent, with nits.** Neither read returned a **Blocking** issue. Between them they
+found **no cross-tenant read or write**, no dropped tenant predicate, no missing authorization check,
+no role mapped to the wrong permission, and **no path by which a provider credential reaches a
+response, a log or an audit row**. An audit recorded only as its hits reads as a worse result than it
+was, and the two Should-fix items below (M1, M3) were both found *inside* code that was otherwise
+doing the right thing.
+
+**Five claims were confirmed by execution rather than by reading** — each one had been flagged in the
+brief as *distrust this, it is asserted by the code that would be wrong*:
+
+| Claim distrusted | How it was confirmed |
+|---|---|
+| The composite foreign keys that stop a bot naming another tenant's model actually exist in the database, rather than only in a migration file | Queried from `pg_constraint` on the live schema, not read from `database/migrations/` |
+| A child row of one bot cannot resolve under a **different bot in the same organization** — the failure that every cross-tenant assertion in the repo passes against | `tests/Security/BotChildEndpointAccessTest.php` → *"404s a child of a DIFFERENT bot inside the SAME organization"*, asserted on its own for that reason |
+| The delete path's child summary is read **inside** the transaction, **before** the children are removed — a summary read anywhere else records zeroes for exactly the row that needed them | Executed against the delete path (`app/Services/Bots/BotService.php`, `BotChildSummary`); the recorded counts are non-zero and match the rows that were then deleted |
+| `tests/Contract/ThemeGrammarParityTest.php` genuinely **parses** `apps/web/src/lib/theme.ts` rather than restating its constants in PHP | Read the parse: `repoFile('apps/web/src/lib/theme.ts')` with the constants extracted by pattern. A test carrying its own copy of the regex would be the third copy and the first to go stale |
+| `public_bot_id` is unguessable, at all three layers that constrain it | `App\Support\Kb\PublicBotIdentifier` mints `pub_` + 16 CSPRNG bytes hex-encoded; `bots_public_bot_id_shape` CHECKs `^[A-Za-z0-9_-]{1,64}$`; the hosted-chat route segment refuses anything else. The minted grammar is a strict **subset** of the other two, so a minted value can never be the one that discovers a disagreement between them |
+
+**Why the prefix is `M`.** `K1`–`K6` are the bots-schema findings and `L1`–`L6` are the security read
+of the bots *surface*; `S1`–`S17` mean the second scaffolding audit round and have already caused one
+ADR to cite the wrong finding. `M` continues `K` and `L` and is **not** `docs/23`'s class letter `M`
+(*"needs a machine or a person this host does not have"*) — a class letter never appears as `§ M3`.
+
+**M1–M5 are this phase's own findings and are all fixed**, in commits `769fbf2` and `a0b2ea7`.
+**M6 and M7 are outside Phase B, already false before it started, and are recorded rather than
+fixed** — neither is in a tree `docs/` may write to.
+
+### M1 — `prohibited` does not mean "must not be present", and the mechanism is not the one the brief assumed *(CLOSED)*
+
+**Closed in `769fbf2`. Owner was `control-plane-engineer`; the rule is now `missing`.**
+
+```bash
+grep -n "'status' => \['missing'\]" services/core-api/app/Http/Requests/UpdateBotRequest.php
+grep -n 'function validateProhibited' -A3 \
+  services/core-api/vendor/laravel/framework/src/Illuminate/Validation/Concerns/ValidatesAttributes.php
+```
+
+`validateProhibited` is `! $this->validateRequired(...)`. So it **passes** for `null`, for `""` and
+for `[]` — and `validated()` keeps the key, because the field was declared. `ConvertEmptyStringsToNull`
+turns a cleared control's `""` into `null` before validation runs, which is exactly the shape a stale
+client still modelling `status` as an optional field emits. The key then reached `BotEdit`, the
+repository wrote `NULL` into a `NOT NULL` column, PostgreSQL raised **23502**, and **the rename
+carried in the same request was lost behind a 500 with no field-keyed error**. An array-valued
+`status` was worse still: a type error before the database was touched at all.
+
+`missing` is the rule that fails on **presence, regardless of value** — `! Arr::has($this->data,
+$attribute)`. The four passing shapes are now a dataset asserting a 422, the validation class, a
+`status`-keyed error, and that the accompanying rename did **not** land; plus the case that must
+still work, a PATCH carrying only a name.
+
+**The mechanism correction, recorded because it differs from the conclusion the brief handed over.**
+The brief reasoned that `Prohibited` behaves as an implicit rule. It is **not** in this framework's
+`$implicitRules` list, while `Missing` **is** — read `$implicitRules` in `Validation/Validator.php`.
+The consequence is a split the outcome table hides: for `null` and `[]` the rule **runs** and returns
+`! validateRequired`; for `""` it is **skipped entirely, *because* it is not implicit**. Both routes
+end in a pass, so the finding stands exactly as reported — but it was **measured against the
+installed framework rather than inherited**, and the two routes matter to anyone who later reasons
+about which values a `prohibited`-shaped rule can see.
+
+Each fix carries a **negative control**: reinstating the old rule fails exactly the three
+empty-value rows.
+
+### M2 — a homoglyph changed the host, in a file that stated twice that all its mutations are identity-preserving *(CLOSED)*
+
+**Closed in `769fbf2`. Fixed at the class, not at the instance.**
+
+```bash
+# Every surviving `mb_strtolower` hit is a DOCBLOCK WARNING against it, not a call. The live folds
+# are the two `strtolower(` lines; if that ever inverts, this finding has been reopened by an edit.
+grep -n 'mb_strtolower\|[^_]strtolower(' services/core-api/app/Support/Web/ExactOrigin.php
+```
+
+`App\Support\Web\ExactOrigin` folded case with `mb_strtolower()`, which applies **Unicode simple
+lowercase mapping**, while the control-character guard directly above it is byte-wise. **U+212A
+KELVIN SIGN lowercases to ASCII `k`**, so `https://Kelvin.example.com` — with the Kelvin sign in place
+of the K — was stored as `kelvin.example.com`. Two properties the file argues at length that it does
+**not** have were both false: the folding was not identity-preserving, and **two distinct inputs
+collided onto one row**. On a table whose whole purpose is that a stored origin equals the `Origin`
+header a browser sends, a fold that rewrites the host is a grant applied to a name the operator never
+entered.
+
+The repair is `strtolower()` — byte-wise, ASCII-only and locale-independent — and it closes the
+**class** rather than the instance: an exhaustive scan of U+0080–U+2FFFF confirms **exactly one**
+codepoint above ASCII folds into an ASCII letter this way. A non-ASCII host now reaches the punycode
+refusal the file always documented it as reaching. The fix is additive: no existing expectation
+moved, and the new rows expect the message an existing non-ASCII row already expected. Negative
+control: reinstating `mb_strtolower` fails exactly the two homoglyph rows.
+
+**The transferable shape:** a normalisation step and the guard above it must agree about what a
+*character* is. A byte-wise guard followed by a Unicode-aware transform means the transform can
+produce a string the guard never saw.
+
+### M3 — a data-loss path: a *withheld* field became a form value and a save wrote `null` over both operator-authored prompts *(CLOSED)*
+
+**Closed in `769fbf2` (server half) and `a0b2ea7` (client half). Recorded as decisions in
+[ADR-060](19-repo-structure-adrs.md) and [ADR-061](19-repo-structure-adrs.md); this entry is the
+defect.** It was **live on the shipped console**, not latent.
+
+Three independently-reasonable things composed into it:
+
+1. **The console re-derived `bots.manage` from the session role by hand** — a third spelling of the
+   server's grant map, answering a question about the **session** while ADR-056's projection is
+   resolved **per record, per request**.
+2. **The panel defaults builder seeded every field in its tuple from the resource unconditionally.**
+   So on a row fetched while the instruction fields were withheld — a role promoted mid-session, a
+   cached detail row, any refetch skew — both prompts arrived `null` and became form values.
+3. **`sometimes|nullable|string` accepted them.** `sometimes` leaves an **absent** key alone; a
+   **present `null` clears the column**. Saving a rename wrote `null` over both operator-authored
+   prompts and **returned 200**.
+
+The repair is at the seam, in both directions: the server states what it withheld
+(`instructions_visible`, ADR-060) and the client **omits** a withheld field from form state rather
+than seeding it null (ADR-061), with a conditionally-rendered card body as the second line, because
+React Hook Form submits a registered input's DOM value whether or not `defaultValues` named it.
+
+**Two testing notes worth more than the fix.** The window tests assert on **keys, never values** — a
+body carrying `system_instruction: null` is byte-identical to the destructive request, so a value
+assertion would have passed *against* the bug. And the first version of the component test was itself
+a **false green**: `elements()` on an unpainted page returns an empty list, so both *"no control"*
+assertions passed against a blank document. It now awaits a control the tab **does** render before
+asserting the absence of the ones it does not.
+
+The role helper survives as an **affordance only** — it gates whether an editor is offered at all —
+and its docblock now says so. The sentence removed from it, that it also decides whether those two
+fields *mean* anything, **was the bug**.
+
+### M4 — a mirrored type was hand-duplicated in `apps/web`, in the same phase as the docblock warning against exactly that duplication *(CLOSED)*
+
+**Closed in `a0b2ea7`.**
+
+```bash
+git show 62e06f9 -- apps/web/src/lib/table/envelope.ts | grep -n 'interface PaginationMeta'
+grep -n 'ListMetaResource' apps/web/src/lib/table/envelope.ts packages/contracts/src/resources/bots.ts
+```
+
+`apps/web/src/lib/table/envelope.ts` declared its own `PaginationMeta` — field for field identical to
+`ListMetaResource`, which `packages/contracts/src/resources/bots.ts` mirrors and
+`test/resource-drift.test.ts` compares against the generated OpenAPI document. The local copy landed
+in `62e06f9`, the phase's **first** commit, and survived to its last; `resource-drift.test.ts` was
+itself rewritten to catch this shape after `MemberResource` was hand-written a second time earlier in
+this repository, and says so in its own comments.
+
+**The window a local copy opens is narrow and silent, which is why it needs a finding rather than a
+tidy-up:** a server-side change to the `meta` block turns `@kb/contracts` red while `apps/web`
+compiles clean against a stale interface. `readMeta` guards only `page`, `per_page` and `total`, so
+the pager would go on reading a field that is no longer what it says, with the drift test green in
+the package that does not render it. Importing the type makes the drift test *this file's* drift test
+too. There is no local envelope type either, for the same reason.
+
+This is the failure `packages/contracts` exists to prevent and that `contract-steward` exists to
+catch — see `CLAUDE.md` § *Shared directories*: *"a second copy of the frame parser is the drift
+`contract-steward` exists to catch"*. It is recorded here because it got past the phase's own
+reviews for the whole phase.
+
+### M5 — the derived radius scale was declared on `:root`, so a scoped `--radius` was inert *(CLOSED)*
+
+**Closed in `a0b2ea7`, in `packages/design-tokens/scripts/build.mjs` and its generated output.**
+
+```bash
+grep -n 'radius' packages/design-tokens/generated/theme.css
+grep -n 'radius' packages/design-tokens/generated/tokens.css
+```
+
+A custom property's `var()` references are substituted **at the element that declares it**. The
+`@theme inline` block emitted `--radius-sm: var(--radius-sm)` — the self-reference shape that is
+correct and inert for every *literal* family (`--shadow-md`, `--text-h1`, `--font-sans`,
+`--ease-out`) because unlayered CSS beats layered CSS and the real value always wins. **Radius is the
+one family whose steps are derived from another property**, and for it that shape resolves the whole
+chain at `:root`: a `rounded-sm` utility read a fixed length computed from the *root* `--radius`, so
+writing `--radius` onto a nested element — which is exactly what the bot theme preview
+(`apps/web/src/components/bot-theme-scope.tsx`) does — **moved nothing**. The console preview and the
+shipped widget, which sets `--radius` at its own root, therefore disagreed about corner radius, and
+each looked right in isolation.
+
+The fix emits the **unsubstituted `calc()`** into the inline block, so the utility carries the
+expression and `var(--radius)` resolves at the element. `apps/web/tests/components/design-system-css.test.tsx`
+now walks every step of the scale at every value in the tenant radius enum. The `max(0px, …)` wrapper
+is load-bearing and unchanged: at `--radius: 0rem`, `calc(0rem - 6px)` is `-6px`, which is an invalid
+`border-radius` that the browser **discards** — the test probes for a fallback value precisely so a
+discarded declaration is something an assertion can see.
+
+### M6 — the *"CI greps for this"* claim shape survives the 2026-08-17 sweep, the sweep's own grep cannot see it, and it is not confined to `services/core-api`
+
+**Open, and wider than it was reported. Not fixed here — `docs/` does not edit `services/` or
+`apps/`. Owners are per tree: `control-plane-engineer`, `mobile-engineer`, `widget-sdk-engineer`,
+and whoever owns the `services/ai-service` file a hit lands in.**
+
+`CLAUDE.md` states that these claims were swept when `.github/` was deleted and that **a surviving
+one is a bug**. They survive. Three things about *how* they survive are the finding:
+
+**(1) The sweep's own measuring command returns clean against them.** The grep published in
+`CLAUDE.md` matched `gates\.yml` and `\.github/workflows` — the deleted gate by **filename** — while
+the surviving comments name it by **behaviour** and never once by filename. Run the published command
+and the tree looks swept. `CLAUDE.md`'s block now carries `CI grep` as a third alternative, and the
+comment beside it says why.
+
+**(2) The obvious widening is the wrong inflection, which is `docs/22` § H1 one level up.** Matching
+`CI greps` (plural) finds the `Controller.php`, `OrganizationScope.php`, `AppServiceProvider.php`,
+`InternalAiClient.php` and `config/services.php` comments and **misses**
+`app/Models/EmailVerificationToken.php` and `app/Models/OrganizationInvitation.php`, which both say
+*"the CI grep"* — singular. H1 is a tenancy gate that greps only the plural form of the bypass it
+exists to catch; this is the same defect in the sweep that was supposed to remove H1's kind of claim.
+Match `CI grep` and both inflections fall out.
+
+**(3) It was never a `services/core-api` problem.** The commissioning brief reported *five* comments
+in that service. Measured at the commit rather than in prose, the non-test trees of that service
+alone return more than five, and the same shape is live in `apps/mobile`, `apps/widget` and
+`services/ai-service` — including `services/ai-service/app/db/writes.py`, whose comment describes
+the allow-list gate that ADR-033 and `CLAUDE.md` both record as **deleted**.
+
+**Measure it at a commit, not in the working tree**, because a commit does not move while you read it
+and this tree does:
+
+```bash
+# a0b2ea7 is Phase B's last commit and is the state this finding was measured against. Swap it for
+# HEAD to see the state now — expect the two to differ while the repair below is in flight.
+git grep -n 'CI grep' a0b2ea7 -- apps services packages scripts infrastructure
+git grep -n 'CI grep' a0b2ea7 -- services/core-api/app services/core-api/config services/core-api/database
+```
+
+**This grep is a lead, not a verdict, and that is the reason it was not simply added to the sweep and
+left.** It matches the *corrections* as well as the claims: `apps/mobile/jest.config.js`,
+`apps/mobile/eslint.config.mjs` and `apps/mobile/README.md` each contain the sentence recording that
+**no such grep ever existed** (`docs/22` § *Found while completing the stubs*, the seventeenth false
+enforcement claim). Those hits are history and must stay. Every hit needs reading before it is
+touched — which is precisely the self-tripping shape the sweep's filename-only pattern was chosen to
+avoid, and the cost of avoiding it was blindness.
+
+**Why the surviving claims are load-bearing in the wrong direction.** A reader who finds
+`// CI greps for both` beside a rule concludes the rule is machine-checked and does not add a test.
+That is `docs/22` § F7 (a vendored ruleset counted by a gate and executed by nothing) and § F1–F13's
+seventeenth claim, again. The one to repair first is
+`services/core-api/app/Models/Scopes/OrganizationScope.php`, because **ADR-043's decision rests on
+it**: the bypass alternative is barred there on the stated ground that *the CI grep cannot see its
+singular form*, and that argument now cites a mechanism which does not exist. The correct repair is
+the one the 2026-08-17 sweep used elsewhere — state the invariant, say it is held by review and by
+the test suites, and name the test where one exists.
+
+**In flight, not neglected, and recorded that way for the same reason § K4 was.** While this finding
+was being written, `git status --porcelain` showed `Controller.php`, `OrganizationScope.php`,
+`AppServiceProvider.php` and `InternalAiClient.php` modified in the working tree, alongside an
+untracked `services/core-api/tests/Arch/StringLevelDoctrineTest.php` whose opening comment reads
+*"Each rule below was a CI grep"* — a `test-engineer` converting the claims into assertions rather
+than into prose, which is the better of the two repairs. That work is uncommitted and this record
+does not depend on it: the closing condition is the **committed** state, and the check is the first
+command above run against a commit that contains the repair.
+
+### M7 — `kb-design-language`'s Definition of done asserts a `tokens.widget.css` subset check "asserted in CI"; the file, the export and the CI all do not exist
+
+**Open. Not fixed here — `docs/` never edits `.claude/skills/**`. Owner: the skill's owner, with
+`admin-web-engineer` (`packages/design-tokens`) and `widget-sdk-engineer` (`apps/widget`).**
+
+```bash
+grep -n 'tokens.widget.css' .claude/skills/kb-design-language/SKILL.md \
+                            .claude/skills/kb-design-language/references/cross-platform.md
+ls packages/design-tokens/generated/                     # index.d.ts index.js theme.css tokens.css
+sed -n '/"exports"/,/^  }/p' packages/design-tokens/package.json
+grep -rn 'design-tokens' apps/widget/src/app/styles.css  # imports tokens.css, the FULL set
+```
+
+The skill's Definition of done reads *"`tokens.widget.css` is a strict subset of `tokens.css` **by
+name in both the `:root` and `.dark` blocks**, asserted in CI"*, and `references/cross-platform.md`
+carries a table row for the file, a `node -e` verification recipe and a second checklist entry.
+**No such file is generated, no package export names it, `apps/widget` imports the full `tokens.css`,
+and there is no CI** (`.github/` was deleted 2026-08-17). `packages/design-tokens/src/tokens.json`
+already knows: its `_legacyColors_note` says the removal of the legacy aliases belongs to
+`widget-sdk-engineer` *"together with the tokens.widget.css subset that does not exist yet."* So one
+file in the repository states the truth while the skill that governs it states a check.
+
+**Why this one matters more than an ordinary stale line.** A widget agent in a later phase reads a
+skill's Definition of done as a list of things to satisfy before shipping, and this entry sends it
+looking for a build entry point, a generated artifact and a CI job that have never existed —
+the pointer-leads-somewhere-false failure mode this file has recorded against itself repeatedly
+(§ G16, § K5, and the `S2`/`L2` citation slip at the head of § *The security read of the bots
+surface*). The budget argument behind the entry is **sound and unaffected**: custom properties are
+not tree-shaken, so the full token set is dead weight against the widget's brotli shell budget. What
+is false is only the claim that anything checks it. The honest repair is to state the subset rule as
+a rule and name what would verify it — the `node -e` recipe already in `cross-platform.md` — rather
+than to assert a gate.
+
+**Where the specification and a skill disagree, documented rather than resolved.** `docs/23` carries
+`tailwind-shadcn/SKILL.md:64` as class **D**: *"the spec does not enumerate `theme_configuration`; an
+ADR should ratify this list before the first migration."* **The first migration has now landed and
+the list was not ratified.**
+
+```bash
+grep -n "the tenant contributes six scalars" .claude/skills/tailwind-shadcn/SKILL.md
+grep -n "theme - 'primary'" services/core-api/database/migrations/2026_08_19_001400_create_bots_table.php
+grep -n 'logo_object_key\|avatar_object_key\|default_mode' \
+  services/core-api/database/migrations/2026_08_19_001400_create_bots_table.php   # silent
+```
+
+The skill names **six** tenant scalars — `primary`, `accent`, `radius`, `logo_object_key`,
+`avatar_object_key`, `default_mode` — on a column it calls `theme_configuration`. The shipped column
+is `bots.theme` (§ K5) and its `bots_theme_vocabulary` CHECK admits **`primary`, `accent`, `radius`
+and nothing else**; the remaining three have **no column anywhere on `bots`**, in the jsonb map or
+beside it. So the divergence is not a narrower key set — it is three scalars the skill says a tenant
+contributes and that the schema has no place to put.
+
+Documented, not resolved: `docs/` does not edit `.claude/skills/**`, and the two candidate answers
+are a real decision rather than a wording fix — either the three missing scalars are a Phase C/D
+column addition, or the skill is describing a surface this product will not have. That is
+`admin-web-engineer`'s to rule, and it needs an ADR whichever way it goes, exactly as the
+`UNVERIFIED` marker asked for before the migration existed.
+
+## The Phase B review fixes — N1–N7, 2026-08-20
+
+A `/code-review` over `main…claude/phase-b-task-planning-ay7299` — the same Phase B branch § *The
+Phase B audits* reads — returned **seven** findings. All seven are fixed, and the effort reports the
+suites green; this section was written from `docs/`, which does not run them, so that verdict is
+recorded as reported rather than as measured here.
+
+**Two of the seven were wrong about the mechanism**, and that is the reason this section exists at
+all rather than being a changelog. N4's premise was false outright — the rule the review said refused
+a legitimate PATCH did not refuse it, and could not have — and N5's was false in part. Both were
+caught because each was measured against the installed framework before anything was edited. The
+closing note ties that to § *The rulings of 2026-08-12*, which records the same shape for a ruling.
+
+**No ADR is warranted, and saying so is part of the record.** None of the seven changes an
+architectural decision: five are defects against a decision already made, one (N3) adds a mechanism
+in the shape of the two the repository already uses, and **N7 is a decision being *upheld* under
+pressure** — the obvious repair was an optimistic update, an existing decision forbids it, and the
+fix was built the harder way so the decision survives. An ADR that ratified any of these would be
+recording a choice nobody made.
+
+**Why the prefix is `N`.** `K1`–`K6` are the bots-schema findings, `L1`–`L6` the security read of the
+bots surface, `M1`–`M7` the Phase B audits; `N` continues them. It is also **not** one of
+`docs/23`'s class letters — those are `M`, `S`, `V`, `P`, `X`, `D`, `W` — so `§ N4` cannot be read as
+a class the way `§ M3` once could.
+
+**Measure these in the working tree, not at a commit.** The seven fixes were uncommitted when this
+was written (`CLAUDE.md` § *Git*: Ankur reviews and commits), so unlike § M6 the check here is
+`git diff` and `git status --porcelain`, and the line numbers below will move the moment they land.
+Where a fact is likely to move, a grep is given instead.
+
+### N1 — the Publishing tab reported unsaved edits for a form holding exactly the stored row, and the same defect was in six more places *(CLOSED)*
+
+```bash
+grep -n 'export const numericFieldValue\|export const clearableFieldValue' \
+  apps/web/src/features/bots/bot-model-shared.ts
+grep -rn 'clearableFieldValue\|numericFieldValue' apps/web/src/features/bots/
+```
+
+`formState.isDirty` compares form state against `defaultValues` **before the resolver runs**, so the
+schema's `z.preprocess` never sees the comparison. `botPanelDefaults` seeds the three
+`nullableIntField` limits (`rate_limit_per_minute`, `rate_limit_per_day`, `retention_days`) from the
+resource as **numbers**, while the three number inputs on the Publishing tab wrote the raw DOM string
+into form state. `'60' !== 60`, so typing a seeded value back in — or merely touching and restoring
+it — left the panel dirty **permanently**, and `useUnsavedBotEdits` then had the editor shell
+interpose its *"Leave without saving?"* dialog on every tab change for a form nobody had edited. That
+is the one dialog in the editor whose whole purpose is to stop an operator losing work, and this
+taught them to click through it.
+
+**The repo already held the fix, one tab over.** `numericFieldValue` in
+`apps/web/src/features/bots/bot-model-shared.ts:251` exists for exactly this failure and its docblock
+says so in the same words with a different literal (`'20' !== 20`); the Model tab used it and the
+Publishing tab did not. The repair adopts `asFieldText` for the read direction and
+`numericFieldValue(raw, null)` for the write, and **deletes two private near-duplicates**
+(`numberText`, `clearableTextValue`) that did the read half correctly and the write half not at all.
+
+**The part worth recording is that the defect was in seven places rather than one.** The review found
+the three number inputs. `consent_text` on the same tab had it in text form, and so did **all five**
+`clearableText` fields on the Identity tab — `description`, `welcome_message`, `placeholder_text`,
+`system_instruction`, `answer_style_instruction`. `clearableText` preprocesses blank-or-whitespace to
+`null` (which is what `TrimStrings` then `ConvertEmptyStringsToNull` do server-side before any rule),
+so a control writing the raw `''` leaves `'' !== null` against a stored null, and a type-and-delete
+arms the guard the same way. A new `clearableFieldValue`
+(`bot-model-shared.ts:277`) is that preprocess expression and nothing else — deliberately **not**
+trimming, because trimming into form state moves the caret and eats a space the operator is still
+typing after. **This is ADR-036's lesson in component form: a private copy of a shared helper is
+where the fix fails to arrive**, and it is § M4 again one layer down — there a hand-copied *type*,
+here a hand-copied *helper*.
+
+**Deliberately not changed, and the distinction is the finding's edge.**
+`bot-create-dialog.tsx`'s `description` is the same code shape and is **not** the same defect:
+`botCreateDefaults()` seeds it as `''`, and that dialog reads no `isDirty` at all. Mapping blank to
+`null` there would make form state disagree with the factory that seeded it, to fix nothing. The
+comment beside the control now says that, so the next reader sweeping for this shape does not
+"complete" the sweep by breaking it.
+
+### N2 — the create-bot dialog reopened holding a slug the server had rejected, under a stale 422 *(CLOSED)*
+
+```bash
+grep -n 'DialogTrigger asChild\|function CreateBotForm' apps/web/src/features/bots/bot-create-dialog.tsx
+grep -n 'form.reset' apps/web/src/features/bots/bot-create-dialog.tsx   # expect: nothing
+```
+
+`useForm` and `useMutation` sat in `CreateBotForOrganization`, a component that **never unmounts** —
+only the `<Dialog>` subtree was conditionally rendered — and `form.reset()` ran in `onSuccess`
+alone. There are five ways to close that dialog (Cancel, Escape, the overlay, the corner X, a
+successful create) and the reset covered one. Submit a duplicate handle, press Escape, reopen: the
+refused slug and its 422 banner were both still there, an error about a request the operator had not
+just made. The component's own comment claimed *"the screen carries no form state … while it is
+closed"*, which was false the whole time.
+
+**The fix makes the comment true rather than adding four resets.** `<Dialog>` is now unconditional;
+the form and its mutation live in a child rendered inside `<DialogContent>`, which Radix unmounts on
+close; and `form.reset()` is **gone entirely**. Unmount covers all five paths, and a reset is a
+second, weaker spelling of the same intention — the shape that needed one is precisely the shape that
+forgot to call it. `queryClient` and the list query key stay in the parent on purpose, so
+`onSettled` still fires for a request that was in flight when the dialog closed.
+
+**The second-order gain is the reason this is not merely tidier.** Conditioning the `<Dialog>` root
+had also removed the node Radix restores focus to and the node its exit animation plays on, so
+**focus return and the close animation were both silently broken** — two behaviours the primitive is
+there to provide, and the old comment credited it with providing. A `DialogTrigger asChild` supplies
+the return target, and the regression test asserts it on `document.activeElement` after an
+**Escape** — chosen because it is the close path with no handler of ours on it, and therefore the one
+a per-path reset is likeliest to miss.
+
+### N3 — `admin.bots.index` published none of its five query parameters, so a generated client could not reach page 2 *(CLOSED)*
+
+```bash
+grep -n 'ProvidesOpenApiQueryParameters' services/core-api/app/Console/Commands/DumpOpenApiCommand.php \
+     services/core-api/app/Http/Requests/IndexBotsRequest.php
+grep -n 'public static function openApiQueryParameters' services/core-api/app/Support/Http/ListQuery.php
+```
+
+`DumpOpenApiCommand::parameters()` derived its entire output from `$route->parameterNames()`, which
+returns **URI placeholders and nothing else**, and hard-coded `'in' => 'path'`. It had no query
+branch because it had never needed one: `IndexBotsRequest` is this API's **first and only**
+query-string FormRequest. So the operation published `organization` and stopped, and a client
+generated from the committed document got `listBots(organization)` with no way to ask for a second
+page, choose a sort column, choose a direction, or pass a filter — against an endpoint that validates
+and honours all five. **Functionality removed with nothing reported**, which is the drift direction
+the contract suite exists to catch and the direction it is hardest to notice, because nothing fails.
+
+**Why it was not fixed by parsing `rules()`, which is the obvious design.** Two independent reasons,
+both recorded in the new interface's docblock so the next person does not re-propose it:
+
+1. **Mechanical.** `packages/contracts/rules/UpdateBotRequest.json` and its siblings are dumps of
+   `rules()` *after* Laravel stringified them, so a closed set arrives as the literal
+   `in:"id","name",…` — embedded quotes and all, because `Rule::in()` quotes every member. Reading an
+   `enum` back out means writing a parser for Laravel's rule serialization, complete with quoting,
+   escaping and the comma inside a value, against a format nobody promised to keep stable.
+2. **Substantive, and the stronger of the two.** The manifest **cannot express the facts a caller
+   most needs**. A validation rule has no vocabulary for a default: `page` is "an integer at least 1"
+   and says nothing about being 1 when absent, because the default is an argument to
+   `ListQuery::fromValidated()` and is therefore the *endpoint's* decision, not the rule's. Same for
+   `per_page` and `sort`. A document derived from the rules alone would publish three parameters
+   whose absent behaviour is exactly the part a client has to guess.
+
+The repair follows the two mechanisms already in this repository — `ProvidesOpenApiSchema` lets a
+Resource describe the JSON it emits, `#[ResponseShape]` names the status codes — with a third:
+`App\Support\Contracts\ProvidesOpenApiQueryParameters`, implemented by `IndexBotsRequest`, satisfied
+by a generic `ListQuery::openApiQueryParameters()` at `ListQuery.php:145`. **Its placement is the
+mechanism**: it sits directly beside `ListQuery::rules()` and reads every bound from the same
+constant the rule reads, so the two descriptions of one contract cannot drift without a reviewer
+seeing both. `DumpOpenApiCommand` gained one shared `formRequestClass()` for its two questions, so
+"which FormRequest does this action take" is answered once rather than by two reflections that can
+disagree.
+
+**The diff is `+63/−0`.** `organization` is byte-identical and still first, which is load-bearing:
+the committed document is compared byte for byte, so query parameters are appended and nothing above
+them moves. `tests/Contract/OpenApiDocumentTest.php` asserts the published values against
+`ListQuery`'s own constants and `IndexBotsRequest::SORTABLE` rather than against literals — a
+hard-coded `100` in the test would agree with a document describing a ceiling the server does not
+enforce.
+
+**And the thing this fix does not close, recorded because it is now load-bearing on a human.**
+Nothing verifies that the committed artifacts are current. `OpenApiDocumentTest.php:1349` already
+carries the note: the *"keeps the committed document current"* test called
+`kb:dump-openapi --check` at the default path, a CI step took the assertion over, and **the premise
+became true again on 2026-08-17 when `.github/` was deleted**. The suite proves the generator is
+deterministic and that `--check` *can* fail, against a temp path; it proves nothing about
+`packages/contracts/openapi/core-api.openapi.json`. Both dumps here were re-run by hand and both
+`--check`s are reported to exit 0 — unverified from `docs/`, which runs neither — and **the next
+change to `rules()`, and the next implementer of `ProvidesOpenApiQueryParameters`, needs the same
+manual step with nothing to remind them.** That is § *Removing CI/CD*'s "the committed OpenAPI
+artifact unchecked again", now with one more producer feeding it.
+
+### N4 — `UpdateBotRequest`'s `required_with`: the review's premise was wrong, and *that* is the finding *(CLOSED)*
+
+**Recorded as a correction, not as a bug fix.** A record written from the review's wording would be
+false, which is the § K1 and § M1 shape a third time: the reported defect was real in its
+*conclusion* and wrong in its *mechanism*, and only measurement told them apart.
+
+The review claimed `'provider_connection_id' => [… 'required_with:provider_model_id']` refused a
+legitimate model-only PATCH. **It did not, and it could not have.** The four reachable bodies,
+measured against the real `rules()` before anything was edited:
+
+| body | old behaviour |
+| --- | --- |
+| `{"provider_model_id":"01J…"}` | **passes** — no 422, the shape the review said was refused |
+| `{"provider_connection_id":null}` | **passes** the rule; the service refuses it |
+| `{"provider_connection_id":null,"provider_model_id":null}` | **passes** |
+| `{"provider_connection_id":null,"provider_model_id":"01J…"}` | **422** — the one shape the rule did decide |
+
+The mechanism is `sometimes`, which sits before `required_with` in the array:
+
+```bash
+grep -n 'function passesOptionalCheck' -A 10 \
+  services/core-api/vendor/laravel/framework/src/Illuminate/Validation/Validator.php
+```
+
+`passesOptionalCheck()` short-circuits **every remaining rule** for an absent key. So a body naming
+only the model never reached `required_with` at all, and a body clearing only the connection left the
+sibling absent and never reached it either. The rule therefore decided **one of four shapes,
+redundantly** — `BotService::assertModelSelection()` already refuses that same pair on that same
+field with a fuller message — and was **silent on the shape its own error message described**
+(*"Clearing the connection while keeping the model…"*, which is the connection-only body against a
+bot with a model stored).
+
+**It was still removed**, because the design the file's own comment states is the right one: one
+check on the **resulting** pair, in `BotService::assertModelSelection()`, reading the half the body
+did not name off the stored row through `resolved()`. `UpdateBotRequest.php:170` is now
+`['bail', 'sometimes', 'nullable', 'string', 'ulid']` and the `required_with` message is gone. **The
+only behavioural change** is that the fourth shape now receives the service's fuller message instead
+of a second, shorter one on the same field — two spellings of one refusal being how they drift.
+
+`StoreBotRequest` **keeps** the rule, and the asymmetry is the difference between a POST and a PATCH
+rather than an oversight: on a create the body *is* the resulting pair, so a declarative rule can
+decide it. The Zod mirror had to move with it — `crossField` was shared by both bot schemas and is
+now split into `crossFieldShared`, `crossFieldCreate` (which keeps `modelNeedsConnection`) and
+`crossFieldSettings` (which does not). Mirroring it on the settings schema anyway would make
+`@kb/contracts` refuse a body the server accepts, which the probe harness reports as *"form blocks
+input the server accepts"*.
+
+**The general rule, stated because it will recur on every PATCH surface this product grows:** *a
+validation rule sitting behind `sometimes` cannot enforce anything about an absent key, so a
+cross-field invariant on a PATCH has to be checked against the resulting state and not against the
+body.* The evidence pair is the counter-example that shows the rule is not "never use `required_with`
+on a PATCH": `evidence_threshold` and its scale are `required_with` each other on both verbs,
+correctly, because neither half means anything without the other **whatever is stored**.
+
+### N5 — audit rows describing edits that did not happen *(CLOSED)*
+
+```bash
+grep -n 'wasChanged' services/core-api/app/Repositories/Eloquent/EloquentBotRepository.php
+grep -n 'changed === \[\]' services/core-api/app/Repositories/Eloquent/EloquentBotStarterQuestionRepository.php
+```
+
+`BotService::update()` wrote a `bot.updated` row unconditionally. A PATCH naming a field at its
+current value passes the controller's empty-body guard, Eloquent finds the model clean and issues no
+UPDATE — `save()` reaches `performUpdate()` only when the model is dirty — and an **append-only** row
+then claimed an edit that never occurred. The trail was wrong in the one direction nobody audits it
+in: not a missing row, an invented one. The codebase already refused exactly this on exactly this
+ground in three places — `BotService::transition()`, `BotDomainService::changeStatus()`, and the
+controller's own empty-body message.
+
+**Why the fix is a gate and not a 422, which is the part that needed deciding.** `BotService::update()`
+deliberately **excludes the bot's own row** from the slug-collision check, on the recorded ground that
+*"a console that re-submits the whole form would report every save as a duplicate of itself"* — so a
+whole-form resubmit is a **supported shape** here, and `movesRetrievalConfiguration()` makes the same
+concession for a knob named at its stored value. Refusing the no-op would break the save button on an
+unchanged form. The lifecycle siblings that *do* refuse theirs are a genuinely different case: there
+the request names a **move**, and a move to the state you already hold is a caller who has misread the
+row rather than a form being saved.
+
+`EloquentBotRepository::update()` now gates the audit closure on `$bot->wasChanged()`
+(`EloquentBotRepository.php:294`). **`wasChanged()` and not a pre-save `isDirty()`**, because the two
+answer different questions and only one survives the version bump: `wasChanged()` reads `$changes`,
+which `performUpdate()` syncs, so it also reports true for the
+`retrieval_configuration_version` bump this method applies **itself** — correctly, since a moved
+configuration version *is* an edit and it invalidates every cached answer for the bot. A pre-save
+`isDirty()` would have missed it. `EloquentBotStarterQuestionRepository::update()` short-circuits on
+`$changed === []` (`:140`), where both branches above it are value comparisons rather than presence
+tests.
+
+**A correction to the review here too.** It claimed that path stored `changed: ''`. **It did not.**
+`AuditLogger::sanitize()` normalises with `mb_substr(trim($value), …)` and skips a value that was
+already empty on arrival — silently, and that silence is relied on by name elsewhere (`capabilities`
+on the provider-model operations is `implode(',', $flags)`, which legitimately produces `''`). So the
+key was simply **absent**, and the row read as an ordinary edit rather than as a vacuous one. **The
+defect was the row existing at all**, not its payload — and the payload being unremarkable is what
+made it survive the phase's own reviews.
+
+### N6 — the pager could print a row range past the total *(CLOSED)*
+
+`apps/web/src/components/server-data-table.tsx` derived `last = first + rowsOnPage - 1`, mixing two
+sources that do not move together. `pageIndex` and `pageSize` come from the **URL** and move
+synchronously on a click; `rowsOnPage` is the row model's length, which under TanStack Query's
+`placeholderData` is still the **previous page's** count until the fetch lands. Paging to a short
+final page therefore rendered, for the duration of the request, a window describing rows the envelope
+says do not exist — "126–150 of 137" on the surface whose entire job is to say how much there is.
+`canNext` was derived from `last` and inherited the same skew, so it could offer a Next past the end
+or, on a shrinking page, refuse one that exists.
+
+```bash
+grep -n 'Math.min(first + rowsOnPage\|const canNext' apps/web/src/components/server-data-table.tsx
+```
+
+`last` is now clamped to `rowCount` (`:514`) — the label may be a page behind but can never be
+nonsense — and `canNext` is `(pageIndex + 1) * pageSize < rowCount` (`:516`), derived from the URL
+and the envelope total **alone**, so the placeholder window cannot reach it. The regression test
+renders a 25-row page-5 window at `page=6` against a 137-row total and asserts the string `150`
+appears nowhere in the document, which is the assertion that would have failed before.
+
+### N7 — the origin status select snapped back mid-request, and the fix deliberately did **not** make it optimistic *(CLOSED)*
+
+**This is the one that upholds an existing decision under pressure, so the reasoning is the record
+and the diff is the footnote.**
+
+`OriginStatusSelect` is fully controlled on `row.status`, and the status mutation is
+invalidate-and-re-read. So choosing "Active" re-rendered the trigger still reading "Pending" for the
+whole PATCH **plus** the refetch — a control that visibly ignores the click, on the one screen where
+the control decides whether a page on the internet may boot this widget.
+
+The obvious repair is an optimistic update, and it was **explicitly rejected**:
+
+```bash
+grep -n 'optimistic flip would claim' apps/web/src/features/bots/bot-origins.tsx   # :176-177
+grep -rn 'onMutate' apps/web/src apps/web/tests                                     # expect: nothing
+```
+
+`bot-origins.tsx:176-177` states it: an optimistic flip *"would claim one the server may have
+refused, on the control that decides whether a page on the internet can boot this widget."* There are
+**zero `onMutate` calls anywhere in `apps/web`**, and three other files record the same decision for
+their own surfaces — `features/models/model-list.tsx:64` (*"an optimistic flip would claim a write
+that may have been refused"*), `app/(admin)/sources/page.tsx:17` (deletion and disable are two-phase
+and verified), and `features/bots/bot-starter-questions.tsx:82`. The one apparent counter-example is
+not one: `features/chat/chat-surface.tsx:79`'s "optimistic user turn" is local component state
+reconciled against the server's echo by `clientMessageId`, not a query-cache write.
+
+**The fix shows in-flight *intent* with no cache write.** `changeStatus.variables` is react-query's
+own record of the argument currently in flight, so the chosen status needs **no new state** that
+could disagree with it, no cache write and no rollback path; the cache holds the server's row
+throughout, and the instant the mutation settles every trigger falls back to `row.status`. Beside it:
+a spinner (`motion-reduce:animate-none`), `aria-busy` on the trigger, and an `sr-only`
+`role="status"` live region — because `aria-busy` is announced by nothing on its own and `disabled`
+is announced as "unavailable" with no reason, so without the region the only feedback was visual.
+
+**The regression test is the argument.** It holds the PATCH open, asserts the trigger reads the
+chosen value and is busy, then **has the server refuse** — answering with the row unchanged — and
+asserts the trigger settles back to "Pending". *That assertion is impossible to write under an
+optimistic update*, which is the point: a client that had written the cache would now be claiming a
+grant the server withheld and would need a rollback path to un-claim it. The test is in
+`apps/web/tests/components/bot-publishing-panel.test.tsx`, because `BotOrigins` renders inside that
+tab.
+
+This also carries § L2's warning forward unchanged: the delete path still destroys a bot's origin
+allow-list with no record of what it permitted, and nothing here touches that.
+
+### Two of seven were wrong about the mechanism, and both were caught by measuring first
+
+The review returned seven findings and **two of them misdescribed the mechanism** — N4 entirely, N5
+in part. Neither would have been visible from the diff. N4's premise was refuted by reading
+`passesOptionalCheck()` in the installed framework rather than reasoning about rule order; N5's by
+reading `AuditLogger::sanitize()` rather than trusting the reported payload. In both cases the
+*outcome* the review asked for was still right — remove the rule, stop writing the row — and the
+*reason* was not, which is precisely the combination that survives a fix and then misleads the next
+reader, because a record written from the review's wording would have been a confident false
+statement about how Laravel validates and how this repository audits.
+
+This file already has a convention for it. § *The rulings of 2026-08-12* records that **four of nine
+rulings went a different way from the brief that asked for them, and in three the investigation
+refuted the premise**, and says why that is written down: *"a ruling recorded only as its outcome
+invites the same question next quarter."* § K1 and § M1 apply the same treatment to a reported
+finding. **The same reasoning applies to a review finding, and this section is that convention being
+extended to one**: a review is a hypothesis with a suggested fix attached, the fix can be right while
+the hypothesis is wrong, and the cheap way to tell — measuring the claim against the installed
+dependency before editing anything — is also the only way. Applying the review's wording without it
+would have produced two entries here that read as authoritative and were false.
