@@ -1,0 +1,255 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Repositories\Contracts;
+
+use App\Enums\SourceState;
+use App\Models\KnowledgeSource;
+use App\Services\Sources\IngestionApplication;
+use App\Services\Sources\IngestionProgress;
+use App\Services\Sources\NewSource;
+use App\Services\Sources\SourceChildSummary;
+use App\Services\Sources\SourceEdit;
+use App\Support\Http\ListQuery;
+use Closure;
+use Illuminate\Contracts\Pagination\LengthAwarePaginator;
+
+/**
+ * The organization's knowledge sources, and the item/version rows underneath them.
+ *
+ * ── EVERY METHOD TAKES `$organizationId` FIRST, AND POSITIONALLY ──────────────────────────────
+ *
+ * The explicit predicate is the MECHANISM (`kb-tenancy-isolation`);
+ * `#[ScopedBy(OrganizationScope::class)]` on every model here is the BACKSTOP, and the two fail
+ * differently — the backstop reads the ambient `TenantContext`, so it fails in exactly the
+ * situation the explicit argument exists for: a QUEUE WORKER, which this surface has and the bot
+ * surface does not. `SubmitIngestionJob` runs in a pooled process whose previous occupant was
+ * another tenant, and `kb-tenancy-isolation` names that as the silent failure rather than the loud
+ * one — no tenant set raises, the PREVIOUS tenant still set returns plausible rows.
+ *
+ * ── WHAT A LEAK LOOKS LIKE ON THIS TABLE ──────────────────────────────────────────────────────
+ *
+ * A source resolved out of the wrong organization does not produce an error. `source_version_id` is
+ * one of the four mandatory Qdrant filter terms, and the set of live version ids is resolved HERE,
+ * in PostgreSQL, and shipped to the data plane — so a mis-scoped read becomes a well-formed answer
+ * at normal latency citing a document the organization never uploaded.
+ *
+ * ── EVERY MUTATING METHOD TAKES ITS AUDIT ROW AS A REQUIRED CLOSURE ───────────────────────────
+ *
+ * All six `source.*` operations are `ON_FAILURE_ABORT`, so a failed audit write must roll the state
+ * change back. `AuditLogger` opens no transaction of its own and `Illuminate\Support\Facades\DB` is
+ * arch-pinned to `App\Repositories\Eloquent`, so this layer is the only place the wrapping can
+ * happen. The closure is REQUIRED and `null` is not an accepted value, so a future caller cannot
+ * write the state change with no row.
+ */
+interface KnowledgeSourceRepositoryInterface
+{
+    /**
+     * One PAGE of this organization's sources.
+     *
+     * ORDER IS ALWAYS DETERMINISTIC AND THE TIE-BREAK IS NOT OPTIONAL. Offset pagination over an
+     * unordered result set may legally repeat on page 2 a row it already showed on page 1 —
+     * PostgreSQL gives no ordering guarantee without `ORDER BY`, and neither `name` nor `status` is
+     * unique within an organization. The sort column is followed by `id`, always, even when the
+     * sort column IS `id`.
+     *
+     * `deleted_at IS NOT NULL` rows are INCLUDED unless the caller filters them out, and that is a
+     * decision rather than an oversight: phase 1 of a two-phase delete leaves a row an operator has
+     * to be able to see, because "where did that source go" is asked precisely while the purge is
+     * in flight. Retrievability is decided by the STATUS FILTER, not by this list.
+     *
+     * @return LengthAwarePaginator<int, KnowledgeSource>
+     */
+    public function paginate(string $organizationId, ListQuery $query): LengthAwarePaginator;
+
+    /**
+     * One source of THIS organization, or null.
+     *
+     * IT EXISTS FOR THE QUEUE WORKER AND FOR NOTHING ELSE. Every HTTP path already holds the row —
+     * the scoped route binding resolved it through `$organization->sources()` and 404'd a foreign
+     * id at BINDING time, before any policy was constructed. A job has no route and no binding, so
+     * this is where its organization predicate becomes explicit rather than ambient.
+     */
+    public function find(string $organizationId, string $sourceId): ?KnowledgeSource;
+
+    /**
+     * Create one source, its first item, and the `Draft -> Queued` transition, in ONE transaction.
+     *
+     * ── THE ITEM IS NOT OPTIONAL AND IS NOT A SPECIAL CASE ────────────────────────────────────
+     *
+     * `kb-source-lifecycle`: every source has at least one `source_items` row, INCLUDING a
+     * single-file upload, because the pointer switch, the missing-page counter and citation
+     * provenance all key off `source_item_id`. Code that reads a version pointer off the SOURCE for
+     * uploads and off the ITEM for crawls diverges the first time somebody adds a second file, and
+     * it diverges silently, because each branch works alone.
+     *
+     * ── THE SOURCE ID ARRIVES AS AN ARGUMENT AND IS NOT GENERATED HERE ────────────────────────
+     *
+     * The caller mints it, because the pasted-text object is written to a SOURCE-SCOPED key before
+     * this transaction opens (`App\Support\Kb\ObjectKey`) and object storage does not participate
+     * in the transaction. An id generated by the INSERT would be an id the object could not name,
+     * which is how the key that nothing could delete came to exist. `HasUniqueIds::setUniqueIds()`
+     * assigns only when the key is empty, so a provided id means the model's generator never runs
+     * for this row — one generation site, not two, and the format still belongs to the model.
+     *
+     * @param  string  $sourceId  the ULID the caller has already used to build the storage key and
+     *                            will use to dispatch; minted by `KnowledgeSource::newUniqueId()`
+     * @param  string  $jobId  the ULID this dispatch is identified by, stamped onto the item so a
+     *                         callback naming any other job is ignored rather than compared
+     * @param  Closure(KnowledgeSource): void  $audit  invoked inside the transaction, after the
+     *                                                 INSERTs so both rows carry their ULIDs
+     */
+    public function create(
+        string $organizationId,
+        string $sourceId,
+        NewSource $input,
+        ?string $createdBy,
+        string $canonicalKey,
+        ?string $storageKey,
+        ?string $contentHash,
+        ?string $mime,
+        ?int $byteSize,
+        string $jobId,
+        Closure $audit,
+    ): KnowledgeSource;
+
+    /**
+     * Apply a partial edit under a row lock.
+     *
+     * @param  Closure(KnowledgeSource): void  $audit  invoked inside the transaction, and ONLY when
+     *                                                 the save genuinely changed the row — a
+     *                                                 whole-form resubmit that changes nothing must
+     *                                                 not leave a `source.updated` row asserting an
+     *                                                 edit that did not happen
+     * @return KnowledgeSource|null null when no such source exists in THIS organization
+     */
+    public function update(
+        string $organizationId,
+        string $sourceId,
+        SourceEdit $edit,
+        Closure $audit,
+    ): ?KnowledgeSource;
+
+    /**
+     * Move one source to `$target`, under a row lock, refusing anything the table forbids.
+     *
+     * THE LOCK IS WHAT MAKES `previous_status` TRUE. Both `source.disabled` and `source.enabled`
+     * echo it, and `AuditLogger` requires it read "under the same row lock that writes the new
+     * value, so two concurrent moves serialise and neither row can name a status the source never
+     * held".
+     *
+     * @param  bool  $verified  threaded into `SourceState::canTransitionTo()`. It defaults to false
+     *                          THERE, so a caller that forgets it is refused rather than publishing
+     *                          an unverified version; it is required HERE so forgetting is not
+     *                          expressible at all
+     * @param  Closure(KnowledgeSource, SourceState): void  $audit  the row, and the status it held
+     *                                                              before this call
+     * @return KnowledgeSource|null null when no such source exists in THIS organization
+     *
+     * @throws \App\Services\Sources\IllegalSourceTransition
+     */
+    public function transition(
+        string $organizationId,
+        string $sourceId,
+        SourceState $target,
+        bool $verified,
+        Closure $audit,
+    ): ?KnowledgeSource;
+
+    /**
+     * Re-submit an existing source: move it to `Queued` and claim every item for a NEW job.
+     *
+     * Claiming is the half a plain `transition()` cannot do. A reprocess dispatched while an
+     * earlier run is still in flight produces two live jobs whose sequences both start at 1, so
+     * stamping the new `current_job_id` and resetting `progress_sequence` is what makes the older
+     * run's frames ignorable rather than merely out of order.
+     *
+     * @param  Closure(KnowledgeSource, int): void  $audit  the row, and how many items were
+     *                                                      claimed — which is the `item_count` the
+     *                                                      reprocess audit row publishes as the
+     *                                                      scale of the work asked for. The prior
+     *                                                      status is deliberately NOT passed:
+     *                                                      `source.reprocess.requested` has no
+     *                                                      `previous_status` in its allow-list, so
+     *                                                      a closure that received one could only
+     *                                                      have it dropped and reported
+     * @return KnowledgeSource|null null when no such source exists in THIS organization
+     *
+     * @throws \App\Services\Sources\IllegalSourceTransition
+     */
+    public function requeue(
+        string $organizationId,
+        string $sourceId,
+        string $jobId,
+        Closure $audit,
+    ): ?KnowledgeSource;
+
+    /**
+     * PHASE 1 OF THE TWO-PHASE DELETE: stamp `deleted_at` and move the source to `Deleting`.
+     *
+     * NOT A HARD DELETE. `kb-deletion-and-verification` splits removal into an immediate logical
+     * exclusion and a background purge that PROVES it, and the purge is `deletion-engineer`'s on
+     * both sides of the seam. What this method owes is the immediate half: after it returns, the
+     * source is excluded from retrieval by the status filter and by the active-version pointer, and
+     * `purged_at` is still null because nothing has been proven yet.
+     *
+     * @param  Closure(KnowledgeSource): void  $audit  invoked inside the transaction, BEFORE phase
+     *                                                 2 removes anything, so the child counts it
+     *                                                 reads describe the rows that are about to go
+     * @return KnowledgeSource|null null when no such source exists in THIS organization
+     *
+     * @throws \App\Services\Sources\IllegalSourceTransition
+     */
+    public function softDelete(string $organizationId, string $sourceId, Closure $audit): ?KnowledgeSource;
+
+    /**
+     * How many items and versions this source has right now, with both tenant predicates.
+     */
+    public function childSummary(string $organizationId, string $sourceId): SourceChildSummary;
+
+    /**
+     * Whether any LIVE version of this source published with parser or OCR warnings.
+     *
+     * ── IT EXISTS SO RE-ENABLING RESTORES THE TRUTH RATHER THAN THE REQUEST ───────────────────
+     *
+     * `Ready` and `ReadyWithWarnings` are identical for retrieval, and they differ in the one thing
+     * a client must not be able to overwrite: whether this source's live content parsed cleanly
+     * (§8.11). So an enable resolves its target from the versions the ACTIVE-VERSION POINTERS name
+     * rather than from a field on the request.
+     *
+     * READ THROUGH THE POINTER, never through `activated_at IS NOT NULL AND retired_at IS NULL`.
+     * The partial unique index makes those agree today, and the pointer is the DEFINITION of live;
+     * the other reading is an inference from a constraint, and it is the reading that would survive
+     * somebody dropping the index.
+     */
+    public function hasWarnedActiveVersion(string $organizationId, string $sourceId): bool;
+
+    /**
+     * The `source_items` rows of one source, oldest first, for the ingestion submission body.
+     *
+     * @return list<\App\Models\SourceItem>
+     */
+    public function itemsFor(string $organizationId, string $sourceId): array;
+
+    /**
+     * Apply one ingestion progress frame, guarded, in ONE transaction.
+     *
+     * ── THE GUARD IS THE WHOLE METHOD ─────────────────────────────────────────────────────────
+     *
+     * `WHERE sequence > progress_sequence`, plus `current_job_id` equality, both read under a
+     * `lockForUpdate()` on the item. Without them a Celery retry re-emitting stage 6 after stage 9
+     * has landed flips a `ready` source back to `processing` and takes an already-published version
+     * out of retrieval — silently, with a 200 on both frames.
+     *
+     * @param  Closure(IngestionApplication): void  $audit  invoked inside the transaction, and only
+     *                                                      when the frame was applied
+     *
+     * @throws \App\Services\Sources\IllegalSourceTransition
+     */
+    public function applyIngestionProgress(
+        string $organizationId,
+        IngestionProgress $frame,
+        Closure $audit,
+    ): IngestionApplication;
+}

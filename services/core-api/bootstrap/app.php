@@ -175,9 +175,13 @@ return Application::configure(basePath: dirname(__DIR__))
         ]);
 
         $middleware->group('internal', [
+            // FIRST, AND BEFORE BINDINGS. Nothing on this surface has any other credential — no
+            // cookie, no bearer token, no session — so an unverified request must not reach a route
+            // model binding, a controller, or a database read. `SubstituteBindings` issues queries
+            // for the ids in the path; running it ahead of verification would make an unsigned
+            // request a probe.
+            \App\Http\Middleware\VerifyInternalSignature::class,
             \Illuminate\Routing\Middleware\SubstituteBindings::class,
-            // TODO(contracts): App\Http\Middleware\VerifyInternalSignature — HMAC + timestamp skew
-            // + X-KB-Request-Id replay nonce (kb-internal-api-contracts).
         ]);
 
         // MIDDLEWARE PRIORITY. The single ordering constraint that matters here is

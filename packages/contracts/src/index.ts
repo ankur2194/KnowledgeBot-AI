@@ -121,3 +121,18 @@ export type {
   ProviderModelCollectionResource,
   ProviderModelResource,
 } from './resources/provider-models.js';
+
+/**
+ * The knowledge-source admin surface. Same `export type` discipline, and the same reason this module
+ * holds no runtime value — with one asymmetry against `bots.ts` worth naming here rather than only in
+ * the module: its two closed vocabularies have NO tuple sibling behind `@kb/contracts/forms`, because
+ * no source form ships yet. `SourceStatus` is pinned to the server by the enum comparison in
+ * test/resource-drift.test.ts and by nothing else, which is the correct amount of pinning for a
+ * vocabulary nothing iterates.
+ */
+export type {
+  SourceCollectionResource,
+  SourceResource,
+  SourceStatus,
+  SourceType,
+} from './resources/sources.js';

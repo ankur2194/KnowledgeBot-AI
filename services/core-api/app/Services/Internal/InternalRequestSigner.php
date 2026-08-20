@@ -41,7 +41,23 @@ final class InternalRequestSigner
      */
     public function canonicalString(string $method, string $path, string $body, array $kbHeaders): string
     {
-        $timestamp = $kbHeaders['X-KB-Timestamp'] ?? '';
+        // CASE-INSENSITIVE, AND THAT IS NOT DEFENSIVENESS. This method serves BOTH directions:
+        // the outbound signer hands it the canonical `X-KB-Timestamp` spelling it is about to put
+        // on the wire, and the inbound VERIFIER hands it the set it recomputed from
+        // `$request->headers->all()`, which Symfony normalises to lower case. A literal key lookup
+        // silently yields the EMPTY STRING on the verifier's side, so the fourth line of the
+        // canonical string differs while every other line matches — and the only symptom is a 401
+        // on a request that is correct in every log. Measured, not imagined: it was this method's
+        // first bug.
+        $timestamp = '';
+
+        foreach ($kbHeaders as $name => $value) {
+            if (strcasecmp($name, 'X-KB-Timestamp') === 0) {
+                $timestamp = $value;
+
+                break;
+            }
+        }
 
         $canonical = $this->prefix."\n".strtoupper($method)."\n".$path."\n"
             .$timestamp."\n".hash('sha256', $body)."\n";

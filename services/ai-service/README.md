@@ -83,36 +83,72 @@ uv run python -c "from app.main import app"        # the app builds
 uv run celery -A app.worker inspect registered     # the worker resolves
 ```
 
-## Things CI will fail you for, that are not obvious
+## Sharp edges, and which of them anything actually enforces
 
-**Never name an ORM or a migration tool anywhere under `app/`.** The table allow-list gate
-greps that package case-insensitively for `create table`, `alter table`, `drop table`, and
-for the names of SQLAlchemy, SQLModel, Tortoise and Alembic. It has no `--include` filter,
-so a docstring, a comment, or a README nested under `app/` fails the build exactly like real
-code would. Keep prose of that kind in this file, which sits outside `app/`.
+This section used to be called "Things CI will fail you for". **There is no CI in this
+repository** — `.github/` held the gates and was deleted on 2026-08-17, and nothing replaced
+it. Some of what follows was a *design* rule that a gate happened to check; some was only ever
+an accommodation of a grep. They have different half-lives, so each item below says what the
+rule is and, separately, what enforces it: **nothing**, **a test**, or **Python itself**. Where
+the answer is "nothing", that is the useful part of the sentence — an unenforced rule you
+believe is enforced is worse than one you know is not.
 
-**The words `copy`, `update` and `delete from` in prose are write-gate matches.** The table
-allow-list gate greps `app/` for `(insert into|update|delete from|copy)\s+<word>`, so an
-ordinary English sentence — "a second copy here", "loads its own copy of every model",
-"update the pointer" — fails the job exactly like a stray `INSERT`. Two lines in this
-skeleton had to be reworded for this reason. Prefer "duplicate", "refresh" or "remove".
+**Never add an ORM or a migration tool under `app/`.** *Enforced by: nothing.* The rule is real
+and is about ownership — Laravel owns every migration, and a second migration authority against
+a schema we do not own is the failure it prevents. The check was a gate that grepped `app/`
+case-insensitively for `create table` / `alter table` / `drop table` and for the names of
+SQLAlchemy, SQLModel, Tortoise and Alembic. It is gone, so an `import alembic` under `app/`
+would land with nothing objecting. `scripts/security/rules/kb-python-tenancy.yaml` carries a
+semgrep rule matching those imports, but as of 2026-08-20 no Makefile target, script or workflow
+invokes semgrep (finding **F7**), so it records the intent rather than holding it.
 
-**`.count(` is a tenancy-gate match.** The Qdrant-filter gate greps for `count(`, which also
-matches `str.count(`, `list.count(` and `Counter(...).count(`. Any of them outside
-`app/retrieval/search.py` fails the job unless the line carries `# tenancy-exempt: <reason>`.
+> **Retired, not merely unenforced:** the ban on *naming* one of those tools in prose. That
+> gate had no `--include` filter, so a docstring or a comment under `app/` failed the build
+> exactly like an import would, and every explanation that needed to name a tool was exiled to
+> this file. That constraint no longer exists. `app/db/writes.py` now names four of them in its
+> own docstring, deliberately, because the clearest way to say what is forbidden is to say it.
 
-**Never add `app/providers/openai.py`.** It shadows the `openai` SDK on import, from inside
-the package that needs it. The adapter is `openai_adapter.py`.
+**The words `copy`, `update` and `delete from` in prose were write-gate matches.** *Enforced by:
+nothing — and there is nothing left to enforce.* The gate grepped `app/` for
+`(insert into|update|delete from|copy)\s+<word>`, so an ordinary English sentence — "a second
+copy here", "loads its own copy of every model", "update the pointer" — failed the job exactly
+like a stray `INSERT`. This was pure grep appeasement with no design behind it, and it is
+**withdrawn in full**: prefer whichever word is clearest, including `copy` and `update`. Kept
+only as history, because it explains a real artifact — a few lines in `app/` are worded
+"duplicate"/"refresh"/"remove" where a plainer word would have read better, and that is why. If
+you are reworking such a line, you may simply say what you mean.
 
-**A new table name in `app/db/writes.py` is a review stop.** `ALLOWED_TABLES` is the list —
-do not look for it, or for how long it is, in prose. A name may join it only by demonstrating
-all three properties its docstring sets out: the row is **derived and rebuildable** in the
-ADR-010 sense, **no public API path reads or writes it**, and **Laravel owns its migration**.
-Miss the second and the write lands beside Laravel's own writer with no policy check, no audit
-row and no framework-applied tenant scope — and it fails nowhere. CI pins the reviewed set by
-name (a `KB_TABLE_REVIEW_PIN` check, deleted with CI on 2026-08-17), deliberately not by count: a count is bumped in
-the same commit that breaks the rule, and it cannot see a swap or a rename at all.
+**`# tenancy-exempt: <reason>` is a convention, no longer a gate token.** *Enforced by:
+nothing.* The Qdrant-filter gate grepped `app/` for `count(` — which also matches
+`str.count(`, `list.count(` and `Counter(...).count(` — and failed any hit outside
+`app/retrieval/search.py` unless the line carried that marker. **Keep writing the marker.** It
+survives on its own merit as style: an unfiltered `count(` on a Qdrant client is a tenancy bug
+that reads as ordinary code, and the annotation is how the author states the org and version
+scope they reasoned about, for the reviewer who is now the only check. It is live in the tree
+(`app/ingestion/indexing/upserter.py:369`) and it means what it always meant. What changed is
+that omitting it now costs you a review comment instead of a red build — and that a
+false-positive match on `str.count(` no longer needs an annotation at all, so do not add one to
+a line that never touched a vector store.
 
-**`import ragas` must fail everywhere except `ai-worker-evaluation`.** `ragas` is a wheel
-extra, installed only by the `runtime-evaluation` image stage, and a test asserts the import
-raises in the API image. Import it inside the task body, never at module scope.
+**Never add `app/providers/openai.py`.** *Enforced by: Python itself.* It shadows the `openai`
+SDK on import, from inside the package that needs it, so the failure is immediate and
+unmissable rather than a gate's opinion. The adapter is `openai_adapter.py`.
+
+**A new table name in `app/db/writes.py` is a review stop.** *Enforced by: nothing.*
+`ALLOWED_TABLES` is the list — do not look for it, or for how long it is, in prose. A name may
+join it only by demonstrating all three properties its docstring sets out: the row is **derived
+and rebuildable** in the ADR-010 sense, **no public API path reads or writes it**, and **Laravel
+owns its migration**. Miss the second and the write lands beside Laravel's own writer with no
+policy check, no audit row and no framework-applied tenant scope — and it fails nowhere. A
+`KB_TABLE_REVIEW_PIN` check used to pin the reviewed set by name, deliberately not by count (a
+count is bumped in the same commit that breaks the rule, and cannot see a swap or a rename at
+all); it was deleted with the rest of CI on 2026-08-17. The reasoning for pinning by name still
+stands and nothing applies it, so the tuple's contents are now a pure review decision.
+
+**`import ragas` must fail everywhere except `ai-worker-evaluation`.** *Enforced by: a
+build-time assertion and two tests* — the one item here that something still checks. `ragas` is
+a wheel extra installed only by the `runtime-evaluation` image stage; `Dockerfile:372` runs an
+`importlib.util.find_spec('ragas')` probe in the runtime stage and fails the build if it
+resolves, and `tests/unit/test_evaluation_extra_pins.py` and
+`tests/unit/test_evaluation_judge_path.py` assert the containment and that nothing imports it at
+module scope. Import it inside the task body, never at module scope.

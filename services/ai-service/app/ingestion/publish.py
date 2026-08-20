@@ -12,9 +12,20 @@ This is not bureaucracy, and the failure it prevents is not a lost write. The pa
 index enforcing "at most one active version per item" is a *database* constraint; a second
 writer racing it raises an integrity error **inside a Celery task**, which retries, which
 raises again. Meanwhile the ingest reports success and the bot keeps answering from the
-previous version. The queue burns a worker forever and every dashboard is green. CI greps
-`app/` for an assignment to that column precisely because the symptom is so far from the
-cause — do not write that expression anywhere, including in a comment.
+previous version. The queue burns a worker forever and every dashboard is green.
+
+**Nothing stops you writing that assignment.** A gate used to grep `app/` for it, precisely
+because the symptom is so far from the cause; `.github/` was deleted on 2026-08-17 and nothing
+replaced it, no test asserts the column's absence from this tree, and `ALLOWED_TABLES` has no
+runtime guard behind it — it is a list a reviewer reads, not a check a statement passes. The one
+mechanism that is real is the database constraint, and it is the trap rather than the guard:
+`source_versions_one_active_per_item` exists as of Phase C1
+(`2026_08_20_002000_create_source_versions_table.php:227`), against a
+`source_items.current_version_id` that also now exists. So a second writer here does not fail to
+find a constraint — it finds one, inside a Celery task, in exactly the shape described above.
+The rule holds by review: do not write an assignment to that column anywhere in this tree. The
+old corollary "not even in a comment" was a property of the prose-blind grep and is retired
+along with it — this paragraph names the column four times on purpose.
 
 The split is drawn where the knowledge is: only the worker that wrote the points can prove
 they are all there, and only the control plane can decide what every tenant's next query sees.

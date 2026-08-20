@@ -1300,7 +1300,7 @@ it('publishes query parameters only where a request declares them', function ():
     // THE OTHER DIRECTION, and the one a single-endpoint assertion cannot see: a `parameters()` that
     // appended the list-query block to every operation would satisfy the test above and would put
     // `page` on `POST …/bots`. Only requests implementing `ProvidesOpenApiQueryParameters` may
-    // contribute, and `IndexBotsRequest` is currently the only one — Phases C4, D and E2 are
+    // contribute — `IndexBotsRequest` and `IndexSourcesRequest` today, and Phases D and E2 are
     // expected to add more, which is why this asserts the RULE rather than the count.
     $document = dumpDocument()['document'];
     $paths = $document['paths'] ?? null;
@@ -1326,10 +1326,18 @@ it('publishes query parameters only where a request declares them', function ():
         }
     }
 
-    // PINNED BY NAME AND NOT COUNTED (D29): a count says "expected 1, got 2" and a deliberate new
+    // PINNED BY NAME AND NOT COUNTED (D29): a count says "expected 2, got 3" and a deliberate new
     // paginated list fails identically to the block leaking onto an operation that never asked.
+    // ADDING A NAME HERE IS THE EXPECTED COST OF SHIPPING A NEW LIST, and it is the same shape as
+    // ScheduleTest's pinned entry set — the failure is the reviewer's cue that a new operation now
+    // publishes `page`, `per_page`, `sort`, `dir` and `filter`, and therefore that its sortable set
+    // is closed and its page size is capped. Sorted by path, which is the order `dumpDocument()`
+    // emits and therefore the order this array arrives in.
     expect(array_values(array_unique($withQuery)))
-        ->toBe(['GET /api/v1/organizations/{organization}/bots']);
+        ->toBe([
+            'GET /api/v1/organizations/{organization}/bots',
+            'GET /api/v1/organizations/{organization}/sources',
+        ]);
 });
 
 it('is byte-identical across two runs and --check is a real gate', function (): void {

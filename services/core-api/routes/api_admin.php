@@ -11,8 +11,11 @@ use App\Http\Controllers\Api\V1\InvitationController;
 use App\Http\Controllers\Api\V1\MemberController;
 use App\Http\Controllers\Api\V1\ProviderConnectionController;
 use App\Http\Controllers\Api\V1\ProviderModelController;
+use App\Http\Controllers\Api\V1\ReprocessSourceController;
 use App\Http\Controllers\Api\V1\ResendInvitationController;
 use App\Http\Controllers\Api\V1\RotateProviderCredentialController;
+use App\Http\Controllers\Api\V1\SourceController;
+use App\Http\Controllers\Api\V1\SourceStatusController;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -548,6 +551,125 @@ Route::middleware(['auth:sanctum', 'surface:admin', 'org.member', 'verified', 't
         Route::post('/invitations/{invitation}/resend', [ResendInvitationController::class, '__invoke'])
             ->middleware('throttle:invitation-resend')
             ->name('invitations.resend');
+
+        /*
+         * KNOWLEDGE SOURCES — the corpus a bot may answer from.
+         *
+         * `{source}` RESOLVES THROUGH `$organization->sources()` because the group calls
+         * ->scopeBindings(). That is the load-bearing part: a foreign or unknown id 404s at BINDING
+         * time, before any policy runs and before the row is in memory. A bare
+         * `KnowledgeSource $source` binding would be a global find with no organization predicate,
+         * executed inside SubstituteBindings, upstream of every check (laravel-rbac-policies,
+         * Gotchas). THE SEGMENT NAME IS THE WIRING: `Model::childRouteBindingRelationshipName()` is
+         * `Str::plural(Str::camel($childType))`, so `{source}` derives `sources()` —
+         * App\Models\Organization::sources(), which exists for exactly this. `{knowledgeSource}`
+         * would derive `knowledgeSources()`, which does not exist, and 404 everything.
+         *
+         * WHY THIS SURFACE IS DIFFERENT FROM THE BOT ONE. `source_status` and `source_version_id`
+         * are two of the four mandatory Qdrant filter terms (kb-tenancy-isolation NN3) and both are
+         * resolved from these tables, so a mistake here does not produce an error — it produces a
+         * correct-looking answer, at normal latency, citing a document the organization never
+         * uploaded.
+         *
+         * `index` and `show` demand `sources.view`; `update` and `destroy` demand `sources.manage`;
+         * `store` demands `sources.manage` on the ORGANIZATION and additionally `sources.upload`
+         * when the body carries files, because uploading is the one action that consumes a storage
+         * quota and hands bytes to an untrusted parser (Permission::SourcesUpload). The Analyst
+         * role holds NONE of the four `sources.*` permissions — Permission::SourcesView's docblock
+         * refuses the tempting grant, because a conversation transcript renders its citations off
+         * the denormalized citation row and reads nothing from `knowledge_sources`.
+         *
+         * `POST /sources` IS MULTIPART-SHAPED AND THE PART NAME IS `files[0]`, INDEXED EVEN FOR ONE
+         * FILE. StoreSourceRequest declares `files` and `files.*` so the 422 keys read `files.0`,
+         * which is what lets the console render a per-file error against the row an operator can
+         * see. TODO(phase-c): the upload INTAKE — the six-step gate of kb-security-baseline, the
+         * object write, and the source.upload.accepted / source.upload.rejected audit pair — has
+         * not landed, so `type: file` is refused with a 422 that says so. The shape is pinned
+         * anyway rather than omitted: an absent `files` rule would make `validated()` DISCARD the
+         * parts silently and answer 201 for a source with no content.
+         *
+         * DELETE IS PHASE 1 OF A TWO-PHASE REMOVAL and returns the source rather than an
+         * acknowledgement: `status` becomes `deleting`, `deleted_at` is stamped, `purged_at` stays
+         * null, and the row is already out of retrieval. Phase 2 — the verified purge of vectors,
+         * objects and the four Valkey families — is deletion-engineer's on both sides of the seam,
+         * and this route dispatches nothing toward it deliberately.
+         */
+        Route::get('/sources', [SourceController::class, 'index'])
+            ->name('sources.index');
+
+        Route::post('/sources', [SourceController::class, 'store'])
+            ->name('sources.store');
+
+        Route::get('/sources/{source}', [SourceController::class, 'show'])
+            ->name('sources.show');
+
+        Route::patch('/sources/{source}', [SourceController::class, 'update'])
+            ->name('sources.update');
+
+        Route::delete('/sources/{source}', [SourceController::class, 'destroy'])
+            ->name('sources.destroy');
+
+        /*
+         * DISABLE AND ENABLE, ON THEIR OWN ROUTE.
+         *
+         * `status` is the column that decides whether a source is in the corpus at all, so it does
+         * not sit among the PATCH's optional fields — two doors to it are two places a check has
+         * to be, which is the same argument that put the bot lifecycle on its own route.
+         * `UpdateSourceRequest` declares `status` as `missing` rather than dropping the rule,
+         * because an absent rule means `validated()` silently discards the field and a client that
+         * had not been updated would disable a source, get a 200, and find it still answering.
+         *
+         * A PUT AND NOT A PATCH: the body is the complete desired state of the one thing this route
+         * addresses. It is NOT idempotent in the strict sense — re-sending the state a source
+         * already holds is a 422 — and that is deliberate: a no-op would write a `source.disabled`
+         * or `source.enabled` audit row describing a change that did not happen.
+         *
+         * THE ACCEPTED SET IS `disabled` AND `ready`, not the fifteen states. Thirteen of the
+         * transitions are the pipeline walking and arrive on the ingestion callback; `queued` is
+         * POST /reprocess, which mints the force nonce without which a resubmission silently
+         * dedupes; and `deleting` is DELETE, which stamps `deleted_at` with it. Sending `ready`
+         * re-enables whatever the source published as — WHICH of the two ready states it lands in
+         * is read from its live versions, because "did this document parse cleanly" is a fact about
+         * the content rather than a choice a client may overwrite.
+         *
+         * THE GUARD IS NOT DUPLICATED HERE. `SourceState::transitionTable()` is the only statement
+         * of the machine and `SourceService` asks it under the row lock that also reads
+         * `previous_status` for the audit row.
+         *
+         * NO SECOND LIMITER. Disabling withdraws a source this organization owns, touches no
+         * credential and verifies no password, so `throttle:admin`'s (organization, user) budget is
+         * the whole of check 6.
+         */
+        Route::put('/sources/{source}/status', [SourceStatusController::class, '__invoke'])
+            ->name('sources.status.update');
+
+        /*
+         * REPROCESS — run this source through the pipeline again.
+         *
+         * A POST AND NOT A PUT BECAUSE IT IS NOT IDEMPOTENT, AND MUST NOT BE. Every call mints a
+         * new `force_nonce`, which is the one component of the ingest key that changes when nothing
+         * else did — without it a resubmission of unchanged content produces an identical key,
+         * `UNIQUE (source_item_id, ingest_key)` resolves it to the existing version, and the admin
+         * sees "already processed" for a button labelled Reprocess.
+         *
+         * IT THEREFORE DOES NOT HONOUR AN `Idempotency-Key` REQUEST HEADER, and neither does POST
+         * /sources. A client-supplied key would have to mean "if you have seen this, return the
+         * earlier response", which is exactly the dedupe the force nonce exists to defeat. The
+         * INTERNAL seam still carries X-KB-Idempotency-Key, derived server-side from the source,
+         * every item and the nonce — so a RETRY of one submission is a replay while a SECOND PRESS
+         * is a second run. The two ideas look alike and are opposites.
+         *
+         * 202 AND NOT 200: nothing has been reprocessed when this returns. The submission is a
+         * queued job, progress arrives on `status`, and the PREVIOUS VERSION KEEPS SERVING every
+         * query until the new one is indexed AND verified.
+         *
+         * `sources.manage` and not `sources.upload` — no new content is admitted and no storage
+         * quota is consumed. What it does spend is provider embedding tokens on every item, which
+         * the audit row records as `item_count` because it is a billing fact rather than an
+         * authorization one.
+         */
+        Route::post('/sources/{source}/reprocess', [ReprocessSourceController::class, '__invoke'])
+            ->name('sources.reprocess');
 
         Route::get('/members', [MemberController::class, 'index'])
             ->name('members.index');

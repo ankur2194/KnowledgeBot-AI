@@ -58,6 +58,8 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property string|null $mime
  * @property int|null $byte_size
  * @property string|null $current_version_id
+ * @property string|null $current_job_id
+ * @property int $progress_sequence
  * @property \Carbon\CarbonImmutable|null $last_discovered_at
  * @property int $missing_count
  * @property \Illuminate\Support\Carbon|null $created_at
@@ -152,6 +154,10 @@ final class SourceItem extends Model implements OrgOwned
         return [
             'byte_size' => 'integer',
             'missing_count' => 'integer',
+            // THE CALLBACK ORDERING GUARD. An integer cast and not a string, because the guard is
+            // `sequence > progress_sequence` and a string comparison makes frame 10 arrive before
+            // frame 9 — which is the exact rewind the guard exists to refuse, expressed as a cast.
+            'progress_sequence' => 'integer',
             'last_discovered_at' => 'immutable_datetime',
         ];
     }

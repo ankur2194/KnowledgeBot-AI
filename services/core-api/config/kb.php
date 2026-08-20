@@ -85,6 +85,28 @@ return [
          * which is how one unhealthy dependency starves the whole admin surface.
          */
         'readiness' => 10,
+
+        /*
+         * Ingestion SUBMISSION (Laravel -> FastAPI), seconds. Its own budget, and neither of the
+         * two above.
+         *
+         * NOT `internal` (55 s): that number is sized for a STREAMED ANSWER waiting on a provider,
+         * and it is the value X-KB-Deadline is derived from for a request that may legitimately
+         * take most of a minute. A submission waits on none of that — it hands the data plane a
+         * source, an item list and an idempotency key, and gets a 202 back before any byte of any
+         * document has been read. Giving it the chat budget would let one unreachable ai-api hold a
+         * queue worker for 55 s per attempt, five attempts deep, which is the whole `ai-dispatch`
+         * queue stalled behind a dependency that is already gone.
+         *
+         * NOT `readiness` (10 s) either, and the difference is the point of having a third row: a
+         * readiness call is a pure function of its request body, while a submission WRITES — it
+         * claims an idempotency key and enqueues a Celery task. A timeout on a call that wrote is
+         * not a failure, it is an UNKNOWN, and the retry that follows it depends on the
+         * idempotency record to be a replay rather than a second job. 20 s is chosen to sit well
+         * inside SubmitIngestionJob's 60 s `#[Timeout]` with room for the 3 s connect and one
+         * jittered backoff rung, so the job's own ceiling is never the thing that fires first.
+         */
+        'ingestion' => 20,
     ],
 
     /*
@@ -126,6 +148,21 @@ return [
      */
     'contract_version' => 'v1',
     'signing_prefix' => 'KB1',
+
+    /*
+     * What this application ACCEPTS on an inbound signed callback. A LIST, not a scalar, and the
+     * plurality is the whole mechanism: during a prefix bump the verifier accepts both for one
+     * release window while the signer emits only the new one, because signer and verifier deploy at
+     * different times and a single-value scheme 401s every callback through a rolling deploy.
+     * Dropping the retired prefix is a DELIBERATE SECOND DEPLOY, never part of the first.
+     *
+     * It is configuration rather than a constant for exactly that reason (ADR-018). The comment
+     * above has named this key since the seam was designed; this is it.
+     */
+    'accepted_signing_prefixes' => array_values(array_filter(array_map(
+        'trim',
+        explode(',', (string) env('KB_ACCEPTED_SIGNING_PREFIXES', 'KB1')),
+    ))),
     'signature_skew_seconds' => 60,
     'replay_nonce_ttl_seconds' => 120,
 

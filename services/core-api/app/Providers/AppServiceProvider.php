@@ -9,6 +9,7 @@ use App\Repositories\Contracts\BotDomainRepositoryInterface;
 use App\Repositories\Contracts\BotRepositoryInterface;
 use App\Repositories\Contracts\BotStarterQuestionRepositoryInterface;
 use App\Repositories\Contracts\EmbeddingCandidateRepositoryInterface;
+use App\Repositories\Contracts\KnowledgeSourceRepositoryInterface;
 use App\Repositories\Contracts\MembershipRepositoryInterface;
 use App\Repositories\Contracts\OrganizationRepositoryInterface;
 use App\Repositories\Contracts\ProviderConnectionRepositoryInterface;
@@ -18,6 +19,7 @@ use App\Repositories\Eloquent\EloquentBotDomainRepository;
 use App\Repositories\Eloquent\EloquentBotRepository;
 use App\Repositories\Eloquent\EloquentBotStarterQuestionRepository;
 use App\Repositories\Eloquent\EloquentEmbeddingCandidateRepository;
+use App\Repositories\Eloquent\EloquentKnowledgeSourceRepository;
 use App\Repositories\Eloquent\EloquentMembershipRepository;
 use App\Repositories\Eloquent\EloquentOrganizationRepository;
 use App\Repositories\Eloquent\EloquentProviderConnectionRepository;
@@ -116,6 +118,18 @@ final class AppServiceProvider extends ServiceProvider
         // The one query in the application keyed on a USER rather than an organization — the org
         // switcher's list and the login-time default. See the interface for why that is not a scope
         // violation: `organization_users` is the table the tenant scope is derived FROM.
+        // The organization's knowledge sources, and the item and version rows underneath them.
+        // ONE interface for all three tables rather than three, because they are not three
+        // entities a caller composes — they are one cascade with one lifecycle, and every write
+        // that touches a version also touches the item's active-version pointer under the same
+        // lock. Splitting them would put the pointer flip on one seam and the row it points at on
+        // another, which is exactly the split ADR-012 exists to forbid across the Laravel/FastAPI
+        // boundary and would be no better inside one process.
+        $this->app->bind(
+            KnowledgeSourceRepositoryInterface::class,
+            EloquentKnowledgeSourceRepository::class,
+        );
+
         $this->app->bind(
             MembershipRepositoryInterface::class,
             EloquentMembershipRepository::class,

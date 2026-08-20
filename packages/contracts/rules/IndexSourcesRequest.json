@@ -1,0 +1,37 @@
+{
+    "class": "App\\Http\\Requests\\IndexSourcesRequest",
+    "rules": {
+        "dir": [
+            "bail",
+            "sometimes",
+            "string",
+            "in:\"asc\",\"desc\""
+        ],
+        "filter": [
+            "bail",
+            "sometimes",
+            "nullable",
+            "string",
+            "max:200"
+        ],
+        "page": [
+            "bail",
+            "sometimes",
+            "integer",
+            "min:1"
+        ],
+        "per_page": [
+            "bail",
+            "sometimes",
+            "integer",
+            "min:1",
+            "max:100"
+        ],
+        "sort": [
+            "bail",
+            "sometimes",
+            "string",
+            "in:\"id\",\"name\",\"type\",\"status\""
+        ]
+    }
+}

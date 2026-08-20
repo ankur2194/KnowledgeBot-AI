@@ -756,6 +756,138 @@ const NO_CLIENT_FORM: Readonly<Record<string, string>> = {
   'App\\Http\\Requests\\AcceptInvitationRequest':
     'single `token` off a mail link, no user-editable input, so no form and no resolver',
 
+  // ── THE FIVE SOURCE-LIFECYCLE MANIFESTS, AND NOT ONE OF THEM IS MIRRORED ─────────────────────
+  //
+  // Two are exempt ON THE MERITS and three are OWED, and every entry says which it is in its first
+  // clause — because a list where a decision and a to-do read alike is a list whose to-dos are never
+  // done. The response side of the same feature went the OTHER way in the same change:
+  // `SourceResource` and `SourceCollectionResource` are MIRRORED in test/resource-drift.test.ts. The
+  // asymmetry is `rhf-zod-forms` NN3 and is deliberate — a RESPONSE type is correct the moment the
+  // server publishes it and is wrong the moment a client re-declares it locally, while a REQUEST
+  // schema is only correct beside the form that renders it, and one written ahead of its form is an
+  // unread declaration whose drift nobody would notice.
+
+  // EXEMPT ON THE MERITS. THE SECOND QUERY-STRING MANIFEST, and `IndexBotsRequest`'s argument above
+  // applies to all five of its fields verbatim: they are read out of the URL by
+  // `apps/web/src/lib/table/params.ts`, which CLAMPS — a `sort` outside the endpoint's sortable set
+  // degrades to the default, a `per_page` outside the declared sizes degrades to the default, a
+  // filter past `MAX_FILTER_LENGTH` is truncated — where a Zod mirror would have to REJECT, with no
+  // field, no control and no per-field error to key a message to. The drift harness has no vocabulary
+  // for "degrades to the default"; it can say accept or reject and nothing else.
+  //
+  // WHAT THE SECOND ONE MEASURES THAT THE FIRST COULD ONLY PREDICT. That note ended "if a third list
+  // endpoint arrives, that is the piece worth lifting into this package — as a tuple, not as a
+  // schema", meaning the SORTABLE SET. This is the second, and the two sets already disagree:
+  // `id,name,slug,status` for bots against `id,name,type,status` here. So the thing that looked
+  // liftable is per-endpoint after all — a shared tuple would be one endpoint's vocabulary pretending
+  // to be every endpoint's, which is the exact reason `ListMetaResource.sort` is typed `string`
+  // rather than a union (test/resource-drift.test.ts). What IS shared is the ENVELOPE, and that is
+  // already imported rather than re-declared.
+  'App\\Http\\Requests\\IndexSourcesRequest':
+    'EXEMPT: a query-string manifest, not a form — no control, no resolver and no per-field error, and the client CLAMPS every one of these five values (apps/web/src/lib/table/params.ts) where a mirroring schema would have to reject. Its sortable set differs from IndexBotsRequest\'s in one member, which is the measurement that says the set stays per-endpoint — see the comment above',
+
+  // EXEMPT ON THE MERITS, AND THE ONLY MANIFEST IN THIS FILE NO CLIENT COULD SUBMIT IF IT WANTED TO.
+  // `POST /internal/ingestion/callback` is the FastAPI data plane reporting a stage transition back
+  // to Laravel over the signed internal transport (`kb-internal-api-contracts`): the caller proves
+  // itself with an HMAC signature, not a session, and there is no browser, widget or mobile client on
+  // either end of it. `kb-architecture-map` NN3 is the same fact from the other side — clients never
+  // reach FastAPI — so a "client form" for this body is a contradiction rather than a gap.
+  //
+  // AND EXPORTING IT WOULD BE ACTIVELY WRONG, not merely useless. This barrel ships to apps/web,
+  // apps/widget and apps/mobile by default, and the body is the internal wire shape: `job_id`,
+  // `sequence`, `ingest_key`, `content_hash`, and the four `*_cfg_version` strings that decide when a
+  // corpus must be re-embedded. Publishing that to a browser bundle tells a reader which fields make
+  // the control plane accept a stage transition — the same argument that keeps `credential` out of a
+  // shared schema, applied to a shape whose whole security model is that only one caller has it.
+  //
+  // ONE FIELD HERE IS GENUINELY SHARED, AND IT IS ALREADY PINNED ELSEWHERE: `error_class` is the
+  // eighteen-member taxonomy, which this package holds as `ERROR_CLASSES` and
+  // test/error-taxonomy-parity.test.ts compares directly against services/ai-service/app/core/errors.py
+  // — Python at the apex, not this manifest. So the exemption costs no vocabulary.
+  'App\\Http\\Requests\\IngestionCallbackRequest':
+    'EXEMPT: the inbound frame from the FastAPI data plane on a signature-authenticated internal route. No browser, widget or mobile client ever submits it, and a shared schema would publish the internal wire shape — job_id, sequence, ingest_key, content_hash, the cfg versions — into a package that ships to browsers. Its one shared vocabulary, `error_class`, is pinned against errors.py by test/error-taxonomy-parity.test.ts',
+
+  // OWED, NOT EXEMPT — AND THE INTERESTING PART IS THAT A SCHEMA FOR HALF OF IT ALREADY EXISTS.
+  // `uploadSchema` (src/forms/upload.ts) has shipped since before this manifest was dumped, and the
+  // question this entry answers is whether it MIRRORS this request. It does not, and the reasons were
+  // measured against the real manifest and the real schema rather than argued:
+  //
+  //   1. THE MANIFEST IS A THREE-ARM BODY AND THE SCHEMA IS ONE ARM. `POST /sources` accepts `file`,
+  //      `url` and `text`, discriminated by `type` and enforced by paired `required_if` /
+  //      `prohibited_unless` rules on `files`, `origin_url` and `content`. It validates eleven paths;
+  //      `schemaPaths(uploadSchema(…))` is exactly `['files', 'files.*']`, so nine are missing and
+  //      `the schema declares exactly the fields the FormRequest validates` fails by name on every one
+  //      of them. Both repairs that failure invites are wrong: subtracting the nine stops probing
+  //      them, and growing `uploadSchema` into the whole body makes the FILE PICKER's schema demand
+  //      `name`, `type` and a discriminant it does not render.
+  //
+  //   2. THE TWO SIZE PROBES ON THE FILE HALF WOULD BOTH BE FALSE REDS. `files`' `max:10` is generated
+  //      by the generic array sizer as ten `'a'` STRINGS, which `z.file()` refuses — "form blocks
+  //      input the server accepts", against a schema that is exactly right. `files.*`'s `max:25600` is
+  //      worse: `kindOf(['bail','file','max:25600'])` is `unknown`, so the sizer emits the NUMBER
+  //      25600. Both measured, not reasoned. A `sized` generator could synthesize real `File`s — and
+  //      then it would be comparing the wrong quantity, which is (3).
+  //
+  //   3. THE TWO NUMBERS ARE NOT THE SAME NUMBER. `max:25600` is KILOBYTES, because that is the unit
+  //      Laravel's `max:` speaks for an uploaded file, and it is a CONSTANT on the FormRequest
+  //      (`StoreSourceRequest::MAX_FILE_KILOBYTES`). `uploadSchema` caps `max_bytes`, in BYTES, from
+  //      a per-organization `OrgUploadLimits` the bootstrap config returns — §8.10 makes the cap
+  //      configurable, which is why no byte constant may exist in this package at all. A probe would
+  //      have to pick one organization's limits and assert the server's platform constant against
+  //      them, and the two agree only by coincidence. The server's own docblock names the closure:
+  //      the limits endpoint "belongs with the intake" and "must publish THESE constants rather than
+  //      a second copy of the numbers". Until it does, there is nothing here to compare.
+  //
+  // WHAT CLOSES IT, in the order it has to happen: the upload intake and its `OrgUploadLimits`
+  // endpoint land; the console gets a create form covering all three arms (or the manifest is split);
+  // the schema declares the eleven paths with the discriminated union spelled as a `superRefine`, like
+  // every other cross-field rule in this file; and a `sized` generator for `files.*` synthesizes real
+  // `File`s at an exact byte length against limits derived from the server's own constants. Then this
+  // entry becomes a MIRRORS entry and the hand-written cases in `the upload form: the limits are the
+  // organization's, not this package's` keep only what a probe cannot express.
+  //
+  // A FALSE MIRROR CLAIM WOULD BE WORSE THAN THIS DEFERRAL, which is the whole reason the register has
+  // an OWED shape at all: `StoreInvitationRequest` and the two model-catalogue requests all sat here
+  // as OWED and all graduated, because holding a to-do inside the assertion is what got them closed
+  // rather than forgotten.
+  'App\\Http\\Requests\\StoreSourceRequest':
+    'OWED, not exempt: `uploadSchema` covers the FILE arm of a three-arm body and declares 2 of the 11 validated paths, and its per-organization byte cap is not comparable to the FormRequest\'s platform constant in kilobytes — measured, see the comment above. It graduates with the upload intake, the OrgUploadLimits endpoint and a create form that renders all three arms',
+
+  // OWED, NOT EXEMPT. This is the bots precedent's mirror image and the difference is the SCREEN:
+  // `UpdateBotRequest` is a MIRRORS entry because apps/web renders the bot settings form, and
+  // `/sources` is a 45-line placeholder page with no detail screen behind it. `rhf-zod-forms` NN3 is
+  // the rule — a schema ships WITH the form that renders it — and this is the case it is about.
+  //
+  // THE SHAPE IS READY WHEN THE SCREEN IS. It is the same `sometimes` PATCH the bot settings form
+  // mirrors: `name`, `description`, `tags`, `tags.*` and the two window fields, plus four paths ruled
+  // `missing` (`type`, `status`, `origin_url`, `content`) whose correct client-side spelling is the
+  // ABSENCE of a path from a `strictObject` — so the mirror can be written mechanically from the
+  // manifest the day the form exists, and the four `missing` paths are exactly the fields a metadata
+  // form is most likely to grow by accident. `distinct` on `tags.*` is probed as of this change, so
+  // the schema will have to refuse a repeated tag rather than agree with the server by being unprobed.
+  'App\\Http\\Requests\\UpdateSourceRequest':
+    'OWED, not exempt: the metadata PATCH is an ordinary `sometimes` field form with no credential and no security grammar, and nothing about it resists mirroring — there is simply no form yet. The sources detail screen (apps/web/src/features/sources) is the next batch\'s; the schema ships with it, per rhf-zod-forms NN3',
+
+  // OWED, NOT EXEMPT, and it is the entry where the bots precedent most nearly forces the other
+  // answer — so the difference is worth stating rather than assuming.
+  //
+  // `UpdateBotStatusRequest` is MIRRORED because after `status` left `botSettingsSchema` its `in:`
+  // probes became THE ONLY comparison between `BOT_STATUSES` and the server: a five-member tuple that
+  // every status pill iterates, pinned nowhere else. That argument does not reach here, because this
+  // package declares no source tuple at all. `SourceStatus` is a UNION in src/resources/sources.ts and
+  // it is pinned — member for member, against the document's inlined enum, in
+  // test/resource-drift.test.ts — so nothing about the vocabulary is unwatched by this exemption.
+  //
+  // AND THE TWO SETS ARE NOT THE SAME SET, which is why mirroring the wrong one would be worse than
+  // waiting: the resource publishes FIFTEEN lifecycle states and this request accepts TWO
+  // (`disabled`, `ready`). Every other move belongs to the ingestion pipeline, and a `<Select>` built
+  // over the union rather than over the transition set would offer to publish a version nothing
+  // verified. That relationship is asserted today — the source-types suite in resource-drift reads
+  // this manifest's `in:` members and requires each to be a member of the union — so the transition
+  // vocabulary is not unwatched either; it simply has no client spelling to drift against yet.
+  'App\\Http\\Requests\\UpdateSourceStatusRequest':
+    'OWED, not exempt: the enable/disable control on the sources detail screen (apps/web/src/features/sources) is the next batch\'s and the schema ships with it. Unlike UpdateBotStatusRequest this exemption pins nothing loose — `SourceStatus` is a union pinned against the document in test/resource-drift.test.ts, and this manifest\'s two-member transition set is read from the manifest there rather than restated in TypeScript',
+
   // `StoreInvitationRequest` USED TO SIT HERE, recorded as OWED rather than exempt, with the exact
   // three-step diff that would close it. It is now a MIRRORS entry above, and the note is kept for
   // one reason: it is the worked example of what this list is FOR. An entry here means "no client
@@ -1012,6 +1144,62 @@ const probe = (
   serverAccepts,
 });
 
+/** Reads a dotted path out of a candidate body. The inverse of `setPath`, minus the `.*` segment. */
+const readPath = (source: Candidate, path: string): unknown =>
+  path
+    .split('.')
+    .reduce<unknown>(
+      (cursor, segment) => (cursor as Record<string, unknown> | undefined)?.[segment],
+      source,
+    );
+
+/**
+ * THE ONE PROBE IN THIS FILE THAT DOES NOT MUTATE A SINGLE VALUE, and `distinct` is the reason.
+ *
+ * Every other probe here is one path set to one value, because every other rule decides on the value
+ * in front of it. `distinct` decides on the RELATIONSHIP BETWEEN TWO ELEMENTS of the same array, and
+ * `setPath`'s `.*` branch — which replaces the array with a ONE-element list holding the value under
+ * test — can never express it: a single element is distinct by construction, so the generic
+ * vocabulary would emit a probe that asserts nothing, which is the silent variant of not probing at
+ * all.
+ *
+ * So this writes the ARRAY: the same element twice.
+ *
+ * THE ELEMENT COMES FROM THE MIRROR'S BASELINE, and that is what makes the rejection claim honest
+ * rather than merely plausible. The baseline is asserted to be a body the SERVER accepts before any
+ * probe runs, so its first tag/flag/whatever satisfies every element rule on the field — `min:1`,
+ * `max:64`, a regex, all of them. The ONLY thing that changes between the baseline and this probe is
+ * that the element appears twice, so the only rule that can produce the rejection is `distinct`. A
+ * synthesized element (`'a'`, or a sizer value) would risk a probe that "passes" because the value
+ * violated something else entirely, which is a green with no meaning.
+ *
+ * IT DECLINES rather than guessing when the baseline's array is empty or absent — there is no
+ * element to duplicate, and `[undefined, undefined]` is a different claim about a different rule.
+ * That declination is not silent in the way `sizerFor`'s is: `distinct` only ever appears on a `.*`
+ * path, whose parent array a baseline must populate anyway for the element rules to be probed at all,
+ * so an empty one already fails `no size rule in a mirrored manifest lost its probe`.
+ */
+const duplicateElementProbe = (path: string, mirror: Mirror): Probe | undefined => {
+  if (!path.endsWith('.*')) return undefined;
+
+  const arrayPath = path.slice(0, -'.*'.length);
+  const baseline = readPath(mirror.baseline(), arrayPath);
+  if (!Array.isArray(baseline) || baseline.length === 0) return undefined;
+
+  const element: unknown = baseline[0];
+
+  return {
+    label: 'distinct: the same element twice',
+    apply: (base) => {
+      const next = structuredClone(base);
+      setPath(next, arrayPath, [element, element]);
+
+      return next;
+    },
+    serverAccepts: false,
+  };
+};
+
 /** `max:`/`min:` mean length, count or magnitude depending on the field's declared type. */
 type Kind = 'string' | 'array' | 'number' | 'unknown';
 
@@ -1023,9 +1211,30 @@ const kindOf = (rules: readonly string[]): Kind => {
   return 'unknown';
 };
 
+/**
+ * THE ARRAY FILLER IS UNIQUE PER ELEMENT, and it was `'a'` repeated until `distinct` arrived.
+ *
+ * An `n`-element list of identical values is not a value the server accepts when the field's ELEMENT
+ * rule says `distinct` — `tags: max:50` with `tags.*: …|distinct` is the real shape — so the `max:`
+ * boundary probe, which claims acceptance, was making a claim the server refuses. The failure it
+ * produces is a FALSE RED on a correct schema ("form blocks input the server accepts: tags"), and the
+ * repair it invites is to delete the uniqueness refinement from the mirror, which is the rule.
+ *
+ * Fixing it HERE rather than with a per-field `sized` override is deliberate. `probesFor` is handed
+ * one path's rule list and cannot see `tags.*` while probing `tags`, so a harness-level "is the
+ * element distinct?" branch would be the sibling-aware generator this file does not have; and an
+ * override would have to be remembered by every future mirror of an array whose elements are
+ * distinct, with a false red as the only reminder. A unique filler is honest for BOTH cases: no rule
+ * in Laravel demands that an array's elements REPEAT, so uniqueness can never be the reason a server
+ * rejects a probe.
+ *
+ * `a${index}` rather than `'a'.repeat(index)`, because element rules are usually `max:`-bounded and a
+ * filler whose length grows with the index would blow one at element 65. The only element pattern in
+ * the tree today is `^[a-z][a-z0-9_]*$` (`supported.*`), which `a0`…`a19` satisfies.
+ */
 const sized = (kind: Kind, size: number): unknown => {
   if (kind === 'string') return 'a'.repeat(size);
-  if (kind === 'array') return Array.from({ length: size }, () => 'a');
+  if (kind === 'array') return Array.from({ length: size }, (_, index) => `a${index}`);
   return size;
 };
 
@@ -1037,6 +1246,23 @@ const sized = (kind: Kind, size: number): unknown => {
 const FORMAT_RULES = new Set([
   ...VALUE_EXEMPT,
   'regex',
+  /**
+   * `file` IS A FORMAT RULE WHOSE FORM IS AN OBJECT, and its co-declared `max:` is the worst
+   * collision in this set because `kindOf` cannot even see it: `['bail','file','max:25600']` names no
+   * type rule, so the kind is `unknown` and the generic sizer emits the NUMBER 25600 as the probe
+   * value for a field that must hold a `File`. The probe would then claim the server accepts a bare
+   * integer where it accepts a 25 MB upload — a false red on a correct schema, and the harder failure
+   * to diagnose.
+   *
+   * There is no field carrying it in any MIRRORED manifest today: `StoreSourceRequest` is
+   * NO_CLIENT_FORM, so `sizerFor` never runs on it. This entry is for the day it graduates — with it
+   * the probe is SUPPRESSED and `missingSizeProbes()` reports `files.* · max:25600 boundary` by name,
+   * which forces the `sized` generator that is the only honest answer: real `File` objects at an
+   * exact byte length, built from limits derived from the server's own constants rather than from a
+   * number this file picked. See the OWED entry in NO_CLIENT_FORM, and `UNPROBED_RULES.file` for why
+   * the format verdict itself cannot be probed at all.
+   */
+  'file',
   /**
    * A RULE OBJECT, listed by the class name `kb:dump-form-rules` records it under, and the reason it
    * belongs in this set is that it is a format rule wearing a different spelling: it demands a
@@ -1288,6 +1514,62 @@ function probesFor(path: string, rules: readonly string[], mirror: Mirror): Prob
         for (const member of argOf(rule).split(','))
           probes.push(probe(value, `in: ${member}`, member.replace(/^"|"$/g, ''), true));
         probes.push(probe(value, 'in: a non-member', '__not_a_member__', false));
+        break;
+      }
+
+      /**
+       * TAUGHT RATHER THAN EXEMPTED, and taught in ONE DIRECTION ONLY — which is a first for this
+       * switch and is the honest shape rather than a half-measure.
+       *
+       * THE REJECTION PROBES ARE UNCONDITIONAL AND THEY ARE THE POINT. `validateDate` is
+       * `strtotime() !== false` followed by `checkdate()` on the parsed parts, so both values below
+       * are refused whatever else the field declares, and they catch the two schemas a date field
+       * actually drifts into: a bare `z.string()`, which takes `'not-a-date'`, and a hand-rolled
+       * `/^\d{4}-\d{2}-\d{2}$/`, which takes the thirtieth of February. Nothing else in this harness
+       * would notice either — the field's other rules are `sometimes` and `nullable`, whose probes a
+       * plain string field passes.
+       *
+       * THE ACCEPTANCE DIRECTION IS DELIBERATELY LEFT TO THE MIRROR'S BASELINE, because there is no
+       * canonical value to claim. Laravel's `date` is `strtotime`, which accepts `'tomorrow'`,
+       * `'+1 week'` and `'1 January 2026'`; no client schema will ever take those and none should, so
+       * a `serverAccepts: true` probe would have to pick ONE ISO spelling — date-only or a full
+       * offset datetime — and assert it against a mirror whose picker emits the other. That is a
+       * false red on a correct schema, produced by this file's own choice rather than by any
+       * disagreement with the server. The baseline covers the direction properly: it is asserted to
+       * parse before any probe runs, and it carries whatever format that form really submits.
+       *
+       * That leaves `date`'s acceptance edge — a value the server takes and the client refuses —
+       * uncovered on purpose, and it is the tolerable direction here for the same reason
+       * `ReadableThemeColor`'s residual is: the consequence is a 422 keyed to the field, rendering the
+       * server's own sentence, on a value nobody types into a date picker.
+       */
+      case 'date':
+        probes.push(probe(value, 'a string strtotime cannot parse', 'not-a-date', false));
+        // `strtotime` PARSES this one — it is `checkdate` that refuses it — which is why a mirror
+        // built from a shape regex agrees with the first probe and fails this one.
+        probes.push(probe(value, 'a well-shaped date that does not exist', '2026-02-30', false));
+        break;
+
+      /**
+       * TAUGHT RATHER THAN EXEMPTED, and it needed a probe generator of a different shape to be
+       * taught at all — see `duplicateElementProbe`, which writes the ARRAY rather than one element
+       * because a one-element list is distinct by construction.
+       *
+       * The alternative was an UNPROBED_RULES entry, and the reason it lost is the one that map's own
+       * `numeric`/`decimal` note gives: an entry there is silent forever, and the field carrying this
+       * rule (`tags.*`) belongs to a request that is OWED rather than exempt. A suppressed `distinct`
+       * would let the tag input that ships next batch "agree" with the server by being unprobed, and
+       * the symptom — a duplicate tag accepted locally and 422'd on arrival, keyed `tags.3` — is
+       * precisely what this file exists to catch before it is written.
+       *
+       * It generates NOTHING today, because no MIRRORED manifest carries the rule. Proved rather than
+       * asserted: `the `date` and `distinct` branches of the rule classifier` below runs it against a
+       * fixture manifest in both directions, since "the probe was silent" and "the probe passed" are
+       * indistinguishable in the output.
+       */
+      case 'distinct': {
+        const duplicate = duplicateElementProbe(path, mirror);
+        if (duplicate !== undefined) probes.push(duplicate);
         break;
       }
 
@@ -1552,6 +1834,30 @@ describe('what the harness declines to probe', () => {
     'App\\Rules\\ExactWidgetOrigin':
       'the widget origin grammar, and the entry that comes closest to the line this map draws — because a probe for it COULD be written and would be a second implementation of a security control. `App\\Support\\Web\\ExactOrigin` refuses a wildcard, a path, a query, a fragment, userinfo, an IPv6 literal, a non-ASCII host, `:0` and `:00443`, each with its own sentence, and NORMALISES what it accepts (case folded, default port dropped, one trailing slash dropped). Generating a rejection probe means picking one of those refusals and asserting the client reproduces it; the client deliberately reproduces NONE of them, for the reason src/forms/bot-domain.ts argues at length — a third spelling of a control whose refusals are its content is the copy nothing compares to the other two, and it fails in the bad direction, refusing an origin the operator really can embed on with no 422 to explain it. So the residual is exactly the theme-colour one: an origin that is malformed, wildcarded or pathed submits and comes back a 422 keyed `origin` carrying the server’s own sentence, which `ExactOrigin::parse()` returns precisely so a form can render it. WHAT IS PROBED ANYWAY is the co-declared `max:255`, through `originOfLength`, whose acceptance at 255 and rejection at 256 were MEASURED against the installed PHP rather than reasoned about — and the boundary of the decision is asserted by hand in the widget-origin section below, so the gap stays the gap that was argued for rather than widening into "the client checks nothing about an origin"',
 
+    /**
+     * THE ONE RULE IN THIS MAP THAT IS UNPROBEABLE BECAUSE OF THE TRANSPORT rather than because of a
+     * pattern, a sibling or a second implementation — and the only one where "teach it instead" is
+     * not a choice this file gets to make.
+     *
+     * `validateFile` requires an `Illuminate\Http\UploadedFile`, which exists only because PHP's
+     * multipart machinery wrote a temporary file and `is_uploaded_file` agreed. There is no JSON
+     * value of any shape that satisfies it: the request is `multipart/form-data`, and every probe in
+     * this harness is a value inside a candidate BODY that both sides parse. Synthesizing one would
+     * mean building a multipart request and a PHP interpreter to receive it, which is not a probe —
+     * it is the endpoint's Feature test, and `services/core-api` has it.
+     *
+     * WHAT THE EXEMPTION DOES NOT COVER, said out loud because an entry here is silent forever. The
+     * client's half of "is this a file" is `z.file()`, which is `instanceof File` — a check with no
+     * server counterpart it could disagree with, since the server's question is about a transport
+     * artifact and the client's is about a JavaScript object. The rules that DO have two comparable
+     * spellings are the size cap and the MIME list, and both are asserted by hand in `the upload
+     * form: the limits are the organization's, not this package's`, holding one `File` fixed and
+     * varying the limits DTO. The co-declared `max:` is separately protected by `file`'s membership
+     * in FORMAT_RULES, which suppresses the generic sizer's dishonest probe and makes
+     * `missingSizeProbes()` name the field the day the request is mirrored.
+     */
+    file: 'an uploaded-file rule, and the only one here that no JSON probe can reach: `validateFile` demands an `UploadedFile` that PHP\'s multipart machinery produced and `is_uploaded_file` vouched for, while every probe in this harness is a value inside a body both sides parse. The client\'s `z.file()` is an `instanceof File` check with no comparable server spelling; the two rules that DO have one — the size cap and the MIME allow-list — are asserted by hand in the upload-form suite below, and the co-declared `max:` is suppressed rather than faked by `file`\'s membership in FORMAT_RULES',
+
     size: 'the `size:` fields are the 64-hex invitation/verification token and `price_currency`\'s `size:3`, and NEITHER can be probed generically. The token: registerSchema mirrors it DELIBERATELY LOOSER (src/forms/auth.ts), because a wrong-LENGTH token must reach the server and come back as the byte-identical "no longer valid" refusal rather than being rejected locally by a check that tells its holder the token is the wrong SHAPE — probing it would report that decision as drift. `price_currency` NOW HAS A MIRROR (providerModelCreateSchema/providerModelEditSchema) and is still unprobed, which is a narrower claim than the one that used to stand here: `size:3` is co-declared with `regex:/^[A-Z]{3}$/`, so the only honest acceptance value at length 3 is a three-letter UPPER-CASE code and the only honest rejection is a value of another length that also matches nothing — teaching `probesFor` a `size` case to reach it would apply that case to the four token manifests too, where the deliberate looseness above would then read as drift. The schema mirrors both halves as one regex and the cross-field section asserts it by hand',
   };
 
@@ -1571,6 +1877,18 @@ describe('what the harness declines to probe', () => {
     'max',
     'min',
     'in',
+    /**
+     * BOTH ARRIVED WITH THE SOURCE MANIFESTS, whose requests are all NO_CLIENT_FORM — so `probesFor`
+     * never runs on them today, exactly as `numeric` and `decimal` did not when they were taught.
+     * They are taught for the same reason and it is sharper here: three of those five manifests are
+     * OWED rather than exempt, so the forms that carry these rules are a batch away rather than
+     * hypothetical, and a rule suppressed now is a rule nobody re-examines when the schema lands.
+     *
+     * `date` is taught in ONE DIRECTION and `distinct` needed a probe generator of a different shape;
+     * both are argued at their `case` in `probesFor` and proved against fixtures below.
+     */
+    'date',
+    'distinct',
     'ulid',
     'required',
     'present',
@@ -2065,6 +2383,183 @@ describe('the `missing` branch of the rule classifier', () => {
     expect(
       probesFor('status', ['missing'], faithful).map((generated) => generated.serverAccepts),
     ).toEqual([true, false, false]);
+  });
+});
+
+/**
+ * The `date` and `distinct` branches, proved against a manifest fixture — and this block exists for a
+ * reason the two above do not have: BOTH BRANCHES GENERATE NOTHING IN THE REAL SUITE TODAY.
+ *
+ * The rules arrived on `StoreSourceRequest` and `UpdateSourceRequest`, both NO_CLIENT_FORM, so
+ * `probesFor` never runs on either. That is exactly the state in which teaching a rule and exempting
+ * it look identical from the outside — the suite passes either way, reports the same counts, and
+ * nobody finds out which happened until a schema lands beside a branch that was never executed. So
+ * the branches are executed here, in both directions, the same way `emailOfLength`'s teeth are proved
+ * rather than assumed.
+ *
+ * THE FIXTURE IS SHAPED ON `UpdateSourceRequest`, which is the manifest that will carry both first —
+ * it is recorded as OWED rather than exempt, with the sources detail screen named. Writing it to
+ * `rules/` instead would make the "every manifest is mirrored or exempt" suite assert against a
+ * FormRequest that does not exist.
+ */
+describe('the `date` and `distinct` branches of the rule classifier', () => {
+  const SOURCE_FIXTURE: Manifest = {
+    class: 'App\\Http\\Requests\\Fixture\\UpdateSourceRequest',
+    rules: {
+      tags: ['bail', 'sometimes', 'array', 'max:50'],
+      'tags.*': ['bail', 'string', 'min:1', 'max:64', 'distinct'],
+      effective_at: ['bail', 'sometimes', 'nullable', 'date'],
+    },
+  };
+
+  /** TWO TAGS, NOT ONE: `duplicateElementProbe` reads element 0, and a one-element baseline would
+   *  prove the probe fires without proving it left the rest of the list alone. */
+  const baseline = (): Candidate => ({ tags: ['handbook', '2026'], effective_at: '2026-08-20' });
+
+  /**
+   * The mirror a tag input and a date picker would really ship. `z.iso.date()` because that is what
+   * an `<input type="date">` submits; the server takes far more (`strtotime` accepts `'tomorrow'`),
+   * which is the asymmetry the `date` case declines to probe in the acceptance direction.
+   */
+  const faithful: Mirror = {
+    schema: z.strictObject({
+      tags: z
+        .array(z.string().trim().min(1).max(64))
+        .max(50)
+        .refine((values) => new Set(values).size === values.length, {
+          error: 'Tags must be unique',
+        })
+        .optional(),
+      effective_at: z.iso.date().nullable().optional(),
+    }),
+    baseline,
+  };
+
+  it('accepts the faithful mirror, and the path set agrees with the manifest', () => {
+    expect(faithful.schema.safeParse(baseline()).success).toBe(true);
+    expect(driftFailures(SOURCE_FIXTURE, faithful)).toEqual([]);
+    // `.refine()` on an array returns an array, so `.element` survives it and `tags.*` is still
+    // reachable — the property `schemaPaths`' docblock depends on, restated where a refinement is in
+    // the way for the first time.
+    expect(new Set(schemaPaths(faithful.schema))).toEqual(new Set(validatedPaths(SOURCE_FIXTURE)));
+  });
+
+  it('catches a tag list that permits the duplicate the server refuses', () => {
+    // THE SCHEMA SOMEBODY WRITES FIRST. Every element rule mirrored, `max:50` mirrored, and the one
+    // rule that is about the LIST rather than an element simply absent — which is invisible in review
+    // and produces a 422 keyed `tags.3` on a chip input that looked fine.
+    const noRefinement: Mirror = {
+      schema: z.strictObject({
+        tags: z.array(z.string().trim().min(1).max(64)).max(50).optional(),
+        effective_at: z.iso.date().nullable().optional(),
+      }),
+      baseline,
+    };
+
+    expect(driftFailures(SOURCE_FIXTURE, noRefinement)).toEqual([
+      'form accepts input the server rejects: tags.* — distinct: the same element twice',
+    ]);
+  });
+
+  it('builds the duplicate out of the BASELINE element, so only `distinct` can explain the refusal', () => {
+    const [generated] = probesFor('tags.*', SOURCE_FIXTURE.rules['tags.*'] as string[], faithful)
+      .filter((candidate) => candidate.label.startsWith('distinct'));
+
+    expect(generated?.serverAccepts).toBe(false);
+    expect(generated?.apply(baseline())).toEqual({
+      tags: ['handbook', 'handbook'],
+      effective_at: '2026-08-20',
+    });
+
+    // …and it declines rather than guessing when there is no element to duplicate. `[undefined,
+    // undefined]` would be a probe about `string` wearing `distinct`'s label.
+    expect(
+      duplicateElementProbe('tags.*', { schema: faithful.schema, baseline: () => ({ tags: [] }) }),
+    ).toBeUndefined();
+    // A `distinct` on a non-element path is not a thing Laravel emits, and the generator says so
+    // rather than mutating the array wholesale.
+    expect(duplicateElementProbe('tags', faithful)).toBeUndefined();
+  });
+
+  it('catches a date field typed as a bare string', () => {
+    const looseDate: Mirror = {
+      schema: z.strictObject({
+        tags: z
+          .array(z.string().trim().min(1).max(64))
+          .max(50)
+          .refine((values) => new Set(values).size === values.length)
+          .optional(),
+        effective_at: z.string().nullable().optional(),
+      }),
+      baseline,
+    };
+
+    // BOTH rejection probes fire, which is the shape of the bug: a `z.string()` date field takes
+    // anything at all.
+    expect(driftFailures(SOURCE_FIXTURE, looseDate)).toEqual([
+      'form accepts input the server rejects: effective_at — a string strtotime cannot parse',
+      'form accepts input the server rejects: effective_at — a well-shaped date that does not exist',
+    ]);
+  });
+
+  it('catches a date field mirrored as a SHAPE regex, which the first probe cannot', () => {
+    // THE SECOND PROBE'S WHOLE REASON. `/^\d{4}-\d{2}-\d{2}$/` refuses `'not-a-date'` exactly as the
+    // server does, so probe one is silent on it and the field looks mirrored — and it takes the
+    // thirtieth of February, which `checkdate` refuses and a calendar does not have. It is the schema
+    // a reviewer waves through, because it looks like a date check.
+    const shapeOnly: Mirror = {
+      schema: z.strictObject({
+        tags: z
+          .array(z.string().trim().min(1).max(64))
+          .max(50)
+          .refine((values) => new Set(values).size === values.length)
+          .optional(),
+        effective_at: z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/)
+          .nullable()
+          .optional(),
+      }),
+      baseline,
+    };
+
+    expect(driftFailures(SOURCE_FIXTURE, shapeOnly)).toEqual([
+      'form accepts input the server rejects: effective_at — a well-shaped date that does not exist',
+    ]);
+  });
+
+  it('generates NO acceptance probe for `date`, which is the deliberate half', () => {
+    // Written down as an assertion rather than only as a comment, because "no probe" is the thing a
+    // future reader is most likely to mistake for an oversight. The two verdicts are both `false`;
+    // the acceptance direction is carried by `the baseline is a value both sides accept`, which each
+    // mirror answers in whatever format its own form submits.
+    //
+    // FILTERED TO THE `date` CASE'S OWN PROBES rather than read off a bare `['date']` rule list: a
+    // field with no `sometimes` and no `required` still gets the presence pair, whose omitted probe is
+    // an acceptance — and it belongs to the presence branch, not to this one.
+    const emitted = new Set([
+      'a string strtotime cannot parse',
+      'a well-shaped date that does not exist',
+    ]);
+    const dateProbes = probesFor(
+      'effective_at',
+      SOURCE_FIXTURE.rules['effective_at'] as string[],
+      faithful,
+    ).filter((generated) => emitted.has(generated.label));
+    expect(dateProbes).toHaveLength(2);
+    expect(dateProbes.map((generated) => generated.serverAccepts)).toEqual([false, false]);
+
+    // The presence pair is separate and unaffected: `sometimes|nullable` still generates its two.
+    expect(
+      probesFor('effective_at', SOURCE_FIXTURE.rules['effective_at'] as string[], faithful).map(
+        (generated) => generated.label,
+      ),
+    ).toEqual([
+      'omitted (sometimes)',
+      'null',
+      'a string strtotime cannot parse',
+      'a well-shaped date that does not exist',
+    ]);
   });
 });
 
@@ -3202,11 +3697,20 @@ describe('the starter questions: the rules a single-field probe cannot express',
  * about the form agreeing with the ORGANIZATION it is rendering for — not about the form being
  * trusted.
  *
- * THERE IS NO MANIFEST FOR THIS ENDPOINT YET, so `uploadSchema` is absent from `MIRRORS` and from
- * `NO_CLIENT_FORM`, and no probe compares it to a `rules()` dump. When `StoreSourceRequest.json`
- * lands it becomes a `MIRRORS` entry like every other schema and these hand-written cases keep only
- * what a probe cannot express — which is exactly this one, since the harness has no generator that
- * varies the LIMITS a schema was built from.
+ * THE MANIFEST FOR THIS ENDPOINT HAS LANDED AND THIS SCHEMA STILL MIRRORS NOTHING, which is the
+ * opposite of what this paragraph used to predict. It read "when `StoreSourceRequest.json` lands it
+ * becomes a `MIRRORS` entry like every other schema" — and when it landed it described a THREE-ARM
+ * body of which `uploadSchema` covers one arm: two of eleven validated paths, a per-file cap the
+ * server states in KILOBYTES as a platform constant against a per-organization cap this factory takes
+ * in BYTES, and a `file` rule no JSON probe can reach. So the request sits in `NO_CLIENT_FORM` as
+ * OWED, with the measurement, and every case below is still the only thing standing between this
+ * schema and the server.
+ *
+ * WHAT THAT CHANGES ABOUT THIS BLOCK: nothing to remove, and one thing to stop expecting. These cases
+ * were written as the residue a probe cannot express, and they are currently the WHOLE check rather
+ * than the residue. When the request graduates they go back to being what they were built as — the
+ * harness has no generator that varies the LIMITS a schema was built from, and it never will, because
+ * that is a property of the factory rather than of any one instantiation.
  */
 describe('the upload form: the limits are the organization’s, not this package’s', () => {
   /** Two organizations that disagree on every axis. Neither set of numbers means anything on its
@@ -3292,8 +3796,15 @@ describe('ownership columns are unrepresentable', () => {
    *
    * Iterating `MIRRORS` means the next mirrored schema is covered the moment its entry lands, with no
    * second list to remember — the same closure argument the manifest set-equality assertion above makes.
-   * The one non-mirrored schema is named explicitly because it has no manifest yet and therefore
-   * cannot be reached through `MIRRORS`; when it gets one, it moves and these lines go away.
+   * The one non-mirrored schema is named explicitly because it cannot be reached through `MIRRORS`;
+   * when it becomes an entry, it moves and these lines go away.
+   *
+   * "BECAUSE IT HAS NO MANIFEST YET" IS WHAT THAT SENTENCE USED TO SAY, and it is no longer the
+   * reason: `StoreSourceRequest.json` exists and `uploadSchema` mirrors two of its eleven validated
+   * paths, so the request is `NO_CLIENT_FORM` as OWED and this schema stays hand-listed. The
+   * distinction matters for this loop specifically — a reader who believed the only obstacle was a
+   * missing dump would close it by adding a `MIRRORS` entry, which is the false mirror claim that
+   * register exists to refuse.
    *
    * `botSettingsSchema` USED TO BE THE SECOND NAME HERE, carrying the label "(no manifest yet)". It
    * has two now — `StoreBotRequest` and `UpdateBotRequest` — so it is reached through `MIRRORS` like
@@ -3313,7 +3824,7 @@ describe('ownership columns are unrepresentable', () => {
       ([className, mirror]) => [className, mirror.schema] as readonly [string, z.ZodType],
     ),
     [
-      'uploadSchema (no manifest yet; a factory, so instantiated)',
+      'uploadSchema (mirrors no manifest — StoreSourceRequest is NO_CLIENT_FORM; a factory, so instantiated)',
       uploadSchema({ max_bytes: 1, allowed_mime: ['application/pdf'], max_batch: 1 }),
     ],
   ];

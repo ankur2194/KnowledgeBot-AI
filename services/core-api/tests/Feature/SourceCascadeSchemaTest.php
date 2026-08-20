@@ -8,6 +8,7 @@ use App\Models\KnowledgeSource;
 use App\Models\Organization;
 use App\Models\SourceItem;
 use App\Models\SourceVersion;
+use App\Support\Kb\ObjectKey;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Str;
@@ -267,6 +268,27 @@ it('refuses a storage key outside the row\'s own organization prefix', function 
     );
     expect(str_contains((string) $foreignPrefix?->getMessage(), 'source_items_storage_key_is_tenant_scoped'))
         ->toBeTrue((string) $foreignPrefix?->getMessage());
+
+    // AND THE SAME REFUSAL WHEN THE KEY IS BUILT BY THE BUILDER RATHER THAN BY HAND. `ObjectKey`
+    // now owns every Laravel-side key, so the interesting question moved: a well-formed key from
+    // the sanctioned helper is exactly the shape a reviewer would wave through, and the CHECK has
+    // to refuse it just as flatly when the organization it names is not this row's. The helper
+    // guarantees a well-formed prefix; it cannot guarantee the RIGHT one, because it is handed the
+    // organization id rather than reading it off the row. That is what the database is for.
+    $refresh = SourceItem::withoutGlobalScopes()->findOrFail($item->id);
+
+    $builtForAnotherTenant = cascadeAttempt(static function () use ($refresh, $other, $source): void {
+        $refresh->storage_key = ObjectKey::originalText($other->id, $source->id, str_repeat('b', 64));
+        $refresh->save();
+    });
+
+    expect($builtForAnotherTenant)->toBeInstanceOf(
+        QueryException::class,
+        'a key produced by the canonical builder for the wrong organization was accepted, so the '
+        .'builder existing would have replaced a check rather than added one.'
+    );
+    expect(str_contains((string) $builtForAnotherTenant?->getMessage(), 'source_items_storage_key_is_tenant_scoped'))
+        ->toBeTrue((string) $builtForAnotherTenant?->getMessage());
 });
 
 it('refuses a display name that is a path, a control character, or a relative directory', function (string $displayName): void {

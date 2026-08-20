@@ -8,6 +8,7 @@ use App\Exceptions\KbException;
 use App\Services\Embedding\EmbeddingCandidate;
 use App\Services\Embedding\EmbeddingDesignation;
 use App\Services\Embedding\EmbeddingReadiness;
+use App\Services\Sources\IngestionSubmission;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
@@ -141,6 +142,122 @@ final class InternalAiClient
         }
 
         return EmbeddingReadiness::fromResponse($payload);
+    }
+
+    /**
+     * Hand one source to the ingestion pipeline: `POST /internal/v1/ingestion/jobs`, `202 {job_id}`.
+     *
+     * ── THE BODY IS ASSEMBLED SERVER-SIDE AND CARRIES NO REQUEST INPUT ────────────────────────
+     *
+     * `IngestionSubmission` is built from `knowledge_sources` and `source_items` rows this
+     * organization owns, after the FormRequest, the policy and the state machine have passed. The
+     * three fields that matter most are precisely the ones a client may never supply:
+     * `storage_key` is a path, `mime` is the SNIFFED type rather than the caller's `Content-Type`,
+     * and `content_hash` is what the published version becomes checkable against.
+     *
+     * NO CREDENTIAL ON THIS BODY. `app/ingestion/tasks.py` resolves and decrypts the embedding
+     * credential at execution time through the provider layer's own accessor, and nothing under
+     * `app/ingestion/` accepts a credential parameter. A key attached here would sit in a Celery
+     * task argument, which is serialized to the broker and read by anything that instruments task
+     * args.
+     *
+     * ── THE IDEMPOTENCY KEY IS DERIVED, NEVER MINTED ──────────────────────────────────────────
+     *
+     * `sha256(org_id | operation | fingerprint)`, with the fingerprint coming from the submission
+     * itself. A random key would make every retry of this job a SECOND ingestion of the same
+     * document — same bytes, same parse, same embedding spend, and two versions racing the pointer.
+     * The fingerprint's own contents and the one component it cannot cover are stated in full on
+     * `IngestionSubmission`.
+     *
+     * ── NO `->retry()`, AND NO X-KB-BOT-ID ────────────────────────────────────────────────────
+     *
+     * Retry ownership is the JOB's on this path — `kb-error-taxonomy` permits job SUBMISSION to
+     * retry and permits nothing else on this side of the seam — so a `->retry()` here would
+     * multiply attempts against a ladder `SubmitIngestionJob` already runs.
+     *
+     * `X-KB-Bot-Id` is absent, and the header table lists ingestion among the bot-scoped
+     * operations. THE CONTRADICTION IS REPORTED RATHER THAN SPLIT: a knowledge source belongs to
+     * the ORGANIZATION and is assigned to zero or many bots, so there is no single bot id to send
+     * and inventing one would put a bot in a signature that scopes nothing. `embeddingReadiness()`
+     * above omits it for the same reason and says so.
+     *
+     * @throws KbException
+     */
+    public function submitIngestion(
+        string $organizationId,
+        IngestionSubmission $submission,
+        ?string $actorId = null,
+    ): string {
+        // Serialize ONCE and sign those exact bytes. Re-encoding JSON to hash it is not
+        // byte-stable and produces intermittent 401s.
+        $body = json_encode($submission->toArray(), JSON_THROW_ON_ERROR);
+
+        $path = '/internal/'.config('kb.contract_version').'/ingestion/jobs';
+
+        $headers = [
+            'X-KB-Org-Id' => $organizationId,
+            // `system` when the scheduler or a recrawl dispatcher submitted it; `user` when an
+            // administrator pressed a button. It drives what the diagnostics contracts may return
+            // on the far side, so it is never defaulted to the flattering value.
+            'X-KB-Actor-Type' => $actorId === null ? 'system' : 'user',
+            'X-KB-Operation' => 'ingestion.submit',
+            'X-KB-Request-Id' => (string) Str::ulid(),
+            'X-KB-Config-Version' => (string) $this->snapshotVersion($body),
+            'X-KB-Contract-Version' => (string) config('kb.contract_version'),
+            'X-KB-Deadline' => (string) $this->deadlineMs((float) config('kb.timeouts.ingestion')),
+            // REQUIRED ON A MUTATION. Absent, the far side answers `validation` -> 422, which is
+            // correct and is not a case worth reaching: this is a write, and a write whose retry
+            // cannot be recognised as a replay is a duplicate job.
+            'X-KB-Idempotency-Key' => hash(
+                'sha256',
+                $organizationId."\x1fingestion.submit\x1f".$submission->fingerprint(),
+            ),
+            'X-KB-Timestamp' => (string) time(),
+        ];
+
+        if ($actorId !== null) {
+            $headers['X-KB-Actor-Id'] = $actorId;
+        }
+
+        $signature = $this->signer->sign('POST', $path, $body, $headers);
+
+        try {
+            $response = Http::baseUrl((string) config('services.ai.url'))
+                ->withBody($body, 'application/json')
+                ->withHeaders($headers + [
+                    'Accept' => 'application/json',
+                    'X-KB-Signature' => $signature,   // redacted from every log line
+                ])
+                ->connectTimeout((int) config('kb.timeouts.connect'))
+                ->timeout((int) config('kb.timeouts.ingestion'))
+                ->post($path);
+        } catch (ConnectionException) {
+            // NOT CHAINED. A connection exception's message carries the resolved internal host and
+            // port — topology a tenant must never be told, and `previous` is rendered by several
+            // log formatters and by debug-mode responses.
+            throw KbException::aiServiceUnavailable(
+                'The AI service could not be reached to submit this source for processing.',
+            );
+        }
+
+        if ($response->failed()) {
+            throw $this->relay($response->status(), $response->json());
+        }
+
+        $payload = $response->json();
+        $jobId = is_array($payload) ? ($payload['job_id'] ?? null) : null;
+
+        if (! is_string($jobId) || $jobId === '') {
+            // A 202 with no job id is a contract violation, not a dependency outage — but it is
+            // reported as `internal_dependency` for the same reason an unclassified error body is:
+            // there is no assigned class to relay, and the taxonomy has no row for "the far side
+            // answered in a shape we cannot read" other than this one.
+            throw KbException::aiServiceUnavailable(
+                'The AI service accepted the ingestion submission without returning a job id.',
+            );
+        }
+
+        return $jobId;
     }
 
     /**
@@ -327,10 +444,25 @@ final class InternalAiClient
      * ABSOLUTE epoch milliseconds, computed from this request's own remaining budget — never a
      * duration, and never re-derived downstream.
      */
-    private function deadlineMs(): int
+    private function deadlineMs(?float $budgetSeconds = null): int
     {
         $startedAt = defined('LARAVEL_START') ? (float) LARAVEL_START : microtime(true);
 
-        return (int) round(($startedAt + (float) config('kb.timeouts.readiness')) * 1000);
+        // THE BUDGET IS AN ARGUMENT BECAUSE THE CALLERS HAVE DIFFERENT ONES, and defaulting it to
+        // the readiness budget keeps the existing call site reading exactly as it did. What must
+        // never happen is a caller re-deriving a fresh duration downstream: the header is an
+        // ABSOLUTE instant computed from LARAVEL_START, so the far side's remaining time shrinks
+        // as ours does rather than restarting.
+        //
+        // ONE SHARP EDGE, NAMED: LARAVEL_START is the start of the REQUEST, and a queued job has no
+        // request. In a worker the constant is defined once when the worker booted, so
+        // `microtime(true)` is what this falls back to only in a process where it is undefined —
+        // which is not the worker. `SubmitIngestionJob` therefore passes a deadline that would be
+        // measured from the worker's boot if this were left alone; it is not, because the job sets
+        // its own budget through this argument and the far side treats a deadline already in the
+        // past as an immediate refusal rather than as a licence to run forever.
+        $budget = $budgetSeconds ?? (float) config('kb.timeouts.readiness');
+
+        return (int) round(($startedAt + $budget) * 1000);
     }
 }

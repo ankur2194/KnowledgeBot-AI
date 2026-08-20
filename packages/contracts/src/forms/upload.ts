@@ -17,12 +17,23 @@ import { z } from 'zod';
  * with the positive control first each time — because a factory quietly collapsed into a fixed
  * schema keeps every other test in this file green while enforcing somebody else's limits.
  *
- * WHAT IS STILL NOT ASSERTED, said out loud rather than left to be rediscovered: there is no dumped
- * manifest for this endpoint yet, so `uploadSchema` appears in neither `MIRRORS` nor
- * `NO_CLIENT_FORM` and NOTHING compares it to Laravel's own `rules()`. Drift against the server is
- * a reviewer check until `packages/contracts/rules/StoreSourceRequest.json` lands. (A CI job used to
- * run over packages/, and only over packages/design-tokens/generated — nothing in it read this file
- * — and it is gone regardless.)
+ * WHAT IS STILL NOT ASSERTED, said out loud rather than left to be rediscovered: NOTHING COMPARES
+ * THIS SCHEMA TO LARAVEL'S `rules()`, and that is now a decision rather than a gap.
+ *
+ * The sentence here used to end "until `packages/contracts/rules/StoreSourceRequest.json` lands". It
+ * landed — and `uploadSchema` did NOT become a `MIRRORS` entry, because the manifest turned out to
+ * describe a THREE-ARM body (`file` / `url` / `text`, discriminated by `type`) of which this schema
+ * covers one arm: eleven validated paths against this object's two, a per-file cap the FormRequest
+ * states as a platform constant in KILOBYTES against a per-organization cap this factory takes in
+ * BYTES, and a `files.*` rule (`file`) no JSON probe can synthesize at all. `StoreSourceRequest` is
+ * therefore `NO_CLIENT_FORM`, recorded as OWED with the measurement and with what closes it —
+ * the upload intake, the `OrgUploadLimits` endpoint that must publish the server's own constants, and
+ * a create form covering all three arms. Read that entry before writing a mirror; the argument is
+ * there rather than here because that is the file the assertion lives in.
+ *
+ * Until then, drift against the server is a reviewer check on this file. (A CI job used to run over
+ * packages/, and only over packages/design-tokens/generated — nothing in it read this file — and it
+ * is gone regardless.)
  */
 export interface OrgUploadLimits {
   readonly max_bytes: number;

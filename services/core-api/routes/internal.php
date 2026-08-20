@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use App\Http\Controllers\Internal\IngestionCallbackController;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -49,5 +50,39 @@ use Illuminate\Support\Facades\Route;
 */
 
 Route::group([], function (): void {
-    // TODO: signed callback endpoints land here.
+    /*
+     * INGESTION PROGRESS — the data plane reporting one step of one run.
+     *
+     * `POST /internal/v1/callbacks/ingestion`, signed, carrying (job_id, sequence, stage, status)
+     * plus the version identity, the verification verdict and the durable delivery counter. Laravel
+     * applies it under `WHERE sequence > progress_sequence` AND a `current_job_id` equality, both
+     * read under a row lock on `source_items`, inside the transaction that performs every write the
+     * frame asks for.
+     *
+     * THE GUARD'S TWO COLUMNS ARE ON `source_items` AND NOT ON `source_versions`, because a run is
+     * scoped to an ITEM — the worker's Valkey lock is per `source_item_id`, and the run's first act
+     * is to resolve the ingest key, which is what DECIDES which version row it belongs to. A
+     * sequence counter on the version could not guard the frame that creates the version, which is
+     * precisely the frame a redelivery duplicates.
+     *
+     * A REFUSED FRAME IS A 200 WITH `applied: false`. A 4xx would put a permanently-failing request
+     * in front of a Celery task that is going to re-emit it, and the taxonomy would then have the
+     * caller retry a frame whose whole meaning is "already superseded".
+     *
+     * NO POLICY AND NO `Gate::authorize()`. The caller is a service; authentication is the HMAC,
+     * verified by `VerifyInternalSignature` ahead of `SubstituteBindings`, and the tenant scope is
+     * `X-KB-Org-Id` — which is inside the canonical string precisely so this route may trust it.
+     *
+     * WHY IT IS NOT A `{group}` PARAMETER. `callbacks/{group}` reads well and would put four
+     * different sets of table writes behind one action switching on a string, which is where the
+     * ordering guard gets skipped for one of them. Crawl, deletion and evaluation each land as
+     * their own literal path and their own single-action controller.
+     *
+     * THE DATA PLANE HAS NO INGESTION ROUTER YET (`services/ai-service/app/api/internal/v1/` holds
+     * only `embedding.py`), so nothing calls this route today — a source reaches `queued` and
+     * stops. That is the expected state, not a defect: this half is written against the contract so
+     * the other half can be written against something.
+     */
+    Route::post('/callbacks/ingestion', IngestionCallbackController::class)
+        ->name('callbacks.ingestion');
 });
