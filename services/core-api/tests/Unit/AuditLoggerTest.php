@@ -599,6 +599,36 @@ it('declares a complete, well-formed rule for every operation constant', functio
         'bot.starter_question.created',
         'bot.starter_question.updated',
         'bot.starter_question.deleted',
+        // THE SOURCE CASCADE (Phase C1), and the argument for auditing it is not the provider
+        // surface's. A knowledge source carries no credential and grants no access on its own —
+        // what it decides is WHAT THE BOT SAYS. An answer a customer disputes is explained by which
+        // documents were retrievable when it was produced, and every one of these twelve moves that
+        // set: create/update/delete change the corpus, disable/enable change whether it answers at
+        // all with every vector retained, reprocess changes WHICH version answers at a provider's
+        // per-token price, and the version pair records the POINTER SWITCH — the single act that
+        // decides what every tenant's next query sees, which is Laravel's precisely because the
+        // audit row lives here (ADR-012).
+        'source.created',
+        'source.updated',
+        'source.deleted',
+        'source.disabled',
+        'source.enabled',
+        'source.reprocess.requested',
+        // THE UPLOAD PAIR, AND THE REJECTION IS THE ONE THAT MATTERS. kb-security-baseline's upload
+        // gate is six steps and every one can refuse; without a FAILURE row a caller grinding at it
+        // with crafted files leaves no trace anywhere, because nothing was written. Same gap
+        // `provider.connection.credential_rotation_failed` closes on the credential surface.
+        'source.upload.accepted',
+        'source.upload.rejected',
+        'source.version.activated',
+        'source.version.retired',
+        // THE RETRIEVAL-SCOPE GRANT. `bot_source_assignments` is the one row in the schema that can
+        // span two organizations; the composite foreign keys make the illegal version impossible
+        // and these rows record the legal one. After this row exists a bot answers from documents
+        // it could not reach before — finding L2's argument, one entity over and with documents
+        // rather than an embed permission at stake.
+        'bot.source_assignment.created',
+        'bot.source_assignment.deleted',
     ];
 
     expect($operations)->toEqualCanonicalizing($expected)
@@ -679,6 +709,28 @@ it('declares a complete, well-formed rule for every operation constant', functio
         'bot.starter_question.created' => AuditLogger::ON_FAILURE_ABORT,
         'bot.starter_question.updated' => AuditLogger::ON_FAILURE_ABORT,
         'bot.starter_question.deleted' => AuditLogger::ON_FAILURE_ABORT,
+        // ELEVEN OF THE TWELVE SOURCE OPERATIONS ARE ABORT, on the real test — "can this still be
+        // rolled back" — rather than on whether the event is interesting. Each is written inside
+        // the transaction that performs the change. `source.version.activated` is the one where a
+        // LOG policy would be a defect rather than an inconsistency: the pointer switch is the
+        // single act that decides what every subsequent query sees, and an activation with no audit
+        // row would defeat the main argument for activation being Laravel's at all.
+        'source.created' => AuditLogger::ON_FAILURE_ABORT,
+        'source.updated' => AuditLogger::ON_FAILURE_ABORT,
+        'source.deleted' => AuditLogger::ON_FAILURE_ABORT,
+        'source.disabled' => AuditLogger::ON_FAILURE_ABORT,
+        'source.enabled' => AuditLogger::ON_FAILURE_ABORT,
+        'source.reprocess.requested' => AuditLogger::ON_FAILURE_ABORT,
+        'source.upload.accepted' => AuditLogger::ON_FAILURE_ABORT,
+        // THE TWELFTH, AND IT IS THE MIRROR IMAGE. There is no state change to undo: the refusal is
+        // already decided, no row was written, and aborting would turn a rejected file into a 500 —
+        // a lie to the caller, and still no audit row. Same shape as
+        // `provider.connection.credential_rotation_failed`.
+        'source.upload.rejected' => AuditLogger::ON_FAILURE_LOG,
+        'source.version.activated' => AuditLogger::ON_FAILURE_ABORT,
+        'source.version.retired' => AuditLogger::ON_FAILURE_ABORT,
+        'bot.source_assignment.created' => AuditLogger::ON_FAILURE_ABORT,
+        'bot.source_assignment.deleted' => AuditLogger::ON_FAILURE_ABORT,
     ];
 
     $actualPolicy = array_map(

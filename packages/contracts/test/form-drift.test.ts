@@ -53,7 +53,7 @@ import {
   providerModelEditDefaults,
   providerModelEditSchema,
 } from '../src/forms/provider-model.js';
-import { uploadSchema } from '../src/forms/upload.js';
+import { uploadDefaults, uploadSchema } from '../src/forms/upload.js';
 
 /**
  * The behavioural drift suite (rhf-zod-forms). For every field in the manifest dumped from
@@ -3175,6 +3175,108 @@ describe('the starter questions: the rules a single-field probe cannot express',
     const seeded = starterQuestionUpdateDefaults({ question: 'Where are my invoices?', sort_order: 4 });
     expect(seeded).toEqual({ question: 'Where are my invoices?', sort_order: 4 });
     expect(update(seeded).success).toBe(true);
+  });
+});
+
+/**
+ * ── THE ONE CLAIM `src/forms/upload.ts` SAID NOTHING ASSERTED, NOW ASSERTED ─────────────────────
+ *
+ * That module's docblock stated the property and named the test that would close it: *"a reviewer
+ * check until the drift suite gains an upload case that parses the same File against two different
+ * `OrgUploadLimits` and expects opposite results."* This is that case.
+ *
+ * WHY IT IS WORTH A BLOCK OF ITS OWN. §8.10 makes the maximum file size and the accepted MIME list
+ * PER-ORGANIZATION, so `uploadSchema` is a FACTORY and there is deliberately no byte constant and
+ * no MIME constant anywhere in this package or in apps/web. A refactor that "simplified" the
+ * factory into a fixed schema — hoisting a default cap, defaulting the allow-list, memoising the
+ * result and handing every organization the first one built — would keep every other test in this
+ * file green: the form would still accept files, still refuse rubbish, and still round-trip. It
+ * would simply enforce SOMEBODY ELSE'S limits, and the symptom is an upload rejected server-side
+ * with no client-side hint, or accepted client-side and rejected on arrival. The only way to see it
+ * is to hold the file fixed and vary the DTO.
+ *
+ * THIS IS STILL NOT A SECURITY CLAIM, and the direction matters. `.mime()` reads `File.type`, which
+ * the browser derives from the extension and any caller can forge; it filters the picker and
+ * produces a fast message. The server's extension allow-list, its libmagic sniffing independent of
+ * filename, its compression-ratio caps and its malware hook are the control. Everything below is
+ * about the form agreeing with the ORGANIZATION it is rendering for — not about the form being
+ * trusted.
+ *
+ * THERE IS NO MANIFEST FOR THIS ENDPOINT YET, so `uploadSchema` is absent from `MIRRORS` and from
+ * `NO_CLIENT_FORM`, and no probe compares it to a `rules()` dump. When `StoreSourceRequest.json`
+ * lands it becomes a `MIRRORS` entry like every other schema and these hand-written cases keep only
+ * what a probe cannot express — which is exactly this one, since the harness has no generator that
+ * varies the LIMITS a schema was built from.
+ */
+describe('the upload form: the limits are the organization’s, not this package’s', () => {
+  /** Two organizations that disagree on every axis. Neither set of numbers means anything on its
+   *  own — the assertions are all about the same file landing differently under each. */
+  const GENEROUS = { max_bytes: 32, allowed_mime: ['application/pdf', 'text/csv'], max_batch: 3 };
+  const STRICT = { max_bytes: 8, allowed_mime: ['text/csv'], max_batch: 1 };
+
+  /** `new File(...)` rather than a stub: `z.file()` checks `instanceof File`, and `File` has been a
+   *  Node global since 20 — which is also why the schema uses it instead of `z.instanceof(FileList)`,
+   *  a DOM type absent from Node that would crash this file at module load. */
+  const file = (bytes: number, type: string, name = 'report.pdf'): File =>
+    new File([new Uint8Array(bytes)], name, { type });
+
+  const accepts = (limits: typeof GENEROUS, files: readonly File[]): boolean =>
+    uploadSchema(limits).safeParse({ files: [...files] }).success;
+
+  it('accepts and refuses the SAME file on size, decided only by which DTO built the schema', () => {
+    const sixteen = file(16, 'application/pdf');
+    // POSITIVE CONTROL FIRST. Without it, "the strict org refuses it" also passes on a schema that
+    // refuses everything — which is what a broken factory would produce.
+    expect(accepts(GENEROUS, [sixteen]), 'max_bytes 32 must accept 16 bytes').toBe(true);
+    expect(accepts(STRICT, [sixteen]), 'max_bytes 8 must refuse 16 bytes').toBe(false);
+  });
+
+  it('puts the size boundary exactly where the DTO puts it', () => {
+    // `.max()` on a file is INCLUSIVE, like Laravel's `max:`. A schema one byte out in either
+    // direction is the drift nobody reports: it refuses a file the server would have taken.
+    expect(accepts(STRICT, [file(8, 'text/csv', 'rows.csv')])).toBe(true);
+    expect(accepts(STRICT, [file(9, 'text/csv', 'rows.csv')])).toBe(false);
+  });
+
+  it('accepts and refuses the SAME file on MIME, decided only by which DTO built the schema', () => {
+    const pdf = file(4, 'application/pdf');
+    expect(accepts(GENEROUS, [pdf]), 'a PDF is on the generous list').toBe(true);
+    // The strict organization allows CSV only. Same bytes, same name, same object.
+    expect(accepts(STRICT, [pdf]), 'a PDF is not on the strict list').toBe(false);
+  });
+
+  it('caps the BATCH from the DTO, and the cap is a count rather than a total size', () => {
+    const one = file(1, 'text/csv', 'a.csv');
+    const two = file(1, 'text/csv', 'b.csv');
+    expect(accepts(GENEROUS, [one, two])).toBe(true);
+    expect(accepts(STRICT, [one, two]), 'max_batch 1 must refuse two files').toBe(false);
+    // ...and one file well under the strict cap still passes, so the refusal above is the COUNT and
+    // not something else the strict DTO changed.
+    expect(accepts(STRICT, [one])).toBe(true);
+  });
+
+  it('refuses an empty batch under every DTO, which is why the defaults do not parse', () => {
+    for (const limits of [GENEROUS, STRICT]) {
+      expect(accepts(limits, [])).toBe(false);
+    }
+  });
+
+  it('seeds an empty form, and the seed is deliberately NOT a body the schema accepts', () => {
+    // The only defaults factory in the package whose output fails its own schema, and it is correct:
+    // `.min(1)` is what keeps the submit disabled until the user has chosen something. A default
+    // that parsed would mean an empty batch is postable.
+    expect(uploadDefaults()).toEqual({ files: [] });
+    expect(uploadSchema(GENEROUS).safeParse(uploadDefaults()).success).toBe(false);
+  });
+
+  it('hands out a FRESH array each call, so two mounted forms are not one file list', () => {
+    const first = uploadDefaults();
+    const second = uploadDefaults();
+    expect(first.files).not.toBe(second.files);
+    // react-hook-form takes ownership of `defaultValues`; a shared module-level `[]` would make the
+    // second form's picker append to the first form's rows.
+    first.files.push(new File([], 'leaked.csv', { type: 'text/csv' }));
+    expect(second.files).toEqual([]);
   });
 });
 

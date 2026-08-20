@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use App\Enums\OrgRole;
 use App\Models\Bot;
+use App\Models\KnowledgeSource;
 use App\Models\Organization;
 use App\Models\User;
 use Illuminate\Support\Str;
@@ -42,8 +43,9 @@ use Tests\Support\TenantPair;
  * IT IS IN ORG B'S BOT WELCOME MESSAGE, and that is a Phase B position rather than the final one.
  * The design has always been that it lives in Org B's INDEXED SOURCE CONTENT, so that a leak
  * through retrieval, a citation title, a cached completion or an export trips it. That needs
- * `KnowledgeSourceFactory::indexed()`, which needs the knowledge_sources / source_items /
- * source_versions / chunks migrations and a real Qdrant container — all of them Phase C.
+ * `KnowledgeSourceFactory::indexed()`, which is deferred on ONE remaining blocker — a live provider
+ * embedding call inside the suite. The schema, the model and the Qdrant test container all landed
+ * with Phase C1.
  *
  * The welcome message is the closest analogue available now and it is not a token gesture: it is
  * tenant-authored text that crosses the wire on the bot list, the bot detail, the widget bootstrap
@@ -69,27 +71,39 @@ function tenantPair(): TenantPair
         'welcome_message' => "Refunds are accepted for 30 days. {$canary}",
     ]);
 
+    // ORG B'S KNOWLEDGE, ASSIGNED TO ORG B'S BOT. This is the row `bot_ids` — one of the four
+    // mandatory Qdrant filter terms — is resolved from, and it is deliberately created through
+    // `assignedTo()`, which writes `bot_source_assignments.organization_id` EXPLICITLY rather than
+    // inferring it from either side. There is no source in Org A, on purpose: TenantPair's docblock
+    // states why an unpaired property is correct here and a paired one would weaken the assertion.
+    //
+    // `crossOrg()` is the sibling state that deliberately points a source at a bot in the OTHER
+    // organization. It is not called here — it exists only to be REFUSED, by
+    // `bot_source_assignments_bot_same_org`, and tests/Security/KnowledgeSourceTenancyTest.php is
+    // where it is called and where that constraint is asserted by name.
+    $sourceB = KnowledgeSource::factory()->recycle($b)->assignedTo($botB)->create();
+
     /*
-     * TODO(phase-c): the knowledge-source half of the shipped design, waiting on the
-     * knowledge_sources / source_items / source_versions / chunks migrations, on
-     * App\Models\KnowledgeSource, and on a real Qdrant container in the `test` Compose profile.
-     * When it lands, MOVE the canary here from $botB's welcome message above — do not plant a
-     * second one.
+     * TODO(phase-c): MOVE THE CANARY HERE — do not plant a second one.
+     *
+     * One thing blocks it, and it is no longer the schema, the model or the container: all three
+     * landed with Phase C1. What remains is a LIVE PROVIDER EMBEDDING CALL inside the suite.
+     * ADR-030 removed local embedding, so driving the real ingestion path to a published version
+     * means `embed(...)` going out over the network on a real credential from `composer ci`.
+     * KnowledgeSourceFactory::indexed() carries the two shapes that would close it.
      *
      *   // ->indexed() drives the REAL ingestion path into the test Qdrant container.
      *   // QdrantClient(":memory:") ignores the root filter — never use it here.
-     *   KnowledgeSource::factory()->recycle($b)->assignedTo($botB)
+     *   $sourceB = KnowledgeSource::factory()->recycle($b)->assignedTo($botB)
      *       ->indexed("Refunds are accepted for 30 days. {$canary}")->create();
      *
-     * KnowledgeSourceFactory will also carry a crossOrg() state that deliberately assigns a source
-     * from one organization to a bot in another — the one row that can span two orgs. It exists
-     * only to assert that BOTH the service AND the composite foreign key reject it, which is why
-     * assignedTo() must never quietly infer an organization. The target of that composite key
-     * already exists: `bots_org_scoped_key` on (organization_id, id).
+     * When that line replaces the one above, the canary comes out of $botB's welcome message in the
+     * SAME change. Two canaries mean two assertions to keep in step and a test that can pass on the
+     * wrong one.
      */
 
     return new TenantPair(
-        a: $a, b: $b, botA: $botA, botB: $botB, canary: $canary,
+        a: $a, b: $b, botA: $botA, botB: $botB, sourceB: $sourceB, canary: $canary,
         actorA: User::factory()->recycle($a)->orgRole(OrgRole::Admin)->create(),
         actorB: User::factory()->recycle($b)->orgRole(OrgRole::Admin)->create(),
     );

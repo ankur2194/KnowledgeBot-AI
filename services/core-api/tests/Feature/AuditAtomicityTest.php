@@ -1494,7 +1494,41 @@ it('has a test in this file for every ABORT-policy operation that has a producer
     // ROLE_CHANGED has no producer: PATCH /members/{user} is deliberately not built yet, because the
     // escalation guard for it is its own unit of work. It is listed here with its reason rather than
     // omitted, so the day the route lands this assertion fails and asks for its test.
-    $noProducer = [AuditLogger::ROLE_CHANGED];
+    //
+    // ── AND THE ELEVEN ABORT-POLICY SOURCE OPERATIONS, WHICH ARE HERE BY DESIGN RATHER THAN BY
+    //    OVERSIGHT ────────────────────────────────────────────────────────────────────────────
+    //
+    // Phase C1 registered every knowledge-source audit operation IN ONE PASS, before any endpoint
+    // that calls one exists, because the later Phase C steps are forbidden from editing
+    // App\Services\Audit\AuditLogger. So all eleven genuinely have no producer today, and this
+    // list is what makes that a stated position instead of a gap.
+    //
+    // THIS IS THE MECHANISM THAT MAKES THE ONE-PASS REGISTRATION SAFE. The moment a controller
+    // calls one of these, its atomicity is unproven — and the day somebody moves the name out of
+    // this list without writing the test, or writes the endpoint and leaves the name here, this
+    // assertion is what says so. Each is ABORT because it is written inside the transaction that
+    // performs the change; the twelfth source operation, `source.upload.rejected`, is LOG and is
+    // therefore not in scope for this file at all.
+    //
+    // `source.version.activated` IS THE ONE TO WRITE FIRST when the ingestion callback lands. The
+    // pointer switch is the single act that decides what every subsequent query against an item
+    // sees, and it is Laravel's rather than the data plane's PRECISELY because the audit row lives
+    // here (ADR-012) — an activation that committed without its row would defeat the main argument
+    // for the split.
+    $noProducer = [
+        AuditLogger::ROLE_CHANGED,
+        AuditLogger::SOURCE_CREATED,
+        AuditLogger::SOURCE_UPDATED,
+        AuditLogger::SOURCE_DELETED,
+        AuditLogger::SOURCE_DISABLED,
+        AuditLogger::SOURCE_ENABLED,
+        AuditLogger::SOURCE_REPROCESS_REQUESTED,
+        AuditLogger::SOURCE_UPLOAD_ACCEPTED,
+        AuditLogger::SOURCE_VERSION_ACTIVATED,
+        AuditLogger::SOURCE_VERSION_RETIRED,
+        AuditLogger::BOT_SOURCE_ASSIGNMENT_CREATED,
+        AuditLogger::BOT_SOURCE_ASSIGNMENT_DELETED,
+    ];
 
     sort($covered);
     $expected = array_merge($covered, $noProducer);

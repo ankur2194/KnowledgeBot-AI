@@ -1947,3 +1947,311 @@ its own `defaultValues`.
 permission — a sparse read, a projection by cost rather than by grant. Omission would then mean two
 things and the form could not tell them apart. The observable is the first `?fields=` or
 sparse-fieldset parameter on any read endpoint in `services/core-api/routes`.
+
+---
+
+ADR-062…065 come from **Phase C, step C1** — the step that lands the
+`knowledge_sources → source_items → source_versions → document_elements / chunks` cascade as Laravel
+migrations, and with it closes `docs/22` § **G2** (finding #79) on the removal condition that ruling
+itself named. All four exist for one reason, worth stating once instead of four times: **two in-repo
+sources disagreed about the schema and the DDL had to pick one.** In every case the binding source is
+[`.claude/skills/postgresql-patterns/SKILL.md`](../.claude/skills/postgresql-patterns/SKILL.md)'s
+runnable DDL together with the Python that already executes against those column names, and the
+losing side is the prose docblock in
+`services/core-api/database/factories/KnowledgeSourceFactory.php` — a scaffold whose column list has
+never been executed by anything, because `definition()` throws.
+
+**The docblock is not sloppy, and that is what makes these decisions worth recording.** It is a
+faithful transcription of `docs/11` §16.4, which is verbatim specification and may not be edited. So
+three of the four ADRs below are the *specification* losing to an implementation contract that was
+written later and knows more, and each says which spec line it deviates from. **ADR-065 is the one
+that goes the other way**: it overrules the skill, says so in its own status line, and leaves that
+skill owing a correction which is not this register's to make.
+
+### ADR-062: The Active-Version Pointer Is `source_items.current_version_id`, and the Schema Has No Second One
+
+**Status: `Accepted`. Supersedes nothing. It resolves a disagreement between `docs/11` §16.4
+(verbatim spec) and `.claude/skills/kb-source-lifecycle/SKILL.md` in the _skill's_ favour, and records
+the deviation here rather than by rewriting the extract.**
+
+**Decision:** `source_items.current_version_id` is the only column in the schema that makes a version
+live. `knowledge_sources` gets **no** `active_version_id` and no `current_version_id`. Every source
+has at least one `source_items` row — a single-file upload is a one-item source, not a special case —
+and the enforcement is the partial unique index on `source_versions` from `postgresql-patterns`:
+`CREATE UNIQUE INDEX … ON source_versions (source_item_id) WHERE activated_at IS NOT NULL AND
+retired_at IS NULL`. The activation itself is Laravel's, on the §17.5 ingestion status callback.
+
+**Reason.** `kb-source-lifecycle` states the failure directly: *"code that reads
+`source.current_version_id` for uploads but `item.current_version_id` for crawls will diverge the
+first time someone adds a second file."* Two pointers are not two representations of one fact — they
+are two facts, and **nothing in the schema can force them to agree.** There is no foreign key that
+says "this source's pointer must name a version of one of this source's items", so divergence is not
+a constraint violation, it is a source that is live by one read and dormant by the other. That is a
+lifecycle bug with no failure mode: the source list renders from one pointer, the retrieval filter
+resolves the active version set from the other, and the observable symptom is *a document that
+answers questions after it was replaced*, which reads as a caching problem for as long as anyone is
+willing to look. The second reason is ownership: `services/ai-service/app/db/writes.py:50` names this
+as the one column the data plane must **never** assign — *"Two writers on the one column that decides
+which version is live turns a lifecycle bug into a constraint violation inside a Celery task, retried
+forever."* That rule is stated about **one** column, and a sibling pointer is a second column the same
+rule would have to be restated for, in a service whose whole discipline is that it does not know the
+rule exists.
+
+**Rejected.**
+
+- **A sibling `knowledge_sources.active_version_id` for the single-file upload case**, which is how
+  `docs/11` §16.4 (*"Current version ID"* on `knowledge_sources` **and** on `source_items`) and the
+  factory docblock both read. It is the natural shape for the common case and it is exactly the
+  divergence above. The upload path is also where it would look safest, because a one-item source
+  makes the two pointers trivially equal — until the day it has two items, when nothing raises.
+- **Only `knowledge_sources.active_version_id`, dropping the item-level pointer.** A crawl is many
+  independently versioned items; one pointer per source cannot express "page 14 re-versioned, the
+  other 399 did not", so a single changed page would re-publish the site or nothing at all.
+- **A boolean `source_versions.is_active`.** Refused upstream by `kb-source-lifecycle` NN2 and
+  restated here because it is the shape people reach for: two concurrent publishes both read "no
+  active version", both set their own, and there is no single statement that flips them together.
+  The pointer plus the partial unique index has one.
+- **A generated column or a view on `knowledge_sources` that resolves the item pointer.** It removes
+  the divergence but keeps the *reading habit* that causes it, so the first place someone needs it in
+  a `WHERE` clause it becomes a real column again, and this ADR is re-litigated by accident.
+
+**Trade-off.** Every read that wants "is this source live" pays a join through `source_items`, and
+that is the majority of source-list reads — the admin table, the bot's assigned-source list, the
+public source panel. The API resource must also present a shape the spec describes and the schema does
+not, so *something* computes the source-level rollup; it is a resource concern by decision, and
+nothing prevents a future migration from materializing it back onto the table and reintroducing the
+divergence with a cache-shaped justification. **Revisit when** a read path needs the pointer and
+demonstrably cannot afford the join — the observable is `current_version_id` appearing in the `select`
+list of a *source*-level query, or a source list issuing one join per row at a page size the admin
+console actually uses. The right answer at that point is a materialized rollup that is **written by
+one statement together with the pointer flip**, never a second column that a different code path
+maintains.
+
+### ADR-063: A Version Row Carries Three Configuration Versions Including `ocr_cfg_version`, and Two Timestamps Rather Than One `published_at`
+
+**Status: `Accepted`. Supersedes nothing. Deviates from `docs/11` §16.4, which lists parser and
+chunker configuration versions and _no_ OCR one, and from §13.3's idempotency key, which omits it
+too — that gap is `docs/22` § _Spec defects_ item 1, open since the first research pass, and this ADR
+is the schema half of closing it.**
+
+**Decision:** `source_versions` carries `parser_cfg_version`, `ocr_cfg_version`,
+`chunker_cfg_version` and `embedding_model_version`, all `text NOT NULL`, **spelled exactly as the
+Python keyword arguments are**; and two nullable timestamps, `activated_at` and `retired_at`, with
+`CHECK (retired_at IS NULL OR activated_at IS NOT NULL)`. There is no `published_at`.
+
+**Reason, on the OCR column.** `app/ingestion/identity.py:66-77` makes `ocr_cfg_version` a member of
+`INGEST_KEY_PARTS`, and the key is what decides whether a source version already exists — `UNIQUE
+(source_item_id, ingest_key)` is the dedup. A schema that omits the column has nowhere to put a
+non-empty value, and both ways out are bad. Drop the part and **an OCR retune is a silent no-op**: the
+resubmission dedupes against the completed run, the admin sees "already processed", and the new
+settings never reach a document — which is why the function raises `VALIDATION` on an empty component
+with a message naming this exact failure, so the second way out is that every ingest raises. The
+column is four bytes of ceremony against a change that is invisible at the moment it fails and is
+discovered as *"OCR quality never improved"* weeks later.
+
+**Reason, on the spelling.** The factory reads `parser_config_version` / `chunking_config_version`;
+the Python passes `parser_cfg_version` / `chunker_cfg_version`. A column spelled differently from the
+argument means a mapping table at every construction site, and a mapping table is precisely where a
+key component goes missing without raising — the failure `INGEST_KEY_PARTS`' two-directional
+membership check exists to make impossible *inside* the module and cannot see outside it.
+
+**Reason, on the two timestamps — this is the load-bearing half.** The pointer constraint is
+`CREATE UNIQUE INDEX … WHERE activated_at IS NOT NULL AND retired_at IS NULL`. A single `published_at`
+can say *this version was published*; it cannot say *and is still the live one*, so the predicate has
+no second term and the index cannot be written. **"At most one live version per item" then stops
+being provable by the database** and becomes a property of ordering discipline inside
+`publish_version()` — under at-least-once Celery delivery, the one guarantee ordering discipline
+cannot provide. The two timestamps are not a naming preference; they are the two terms of the only
+constraint that makes atomic publication (Non-negotiable 5) enforceable rather than intended.
+`docs/11` §16.4 agrees here, listing *"Activated time"* and *"Retired time"*; the factory docblock is
+alone on `published_at`.
+
+**Rejected.**
+
+- **The factory's `parser_config_version` / `chunking_config_version` / `published_at`**, all three,
+  for the reasons above.
+- **`published_at` plus a boolean `is_active`.** Reintroduces ADR-062's rejected boolean and inherits
+  its race.
+- **`published_at` plus `superseded_at`.** Functionally identical — two terms, so the index works —
+  and rejected only because it renames the two timestamps that `postgresql-patterns`' runnable DDL,
+  the partial index, the orphan-sweep index (`WHERE activated_at IS NULL`) and the retire-after-
+  activate CHECK all already use. A rename that buys nothing costs four call sites and one review
+  where somebody has to work out whether the two schemes mean the same thing.
+- **A single `cfg jsonb` blob holding all four versions.** No per-key `NOT NULL`, so the empty
+  component the ingest key refuses becomes representable again; and the key needs an exact string, so
+  every read is a `->>` with a cast and a null-coalesce that quietly supplies the empty value.
+- **Making `ocr_cfg_version` nullable for born-digital documents that never ran OCR.** This is the
+  tempting one, because a PDF with a text layer genuinely did not OCR. It is wrong for the same
+  reason the empty string is: the column versions the *configuration in force*, not the *execution*,
+  and a document that did not OCR today is one parser change away from OCRing tomorrow — under a null
+  the key does not move and the reprocess dedupes away.
+
+**Trade-off.** Four opaque `text NOT NULL` columns on a table that grows with every reprocess, and one
+of them reads as a lie until you know the distinction above: a born-digital page carries an
+`ocr_cfg_version` describing OCR that never ran. The CHECK is a third constraint to keep in step with
+the two indexes. And the schema now carries four version strings whose *format* nothing validates —
+they are opaque to PostgreSQL by design, so a caller writing a bare vendor model id into
+`embedding_model_version` instead of `EmbeddingModelIdentity.version` (ADR-035) produces a perfectly
+valid row. **Revisit when** a fifth configuration version joins `INGEST_KEY_PARTS` — a normalizer
+version, a table-serializer version. At five the structured-blob argument gets real, and the right
+shape is then a `jsonb` with a **generated, indexed** key column so the ingest key is still one exact
+string. The observable is the second migration that adds a `*_cfg_version` column, and the tripwire
+is `INGEST_KEY_PARTS` itself: it is the authority on membership and order, and a component added
+there with no migration behind it is this ADR's revisit condition arriving.
+
+### ADR-064: One 15-Value Status Vocabulary, Shared by `knowledge_sources`, `source_items` and `source_versions`
+
+**Status: `Accepted`. Supersedes nothing. Deviates from the factory docblock's seven-value
+source-level list, which is _not a subset_ of the vocabulary the code uses.**
+
+**Decision:** all three status columns are `text NOT NULL` with a `CHECK` constraint over the same
+vocabulary, spelled exactly as `SourceState` in `services/ai-service/app/ingestion/states.py` — the
+enum that asserts its own membership at import. Read the enum rather than a list here (ADR-036);
+`grep -n '^assert len(SourceState)' services/ai-service/app/ingestion/states.py` is the cardinality
+and `postgresql-patterns`' runnable DDL carries the CHECK text. Not a PostgreSQL `enum` type.
+
+**This is `docs/22` § _Spec defects_ item 4 being implemented, not re-opened.** That entry already
+ruled *"processing states are version-level and roll up for display; `Draft`/`Archived` are
+source-level only"* against §16.4's three status columns. It settled the semantics and left the
+storage open; this ADR answers the storage question the migrations had to answer, and answers it the
+way the ruling points — **the rollup is computed, never a second column in a second vocabulary.** One
+consequence follows directly and is accepted: a single shared CHECK admits, at every level, values
+that level never uses — `archived` on a version row, `chunking` on a source row — because narrowing
+per level was rejected below.
+
+**Reason.** The factory's seven values — `pending | processing | ready | ready_with_warnings |
+failed | disabled | deleting` — look like a sensible source-level rollup of the version-level
+machine, and the trap is that **two of them exist nowhere in `SourceState`**. `pending` and
+`processing` are not narrower spellings of `queued` and of the six working states; they are new
+states, so adopting that list would have the schema admit two values no Python constant can produce,
+no transition table names, and no `DATA_PLANE_OBSERVED` membership check would ever report. The first
+row the ingestion status callback writes then either fails the CHECK or passes through a translation
+layer that somebody has to own.
+
+The second reason is why the translation layer is the worse of those two. `source_status` is one of
+the four mandatory Qdrant payload filter terms (`app/retrieval/tenancy.py`), and the retrievable set
+is `RETRIEVABLE = {ready, ready_with_warnings}` — a **closed** set matched positively. Under ADR-010
+that payload value is a projection of a PostgreSQL column, so two vocabularies make the projection a
+*translation*, and a translation with an unknown input has to choose a default. Defaulting to a
+non-retrievable value hides live documents; defaulting to a retrievable one serves content from a
+version that is not active, which is Non-negotiable 5 broken by a mapping table. Neither shows up as
+an error. One vocabulary means the projection is a copy, and a copy has no default.
+
+**Rejected.**
+
+- **The seven-value rollup on `knowledge_sources` with fifteen on `source_versions`.** The rollup
+  framing is the appealing part and it is a **display** concern: "this source is busy" is a sentence
+  about a set of items, computed per request. Giving it a column in the same schema as the
+  authoritative machine, under the same name, is one migration away from being read as authoritative —
+  and the read that does it will be a `WHERE status = 'ready'` written by someone who has only ever
+  seen the source-level table.
+- **A PostgreSQL `enum` type.** `postgresql-patterns` Gotcha: `ALTER TYPE … ADD VALUE` cannot be
+  rolled back, values cannot be dropped or renamed, and a lifecycle change becomes an irreversible
+  deploy step. `DROP CONSTRAINT` + `ADD CONSTRAINT … NOT VALID` + `VALIDATE` is reversible and keeps
+  the values greppable.
+- **An integer state code with a lookup table.** Smaller, and unreadable in `psql`, in a log line and
+  in the Qdrant payload — where the value is matched as a keyword and the wire already carries the
+  string.
+- **A narrower vocabulary for `source_items.status`**, on the grounds that an item cannot be
+  `archived`. True today and unenforced by anything: it is a third vocabulary to keep in step for the
+  benefit of refusing a value nothing writes.
+
+**Trade-off.** A `knowledge_sources.status` that can legally hold `chunking` is momentarily
+nonsensical — a *source* does not chunk, a version of one of its items does — and that oddity is
+accepted as the price of one vocabulary. Adding a state is now three `ALTER TABLE`s under
+`ACCESS EXCLUSIVE` rather than one, mitigated by `NOT VALID` + `VALIDATE` per the migration table in
+`postgresql-patterns`. **And the sharpest cost is that the two definitions are joined by nothing:**
+`states.py` asserts its own membership at import, the CHECK text asserts its own, and **no test
+compares them.** A state added to the enum and to two of the three constraints is a row that fails to
+save in one table and saves in the other, discovered at the callback. That contract test — read the
+enum, read the constraint text out of `information_schema`, compare as sets — is **owed work**, named
+here rather than implied, and it belongs to `test-engineer` across both runtimes. **Revisit when**
+`len(SourceState)` changes; that is the moment the missing test is either written or missed.
+
+### ADR-065: `content_hash` Is `char(64) COLLATE "C"` Hex Everywhere, Which Overrules `postgresql-patterns`
+
+**Status: `Accepted`. Supersedes no ADR. It contradicts an accepted skill:
+`.claude/skills/postgresql-patterns/SKILL.md` line 52 specifies `content_hash bytea NOT NULL — 32 raw
+bytes, not 64 hex chars`. That line is now wrong and is owed a correction from the skill's owner; this
+register does not edit skills, so the obligation is recorded in `docs/22` § P1 rather than discharged
+here.**
+
+**Decision:** every `content_hash` column in the cascade is `char(64) COLLATE "C" NOT NULL` holding a
+lowercase hex sha256 — one spelling on `source_items`, on `source_versions` and on `chunks` alike —
+with `CHECK (content_hash ~ '^[0-9a-f]{64}$')` in the migration.
+
+**Reason, in the order the evidence was found.**
+
+1. **Python emits hex and nothing in this tree emits bytes.** `app/ingestion/chunking/chunker.py:963`
+   is `hashlib.sha256(text.encode("utf-8")).hexdigest()`, and that value is a member of the chunk
+   metadata schema whose completeness is asserted at import.
+2. **The ingest key composes `content_hash` as a *string*.** `app/ingestion/identity.py` takes
+   `content_hash: str`, joins it with `|` into the hashed tuple, and guards each component with
+   `if INGEST_KEY_SEPARATOR in value` — a `str` operation that raises `TypeError` against `bytes`. So
+   `bytea` puts a `bin2hex` at every construction site, and **the failure mode of forgetting one is
+   not a crash**: `bin2hex` applied to a value that is already hex returns a different, valid,
+   128-character string, which hashes to a perfectly well-formed key for an identity that does not
+   exist. The row never dedupes against its own completed run, and nothing raises.
+3. **This repository has already measured what `bytea` costs here — twice.** `docs/22` § **J3**
+   records two `BinaryCast` defects, both silent and both on `bytea` columns: a PDO stream **drained
+   by the first read**, so the second access returned `''` and was reported as *"ciphertext is
+   truncated"* — a message that sends the reader to key management, which is the wrong place
+   entirely — and PostgreSQL's `\x` hex heuristic applied to **already-decoded** bytes, which a
+   random 12-byte IV triggers about one time in 65,536 and which decodes silently to different,
+   shorter bytes. Those columns hold sealed credentials, where `bytea` is not optional and the cost
+   is paid deliberately. Paying it again on a value that has a canonical text form everywhere else is
+   buying a demonstrated defect class for 32 bytes a row.
+4. **The skill already stores a sha256 as text one line below the line this ADR overrules.**
+   `ingest_key char(64) COLLATE "C"` sits four lines under `content_hash bytea`. Two sha256 digests in
+   one `CREATE TABLE`, spelled two ways, is what makes the `bytea` line read as an oversight — though
+   whether it is one is the owner's call, not this file's.
+
+There is a fifth consideration that is a consequence rather than a reason: the Qdrant payload carries
+`content_hash` as a string, and `app/rag/evidence.py:348` dedups on `isinstance(content_hash, str)`,
+**tolerating a non-match as *"cannot be proven identical"***. A non-string reaching that payload
+therefore disables exact-duplicate dedup with no error — the symptom is context budget spent twice on
+one passage, which no assertion in the suite can see.
+
+**Rejected.**
+
+- **`bytea`, as the skill specifies.** Its argument is real and is not being waved away: 32 bytes per
+  row on `chunks`, the table the same skill says reaches hundreds of millions of rows, plus the extra
+  width in every b-tree that includes the column. Overruled because all four reasons above are
+  *measured in this repository* while the storage argument is a projection, and because the direction
+  of regret is asymmetric — see the trade-off.
+- **Splitting by writer: `bytea` where only Laravel writes (`source_items`, `source_versions`) and
+  hex on `chunks`.** This is the hardest one to refuse. It honours both sources exactly, the byte
+  saving is almost entirely on `chunks` anyway, and both conversion sites would sit in PHP where the
+  cast layer already exists. It is rejected because it puts **two spellings of one hash in one
+  schema**, and the query that trips over it is the one written under pressure: a deletion or
+  rebuild audit joining `source_versions.content_hash = chunks.content_hash` is a type error at best,
+  and once somebody adds the cast that makes it run, a comparison that is silently always false.
+- **`char(64)` at the database's default collation.** Same storage, `strcoll` per comparison, and the
+  index is invalidated by a libc or ICU upgrade — `postgresql-patterns`' own ULID table makes this
+  argument and it transfers unchanged.
+- **`bytea` plus a generated hex column.** Pays both storage costs and turns "which one is
+  authoritative" into a per-query decision, which is the question this ADR exists to close.
+
+**Trade-off, and it is a real one.** We accept roughly double the per-hash storage on the largest
+tables in the schema, and we accept `char(n)`'s blank padding, which means a wrong-length value is
+silently padded rather than refused — the `CHECK` is the compensating control and it is mandatory, not
+decorative, because without it `char(64)` is *less* self-enforcing than `bytea` was. The reversal is
+also expensive: `ALTER COLUMN TYPE` from `char(64)` to `bytea` is not binary-coercible, so it is a
+full rewrite plus reindex under `ACCESS EXCLUSIVE` on `chunks`. That asymmetry is stated rather than
+hidden — this decision is cheap now and dear to undo, which is exactly why the storage argument
+deserved to be written out in full above instead of summarized.
+
+**Owed work, recorded and deliberately not done here.** `.claude/skills/postgresql-patterns/SKILL.md`
+line 52 now states a column type this schema does not use, inside the runnable DDL that is the
+authority for everything else on that table — so a reader who trusts the file, as they should, will
+write `bytea` into the next migration and the next model cast. **The correction is owed by that
+skill's owner; `docs-adr-writer` does not edit the skill tree, and an accepted skill being wrong is
+reported rather than rewritten.** Until it lands, `postgresql-patterns` and this ADR disagree in
+writing, and this ADR is the one the migrations follow. The item is `docs/22` § **P1**, and it is open.
+
+**Revisit when** the storage difference becomes operationally visible — the observable is `chunks`
+appearing in a capacity or backup-window conversation with its on-disk size quoted, or the
+`content_hash` index alone exceeding what fits comfortably in `shared_buffers`. The re-decision at
+that point is not "switch to `bytea`" but "switch **and** move the two `str`-composition sites in
+`identity.py` and the payload projection with it", and this ADR's job is to make sure whoever does it
+knows that is three changes rather than one.

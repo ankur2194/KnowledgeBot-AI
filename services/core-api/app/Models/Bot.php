@@ -207,6 +207,30 @@ final class Bot extends Model implements OrgOwned
     }
 
     /**
+     * THE RETRIEVAL SCOPE: which knowledge sources this bot may answer from.
+     *
+     * A `HasMany` over `BotSourceAssignment` and NOT a `belongsToMany` pivot, for the reason that
+     * model's docblock states at length — and it matters more here than it did for the fallback
+     * chain. `attach()` writes neither the ULID primary key nor the denormalized `organization_id`
+     * that both composite foreign keys are built on, and on THIS table that column is the only
+     * thing forbidding the one row in the schema that can span two organizations. A pivot
+     * convenience that filled it in "from somewhere plausible" would infer it from one of the two
+     * sides, which is exactly the inference that makes the guard unenforceable.
+     *
+     * UNORDERED HERE AND ORDERED AT THE SCOPE RESOLVER, deliberately. `priority` is an operator's
+     * TIE-BREAK between sources, not a precedence this relation should imply — and the resolver
+     * that builds the active-version set filters `enabled` as well, which a relation-level
+     * `orderBy` would leave someone thinking had been handled. `Model::shouldBeStrict()` forbids
+     * lazy loading, so the relation has to exist before `with('sourceAssignments')` can be written.
+     *
+     * @return HasMany<BotSourceAssignment, $this>
+     */
+    public function sourceAssignments(): HasMany
+    {
+        return $this->hasMany(BotSourceAssignment::class);
+    }
+
+    /**
      * @return array<string, string>
      */
     protected function casts(): array

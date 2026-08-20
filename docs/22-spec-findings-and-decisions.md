@@ -3716,6 +3716,78 @@ host: **all seven exit 0.** The second claim is doubly worth retiring — steps 
 reachable, so nothing had ever executed them; see **G14** for the separate diagnosis error that
 accompanied it, and `docs/23` for the caveat that this is still a local emulation.
 
+**CLOSED 2026-08-20 by Phase C1, on the removal condition this ruling stated — and closed with no
+gate, because the gate predeceased the event.** Phase C1 landed the
+`knowledge_sources -> source_items -> source_versions` cascade and, with it, `chunks` and
+`document_elements`. That is *"the pin comes out when the source lifecycle lands"*, verbatim, so the
+close required no re-litigation: nothing about the 2026-08-12 reasoning was revisited, and neither of
+the two repairs it rejected was adopted. Property 3 is satisfied the way the ruling always said it
+would be — by Laravel owning the migration, not by narrowing the purge plan.
+
+**Three things about this close are worth more than the close itself.**
+
+**One: the trap fired at nobody.** The *"Removal condition"* paragraph above is written as a warning
+to whoever lands the migrations — the build goes red until the name leaves `KB_MIGRATION_PIN_79`, and
+*"that failure is a success and the flag text says so"*. `.github/` was deleted on **2026-08-17**
+(§ *Removing CI/CD*), three days before the landing. So the one enforcement in this repository that
+was designed to expire on exactly this event was removed three days early, and the event passed in
+silence. The pin was unpinned because a person read a paragraph. **A self-expiring gate is only as
+durable as the workflow it lives in**, and that dependency is invisible from the gate's own design:
+each of its three paths was independently fatal, and all three shared a single point of deletion.
+
+**Two: the close is stated as a command rather than as an outcome** (ADR-036). This one imports the
+tuple instead of restating it, which is what the deleted `(b1)` check did and the reason it could not
+go stale:
+
+```bash
+# ADR-033 property 3, per allow-listed name: does a Laravel migration create it?
+python3 - <<'EOPY'
+import re, pathlib
+ns = {}
+exec(compile(pathlib.Path('services/ai-service/app/db/writes.py').read_text(), 'writes.py', 'exec'), ns)
+mig = list(pathlib.Path('services/core-api/database/migrations').iterdir())
+for t in ns['ALLOWED_TABLES']:
+    hit = any(re.search(rf"CREATE TABLE (IF NOT EXISTS )?{t}\b|Schema::create\('{t}'", p.read_text()) for p in mig)
+    print(f"{'ok      ' if hit else 'MISSING '}{t}")
+EOPY
+```
+
+**The close is asserted against the step and the step is measurable, which is deliberate.** This note
+was written *alongside* the migrations rather than after them — the record and the DDL are two halves
+of one change — so if the command above reports `chunks` or `document_elements` as `MISSING`, this
+close is premature, the pin is live again, and the ruling above is the one in force. That is stated
+rather than assumed because the mechanism that used to make the question unnecessary is the one thing
+this finding no longer has.
+
+**Three: that command is wider than #79, and the widening is a trap of its own.** It reports every
+allow-listed name with no migration, and on the day of the close two such names were **not**
+violations — their writers are stubs, so no statement exists to violate anything. Property 3 bites
+where a write exists, which is why the original finding cited four line numbers in
+`app/deletion/relational.py` rather than a membership list. The second half of the check is therefore
+`grep -rn 'DELETE FROM\|INSERT INTO\|UPDATE ' services/ai-service/app --include=*.py`; a name that
+is `MISSING` in the first command *and* present in the second is this finding recurring under a new
+name. Recorded here because a reader running only the first command will otherwise open two findings
+that do not exist, or — worse — conclude from two false alarms that the command is noise.
+
+**A code comment goes false with this close, in a tree `docs/` does not own.**
+`services/ai-service/app/deletion/relational.py:193-196` states that **no migration in this
+repository creates either table** and marks those two entries' column names as unverified against a
+schema *"in a way the two sparse entries are not"*. Both halves are now wrong, and the second half is
+the useful one: those column names can be checked against a real migration for the first time. It is
+`deletion-engineer`'s to correct; see § P2.
+
+**Cross-reference defect, fixed in the same pass and recorded rather than quietly corrected.** This
+ruling is **G2**. Three documents cited it as **G1** — `CLAUDE.md`'s #79 paragraph and two
+*"What this effort did not touch"* notes in this file (§ ADR-047…052 and § ADR-055…059) — until
+2026-08-20. **G1 is the ADR-036 ruling**, one heading above, and it is about counts in prose, so each
+of those three citations landed a reader on a page about a different subject that reads as plausibly
+related. All three are corrected. The shape is already known here — § L1's preamble records an ADR
+amendment citing *"finding S2"* that had landed on the wrong one, and § C1 and § F12/S12 carry
+head-of-finding pointers for the same reason — and the lesson is the same: a label one character from
+another label has to be checked **at the target**, never at the source. What let this instance survive
+is that the wrong target was *adjacent*, so nothing about the reading experience said "wrong page".
+
+
 ### G3 — #80: the near-duplicate penalty is dropped by ruling, so a verbatim spec line now has no code behind it
 
 **Ruling:** `penalize_near_duplicates` and the `near_duplicate_penalized` exclusion reason are both
@@ -5522,6 +5594,17 @@ mentions still in this file are history and are meant to stay.
   have got a red build until they unpinned the name. Now nothing will remind them. The 2026-08-12
   ruling stands; only its enforcement left.
 
+  **Amended 2026-08-20 — this is the one prediction in this section that came true, and it came
+  true three days later.** Phase C1 landed the `knowledge_sources → source_items → source_versions`
+  cascade together with `chunks` and `document_elements`, which is exactly the event the pin was
+  built to catch, and **nothing objected**: no red build, no reminder, the name unpinned by hand
+  because a person read this bullet. The finding is **closed** — see § *The rulings of 2026-08-12*,
+  **G2** and its closing note for the measuring command, which imports `ALLOWED_TABLES` rather than
+  restating it. The paragraph above stays in the present tense it was written in, because it
+  describes what was true on 2026-08-17 and because the interval it left open — a self-expiring
+  gate deleted three days before the change it expired on — is the whole lesson. It is also the
+  reason the close is recorded in three places rather than one.
+
 ### Two smaller consequences worth naming
 
 * **`scripts/security/rule_count_check.sh` is orphaned.** It was written *because* a gate needed a
@@ -5594,7 +5677,8 @@ different invariant — `apps/web` discriminates the ADR-031 resolver refusal on
 map**, which is sound only while every other `validation` keeps one.
 
 **What this effort did *not* touch:** finding **#79** stays pinned exactly as the 2026-08-12 ruling
-left it (§ *The rulings of 2026-08-12*, G1). Nothing here goes near `chunks`, `document_elements` or
+left it (§ *The rulings of 2026-08-12*, **G2** — cited as G1 here until 2026-08-20; G1 is the
+ADR-036 ruling). Nothing here goes near `chunks`, `document_elements` or
 the `source_versions → source_items → knowledge_sources` cascade, and `ALLOWED_TABLES` is unchanged.
 
 ## Found while building the provider surface — 2026-08-19
@@ -5908,7 +5992,8 @@ built against: an object wrapper (because `#[ResponseShape]` cannot express "an 
 clamps `per_page` silently for callers that never ran a FormRequest.
 
 **What this step did not touch:** finding **#79** stays pinned exactly as the 2026-08-12 ruling left
-it (§ *The rulings of 2026-08-12*, G1). Nothing here goes near `chunks`, `document_elements` or the
+it (§ *The rulings of 2026-08-12*, **G2** — cited as G1 here until 2026-08-20; G1 is the ADR-036
+ruling). Nothing here goes near `chunks`, `document_elements` or the
 `source_versions → source_items → knowledge_sources` cascade, and `ALLOWED_TABLES` is unchanged.
 
 ## Found while landing the bots schema — 2026-08-19
@@ -6799,3 +6884,118 @@ extended to one**: a review is a hypothesis with a suggested fix attached, the f
 the hypothesis is wrong, and the cheap way to tell — measuring the claim against the installed
 dependency before editing anything — is also the only way. Applying the review's wording without it
 would have produced two entries here that read as authoritative and were false.
+
+## The Phase C1 DDL decisions — ADR-062…065, 2026-08-20
+
+Four decisions from **Phase C, step C1** — the step that lands the
+`knowledge_sources → source_items → source_versions → document_elements / chunks` cascade as Laravel
+migrations. Decision text, rejected options, costs and revisit conditions are in
+[`docs/19`](19-repo-structure-adrs.md); this section records the *shape* the four have in common,
+because it is the reason there are four of them rather than none.
+
+**All four are the same kind of question: two sources inside this repository disagreed about a
+column, and DDL cannot abstain.** Prose can carry a disagreement indefinitely — this file is largely a
+record of that — but a `CREATE TABLE` picks one spelling and every reader downstream inherits it. So
+the four were forced by the medium, not by anyone deciding to revisit the schema.
+
+**The losing side was the same document in all four cases**, and naming it is the point:
+`services/core-api/database/factories/KnowledgeSourceFactory.php`'s docblock, whose *"COLUMNS THIS
+MUST PRODUCE"* list is a faithful transcription of `docs/11` §16.4 and has **never been executed by
+anything**, because `definition()` throws. A column list that no statement has ever run against is
+indistinguishable, on the page, from one that has — it is well-organized, it cites its sources, and it
+was wrong in four places. **That is the finding underneath the four ADRs**, and it generalizes past
+this factory: a scaffold that documents a contract it cannot exercise decays exactly like a count in
+prose (ADR-036) and has no measuring command, because there is nothing to measure until the thing it
+describes exists.
+
+**Three of the four are the specification losing to an implementation contract written later.**
+ADR-062 drops the `knowledge_sources` active-version pointer that §16.4 lists; ADR-063 adds an
+`ocr_cfg_version` §16.4 does not have and keeps `activated_at`/`retired_at` over the factory's
+`published_at`; ADR-064 keeps one 15-value vocabulary against the factory's seven-value rollup. Each
+names its deviation in its own status line rather than editing an extract, per `docs/00-index.md`'s
+rule. **ADR-065 goes the other way and is the one to read**: it overrules
+`.claude/skills/postgresql-patterns/SKILL.md`, which is an accepted skill and is normally the binding
+side — and it leaves that skill wrong in writing, which is § P1 below.
+
+**Two of the four rest on a constraint rather than on a preference, and those are the ones a future
+change is most likely to undo by accident.** ADR-062's single pointer and ADR-063's two timestamps are
+not naming choices: they are the two terms of
+`CREATE UNIQUE INDEX … WHERE activated_at IS NOT NULL AND retired_at IS NULL`, the index that makes
+*at most one live version per item* provable by PostgreSQL instead of by ordering discipline inside a
+Celery task that is delivered at least once. A schema that adopted `published_at`, or a sibling
+pointer on `knowledge_sources`, would still pass every test in the suite on the day it landed.
+
+**And C1 closed finding #79**, on the removal condition the 2026-08-12 ruling stated — see
+§ *The rulings of 2026-08-12*, **G2** and the closing note appended to it. The close required no
+re-litigation and adopted neither of the two repairs that ruling rejected.
+
+## Found while landing the source cascade — P1–P3, 2026-08-20
+
+**Why `P`.** `O1`–`O27` is § *Open after scaffolding*, so the letter after `N` was taken. This file
+has picked a letter around a collision before — § L1's preamble records `L` being chosen because
+`S1`–`S17` already meant the second scaffolding audit round, after an ADR amendment citing *"finding
+S2"* landed on the wrong one. `P` is the first free letter.
+
+**All three are owed work in trees `docs/` does not own, and none of them is fixed here.** That is the
+common shape rather than a coincidence: a schema landing for the first time makes three documents
+about the absence of that schema go false at once, and every one of them lives behind a boundary this
+agent does not cross.
+
+### P1 — `postgresql-patterns` line 52 specifies `bytea` for `content_hash`, and ADR-065 overrules it *(OPEN — owed by the skill's owner)*
+
+```bash
+grep -n 'content_hash' .claude/skills/postgresql-patterns/SKILL.md
+```
+
+The line reads `content_hash bytea NOT NULL, -- 32 raw bytes, not 64 hex chars`, inside the runnable
+DDL that is the authority for every other column on `source_versions`. ADR-065 rejects it in favour of
+`char(64) COLLATE "C"` hex, for four reasons measured in this tree — the Python emits hex
+(`chunker.py:963`), the ingest key composes `content_hash` as a `str` and guards it with an `in`
+test that raises `TypeError` against `bytes`, § **J3** records two silent `BinaryCast` defects on
+`bytea` columns in this repository, and the same `CREATE TABLE` already stores a sha256 as
+`ingest_key char(64) COLLATE "C"` four lines below.
+
+**Why this is a finding and not just an ADR.** The skill is *right by default* here — it is the
+binding source for the other three decisions in the same step — so a reader consulting it for the next
+migration or the next Eloquent cast will write `bytea` and be following the correct procedure. The
+disagreement is therefore live and load-bearing until the skill moves, and the failure it produces is
+the silent kind: a `bin2hex` applied to a value that is already hex returns a valid 128-character
+string that hashes to a well-formed ingest key for an identity that does not exist, so the version
+never dedupes against its own completed run and nothing raises.
+
+**Owner:** whoever owns `postgresql-patterns`. **Not fixed here**, and the boundary is the reason:
+this agent does not edit `.claude/skills/`, because documentation drifting from a skill is bad and
+documentation silently rewriting one is worse. § **J7** is the closed precedent for how an item of
+this shape ends — a skill's worked example refusing what ADR-047 permits, recorded here as a
+divergence and then corrected **by the skill's owner**, not by the document that found it. This is the
+second such divergence in the register and the first one still open, so `postgresql-patterns` and
+`docs/19` disagree in writing until it closes; the migrations follow ADR-065 meanwhile.
+
+### P2 — `app/deletion/relational.py`'s docblock says no migration creates `chunks` or `document_elements` *(OPEN — owed by `deletion-engineer`)*
+
+```bash
+sed -n '188,197p' services/ai-service/app/deletion/relational.py
+```
+
+`RELATIONAL_PURGE_ORDER`'s preamble states that *"**no migration in this repository creates either
+table**, so their column names are unverified against a schema in a way the two sparse entries are
+not."* Both halves went false with C1. The second half is the useful one and is the reason this is
+worth a row: the two entries' column names — `organization_id`, `source_version_id` — can be checked
+against a real migration for the first time, and the docblock currently tells a reader not to bother.
+It is the same claim-shape the 2026-08-17 sweep chased across five trees (§ **M6**): a comment that
+was true when written, describing an absence, with nothing watching for the absence ending.
+
+### P3 — nothing compares the status CHECK constraints to `SourceState` *(OPEN — owed by `test-engineer`)*
+
+ADR-064 puts one vocabulary on three columns. The Python half asserts its own membership at import
+(`grep -n '^assert len(SourceState)' services/ai-service/app/ingestion/states.py`); the SQL half
+asserts its own inside each `CHECK`; **the two are joined by nothing.** A state added to the enum and
+to two of the three constraints is a row that saves in one table and fails in another, discovered at
+the ingestion status callback rather than in a suite.
+
+The test is small and crosses both runtimes — read `SourceState`, read the constraint text out of
+`information_schema.check_constraints`, compare as **sets** in both directions — and it is named here
+rather than left implied because ADR-064's revisit condition (`len(SourceState)` changing) is exactly
+the moment it is either written or missed. **This is not a defect today**: the three constraints and
+the enum agree as C1 lands. It is a missing tripwire on an invariant whose violation is silent, which
+is the category this file exists for.

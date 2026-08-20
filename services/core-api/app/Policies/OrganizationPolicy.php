@@ -120,6 +120,76 @@ final class OrganizationPolicy extends OrgScopedPolicy
     }
 
     /**
+     * LIST the organization's knowledge sources.
+     *
+     * Here and not on KnowledgeSourcePolicy because a list has no row to take an organization from
+     * — the same reason `viewBots`, `viewProviderConnections` and `viewMembers` live here.
+     * `KnowledgeSourcePolicy::view()` is the per-row half and carries the identical permission, so
+     * the two never disagree about who may read a source; what differs is only which record
+     * supplied the organization.
+     *
+     * A `viewAny` on KnowledgeSourcePolicy would be the alternative spelling and is not used, for
+     * the reason `viewProviderConnections` records: Laravel resolves `viewAny` from a CLASS NAME
+     * rather than an instance, so the organization would have to come from somewhere other than a
+     * record — which is precisely the shape OrgScopedPolicy exists to make unrepresentable.
+     */
+    public function viewSources(?User $user, Organization $organization): Response
+    {
+        return $this->permit($user, $organization, Permission::SourcesView);
+    }
+
+    /**
+     * Create a knowledge source.
+     *
+     * The record is the ORGANIZATION and not a source, because there is no source yet — the same
+     * split `createBot()` makes one entity over. `Organization` already implements OrgOwned, so
+     * `Gate::authorize('createSource', $organization)` resolves to this class with no OrgContext
+     * shim.
+     */
+    public function createSource(?User $user, Organization $organization): Response
+    {
+        return $this->permit($user, $organization, Permission::SourcesManage);
+    }
+
+    /**
+     * Create a source BY UPLOADING — the one-step path where the file arrives with the request that
+     * creates the source it belongs to.
+     *
+     * TWO ABILITIES ON ONE ENDPOINT, NOT ONE. A create-with-upload authorizes `createSource` AND
+     * this, because it performs both acts: it adds a row to the corpus and it consumes storage
+     * quota while handing bytes to an untrusted parser. Collapsing them would make whichever
+     * permission was chosen govern both, and the pair is separate precisely because a future plan
+     * gate attaches to the second and not the first (see `Permission::SourcesUpload`).
+     *
+     * `KnowledgeSourcePolicy::upload()` is the per-row half, for adding an item or a version to a
+     * source that already exists, and it carries the identical permission.
+     */
+    public function uploadSource(?User $user, Organization $organization): Response
+    {
+        return $this->permit($user, $organization, Permission::SourcesUpload);
+    }
+
+    /**
+     * May this caller WRITE sources in this organization — asked of a LIST, and asked once.
+     *
+     * THIS ABILITY AUTHORIZES NOTHING. IT DECIDES A PROJECTION, exactly as `manageBots()` does, and
+     * for the identical reason: `OrgScopedPolicy::permit()` resolves membership per check and is
+     * deliberately never memoized across organizations, so asking the question per row on a
+     * hundred-row page is a hundred `organization_users` reads for one answer that cannot differ
+     * between them. Every row on that page belongs to the organization in the path.
+     *
+     * A 403 MUST NEVER BE PRODUCED FROM IT — `Gate::allows()`, never `Gate::authorize()` — and it
+     * is not a replacement for `createSource` on `store` or for `KnowledgeSourcePolicy::update()`
+     * on `update`. It exists as its own name rather than reusing `createSource` because an ability
+     * name is read at the call site as the action being performed, and `Gate::allows('createSource',
+     * $org)` inside a GET reads as a creation check somebody forgot to remove.
+     */
+    public function manageSources(?User $user, Organization $organization): Response
+    {
+        return $this->permit($user, $organization, Permission::SourcesManage);
+    }
+
+    /**
      * The three membership abilities have no MODEL of their own — listing members and creating an
      * invitation both act on the organization itself — so they live here rather than on
      * OrganizationInvitationPolicy, which can only authorize a row that already exists. `Organization`

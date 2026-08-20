@@ -182,5 +182,13 @@ export type {
   ProviderModelEditSource,
 } from './provider-model.js';
 
-export { uploadSchema } from './upload.js';
+/**
+ * The upload form, and it is the one entry here that exports a schema FACTORY rather than a schema:
+ * §8.10 makes the size cap and the MIME allow-list per-organization, so there is no byte constant
+ * and no MIME constant in this package to build a fixed schema out of. Callers instantiate it with
+ * the limits the bootstrap config returned for the organization they are rendering for.
+ *
+ * `uploadDefaults` takes no argument for the same reason its siblings take one — see its docblock.
+ */
+export { uploadDefaults, uploadSchema } from './upload.js';
 export type { OrgUploadLimits, UploadIn, UploadOut, UploadSchema } from './upload.js';

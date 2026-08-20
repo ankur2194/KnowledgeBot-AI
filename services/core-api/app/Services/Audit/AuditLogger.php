@@ -517,6 +517,212 @@ final class AuditLogger
 
     public const BOT_STARTER_QUESTION_DELETED = 'bot.starter_question.deleted';
 
+    /**
+     * ── THE TWELVE KNOWLEDGE-SOURCE OPERATIONS, REGISTERED IN ONE PASS ────────────────────────
+     *
+     * All twelve constants and all twelve rules land together, before the endpoints that call them
+     * exist, because Phase C's later steps are forbidden from editing this file. That is a
+     * sequencing decision with a real cost — a rule nothing calls is a rule nothing exercises — so
+     * the standing guards at the bottom of tests/Unit/AuditLoggerTest.php are what hold them:
+     * every constant is pinned BY NAME against `OPERATIONS`, every `on_failure` is pinned by name,
+     * and every `details` key is checked against the credential and bearer-capability name rules.
+     *
+     * ── §18.11 REQUIRES SOURCE CHANGES AUDITED, AND THE SHAPE OF THE REQUIREMENT IS UNUSUAL ──
+     *
+     * A knowledge source carries no credential and grants no access on its own, so the argument for
+     * auditing it is not the one the provider surface makes. It is this: THE CORPUS IS WHAT THE BOT
+     * SAYS. An answer a customer disputes is explained by which documents were retrievable at the
+     * time it was produced, and every one of the twelve rows below moves that set —
+     *
+     *   create / update / delete    what is in the corpus at all
+     *   disable / enable            whether a source answers, immediately, with every vector retained
+     *   reprocess                   which version answers, and at a provider's per-token price
+     *   upload accepted / rejected  what bytes we accepted, from whom, and what we refused
+     *   version activated / retired the pointer switch itself — the single act that decides what
+     *                               every tenant's next query sees
+     *   assignment created/deleted  WHICH BOT may answer from it, which is `bot_ids`, which is one
+     *                               of the four mandatory Qdrant filter terms
+     *
+     * — and none of them leaves a trace anywhere else that outlives the row. `updated_at` says
+     * something changed and cannot say what, and a deleted source's row is gone.
+     *
+     * ── WHAT THE ALLOW-LISTS DELIBERATELY CANNOT CARRY ───────────────────────────────────────
+     *
+     * NO EXTRACTED DOCUMENT TEXT, EVER. Not a chunk, not an element, not an excerpt, not a "first
+     * 200 characters for context". `audit_logs` is append-only, long-lived and exportable, and
+     * `chunks.text` is a customer's document — the single largest body of tenant prose in this
+     * platform. `MAX_VALUE_LENGTH` would truncate it into something that reads as the whole passage
+     * and is not, which is the failure mode that makes a leak look like a summary. There is no
+     * `details` key on any of the twelve below that can hold it.
+     *
+     * `description` IS ABSENT for the weaker version of the same reason `bot.*` refuses
+     * `welcome_message`: prose that decides nothing, in a table an investigator has to be able to
+     * read. `tags` and `heading_path` are ARRAYS, which `sanitize()` drops outright — a structure
+     * in `details` is how `$request->all()` gets in one nesting level down.
+     *
+     * ── WHAT THEY DO CARRY, AND WHY EACH ONE EARNS ITS PLACE ─────────────────────────────────
+     *
+     * `name` and `type` are the only surviving identification after a hard delete, exactly as
+     * `bot.deleted`'s are. `origin_url` is the crawl target: the one tenant-supplied string on the
+     * source that causes this platform to make an OUTBOUND REQUEST, so it is echoed for the same
+     * reason `bot.domain.*` echoes an origin — it IS the security fact rather than a description of
+     * one, and an investigation asks WHICH URLs we were told to fetch without a candidate list to
+     * test against. `content_hash` is a digest and not a secret; it is what makes "we processed
+     * exactly these bytes" checkable. `storage_key` is a generated path under this organization's
+     * own prefix and names no object outside it.
+     *
+     * ── ALL BUT ONE ARE ON_FAILURE_ABORT ─────────────────────────────────────────────────────
+     *
+     * The real test is the class docblock's — "can this still be rolled back" — not "is this
+     * interesting". Eleven of the twelve are written inside the transaction that performs the
+     * change, so the answer is yes and a failed audit write must take the change with it. The
+     * exception is `source.upload.rejected`, which is the mirror image: there is no state change to
+     * undo, the refusal is already decided, and aborting would turn a rejected file into a 500 —
+     * both a lie to the caller and still no audit row.
+     */
+    public const SOURCE_CREATED = 'source.created';
+
+    public const SOURCE_UPDATED = 'source.updated';
+
+    /**
+     * A HARD delete of the source ROW, at the end of the verified two-phase removal.
+     *
+     * That is what makes `name`, `type` and `origin_url` load-bearing here rather than decorative:
+     * `subject_id` points at a ULID no table resolves any more, and without the echoed fields the
+     * trail says a source was removed without being able to say which — or, for a crawl, what we
+     * had been fetching.
+     *
+     * `item_count` and `version_count` are the tripwire the `bot.*` rows' child summaries are:
+     * scalars that tell a reader how much went with it, so a row showing 412 items sends them
+     * looking rather than letting the delete read as a single-document cleanup.
+     */
+    public const SOURCE_DELETED = 'source.deleted';
+
+    /**
+     * ── DISABLE AND ENABLE ARE SEPARATE OPERATIONS, NOT ONE `status_changed` ─────────────────
+     *
+     * `bot.domain.status_changed` is one operation with a `previous_status`, and this pair is two
+     * operations, which looks inconsistent until you ask what each is for. A domain's status has
+     * three values and a promotion is the interesting one, so the transition IS the event. A
+     * source's status has FIFTEEN, and disable/enable are the only two moves a human makes
+     * directly — every other transition is the pipeline walking. Folding them into a generic
+     * `source.status_changed` would put those two beside thirteen machine transitions and make
+     * "who turned this source off" a query with a WHERE clause on a detail field.
+     *
+     * BOTH CARRY `previous_status`, read UNDER THE SAME ROW LOCK that writes the new value, so
+     * neither can name a status the row did not hold. That is the property `bot.updated`
+     * deliberately does NOT have — see its constant — and the difference is that this is a
+     * ONE-COLUMN transition where "previous" is unambiguous on every instance.
+     */
+    public const SOURCE_DISABLED = 'source.disabled';
+
+    public const SOURCE_ENABLED = 'source.enabled';
+
+    /**
+     * An administrator asked for the source to be processed again.
+     *
+     * `force_nonce` IS ECHOED AND IT IS NOT A CREDENTIAL. It is the reprocess request's own
+     * identifier, and it is a component of `ingest_key` — the ONLY component that changes when
+     * nothing else did, which is what makes an explicit reprocess reach a worker at all instead of
+     * deduping against the completed run. Recording it is what lets a trail answer "did this
+     * request actually cause a new version", by matching it against
+     * `source_versions.ingest_key`'s inputs. It authorizes nothing and identifies nobody.
+     */
+    public const SOURCE_REPROCESS_REQUESTED = 'source.reprocess.requested';
+
+    /**
+     * ── THE UPLOAD PAIR, AND THE REJECTION IS THE ONE THAT MATTERS ───────────────────────────
+     *
+     * `kb-security-baseline`'s upload rules are a six-step gate — size, extension allow-list,
+     * content-sniffed MIME, extension/MIME cross-check, OPC macro and embedded-object refusal, and
+     * the content hash — and every one of them can refuse. WITHOUT `source.upload.rejected` THE
+     * REFUSALS ARE INVISIBLE: a caller grinding at that gate with crafted files leaves no trace
+     * anywhere, because nothing was written. That is the same gap `provider.connection.
+     * credential_rotation_failed` exists to close on the credential surface, and it is the reason
+     * this pair is two operations rather than one with an outcome field.
+     *
+     * `reason` IS A CLOSED TOKEN AND NOT A MESSAGE. It names which of the six steps refused —
+     * `size`, `extension`, `mime_sniff`, `mime_mismatch`, `macro_payload`, `duplicate` — and it is
+     * the field an operator groups by. An exception message would be unbounded, would vary by
+     * library version, and could echo the parser's reading of a hostile file back into the audit
+     * table.
+     *
+     * `display_name` IS TENANT-CONTROLLED FREE TEXT AND IS ECHOED ANYWAY, deliberately: on a
+     * rejection it is the only thing that identifies the attempt, `source_items`' own CHECK already
+     * refuses a separator, a control character and the two directory-relative names, and
+     * `MAX_VALUE_LENGTH` bounds it like any other echoed string. A filename crafted to trip the
+     * shape backstop is degraded to a fingerprint, which is tenant self-harm along a path the
+     * backstop exists for.
+     */
+    public const SOURCE_UPLOAD_ACCEPTED = 'source.upload.accepted';
+
+    public const SOURCE_UPLOAD_REJECTED = 'source.upload.rejected';
+
+    /**
+     * ── THE POINTER SWITCH, WHICH IS THE MOST CONSEQUENTIAL WRITE IN THE INGESTION PATH ─────
+     *
+     * Activation is the single act that decides what every subsequent query against this item sees.
+     * It is Laravel's and not the data plane's (ADR-012) precisely because the audit row, the policy
+     * check and the retention clock are here — so an activation with no audit row would defeat the
+     * main argument for the split.
+     *
+     * `previous_version_id` IS ON THE ACTIVATION ROW and is read inside the same transaction, under
+     * the `lockForUpdate()` on the item that the switch already takes. It is what makes the row
+     * readable on its own: "this version replaced that one, at this time, on this actor's request".
+     * Without it a reader has to reconstruct the chain from `source.version.retired` rows and hope
+     * none is missing.
+     *
+     * `chunk_count` is the VERIFIED total the data plane reported with `exact=True`, and it is
+     * recorded because it is the number the whole verification gate turns on. A version activated
+     * with a chunk count that later disagrees with the collection is the "bot only knows half the
+     * document" failure, and this row is where the expected value is written down.
+     *
+     * `ingest_key` and `embedding_model_version` are echoed for replayability: together they say
+     * which content, which four configurations and which vector space produced what went live.
+     * Neither is a secret — the first is a sha256 hexdigest of public inputs, the second is a
+     * provider/model/width/probe-digest string.
+     */
+    public const SOURCE_VERSION_ACTIVATED = 'source.version.activated';
+
+    /**
+     * The other half of the switch, as its own row.
+     *
+     * SEPARATE FROM THE ACTIVATION BECAUSE THE TWO CAN COME APART. A version is retired by the
+     * publish transaction in the ordinary case, and by an archive or a delete in the cases that are
+     * not ordinary — where nothing is activated in its place and the item stops answering. One
+     * combined row could not express "retired, replaced by nothing", which is exactly the state an
+     * incident is asking about.
+     *
+     * `superseded_by_version_id` is therefore NULLABLE in meaning: present when the retirement was
+     * part of a publish, absent when the version was simply withdrawn. `sanitize()` skips a null
+     * silently, so the key's absence is the distinction.
+     */
+    public const SOURCE_VERSION_RETIRED = 'source.version.retired';
+
+    /**
+     * ── THE TWO ASSIGNMENT OPERATIONS, AND THEY AUDIT A CROSS-TENANT BOUNDARY ────────────────
+     *
+     * `bot_source_assignments` is the one row in the schema that can span two organizations
+     * (kb-tenancy-isolation NN2). The composite foreign keys are what make the illegal version
+     * impossible; these rows are what record the legal version, which is a grant in exactly the
+     * sense `bot.domain.created` is: after this row exists, a bot answers from documents it could
+     * not reach before.
+     *
+     * `source_name` IS ECHOED ALONGSIDE `source_id`, AND THAT IS NOT REDUNDANCY. Both `bot.deleted`
+     * and `source.deleted` are HARD deletes, so an assignment row that recorded only two ULIDs
+     * would resolve to nothing on either end once either parent is gone — and "which documents was
+     * this bot allowed to answer from" is precisely the question an incident asks after the fact.
+     * `bot_id` is echoed for the same reason it is on every `bot.*` child row.
+     *
+     * BOTH ARE ON_FAILURE_ABORT. A LOG policy on `created` would permit a retrieval-scope grant to
+     * exist with no record of who made it, which is the whole of finding L2 restated one entity
+     * over — and with higher stakes, because this grant reaches documents rather than a page that
+     * may embed a widget.
+     */
+    public const BOT_SOURCE_ASSIGNMENT_CREATED = 'bot.source_assignment.created';
+
+    public const BOT_SOURCE_ASSIGNMENT_DELETED = 'bot.source_assignment.deleted';
+
     public const OUTCOME_SUCCESS = 'success';
 
     public const OUTCOME_FAILURE = 'failure';
@@ -1114,6 +1320,244 @@ final class AuditLogger
                 // its siblings once the text is deliberately not recorded.
                 'sort_order' => self::ECHOED,
                 'question_count' => self::ECHOED,
+            ],
+        ],
+
+        // ── THE SIX SOURCE-LEVEL OPERATIONS ────────────────────────────────────────────────────
+        //
+        // ONE ALLOW-LIST SHAPE, REPEATED RATHER THAN SHARED THROUGH A CONSTANT — the same call
+        // every other family in this map makes, and the same reason: the lists must be able to
+        // DIVERGE, and a shared constant makes "add a field to the created row" silently add it to
+        // the deleted row too.
+        //
+        // NO `description`, NO EXTRACTED TEXT, NO `tags`. See the constants' docblock: the first
+        // two are unbounded tenant prose in an append-only table an investigator has to be able to
+        // read, and the third is an ARRAY, which sanitize() drops outright.
+        self::SOURCE_CREATED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                // TENANT-CONTROLLED FREE TEXT, and the only surviving identification of the source
+                // after the hard delete: `subject_id` resolves to nothing then.
+                'name' => self::ECHOED,
+                'type' => self::ECHOED,
+                'status' => self::ECHOED,
+                // THE CRAWL TARGET, echoed and never fingerprinted, for the reason
+                // `bot.domain.created` echoes an origin: it is the SECURITY FACT itself rather than
+                // a description of one. An investigation asks which URLs this platform was told to
+                // fetch, and it asks without a candidate list to test against — which is the only
+                // question a fingerprint could answer. Null on a file or text source, and a null is
+                // skipped silently, so the key's absence is meaningful.
+                'origin_url' => self::ECHOED,
+                // The retrieval time window. Timestamps, kept by sanitize() like `expires_at` on
+                // the invitation rows, and the pair that explains a source which is present and
+                // answers nothing.
+                'effective_at' => self::ECHOED,
+                'expires_at' => self::ECHOED,
+            ],
+        ],
+        self::SOURCE_UPDATED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            // The values AFTER the edit, every field on every row — including the ones this
+            // particular PATCH did not name — because a row that recorded only what changed would
+            // be unreadable next to the `created` and `deleted` rows for the same subject.
+            // Identical reasoning, and the identical decision about `previous_*`, as `bot.updated`.
+            'details' => [
+                'name' => self::ECHOED,
+                'type' => self::ECHOED,
+                'status' => self::ECHOED,
+                'origin_url' => self::ECHOED,
+                'effective_at' => self::ECHOED,
+                'expires_at' => self::ECHOED,
+            ],
+        ],
+        self::SOURCE_DELETED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                'name' => self::ECHOED,
+                'type' => self::ECHOED,
+                'status' => self::ECHOED,
+                'origin_url' => self::ECHOED,
+                // THE SCALE OF WHAT WENT, AS SCALARS. The same tripwire the `bot.*` rows carry for
+                // their child collections: a reader who lands on this row and sees 412 items and
+                // 1,340 versions knows a crawl was removed rather than a document, and knows to go
+                // looking at the `source.version.retired` rows that preceded it. An integer takes
+                // sanitize()'s `is_int()` path: never truncated, never redacted, and a 0 records
+                // as 0.
+                'item_count' => self::ECHOED,
+                'version_count' => self::ECHOED,
+            ],
+        ],
+        self::SOURCE_DISABLED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                'name' => self::ECHOED,
+                'status' => self::ECHOED,
+                // READ UNDER THE SAME ROW LOCK that writes the new value, so two concurrent moves
+                // serialise and neither row can name a status the source never held. This is a
+                // ONE-COLUMN transition, which is what makes "previous" unambiguous here and
+                // ambiguous on `source.updated` — the asymmetry `bot.updated` states in full.
+                'previous_status' => self::ECHOED,
+            ],
+        ],
+        self::SOURCE_ENABLED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                'name' => self::ECHOED,
+                'status' => self::ECHOED,
+                'previous_status' => self::ECHOED,
+            ],
+        ],
+        self::SOURCE_REPROCESS_REQUESTED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                'name' => self::ECHOED,
+                'status' => self::ECHOED,
+                // NOT A CREDENTIAL — see the constant's docblock. It is the one ingest-key
+                // component that changes when nothing else did, so it is what makes an explicit
+                // reprocess reach a worker instead of deduping against the completed run.
+                'force_nonce' => self::ECHOED,
+                // How much work was asked for. A reprocess of a 400-page crawl spends provider
+                // embedding tokens on every item, and this is the number that says so.
+                'item_count' => self::ECHOED,
+            ],
+        ],
+
+        // ── THE UPLOAD PAIR ────────────────────────────────────────────────────────────────────
+        //
+        // TWO OPERATIONS AND NOT ONE WITH A VARYING OUTCOME, because `outcome` is derived from the
+        // operation in this map rather than passed in — which is the property that stops any row
+        // claiming `auth.login.failed` with `outcome = success`. A single `source.upload` operation
+        // could therefore only be one or the other.
+        self::SOURCE_UPLOAD_ACCEPTED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                // The item the bytes landed on. `subject_id` is the SOURCE, because that is what
+                // was authorized and what a reader searches by.
+                'source_item_id' => self::ECHOED,
+                // The user's filename. Tenant-controlled free text and echoed anyway — see the
+                // constant's docblock, and note that `source_items_display_name_is_not_a_path`
+                // already refuses a separator, a control character and the two directory-relative
+                // names before this value can reach the column.
+                'display_name' => self::ECHOED,
+                // SNIFFED FROM CONTENT, never the client's Content-Type. Recording the sniffed
+                // value is what makes the cross-check auditable after the fact.
+                'mime' => self::ECHOED,
+                'byte_size' => self::ECHOED,
+                // A DIGEST, NOT A SECRET, and it is what makes "we processed exactly these bytes"
+                // checkable against the version that was published from them.
+                'content_hash' => self::ECHOED,
+                // A GENERATED path under this organization's own prefix — never the uploaded
+                // filename, and `source_items_storage_key_is_tenant_scoped` refuses a key outside
+                // the row's own organization. It names no object another tenant can reach.
+                'storage_key' => self::ECHOED,
+            ],
+        ],
+        self::SOURCE_UPLOAD_REJECTED => [
+            'outcome' => self::OUTCOME_FAILURE,
+            // THE ONE LOG ROW IN THIS FAMILY, and it is the "can this still be rolled back" test
+            // answering NO from the other direction: there is no state change to undo. The refusal
+            // is already decided, no row was written, and aborting would turn a rejected file into
+            // a 500 — both a lie to the caller and still no audit row.
+            'on_failure' => self::ON_FAILURE_LOG,
+            'details' => [
+                'display_name' => self::ECHOED,
+                // What the CLIENT'S bytes actually sniffed as, which on a rejection is the whole
+                // point: `.xlsx` arriving as `application/x-dosexec` is the row somebody wants to
+                // find. Null when the refusal happened before sniffing — a size rejection reads
+                // the header and stops — and a null is skipped silently.
+                'mime' => self::ECHOED,
+                'byte_size' => self::ECHOED,
+                // A CLOSED TOKEN NAMING WHICH GATE REFUSED, never an exception message. See the
+                // constant's docblock: a message would be unbounded, would vary by library version,
+                // and could echo a parser's reading of a hostile file into an append-only table.
+                'reason' => self::ECHOED,
+            ],
+        ],
+
+        // ── THE POINTER SWITCH, AS TWO ROWS ────────────────────────────────────────────────────
+        self::SOURCE_VERSION_ACTIVATED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                // Which page or file of the source this is about. Load-bearing for the same reason
+                // `bot_id` is on every `bot.*` child row: after the source is hard-deleted,
+                // `subject_id` resolves to nothing.
+                'source_item_id' => self::ECHOED,
+                'version_number' => self::ECHOED,
+                // Which of the two Ready flavours it landed in. `ready_with_warnings` is identical
+                // to `ready` for retrieval, so this is the only place the distinction is durable
+                // once the warning summary has been superseded.
+                'status' => self::ECHOED,
+                // WHAT IT REPLACED, read inside the same transaction under the lockForUpdate() the
+                // switch already takes on the item — so the row is readable on its own instead of
+                // requiring a reader to reconstruct the chain from retirement rows.
+                'previous_version_id' => self::ECHOED,
+                // Replayability: which content, which four configurations, which vector space.
+                // A sha256 hexdigest of public inputs and a provider/model/width/probe-digest
+                // string. Neither is a secret and neither identifies a person.
+                'ingest_key' => self::ECHOED,
+                'embedding_model_version' => self::ECHOED,
+                // THE VERIFIED TOTAL the data plane counted with exact=True. The number the whole
+                // verification gate turns on, written down where a later disagreement with the
+                // collection can be measured against it.
+                'chunk_count' => self::ECHOED,
+            ],
+        ],
+        self::SOURCE_VERSION_RETIRED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                'source_item_id' => self::ECHOED,
+                'version_number' => self::ECHOED,
+                'status' => self::ECHOED,
+                // PRESENT WHEN THE RETIREMENT WAS PART OF A PUBLISH, ABSENT WHEN THE VERSION WAS
+                // SIMPLY WITHDRAWN — an archive or a delete retires with nothing in its place, and
+                // "retired, replaced by nothing" is exactly the state an incident asks about.
+                // sanitize() skips a null silently, so the key's absence carries the distinction.
+                'superseded_by_version_id' => self::ECHOED,
+            ],
+        ],
+
+        // ── THE RETRIEVAL-SCOPE GRANT ──────────────────────────────────────────────────────────
+        //
+        // `source_name` sits beside `source_id` and `bot_id` deliberately: both parents are HARD
+        // deletes, so a row carrying only ULIDs resolves to nothing on either end afterwards — and
+        // "which documents was this bot allowed to answer from" is precisely the question that gets
+        // asked after the fact.
+        self::BOT_SOURCE_ASSIGNMENT_CREATED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                'bot_id' => self::ECHOED,
+                'source_id' => self::ECHOED,
+                'source_name' => self::ECHOED,
+                // A tie-break between this bot's sources, never a filter. Recorded because a
+                // reordering is otherwise byte-identical to no change at all.
+                'priority' => self::ECHOED,
+                // WHETHER THE GRANT IS LIVE. A disabled assignment grants nothing; the difference
+                // is the whole reading of this row in an investigation, exactly as `status` is on
+                // `bot.domain.deleted`.
+                'enabled' => self::ECHOED,
+            ],
+        ],
+        self::BOT_SOURCE_ASSIGNMENT_DELETED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                'bot_id' => self::ECHOED,
+                'source_id' => self::ECHOED,
+                'source_name' => self::ECHOED,
+                'priority' => self::ECHOED,
+                // Whether it was LIVE when it went. A removed disabled row granted nothing; a
+                // removed enabled one did.
+                'enabled' => self::ECHOED,
             ],
         ],
     ];
