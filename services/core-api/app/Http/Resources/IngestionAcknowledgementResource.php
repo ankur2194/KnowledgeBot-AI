@@ -12,7 +12,7 @@ use Illuminate\Http\Resources\Json\JsonResource;
 /**
  * What Laravel tells the data plane it did with one ingestion progress frame.
  *
- * ── A REFUSED FRAME IS STILL A 200, AND THE BODY IS WHERE IT SAYS SO ─────────────────────────
+ * ── A SUPERSEDED FRAME IS STILL A 200, AND THE BODY IS WHERE IT SAYS SO ──────────────────────
  *
  * A stale or out-of-order frame is the GUARD WORKING, not an error. Answering it with a 4xx would
  * put a permanently-failing request in front of a Celery task that is going to re-emit it, and
@@ -20,6 +20,14 @@ use Illuminate\Http\Resources\Json\JsonResource;
  * superseded". So the status stays 200 and `applied` carries the verdict — which is also what makes
  * the seam observable: a run whose frames are all `out_of_order` is a redelivery storm, and one
  * whose frames are `unknown_item` is a callback aimed at the wrong tenant.
+ *
+ * THAT IS NOT "EVERY REFUSAL IS A 200", AND THE MISSING CLAUSE WAS PUBLISHED. A MALFORMED frame and
+ * an ILLEGAL STATE TRANSITION are both 422s on this route, so a worker author reading the rule
+ * stated absolutely would be surprised by the first `queued -> parsing` they sent. The choice is
+ * right for the same reason the 200 is: `validation` is non-retryable in the taxonomy, so a Celery
+ * task that reads the class will not hammer a 422 either. The distinction is WHICH IS TRUE OF THE
+ * FRAME — "you are late" is a 200 with a reason, "this frame cannot be applied at all" is a 422 with
+ * an `errors` map naming the field.
  *
  * ── IT ECHOES THE SOURCE'S RESULTING STATUS AND NOTHING ELSE ABOUT THE SOURCE ────────────────
  *
@@ -65,10 +73,12 @@ final class IngestionAcknowledgementResource extends JsonResource implements Pro
             'IngestionAcknowledgementResource' => [
                 'type' => 'object',
                 'additionalProperties' => false,
-                'description' => 'The result of applying one ingestion progress frame. A refused '
+                'description' => 'The result of applying one ingestion progress frame. A SUPERSEDED '
                     .'frame is a 200 with `applied: false`, because a stale or out-of-order frame is '
                     .'the ordering guard working rather than an error, and a 4xx would make a '
-                    .'Celery retry hammer it.',
+                    .'Celery retry hammer it. A MALFORMED frame, and an illegal state transition, '
+                    .'are 422 `validation` instead — non-retryable in the taxonomy, so a worker '
+                    .'reading the class will not hammer those either.',
                 'required' => ['applied', 'reason', 'status', 'activated'],
                 'properties' => [
                     'applied' => [

@@ -1,4 +1,5 @@
 import type { SourceResource } from '@kb/contracts';
+import Link from 'next/link';
 
 import { StatusPill } from '@/components/status-pill';
 import { TONE, type ToneClasses } from '@/components/tone';
@@ -69,7 +70,18 @@ export const SOURCE_COLUMNS = helper.columns([
     meta: { card: 'title' },
     cell: ({ getValue, row }) => (
       <div className="flex min-w-0 flex-col">
-        <span className="font-medium">{getValue()}</span>
+        {/* THE NAME IS THE LINK TO `/sources/{id}`, AND IT IS THE ONLY LINK IN THE ROW — which is
+            the distinction the spec below this one is about. An INTERNAL route built from the row's
+            own ULID, not from anything a tenant typed; the crawl URL two lines down stays text,
+            because making THAT clickable is a decision about following a stranger's URL from an
+            authenticated admin origin. The name itself is still tenant-authored text and is still a
+            JSX child; a link's `href` is the one thing here that is ours. */}
+        <Link
+          href={`/sources/${encodeURIComponent(row.original.id)}`}
+          className="font-medium text-primary underline-offset-4 hover:underline"
+        >
+          {getValue()}
+        </Link>
         {row.original.origin_url === null ? null : (
           // `--font-mono` says "machine handle" without relying on colour, and `truncate` keeps a
           // 2,048-character URL from setting the column's width. The full value is in `title`, which

@@ -10,6 +10,7 @@ use App\Services\Sources\SourceWarningCount;
 use App\Support\Contracts\ProvidesOpenApiSchema;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
+use RuntimeException;
 
 /**
  * One knowledge source with what is actually INSIDE it — the shape `GET .../sources/{source}`
@@ -74,7 +75,9 @@ final class SourceDetailResource extends JsonResource implements ProvidesOpenApi
     {
         $version = $this->content->activeVersion;
 
-        return (new SourceResource($this->resource))->toArray($request) + [
+        $base = (new SourceResource($this->resource))->toArray($request);
+
+        $added = [
             'item_count' => $this->content->itemCount,
             'active_version_count' => $this->content->activeVersionCount,
             'active_version' => $version === null
@@ -93,6 +96,58 @@ final class SourceDetailResource extends JsonResource implements ProvidesOpenApi
             'content_preview' => $this->content->preview,
             'content_preview_truncated' => $this->content->previewTruncated,
         ];
+
+        // `+` IS LEFT-WINS AND SILENT, WHICH IS WHY THIS LINE EXISTS. See `refuseCollisions()`.
+        self::refuseCollisions($base, $added, 'toArray()');
+
+        return $base + $added;
+    }
+
+    /**
+     * Refuse a key that both halves of this projection declare, rather than silently dropping one.
+     *
+     * ── PHP'S `+` ON ARRAYS IS LEFT-WINS AND SAYS NOTHING ────────────────────────────────────
+     *
+     * This resource is composed with `+` in two places on purpose — the list fields are DERIVED
+     * from `SourceResource` rather than restated, in the payload and in the schema alike, so a
+     * field added to the list reaches the detail with no second edit and the two can never disagree
+     * about a description. The cost of that derivation is this: if a name ever appears in BOTH
+     * halves — most plausibly when a count is promoted onto the list row — the base value wins and
+     * the detail's own declaration is discarded, in the payload and in the schema, with nothing
+     * raised.
+     *
+     * ── AND NOT ONE OF THE FOUR DRIFT PINS CAN SEE IT ────────────────────────────────────────
+     *
+     * That is finding S4 and it is why a guard is worth more than a comment here. A collision
+     * leaves every pin green: `keyof` is unchanged (the key set is the union either way), the base
+     * key is present and required, and the base node equals the base node. The only trace it leaves
+     * anywhere is in `openApiSchemas()`, where `'required' => [...$required, ...array_keys($added)]`
+     * is a SPREAD rather than a `+` — so a collision produces a DUPLICATED entry in a JSON Schema
+     * `required` array, which is invalid per the spec and is asserted by nothing.
+     *
+     * A `RuntimeException` and not a refusal the client can see: this cannot be reached by anything
+     * a caller sends. It is reachable only by an edit to one of the two resources, so the audience
+     * is the person making that edit, and the correct outcome is that their test run stops.
+     *
+     * @param  array<string, mixed>  $base
+     * @param  array<string, mixed>  $added
+     */
+    private static function refuseCollisions(array $base, array $added, string $where): void
+    {
+        $collisions = array_keys(array_intersect_key($added, $base));
+
+        if ($collisions === []) {
+            return;
+        }
+
+        throw new RuntimeException(
+            'SourceDetailResource::'.$where.' declares '.implode(', ', $collisions).', which '
+            .'SourceResource already declares. The two are composed with `+`, which is left-wins '
+            .'and silent, so the detail\'s declaration would be discarded with nothing raised and '
+            .'every drift pin still green. Remove the duplicate from whichever of the two should '
+            .'not own the field — the list row is the cheaper place only for values that are '
+            .'columns of `knowledge_sources`.',
+        );
     }
 
     /**
@@ -205,6 +260,8 @@ final class SourceDetailResource extends JsonResource implements ProvidesOpenApi
             ],
         ];
 
+        self::refuseCollisions($properties, $added, 'openApiSchemas()');
+
         return $base
             + SourceActiveVersionResource::openApiSchemas()
             + SourceWarningResource::openApiSchemas()
@@ -220,6 +277,9 @@ final class SourceDetailResource extends JsonResource implements ProvidesOpenApi
                         .'reports zeroes even though rows for an unpublished version exist. That is '
                         .'the correct reading for a delete confirmation, which is asking what is '
                         .'reachable and about to stop being.',
+                    // SAME GUARD, THE SCHEMA HALF. The spread below is what makes a collision
+                    // INVALID rather than merely wrong: `required` would carry the name twice,
+                    // which JSON Schema forbids and which nothing in this repository asserts.
                     'required' => [...$required, ...array_keys($added)],
                     'properties' => $properties + $added,
                 ],

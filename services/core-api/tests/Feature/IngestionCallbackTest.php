@@ -552,3 +552,137 @@ it('carries the durable delivery counter, as a ceiling rather than an increment'
 
     expect($version->fresh()?->delivery_count)->toBe(9);
 });
+
+// ── the accepted set and the read set (findings B2 and S1) ───────────────────────────────────────
+
+it('refuses every spelling of `verified` that it would then read as NOT verified', function (array $spelling): void {
+    // ── FINDING B2 ────────────────────────────────────────────────────────────────────────────
+    //
+    // Laravel's `boolean` rule accepts `true`, `false`, `1`, `0`, `"1"` and `"0"`, and `validated()`
+    // performs NO cast — it returns the input. `toFrame()` reads the flag with `=== true`, which is
+    // the correct way to read a gate whose false value must be unambiguous, and `1 === true` is
+    // `false`. So a frame carrying `"verified": 1` PASSED validation as a well-formed verification
+    // claim and was applied as its opposite: the version did not activate, `Indexing -> Ready` was
+    // refused, and the caller got `200 {applied: true, activated: false}` — indistinguishable from
+    // an ordinary mid-run frame unless the worker inspects `activated`.
+    //
+    // WHAT MAKES IT A PUBLICATION BUG RATHER THAN A COSMETIC ONE: any serialization that yields `1`
+    // instead of a JSON `true` — `int(chunks_ok)`, a numpy bool, a value round-tripped through a
+    // Celery payload — means the source NEVER PUBLISHES and the previous version serves forever,
+    // with a 200 on every frame. A 422 naming the field is what a worker author can act on.
+    $f = ingestionRunFixture();
+
+    $identity = ingestionIdentity();
+
+    $send = fn (int $sequence, SourceState $status, array $extra = []): TestResponse => postIngestionFrame(
+        $f['org']->id,
+        [
+            'job_id' => $f['item']->current_job_id,
+            'source_id' => $f['source']->id,
+            'source_item_id' => $f['item']->id,
+            'sequence' => $sequence,
+            'stage' => $status->value,
+            'status' => $status->value,
+            'version' => $identity,
+        ] + $extra,
+    );
+
+    $send(1, SourceState::Fetching)->assertOk();
+
+    foreach ([2 => SourceState::Parsing, 3 => SourceState::Normalizing, 4 => SourceState::Chunking, 5 => SourceState::Embedding, 6 => SourceState::Indexing] as $seq => $status) {
+        $send($seq, $status)->assertOk();
+    }
+
+    $send(7, SourceState::Ready, ['verified' => $spelling['value']])
+        ->assertStatus(422)
+        ->assertJsonPath('error_class', 'validation')
+        // THE FIELD IS NAMED. A 422 with no `errors` map is the deliberate-refusal shape a client
+        // reserves for something else entirely; a malformed claim has to say which key was wrong.
+        ->assertJsonStructure(['errors' => ['verified']]);
+
+    // NOTHING WAS APPLIED AND NOTHING PUBLISHED. The refusal has to be at the boundary rather than
+    // downstream of a write, or the frame has already moved the run before being rejected.
+    expect($f['item']->fresh()?->current_version_id)->toBeNull();
+    expect($f['source']->fresh()?->status)->toBe(SourceState::Indexing);
+
+    // THE POSITIVE CONTROL. A literal JSON `true` on the very same frame publishes — so the
+    // refusals above are the rule doing its job and not the run being stuck for some other reason.
+    $send(7, SourceState::Ready, ['verified' => true])
+        ->assertOk()
+        ->assertJsonPath('data.activated', true);
+})->with([
+    // THE FOUR SPELLINGS `boolean` ADMITTED AND `=== true` READ AS FALSE. `"true"` and `"false"`
+    // are deliberately absent: neither is an accepted `boolean` value, so both were already 422s,
+    // and the comment that used to defend the strict read cited `"false"` — the one value that
+    // never needed defending — while the four below went unaddressed.
+    'integer one' => [['value' => 1]],
+    'integer zero' => [['value' => 0]],
+    'string one' => [['value' => '1']],
+    'string zero' => [['value' => '0']],
+]);
+
+it('refuses a list-shaped warning_summary instead of storing it as numeric keys', function (): void {
+    // ── FINDING S1 ────────────────────────────────────────────────────────────────────────────
+    //
+    // `array` accepts both JSON spellings, because PHP has one type for both. The rule's comment
+    // used to say a list "would be a constraint violation rendered as a 500" — it would not, and
+    // the value never reaches the constraint as a list: `JsonObjectCast::set()` does
+    // `json_encode((object) $value)`, and `(object) ["ocr_low","table_unplaced"]` becomes
+    // `{"0":"ocr_low","1":"table_unplaced"}`. `jsonb_typeof` is `object`, so
+    // `source_versions_warning_summary_is_object` passes; unlike `bots.theme` this column has no
+    // key-set CHECK behind it. The frame was accepted 200 `applied: true` and the detail projection
+    // then published `warnings: [{code: "0", versions: 1}]`, which nothing on either plane can tell
+    // from a real warning code — `SourceWarningResource` correctly puts no enum on `code`, because
+    // the vocabulary belongs to the data plane.
+    $f = ingestionRunFixture();
+
+    $frame = fn (int $sequence, SourceState $status, array $extra): TestResponse => postIngestionFrame(
+        $f['org']->id,
+        [
+            'job_id' => $f['item']->current_job_id,
+            'source_id' => $f['source']->id,
+            'source_item_id' => $f['item']->id,
+            'sequence' => $sequence,
+            'stage' => $status->value,
+            'status' => $status->value,
+        ] + $extra,
+    );
+
+    // `queued -> fetching` first: the identity is resolved during the run, so the version row is
+    // born on the frame after it, exactly as the publication walk above does it.
+    $frame(1, SourceState::Fetching, [])->assertOk();
+
+    // A REFUSED FRAME DOES NOT ADVANCE `progress_sequence`, so every attempt below is sequence 2
+    // and the successful one lands there too — which is also a small proof that the 422s wrote
+    // nothing.
+    $send = fn (array $extra): TestResponse => $frame(2, SourceState::Parsing, ['version' => ingestionIdentity()] + $extra);
+
+    $send(['warning_summary' => ['ocr_low', 'table_unplaced']])
+        ->assertStatus(422)
+        ->assertJsonPath('error_class', 'validation')
+        ->assertJsonStructure(['errors' => ['warning_summary']]);
+
+    // A MAP WITH NUMERIC KEYS IS THE SAME DEFECT REACHED FROM THE OTHER SIDE, and a list check
+    // alone would miss it: `json_decode` turns the object key `"0"` into the PHP integer key `0`,
+    // so `{"0":"a","2":"b"}` is not a list and would have been stored exactly as the mangling
+    // above produces.
+    $send(['warning_summary' => ['0' => 'ocr_low', '2' => 'table_unplaced']])
+        ->assertStatus(422)
+        ->assertJsonPath('error_class', 'validation');
+
+    expect(SourceVersion::query()->withoutGlobalScopes()->count())->toBe(0);
+
+    // POSITIVE CONTROL, BOTH WAYS. A name-keyed map is accepted and reaches the column, and an
+    // EMPTY value is accepted too — `[]` and `{}` decode to the same PHP value, so "the empty list"
+    // is not a distinguishable input to refuse, and the cast writes either as `{}`.
+    $send(['warning_summary' => ['ocr_low_confidence' => 3]])->assertOk();
+
+    $version = SourceVersion::query()->withoutGlobalScopes()->sole();
+
+    expect($version->warning_summary)->toBe(['ocr_low_confidence' => 3]);
+
+    $frame(3, SourceState::Normalizing, [
+        'version' => ingestionIdentity(),
+        'warning_summary' => [],
+    ])->assertOk();
+});

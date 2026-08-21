@@ -32,9 +32,15 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * totally broken by code that reviews as correct, with no exception and no log line.
  *
  * REJECTED ALTERNATIVE: keep `#[ScopedBy]` and call `withoutGlobalScope(OrganizationScope::class)`
- * on the guest read. That is WORSE than not having the scope, because the CI grep that exists to
- * catch scope bypasses matches `withoutGlobalScopes\(` — PLURAL — so the singular form passes the
- * gate silently. A bypass a reviewer can see is better than one the gate cannot.
+ * on the guest read. That is WORSE than not having the scope: a bypass a reviewer can see is better
+ * than an annotation every guest read has to undo.
+ *
+ * THE REASON THIS USED TO GIVE WAS FALSE IN BOTH HALVES, and it is corrected rather than deleted
+ * because the false version is the more persuasive one. It read: "the CI grep that exists to catch
+ * scope bypasses matches `withoutGlobalScopes(` — PLURAL — so the singular form passes the gate
+ * silently." There is no CI (`.github/` was deleted 2026-08-17), and its replacement —
+ * tests/Arch/StringLevelDoctrineTest.php, a token scan and not a grep — bans BOTH spellings in
+ * `app/`, deliberately and with a comment saying so. The singular fails the suite.
  *
  * WHAT MAKES THE ABSENCE SAFE, from the other direction, exactly as on OrganizationUser:
  *   - the guest read is by `token_hash` — 32 bytes of sha256 over 256 bits of entropy, behind a

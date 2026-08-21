@@ -1,6 +1,7 @@
 import type {
   Role,
   SourceCollectionResource,
+  SourceDetailResource,
   SourceResource,
   SourceStatus,
   SourceType,
@@ -186,6 +187,40 @@ export const fetchSourcePage = async (
   });
   return readPaginatedEnvelope<SourceResource>(body, 'sources');
 };
+
+/**
+ * `GET .../sources/{source}` -> 200 `{data: {…}}` | 403 | 404, unwrapped from `data`.
+ *
+ * ── THE SHAPE IS `SourceDetailResource`, NOT `SourceResource`, AND THE DIFFERENCE IS THE SCREEN ─
+ * The endpoint publishes every field the list row carries PLUS what is inside the source: the item
+ * and live-version counts, the structural counts, the advisory warning codes and a bounded text
+ * excerpt. `SourceDetailResource extends SourceResource` in `@kb/contracts` — by `extends` rather
+ * than by a second flat interface — so a field added to the list shape tomorrow is on this one the
+ * moment it is on that one, and the detail screen cannot silently render `undefined` where the list
+ * renders a value.
+ *
+ * ── EVERY COUNT IT CARRIES IS OVER THE LIVE VERSIONS ONLY ─────────────────────────────────
+ * A source mid-ingestion reports ZEROES even though rows for the unpublished version already exist.
+ * That looks wrong on a progress screen and is exactly right on a delete confirmation, which is the
+ * question these numbers are here to answer: what is reachable, and about to stop being. Nothing on
+ * the detail screen renders them as ingestion progress — `status_is_processing` is the field for
+ * that, and a count that climbs is not what these numbers do.
+ *
+ * `browserFetchData`, because this body is one resource under `data` rather than a page with a
+ * sibling `meta`. `signal` is forwarded because `queryClient.cancelQueries()` is a NO-OP against a
+ * `queryFn` that drops it, and cancelling in-flight reads is step 2 of both logout and the
+ * organization switch — exactly when another organization's document must not resolve.
+ */
+export const fetchSourceDetail = async (
+  orgId: string,
+  sourceId: string,
+  signal: AbortSignal,
+): Promise<SourceDetailResource> =>
+  browserFetchData<SourceDetailResource>({
+    path: sourcePath(orgId, sourceId),
+    credential: await sessionCredential(),
+    signal,
+  });
 
 // ── THE DISPLAY VOCABULARIES ────────────────────────────────────────────────────────────────────
 

@@ -1269,6 +1269,43 @@ const duplicateElementProbe = (path: string, mirror: Mirror): Probe | undefined 
   };
 };
 
+/**
+ * A value to put INSIDE the malformed spellings `App\Rules\JsonObjectMap` refuses — read off the
+ * mirror's own baseline when it has one, and synthesized only when it does not.
+ *
+ * The rule constrains a map's KEYS and says nothing at all about its values, so a probe for it has
+ * to carry some value and must not accidentally be testing that value. Lifting it from the baseline
+ * is what keeps the rejection claim about the key: the baseline is asserted to be a body the SERVER
+ * accepts before any probe runs, so whatever sits under the first key already satisfies every
+ * co-declared element rule the manifest carries (`warning_summary.*: integer` is the shape the data
+ * plane will grow), and the ONLY thing the probe changes is the spelling around it. That is
+ * `duplicateElementProbe`'s reasoning applied to an object rather than a list.
+ *
+ * IT FALLS BACK RATHER THAN DECLINING, which is the opposite of what `duplicateElementProbe` does,
+ * and the difference is deliberate. `distinct` has nothing to say without an element to duplicate;
+ * this rule has plenty to say without a value, because the defect is entirely in the key. Declining
+ * would drop all three probes for a mirror whose baseline simply omits an optional map — silently,
+ * which is the failure mode `what the harness declines to probe` exists to prevent and which no
+ * gate in this file would catch for a rule that is not a size rule.
+ *
+ * What the fallback costs is precision on one narrow case, and it is written down rather than left
+ * to be discovered: against a mirror typed `z.record(k, z.number())` whose baseline omits the field,
+ * the synthesized string is refused for its TYPE and the probe goes green without ever reaching the
+ * key check. The fixture block below exercises both paths so neither is a guess.
+ */
+const SYNTHESIZED_MEMBER = 'a';
+
+const mapMemberValue = (path: string, mirror: Mirror): unknown => {
+  const baseline = readPath(mirror.baseline(), path);
+  if (baseline === null || typeof baseline !== 'object' || Array.isArray(baseline)) {
+    return SYNTHESIZED_MEMBER;
+  }
+
+  const [first] = Object.values(baseline as Record<string, unknown>);
+
+  return first === undefined ? SYNTHESIZED_MEMBER : first;
+};
+
 /** `max:`/`min:` mean length, count or magnitude depending on the field's declared type. */
 type Kind = 'string' | 'array' | 'number' | 'unknown';
 
@@ -1650,6 +1687,112 @@ function probesFor(path: string, rules: readonly string[], mirror: Mirror): Prob
         probes.push(probe(value, 'a ULID whose timestamp overflows', 'Z'.repeat(26), false));
         break;
 
+      /**
+       * THE THIRD AND FOURTH RULE OBJECTS THIS FILE HAS SEEN, AND THE FIRST TWO IT TEACHES rather
+       * than records in UNPROBED_RULES. Both arrived on `IngestionCallbackRequest`, which is
+       * NO_CLIENT_FORM, so neither generates anything in the real suite today — the same state
+       * `numeric`, `decimal`, `date` and `distinct` were taught in, and for the same reason: an
+       * entry in UNPROBED_RULES is silent forever, and these two rules were written precisely
+       * because a LOOSER spelling of each was accepted, mangled and served for weeks. A suppressed
+       * rule here is a schema that gets to re-admit the defect and agree with the server by being
+       * unprobed.
+       *
+       * ── `LiteralBoolean` IS THE `in:` CASE WEARING A CLASS NAME ─────────────────────────────
+       * Its accepted set is exactly two JSON literals, so the probes are the shape `in:` already
+       * generates: one acceptance per member, plus rejections. That is what makes an ACCEPTANCE
+       * probe honest here where `date` had to decline one — there is no format to pick and no
+       * spelling to guess, because the member list is not merely small, it is closed and literal.
+       * MEASURED against the installed `Illuminate\Validation\Factory` with the real rule object
+       * (`['bail','sometimes', new LiteralBoolean]`): `true` and `false` pass; `1`, `0`, `"1"`,
+       * `"0"`, `"true"`, `"false"` and `null` all fail; an omitted key passes. `false` is safe as
+       * an acceptance even under a co-declared `required` — `validateRequired` treats `false` as
+       * present — and that was measured too rather than reasoned about.
+       *
+       * The two rejections are chosen for having DIFFERENT catchers, which is why the other four
+       * refused spellings are not enumerated beside them. `1` is the live defect (finding B2:
+       * `"verified": 1` validated and was then read `=== true`, so the version never activated) and
+       * it catches every coercing mirror — `z.coerce.boolean()` takes all six spellings, so one
+       * probe from the family reports it. `"true"` catches the mirror a coercion probe cannot: a
+       * form-encoder field spelled `z.preprocess(v => v === 'true', z.boolean())`, which refuses `1`
+       * and takes the string, and which is what a `<select>` over a boolean actually submits.
+       * Adding `0`, `"0"`, `"1"` and `"false"` would add rows, not catchers.
+       *
+       * WHAT NO PROBE HERE CAN SEE is the rule being widened on the SERVER: the class name in the
+       * manifest does not change when its body does, so a `LiteralBoolean` that starts accepting
+       * `1` again leaves this branch claiming a rejection that no longer happens, and a strict
+       * `z.boolean()` mirror agrees with the stale claim. That is true of every hard-coded verdict
+       * in this file (`ulid`, `date`, the email lengths) and the answer is the same one: the PHP
+       * side is pinned by the rule's own unit test in `services/core-api`, and what this branch
+       * pins is the CLIENT.
+       */
+      case 'App\\Rules\\LiteralBoolean':
+        probes.push(probe(value, 'a JSON true', true, true));
+        probes.push(probe(value, 'a JSON false', false, true));
+        probes.push(probe(value, 'the integer 1, which Laravel’s `boolean` accepts', 1, false));
+        probes.push(probe(value, 'the string "true", which a form encoder sends', 'true', false));
+        break;
+
+      /**
+       * ── `JsonObjectMap` IS TAUGHT IN ONE DIRECTION, THE WAY `date` IS ───────────────────────
+       * Three rejections and no acceptance, and the missing half is a real declination rather than
+       * an oversight — it is asserted below so it cannot be mistaken for one.
+       *
+       * THERE IS NO HONEST ACCEPTANCE VALUE. The rule constrains keys and says nothing about
+       * values, so a `serverAccepts: true` probe would have to invent a value for a map whose value
+       * type this harness cannot know — `{ocr_low: 'a'}` against a mirror typed
+       * `z.record(k, z.number())` is a false red produced by this file's own choice, exactly the
+       * trap `date`'s acceptance direction avoids. The one value-free candidate is the EMPTY map,
+       * and it is worse than it looks: `[]` and `{}` are the same PHP value and the rule takes both,
+       * but a co-declared `required` or `min:1` REFUSES an empty array — measured, both fail — so
+       * the probe would claim an acceptance the server does not give on any field that demands
+       * content. The acceptance direction is carried where `date` leaves it: `the baseline is a
+       * value both sides accept`, which every mirror answers with a real map of its own.
+       *
+       * THE THREE REJECTIONS ARE THE RULE'S OWN REFUSAL LIST, and each has its own catcher.
+       * MEASURED against the installed factory with `['bail','sometimes','array', new
+       * JsonObjectMap]`: `{"ocr_low":3}` and `{}` pass; `["ocr_low"]`, `{"0":"ocr_low"}`,
+       * `{"0":"a","2":"b"}` and `{"":"a"}` all fail.
+       *
+       *   - THE LIST is finding S1 itself — `array` admits it because PHP has one type for both
+       *     JSON spellings, `JsonObjectCast::set()` then wrote `(object) ["ocr_low"]` as
+       *     `{"0":"ocr_low"}`, the column's `jsonb_typeof` CHECK saw an object, and the console
+       *     published a warning code named `0`. Any `z.record(...)` mirror already refuses an array,
+       *     so this probe's distinct catcher is the UNTYPED mirror — `z.unknown()`, `z.any()`, or a
+       *     union with an array member — which is exactly what a free-form "warning blob" field
+       *     attracts.
+       *   - THE INTEGER-LIKE KEY is the half a list check would miss, and the half no client
+       *     reproduces by accident: `json_decode` turns the object key `"0"` into PHP's integer `0`,
+       *     so `{"0":"a"}` is neither a list nor a name-keyed map, while in JavaScript every object
+       *     key is a string and `z.record(z.string(), …)` takes it without comment. That mirror is
+       *     the one a careful author writes, and this is the only probe that reaches it.
+       *   - THE EMPTY-STRING KEY is refused by the same `is_string($key) && $key !== ''` line and
+       *     survives the repair the probe above invites: a key schema that rules out canonical
+       *     integers still takes `""`.
+       *
+       * THE RESIDUAL, said out loud because a taught rule is as silent about what it skips as an
+       * exempt one. PHP coerces only a CANONICAL decimal key — measured: `0` and `-5` become
+       * integers, `007`, `-0`, `1.5`, `+1` and a 20-digit number stay strings — so a client that
+       * refuses every digit-shaped key is stricter than the server on `"007"`. No probe here says
+       * so, because the harness would have to synthesize the quirk to test it and would then be
+       * asserting its own copy of PHP's rule. The consequence is the tolerable direction and the
+       * same one `ReadableThemeColor` records: a warning vocabulary has no such code, and if one
+       * ever arrives the form blocks it locally rather than mangling it on the way in.
+       */
+      case 'App\\Rules\\JsonObjectMap': {
+        // One value, three spellings around it — see `mapMemberValue` for why it comes from the
+        // baseline rather than from a constant this file picked.
+        const member = mapMemberValue(path, mirror);
+
+        probes.push(
+          probe(value, 'a JSON list where a name-keyed object is required', [member], false),
+        );
+        probes.push(
+          probe(value, 'an object key json_decode turns into an integer', { '0': member }, false),
+        );
+        probes.push(probe(value, 'an empty-string object key', { '': member }, false));
+        break;
+      }
+
       default:
         break;
     }
@@ -1959,6 +2102,28 @@ describe('what the harness declines to probe', () => {
     'date',
     'distinct',
     'ulid',
+    /**
+     * THE TWO RULE OBJECTS FROM `IngestionCallbackRequest`, and the first two rule objects this
+     * file TEACHES — `EvidenceThresholdWithinScale`, `ReadableThemeColor` and `ExactWidgetOrigin`
+     * are all UNPROBED_RULES entries above, so the choice was live rather than a default.
+     *
+     * They went the other way because neither reason those three give applies. Neither is
+     * sibling-dependent, so `probesFor`'s one-field vocabulary is enough; neither needs a value
+     * synthesized against an arbitrary pattern, because one rule's accepted set is two literals and
+     * the other's refusals are about the SHAPE of a key rather than its content; and neither probe
+     * is a second implementation of a control, which is the line `ExactWidgetOrigin` draws.
+     *
+     * And the cost of exempting them would have been unusually high: both rules exist because a
+     * looser spelling was accepted in production and then applied as something the sender never
+     * said — `"verified": 1` read as false, a warning LIST stored as `{"0": …}` — so an
+     * UNPROBED_RULES entry would be recording, permanently and silently, that the client is free to
+     * re-admit exactly the two values the server just stopped taking. `probesFor` never runs on
+     * this manifest today; the branches are executed against a fixture below instead, in both
+     * directions, because a taught rule that nothing exercises is indistinguishable from an
+     * exempt one.
+     */
+    'App\\Rules\\LiteralBoolean',
+    'App\\Rules\\JsonObjectMap',
     'required',
     'present',
     'nullable',
@@ -2629,6 +2794,222 @@ describe('the `date` and `distinct` branches of the rule classifier', () => {
       'a string strtotime cannot parse',
       'a well-shaped date that does not exist',
     ]);
+  });
+});
+
+/**
+ * The two RULE-OBJECT branches, proved against a manifest fixture — and this block exists for the
+ * reason the `date`/`distinct` one gives plus a sharper one of its own.
+ *
+ * BOTH BRANCHES GENERATE NOTHING IN THE REAL SUITE TODAY. `App\Rules\LiteralBoolean` and
+ * `App\Rules\JsonObjectMap` are carried only by `IngestionCallbackRequest`, which is NO_CLIENT_FORM
+ * — a signed service-to-service frame with no form behind it — so `probesFor` never runs on them,
+ * and teaching a rule looks from the outside exactly like exempting it: same counts, same green.
+ *
+ * The sharper reason is what these two rules ARE. Each replaced a looser spelling that had been
+ * accepted in production and then applied as something the caller never said, so the values probed
+ * below are not hypothetical drift — they are the two defects, written down as the harness's own
+ * question. Every verdict here was MEASURED against the installed `Illuminate\Validation\Factory`
+ * with the real rule objects rather than read off the class docblocks.
+ *
+ * THE FIXTURE IS SHAPED ON THE REAL MANIFEST but named `Fixture\` and kept out of `rules/`: a file
+ * there would make the "every manifest is mirrored or exempt" suite assert against a FormRequest
+ * that does not exist, and the real one is already exempt.
+ */
+describe('the rule-object branches of the classifier: LiteralBoolean and JsonObjectMap', () => {
+  const CALLBACK_FIXTURE: Manifest = {
+    class: 'App\\Http\\Requests\\Fixture\\IngestionCallbackRequest',
+    rules: {
+      verified: ['bail', 'sometimes', 'App\\Rules\\LiteralBoolean'],
+      warning_summary: ['bail', 'sometimes', 'array', 'App\\Rules\\JsonObjectMap'],
+    },
+  };
+
+  /** A NUMERIC member value, deliberately: `mapMemberValue` lifts it out of here, so a string would
+   *  hide the difference between "the probe carried the baseline's value" and "the probe carried the
+   *  synthesized filler", which are the two paths the last test in this block separates. */
+  const baseline = (): Candidate => ({ verified: true, warning_summary: { ocr_low: 3 } });
+
+  /**
+   * PHP coerces a CANONICAL decimal object key to an integer key and leaves every other spelling a
+   * string — measured: `0` and `-5` become integers; `007`, `-0`, `1.5`, `+1` and a 20-digit number
+   * stay strings. This is that rule in Zod, and it is the mirror a form for this payload would have
+   * to ship, since `z.record(z.string(), …)` takes `{"0": …}` without a word.
+   *
+   * It is one case narrower than PHP: an integer-shaped key beyond 64 bits stays a string there and
+   * is refused here. No probe tests it (see the residual note at the `case`), and no warning
+   * vocabulary has such a code.
+   */
+  const nameKey = z
+    .string()
+    .min(1)
+    .refine((key) => !/^(?:0|-?[1-9]\d*)$/.test(key), { error: 'Keys must be names, not indices' });
+
+  const faithful: Mirror = {
+    schema: z.strictObject({
+      verified: z.boolean().optional(),
+      warning_summary: z.record(nameKey, z.number().int()).optional(),
+    }),
+    baseline,
+  };
+
+  it('accepts the faithful mirror, and the path set agrees with the manifest', () => {
+    expect(faithful.schema.safeParse(baseline()).success).toBe(true);
+    expect(driftFailures(CALLBACK_FIXTURE, faithful)).toEqual([]);
+    // A record is a LEAF to `schemaPaths` — it has neither `shape` nor `element` — which is what the
+    // manifest says too: Laravel keys per-element rules with `.*`, and this field has none.
+    expect(new Set(schemaPaths(faithful.schema))).toEqual(
+      new Set(validatedPaths(CALLBACK_FIXTURE)),
+    );
+  });
+
+  it('catches the coercing boolean mirror, which is finding B2 written client-side', () => {
+    // `z.coerce.boolean()` is `Boolean(v)`, so it takes all six spellings Laravel's `boolean` rule
+    // takes and several it does not — the exact looseness the server just stopped accepting.
+    const coercing: Mirror = {
+      schema: z.strictObject({
+        verified: z.coerce.boolean().optional(),
+        warning_summary: z.record(nameKey, z.number().int()).optional(),
+      }),
+      baseline,
+    };
+
+    // THREE failures, not one, and the third is the generic presence probe rather than this branch:
+    // `Boolean(null)` is `false`, so a coercing field also swallows an explicit null the server
+    // refuses. Asserted rather than filtered out, because it is the same bug seen from the side the
+    // rule object cannot see.
+    expect(driftFailures(CALLBACK_FIXTURE, coercing)).toEqual([
+      'form accepts input the server rejects: verified — null',
+      'form accepts input the server rejects: verified — the integer 1, which Laravel’s `boolean` accepts',
+      'form accepts input the server rejects: verified — the string "true", which a form encoder sends',
+    ]);
+  });
+
+  it('catches the form-encoder mirror, which the integer probe alone cannot', () => {
+    // The reason the second rejection probe exists: this schema refuses `1` and takes `"true"`, so a
+    // probe set built only around coercion would report it as faithful.
+    const stringly: Mirror = {
+      schema: z.strictObject({
+        verified: z.preprocess((raw) => (raw === 'true' ? true : raw), z.boolean()).optional(),
+        warning_summary: z.record(nameKey, z.number().int()).optional(),
+      }),
+      baseline,
+    };
+
+    expect(driftFailures(CALLBACK_FIXTURE, stringly)).toEqual([
+      'form accepts input the server rejects: verified — the string "true", which a form encoder sends',
+    ]);
+  });
+
+  it('catches the record mirror a careful author writes, on the key spelling PHP coerces', () => {
+    // EVERY OTHER RULE MIRRORED, and the one thing JavaScript has no reason to model simply absent:
+    // in JS every object key is a string, so `z.record(z.string(), …)` is the obvious spelling of
+    // "a map of names to counts" and it takes both keys `json_decode` mangles.
+    const looseKeys: Mirror = {
+      schema: z.strictObject({
+        verified: z.boolean().optional(),
+        warning_summary: z.record(z.string(), z.number().int()).optional(),
+      }),
+      baseline,
+    };
+
+    // The LIST probe is silent here, which is the honest reading rather than a gap: `z.record`
+    // refuses an array on its own, so that probe's catcher is the untyped mirror below.
+    expect(driftFailures(CALLBACK_FIXTURE, looseKeys)).toEqual([
+      'form accepts input the server rejects: warning_summary — an object key json_decode turns into an integer',
+      'form accepts input the server rejects: warning_summary — an empty-string object key',
+    ]);
+  });
+
+  it('catches the untyped blob mirror, which is the only one the list probe reaches', () => {
+    // What a free-form warning map attracts when nobody wants to commit to its vocabulary — and the
+    // schema under which finding S1 would have shipped unchanged on the client side.
+    const untyped: Mirror = {
+      schema: z.strictObject({
+        verified: z.boolean().optional(),
+        // `.optional()` because Zod 4 does NOT treat a bare `z.unknown()` in a shape as an
+        // optional KEY — it accepts `undefined` as a value and still demands the property, which
+        // would fail the `sometimes` probe for a reason that has nothing to do with this branch.
+        warning_summary: z.unknown().optional(),
+      }),
+      baseline,
+    };
+
+    expect(driftFailures(CALLBACK_FIXTURE, untyped)).toEqual([
+      'form accepts input the server rejects: warning_summary — null',
+      'form accepts input the server rejects: warning_summary — a string where an array is required',
+      'form accepts input the server rejects: warning_summary — a JSON list where a name-keyed object is required',
+      'form accepts input the server rejects: warning_summary — an object key json_decode turns into an integer',
+      'form accepts input the server rejects: warning_summary — an empty-string object key',
+    ]);
+  });
+
+  it('generates two acceptance probes for LiteralBoolean and none for JsonObjectMap', () => {
+    // The asymmetry is the argued half of both branches, so it is asserted rather than left in a
+    // comment. `true` and `false` are claimable because the rule's accepted set is two literals;
+    // a map's accepted values are unknowable from a rule list, and the empty map — the one
+    // value-free candidate — is refused by a co-declared `required` or `min:1`.
+    const flag = probesFor('verified', CALLBACK_FIXTURE.rules['verified'] as string[], faithful);
+
+    expect(flag.map((generated) => generated.label)).toEqual([
+      'omitted (sometimes)',
+      'null',
+      'a JSON true',
+      'a JSON false',
+      'the integer 1, which Laravel’s `boolean` accepts',
+      'the string "true", which a form encoder sends',
+    ]);
+    expect(flag.map((generated) => generated.serverAccepts)).toEqual([
+      true,
+      false,
+      true,
+      true,
+      false,
+      false,
+    ]);
+
+    const map = probesFor(
+      'warning_summary',
+      CALLBACK_FIXTURE.rules['warning_summary'] as string[],
+      faithful,
+    );
+
+    // The only acceptance on the map field is the presence probe, which belongs to `sometimes`.
+    expect(map.filter((generated) => generated.serverAccepts).map((g) => g.label)).toEqual([
+      'omitted (sometimes)',
+    ]);
+    expect(map.map((generated) => generated.label)).toEqual([
+      'omitted (sometimes)',
+      'null',
+      'a string where an array is required',
+      'a JSON list where a name-keyed object is required',
+      'an object key json_decode turns into an integer',
+      'an empty-string object key',
+    ]);
+  });
+
+  it('builds the malformed spellings out of the BASELINE value, and falls back when there is none', () => {
+    const applied = (label: string, mirror: Mirror): unknown =>
+      probesFor('warning_summary', CALLBACK_FIXTURE.rules['warning_summary'] as string[], mirror)
+        .filter((generated) => generated.label === label)
+        .map(
+          (generated) => (generated.apply(mirror.baseline()) as Candidate)['warning_summary'],
+        )[0];
+
+    // The baseline's own `3`, so the only thing the server can be refusing is the spelling around it.
+    expect(applied('a JSON list where a name-keyed object is required', faithful)).toEqual([3]);
+    expect(applied('an object key json_decode turns into an integer', faithful)).toEqual({
+      '0': 3,
+    });
+    expect(applied('an empty-string object key', faithful)).toEqual({ '': 3 });
+
+    // …and a baseline that omits the optional map still gets all three probes, carrying the
+    // synthesized filler. Falling back rather than declining is argued at `mapMemberValue`: the
+    // defect this rule catches lives in the KEY, so a probe with no value is still a real probe.
+    const noMap: Mirror = { schema: faithful.schema, baseline: () => ({ verified: true }) };
+
+    expect(applied('a JSON list where a name-keyed object is required', noMap)).toEqual(['a']);
+    expect(applied('an object key json_decode turns into an integer', noMap)).toEqual({ '0': 'a' });
   });
 });
 

@@ -28,8 +28,16 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * "this link is no longer valid": a totally broken flow behind code that reviews as correct.
  *
  * REJECTED ALTERNATIVE: scope it and call `withoutGlobalScope(OrganizationScope::class)` on the
- * guest read. Worse than the absence, because the CI grep for scope bypasses matches
- * `withoutGlobalScopes\(` — PLURAL — and the singular call passes the gate unseen.
+ * guest read. Worse than the absence, because a bypass a reviewer can see is better than one a
+ * reader has to reconstruct — the read would then depend on a call whose whole purpose is to undo
+ * the annotation above it.
+ *
+ * THAT ARGUMENT USED TO BE MADE WITH A FALSE FACT, AND BOTH HALVES WERE FALSE. It read: "the CI
+ * grep for scope bypasses matches `withoutGlobalScopes(` — PLURAL — and the singular call passes
+ * the gate unseen." There is no CI (`.github/` was deleted 2026-08-17), and the check that replaced
+ * the published grep — tests/Arch/StringLevelDoctrineTest.php, a token scan rather than a grep —
+ * bans BOTH spellings in `app/` and says so at its own call site. So the singular does not pass
+ * unseen; it fails the suite. The rejection stands on the reviewability argument alone.
  *
  * WHAT MAKES THE ABSENCE SAFE: the only read is by `token_hash`, 32 bytes of sha256 over 256 bits of
  * entropy behind a UNIQUE index, and the row's `email` is re-compared against the user's current

@@ -14,8 +14,25 @@ use Illuminate\Support\Facades\Route;
 |
 | This surface must not be reachable from the internet. It carries no cookie, no bearer token, no
 | CORS entry (config/cors.php lists every browser-reachable prefix and deliberately omits this one),
-| no Traefik router label, and it never joins the `edge` network. A CI check asserts an external
-| curl against the public host returns something other than 200 for /internal/v1/*.
+| no Traefik router label, and it never joins the `edge` network.
+|
+| RETRACTION. This paragraph used to end: "A CI check asserts an external curl against the public
+| host returns something other than 200 for /internal/v1/*." THERE IS NO SUCH CHECK AND THERE IS NO
+| CI — `.github/` was deleted on 2026-08-17 and nothing replaced it. The sentence also slipped
+| CLAUDE.md's own sweep for false enforcement claims, which matches `gates.yml`,
+| `.github/workflows` and `CI grep`: it contained none of the three, so the sweep read clean while
+| the claim sat on the route file of the surface it was the only stated defence for.
+|
+| WHAT IS CHECKED, AND BY WHAT — stated exactly, because a substitute named loosely is the same
+| defect again. tests/Security/InternalSurfaceExposureTest.php asserts two things about THIS
+| service: that config/cors.php covers no path under this prefix, and that every route here runs
+| VerifyInternalSignature and no session, cookie or bearer middleware.
+|
+| WHAT IS CHECKED BY NOTHING: whether the prefix is reachable from the public internet. That is a
+| property of the Docker network membership, the Traefik router labels and the absence of a host
+| `ports:` mapping — all of which live in infrastructure/, none of which a test booting this
+| application can observe. It is asserted nowhere in this repository today, and the two assertions
+| named above must not be read as standing in for it.
 |
 | Authentication is HMAC-SHA256 over the canonical string, verified by middleware:
 |
@@ -68,6 +85,12 @@ Route::group([], function (): void {
      * A REFUSED FRAME IS A 200 WITH `applied: false`. A 4xx would put a permanently-failing request
      * in front of a Celery task that is going to re-emit it, and the taxonomy would then have the
      * caller retry a frame whose whole meaning is "already superseded".
+     *
+     * THAT IS THE ORDERING GUARD'S REFUSAL AND NOT EVERY REFUSAL. A MALFORMED frame, and an ILLEGAL
+     * STATE TRANSITION, are 422s: they are `validation`, which the taxonomy marks non-retryable, so
+     * a Celery task reading the class will not hammer them either. The distinction is which of the
+     * two is true of the frame — "you are late" is a 200, "this frame cannot be applied at all" is a
+     * 422.
      *
      * NO POLICY AND NO `Gate::authorize()`. The caller is a service; authentication is the HMAC,
      * verified by `VerifyInternalSignature` ahead of `SubstituteBindings`, and the tenant scope is

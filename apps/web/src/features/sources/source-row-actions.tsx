@@ -9,7 +9,7 @@ import {
   Trash2Icon,
   XCircleIcon,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 
 import { ConfirmDestructiveDialog } from '@/components/confirm-destructive-dialog';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -68,7 +68,27 @@ import { actionableConflictMessage } from '@/lib/api/actionable-conflict';
  * the state machine reimplemented in a browser, which fails by hiding a move the server would have
  * allowed. The menu item submits; the refusal renders under the row.
  */
-export function SourceRowActions({ source }: { readonly source: SourceResource }) {
+export function SourceRowActions({
+  source,
+  consequence,
+}: {
+  readonly source: SourceResource;
+  /**
+   * THE DELETE DIALOG'S CONSEQUENCE, WHEN THE CALLER HAS BETTER NUMBERS THAN THIS ROW DOES.
+   *
+   * Omitted on the LIST, which is where this component was born and where it stays true prose: `GET
+   * .../sources` publishes no counts, on purpose — five extra statements per source means 126
+   * queries for a page of 25 — so the list literally cannot say how much a delete removes, and
+   * inventing a plausible figure is worse than the prose.
+   *
+   * Supplied on `/sources/{sourceId}`, where `SourceDetailResource` carries the item, structural and
+   * excerpt counts and `kb-ui-patterns`' "state the consequence in specific numbers" is finally
+   * answerable. The numbers are built by `deleteConsequenceCounts`, not here: this component takes
+   * the whole node so it never learns what a detail resource is, and one screen's copy cannot drift
+   * into the other's.
+   */
+  readonly consequence?: ReactNode;
+}) {
   const { orgId, listKey, canManage } = useSourceActions();
   const queryClient = useQueryClient();
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -289,13 +309,16 @@ export function SourceRowActions({ source }: { readonly source: SourceResource }
            * `deleted`; there is no path back, and a second delete is refused rather than repeated.
            */
           consequence={
-            <>
-              This is phase 1 of 2. “{source.name}” stops answering questions immediately — that
-              takes effect on the next question anyone asks, and no background job has to succeed
-              first. Nothing has been removed yet: the row stays in this list as Deleting while a
-              background purge removes its text, its vectors and its stored file, and it is marked
-              Purge verified only once that has been proven. There is no way back from either step.
-            </>
+            consequence ?? (
+              <>
+                This is phase 1 of 2. “{source.name}” stops answering questions immediately — that
+                takes effect on the next question anyone asks, and no background job has to succeed
+                first. Nothing has been removed yet: the row stays in this list as Deleting while a
+                background purge removes its text, its vectors and its stored file, and it is marked
+                Purge verified only once that has been proven. There is no way back from either
+                step.
+              </>
+            )
           }
           resourceName={source.name}
           confirmLabel="Delete source"

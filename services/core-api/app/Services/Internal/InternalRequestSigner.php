@@ -65,6 +65,23 @@ final class InternalRequestSigner
         $lines = [];
 
         foreach ($kbHeaders as $name => $value) {
+            // ── THE FILTER IS HERE BECAUSE THE VERIFIER'S IS ─────────────────────────────────
+            //
+            // `services/ai-service/app/core/signing.py` filters to `x-kb-*` INSIDE the function
+            // that builds the canonical string. This side used to emit every key it was handed and
+            // rely on both call sites to pre-filter. They do — but the day one does not, PHP
+            // includes a header Python drops, the two canonical strings differ by one line, and the
+            // symptom is a 401 on a request that is correct in every log: exactly the failure this
+            // class's docblock says it exists to prevent, reintroduced through the one asymmetry
+            // between the two implementations.
+            //
+            // A no-op today, deliberately. The two implementations of one format are only worth
+            // trusting where they are the same shape, and "the caller always filters" is a property
+            // of two call sites rather than of the format.
+            if (stripos($name, 'x-kb-') !== 0) {
+                continue;
+            }
+
             if (strcasecmp($name, 'X-KB-Signature') === 0) {
                 continue;
             }

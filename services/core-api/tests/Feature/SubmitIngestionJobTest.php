@@ -88,9 +88,16 @@ it('signs the submission, derives the idempotency key, and sends no credential o
         '*/internal/v1/ingestion/jobs' => Http::response(['job_id' => $f['job']->jobId], 202),
     ]);
 
+    // The instants either side of the call, so the deadline assertion below can be a SANDWICH
+    // rather than a tolerance. See the dedicated deadline test at the foot of this file for why
+    // `> now` was not an assertion at all.
+    $before = microtime(true);
+
     app()->call([$f['job'], 'handle']);
 
-    Http::assertSent(function (Request $request) use ($f): bool {
+    $after = microtime(true);
+
+    Http::assertSent(function (Request $request) use ($f, $before, $after): bool {
         $body = $request->body();
         $headers = [];
 
@@ -119,8 +126,14 @@ it('signs the submission, derives the idempotency key, and sends no credential o
         expect($headers['X-KB-Org-Id'] ?? null)->toBe($f['org']->id);
         expect($headers['X-KB-Operation'] ?? null)->toBe('ingestion.submit');
 
-        // AN ABSOLUTE INSTANT, never a duration and never re-derived downstream.
-        expect((int) ($headers['X-KB-Deadline'] ?? 0))->toBeGreaterThan((int) (microtime(true) * 1000));
+        // AN ABSOLUTE INSTANT, never a duration and never re-derived downstream — AND MEASURED
+        // FROM THE MOMENT THIS JOB RAN. The bounds are the clock either side of `handle()`, so the
+        // only value that satisfies both is one computed from a clock read inside that window.
+        $budgetMs = (int) round((float) config('kb.timeouts.ingestion') * 1000);
+
+        expect((int) ($headers['X-KB-Deadline'] ?? 0))
+            ->toBeGreaterThanOrEqual((int) round($before * 1000) + $budgetMs)
+            ->toBeLessThanOrEqual((int) round($after * 1000) + $budgetMs);
 
         // DERIVED, NEVER MINTED. A retry that generated a new key is a duplicate ingestion of the
         // same document — same bytes, same parse, same embedding spend, and two versions racing the
@@ -241,4 +254,71 @@ it('fails the source rather than leaving it queued forever when submission canno
     $f['job']->failed(new \RuntimeException('the queue gave up'));
 
     expect($f['source']->fresh()?->status)->toBe(SourceState::Failed);
+});
+
+// ── the deadline epoch (finding B1) ──────────────────────────────────────────────────────────────
+
+it('measures X-KB-Deadline from the moment the job runs, never from the worker\'s boot', function (): void {
+    // ── WHAT WENT WRONG, AND WHY THE OLD ASSERTION COULD NOT SEE IT ──────────────────────────
+    //
+    // `InternalAiClient` computed every deadline from `LARAVEL_START`. That constant is
+    // PROCESS-scoped: `public/index.php` and `artisan` are the only two places that define it, and
+    // under PHP-FPM one process serves one request, so it IS the request's start. A `queue:work`
+    // or Horizon worker is a process that lives for hours, so there it is the WORKER'S BOOT — and
+    // `X-KB-Deadline` was therefore `boot + 20 s`, an instant already in the past for any worker up
+    // longer than twenty seconds and receding further for the rest of the process's life. The far
+    // side converts the header verbatim and clamps the remaining budget at zero, so once the
+    // FastAPI ingestion router lands EVERY submission from a warm worker is refused before a byte
+    // is parsed, with this service correct in every log.
+    //
+    // The old assertion here was `deadline > microtime(true) * 1000`, and it could not fail —
+    // `phpunit.xml` bootstrapped `vendor/autoload.php`, which defines nothing, so `defined()` was
+    // false for the whole suite and the client took its `microtime(true)` fallback, which is
+    // correct by construction. The suite exercised the fallback and never the production path.
+    expect(defined('LARAVEL_START'))->toBeTrue(
+        'LARAVEL_START is not defined in this process, so the client is taking its fallback branch '
+        .'and this test is asserting nothing about the branch that ships. tests/bootstrap.php is '
+        .'what defines it; if phpunit.xml no longer points at that file, restore it before reading '
+        .'this suite as green.',
+    );
+
+    $f = submitJobFixture();
+
+    Http::fake([
+        '*/internal/v1/ingestion/jobs' => Http::response(['job_id' => $f['job']->jobId], 202),
+    ]);
+
+    $before = microtime(true);
+
+    app()->call([$f['job'], 'handle']);
+
+    $after = microtime(true);
+
+    $deadline = 0;
+
+    Http::assertSent(function (Request $request) use (&$deadline): bool {
+        $deadline = (int) ($request->header('X-KB-Deadline')[0] ?? 0);
+
+        return true;
+    });
+
+    $budget = (float) config('kb.timeouts.ingestion');
+    $budgetMs = (int) round($budget * 1000);
+
+    // NOW + THE INGESTION BUDGET, to the millisecond, expressed as the interval it must land in.
+    // A tolerance would have to be guessed; these two bounds are measured.
+    expect($deadline)
+        ->toBeGreaterThanOrEqual((int) round($before * 1000) + $budgetMs)
+        ->toBeLessThanOrEqual((int) round($after * 1000) + $budgetMs);
+
+    // THE REGRESSION ASSERTION, NAMED. `LARAVEL_START` in this process is the suite's boot, which
+    // stands in for the worker's; the framework has been up for at least one clock tick by the time
+    // any test body runs, so a deadline still derived from it is strictly smaller than one derived
+    // from the call — and this comparison says so directly rather than inferring it from a window.
+    expect($deadline)->toBeGreaterThan(
+        (int) round((LARAVEL_START + $budget) * 1000),
+        'X-KB-Deadline is measured from LARAVEL_START, which in a queue worker is the worker\'s '
+        .'boot and not this job — so every submission from a warm worker carries a deadline in the '
+        .'past and is refused before a byte is parsed',
+    );
 });

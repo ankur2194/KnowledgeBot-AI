@@ -66,8 +66,14 @@ return [
      *         └── provider total            45      8 + 45 = 53 < 55 ✓
      *
      * `internal` is the value passed to Http::timeout() on the chat call; `chat` is the value
-     * X-KB-Deadline is computed from, as an ABSOLUTE epoch-millisecond instant derived from
-     * LARAVEL_START — never a duration, and never re-derived downstream.
+     * X-KB-Deadline is computed from, as an ABSOLUTE epoch-millisecond instant — never a duration,
+     * and never re-derived downstream.
+     *
+     * THE INSTANT IT IS ADDED TO IS THE CALLER'S, NOT A CONSTANT. This block used to say "derived
+     * from LARAVEL_START", which is right for a request-scoped caller and WRONG for a queued one:
+     * LARAVEL_START is process-scoped, so in a long-lived worker it is the worker's BOOT and
+     * `boot + budget` is an instant already in the past. InternalAiClient names the two epochs
+     * separately (`requestEpoch()` / `callEpoch()`) and requires the call site to pick one.
      */
     'timeouts' => [
         'chat' => 60,

@@ -100,6 +100,29 @@ it('excludes the signature header from its own canonical string', function (): v
     expect($with)->toBe($without);
 });
 
+it('covers only X-KB-* headers, filtering inside the function as the verifier does', function (): void {
+    // ── SYMMETRY WITH `services/ai-service/app/core/signing.py` ───────────────────────────────
+    //
+    // The Python side filters to `x-kb-*` INSIDE the function that builds the canonical string.
+    // This side used to emit every key it was handed and rely on both of its call sites to
+    // pre-filter. They do — so this is a no-op today and the assertion is about the FORMAT rather
+    // than about current behaviour. The day a call site stops filtering, PHP would include a line
+    // Python drops, and the symptom is a 401 on a request that is correct in every log.
+    $withNoise = readinessHeaders() + [
+        'Accept' => 'application/json',
+        'Content-Type' => 'application/json',
+        'Authorization' => 'Bearer never-on-this-seam',
+    ];
+
+    expect(signer()->canonicalString('POST', '/internal/v1/embedding/readiness', '{}', $withNoise))
+        ->toBe(signer()->canonicalString('POST', '/internal/v1/embedding/readiness', '{}', readinessHeaders()));
+
+    // THE CONTROL: an X-KB-* header genuinely changes the string, so the equality above is the
+    // filter working and not the header block being ignored altogether.
+    expect(signer()->canonicalString('POST', '/internal/v1/embedding/readiness', '{}', readinessHeaders() + ['X-KB-Bot-Id' => '01JQZ0000000000000000000BB']))
+        ->not->toBe(signer()->canonicalString('POST', '/internal/v1/embedding/readiness', '{}', readinessHeaders()));
+});
+
 it('carries the key id, because two are live during a rotation', function (): void {
     expect(signer()->sign('POST', '/p', '', readinessHeaders()))->toStartWith('k1:');
 });

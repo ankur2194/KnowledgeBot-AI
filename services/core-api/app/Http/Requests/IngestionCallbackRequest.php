@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace App\Http\Requests;
 
 use App\Enums\SourceState;
+use App\Rules\JsonObjectMap;
+use App\Rules\LiteralBoolean;
 use App\Services\Sources\IngestionProgress;
 use App\Services\Sources\VersionIdentity;
 use Illuminate\Foundation\Http\FormRequest;
@@ -93,7 +95,15 @@ final class IngestionCallbackRequest extends FormRequest
             // `canTransitionTo()`'s own default and for the same reason: a frame that forgot to
             // report a verification must be refused at the `Indexing -> Ready` edge rather than
             // publishing a version that indexed half a document.
-            'verified' => ['bail', 'sometimes', 'boolean'],
+            //
+            // `LiteralBoolean` AND NOT `boolean`, AND THE DIFFERENCE IS FINDING B2. Laravel's
+            // `boolean` rule accepts `1`, `0`, `"1"` and `"0"` as well as the two JSON literals,
+            // and `validated()` does not cast — so `"verified": 1` PASSED this gate as a
+            // well-formed verification claim and was then read as NOT verified by the strict
+            // comparison in `toFrame()`. The version did not activate, `Indexing -> Ready` was
+            // refused, and the worker got a 200 that looks exactly like an ordinary mid-run frame.
+            // The accepted set and the read set are now the same two values.
+            'verified' => ['bail', 'sometimes', new LiteralBoolean],
 
             // ── THE VERSION IDENTITY ────────────────────────────────────────────────────────
             //
@@ -122,10 +132,19 @@ final class IngestionCallbackRequest extends FormRequest
             'chunk_count' => ['bail', 'sometimes', 'integer', 'min:0'],
 
             // Advisory parser and OCR warnings (§8.11), which never gate retrieval. An OBJECT and
-            // never a list: `source_versions_warning_summary_is_object` refuses the array spelling
-            // outright, so a list here would be a constraint violation rendered as a 500 rather
-            // than the 422 it is.
-            'warning_summary' => ['bail', 'sometimes', 'array'],
+            // never a list — and `JsonObjectMap` is what makes that true, because until it landed
+            // nothing did.
+            //
+            // THE COMMENT HERE USED TO CLAIM `source_versions_warning_summary_is_object` CAUGHT A
+            // LIST, and it does not: the value never reaches that CHECK as a list. `SourceVersion`
+            // casts the column with `JsonObjectCast`, whose `set()` is `json_encode((object) $v)`,
+            // and `(object) ["ocr_low","table_unplaced"]` encodes to
+            // `{"0":"ocr_low","1":"table_unplaced"}` — `jsonb_typeof` `object`, CHECK satisfied,
+            // 200 returned. The detail projection then publishes warning codes `0` and `1`, which
+            // nothing on either plane can distinguish from real ones because the vocabulary is the
+            // data plane's. `JsonObjectCast`'s own docblock states the list-to-numeric-keys
+            // behaviour; it simply had never been carried across to the request that admits lists.
+            'warning_summary' => ['bail', 'sometimes', 'array', new JsonObjectMap],
 
             'error_class' => [
                 'bail', 'sometimes', 'nullable', 'string',
@@ -153,10 +172,17 @@ final class IngestionCallbackRequest extends FormRequest
             sequence: (int) $data['sequence'],
             stage: (string) $data['stage'],
             status: SourceState::from((string) $data['status']),
-            // `=== true` and not a truthy cast. `boolean` validation admits `"0"`, `0` and `false`,
-            // and every one of those has to mean NOT verified — a cast that treated `"false"` as
-            // true would publish an unverified version, which is the one failure this flag exists
-            // to make impossible.
+            // `=== true` and not a truthy cast, over a value the rule has already narrowed to a
+            // JSON `true` or `false`. Those are now the SAME SET — which is the whole of the fix
+            // for finding B2. While the rule was Laravel's `boolean`, the accepted set was six
+            // values and this comparison read four of them as NOT verified, so `"verified": 1`
+            // was admitted as a verification claim and applied as its opposite.
+            //
+            // THE COMPARISON STAYS STRICT ANYWAY, and deliberately: a rule object is a thing
+            // somebody can widen in one line, and a truthy cast under a widened rule would publish
+            // an unverified version — the one failure this flag exists to make impossible.
+            // Reading it strictly means a widening turns into a refused publication, which is
+            // visible, rather than into a published one, which is not.
             verified: ($data['verified'] ?? false) === true,
             identity: is_array($version) ? VersionIdentity::fromArray($version) : null,
             deliveryCount: isset($data['delivery_count']) ? (int) $data['delivery_count'] : null,

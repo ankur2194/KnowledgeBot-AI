@@ -60,7 +60,7 @@
         "verified": [
             "bail",
             "sometimes",
-            "boolean"
+            "App\\Rules\\LiteralBoolean"
         ],
         "version": [
             "bail",
@@ -106,7 +106,8 @@
         "warning_summary": [
             "bail",
             "sometimes",
-            "array"
+            "array",
+            "App\\Rules\\JsonObjectMap"
         ]
     }
 }

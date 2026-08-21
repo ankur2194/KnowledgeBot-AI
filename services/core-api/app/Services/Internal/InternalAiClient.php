@@ -95,7 +95,14 @@ final class InternalAiClient
             // snapshotVersion() for why the two are different axes and why a constant is wrong.
             'X-KB-Config-Version' => (string) $this->snapshotVersion($body),
             'X-KB-Contract-Version' => (string) config('kb.contract_version'),
-            'X-KB-Deadline' => (string) $this->deadlineMs(),
+            // AN HTTP CALLER MEASURES FROM REQUEST START. This method is reached from an admin
+            // screen, so `LARAVEL_START` is this request's own beginning under PHP-FPM and the far
+            // side's remaining time shrinks as ours does. A queued caller must NOT use this epoch —
+            // see `requestEpoch()`.
+            'X-KB-Deadline' => (string) $this->deadlineMs(
+                (float) config('kb.timeouts.readiness'),
+                self::requestEpoch(),
+            ),
             'X-KB-Timestamp' => (string) time(),
         ];
 
@@ -204,7 +211,15 @@ final class InternalAiClient
             'X-KB-Request-Id' => (string) Str::ulid(),
             'X-KB-Config-Version' => (string) $this->snapshotVersion($body),
             'X-KB-Contract-Version' => (string) config('kb.contract_version'),
-            'X-KB-Deadline' => (string) $this->deadlineMs((float) config('kb.timeouts.ingestion')),
+            // A QUEUED CALLER MEASURES FROM NOW, AND THIS LINE IS THE WHOLE OF FINDING B1.
+            // `SubmitIngestionJob` runs in a worker that is up for hours, so `LARAVEL_START` there
+            // is the worker's BOOT — `boot + 20 s` is already in the past by the time a warm worker
+            // picks up its second job, and the far side clamps remaining budget at zero and refuses
+            // every submission before a byte is parsed.
+            'X-KB-Deadline' => (string) $this->deadlineMs(
+                (float) config('kb.timeouts.ingestion'),
+                self::callEpoch(),
+            ),
             // REQUIRED ON A MUTATION. Absent, the far side answers `validation` -> 422, which is
             // correct and is not a case worth reaching: this is a write, and a write whose retry
             // cannot be recognised as a replay is a duplicate job.
@@ -441,28 +456,63 @@ final class InternalAiClient
     }
 
     /**
-     * ABSOLUTE epoch milliseconds, computed from this request's own remaining budget — never a
-     * duration, and never re-derived downstream.
+     * ABSOLUTE epoch milliseconds — an instant, never a duration, and never re-derived downstream.
+     *
+     * ── BOTH ARGUMENTS ARE REQUIRED, AND THE EPOCH IS THE HALF THAT USED TO BE IMPLICIT ───────
+     *
+     * The rule is: A CALLER THAT SUPPLIES ITS OWN BUDGET SUPPLIES ITS OWN EPOCH. There is no
+     * default for either, because the defaults are what hid the defect this signature exists to
+     * make impossible — see `requestEpoch()` below for exactly what went wrong.
+     *
+     * What must never happen is a caller re-deriving a fresh duration downstream: the header is an
+     * absolute instant, so the far side's remaining time shrinks as ours does rather than
+     * restarting. That property is the reason for the whole header and it is unaffected by which
+     * epoch is chosen — an epoch chosen wrongly does not restart the budget, it EXHAUSTS it.
      */
-    private function deadlineMs(?float $budgetSeconds = null): int
+    private function deadlineMs(float $budgetSeconds, float $startedAt): int
     {
-        $startedAt = defined('LARAVEL_START') ? (float) LARAVEL_START : microtime(true);
+        return (int) round(($startedAt + $budgetSeconds) * 1000);
+    }
 
-        // THE BUDGET IS AN ARGUMENT BECAUSE THE CALLERS HAVE DIFFERENT ONES, and defaulting it to
-        // the readiness budget keeps the existing call site reading exactly as it did. What must
-        // never happen is a caller re-deriving a fresh duration downstream: the header is an
-        // ABSOLUTE instant computed from LARAVEL_START, so the far side's remaining time shrinks
-        // as ours does rather than restarting.
-        //
-        // ONE SHARP EDGE, NAMED: LARAVEL_START is the start of the REQUEST, and a queued job has no
-        // request. In a worker the constant is defined once when the worker booted, so
-        // `microtime(true)` is what this falls back to only in a process where it is undefined —
-        // which is not the worker. `SubmitIngestionJob` therefore passes a deadline that would be
-        // measured from the worker's boot if this were left alone; it is not, because the job sets
-        // its own budget through this argument and the far side treats a deadline already in the
-        // past as an immediate refusal rather than as a licence to run forever.
-        $budget = $budgetSeconds ?? (float) config('kb.timeouts.readiness');
+    /**
+     * The instant the CURRENT HTTP REQUEST began. Correct ONLY in a request-scoped process.
+     *
+     * ── WHY THIS IS A NAMED METHOD AND NOT A LINE INSIDE `deadlineMs()` ───────────────────────
+     *
+     * `LARAVEL_START` IS PROCESS-SCOPED, NOT REQUEST-SCOPED, AND THE TWO COINCIDE ONLY UNDER
+     * PHP-FPM. It is defined in exactly two places — `public/index.php` and `artisan` — and under
+     * FPM one request is one process, so it is the request's start and the arithmetic is right.
+     * In a long-lived process it is the moment that process BOOTED. A `queue:work` or Horizon
+     * worker is such a process, so a job that measured from here sent `boot + budget`: a deadline
+     * ALREADY IN THE PAST for any worker up longer than its budget, and further into the past for
+     * the rest of the process's life. The far side clamps remaining budget at zero and refuses,
+     * which means every submission from a warm worker would be refused before a byte was read,
+     * with this service correct in every log.
+     *
+     * That is not hypothetical and it is not a near miss: it shipped, and the docblock here named
+     * the hazard and then mis-resolved it — it claimed the job "sets its own budget through this
+     * argument", which is true and irrelevant, because the budget is not the epoch. The fix is the
+     * signature: the epoch is chosen at the call site, by name, and the two names read differently
+     * enough that picking the wrong one is a visible choice rather than an omission.
+     *
+     * THE FALLBACK IS A SAFETY NET FOR A REQUEST-SCOPED PROCESS THAT SOMEHOW LACKS THE CONSTANT
+     * (a differently-bootstrapped SAPI), and it is NOT the queued path's answer — a worker HAS the
+     * constant, so the fallback never fires there. A queued caller must call `callEpoch()`.
+     */
+    private static function requestEpoch(): float
+    {
+        return defined('LARAVEL_START') ? (float) LARAVEL_START : microtime(true);
+    }
 
-        return (int) round(($startedAt + $budget) * 1000);
+    /**
+     * Now. The correct epoch in ANY process, and the only correct one in a long-lived worker.
+     *
+     * A queued job has no request, so there is no earlier instant its budget could honestly be
+     * measured from: the work begins when the job runs. Reading `LARAVEL_START` here would measure
+     * from the worker's boot — see `requestEpoch()`.
+     */
+    private static function callEpoch(): float
+    {
+        return microtime(true);
     }
 }
