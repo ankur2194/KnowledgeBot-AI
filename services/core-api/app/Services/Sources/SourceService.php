@@ -133,6 +133,32 @@ final class SourceService
     }
 
     /**
+     * What is inside one source, as of its live versions.
+     *
+     * ── IT IS A SEPARATE CALL FROM `list()` AND MUST STAY ONE ─────────────────────────────────
+     *
+     * Four aggregate statements against `source_items`, `source_versions`, `document_elements` and
+     * `chunks`, per source. On a detail page that is four queries; folded into the list it would be
+     * a hundred and one for a page of twenty-five, which is why `SourceResource` publishes no counts
+     * and `SourceDetailResource` exists.
+     *
+     * ── WHY THE CONSOLE NEEDED IT ─────────────────────────────────────────────────────────────
+     *
+     * `delete()` below builds a `SourceChildSummary` and writes it to the AUDIT ROW, where no client
+     * can read it, so the sources list shipped a delete confirmation that could not state its
+     * consequence in numbers while `kb-ui-patterns` requires exactly that. `chunk_count` is the
+     * number that confirmation is asking for: it is how many vectors the deletion removes and how
+     * many a rebuild would re-embed at a provider's per-token price.
+     *
+     * NO AUDIT ROW. §18.11 audits credential changes, configuration changes and destructive
+     * operations; reading a source is none of them.
+     */
+    public function detail(Organization $organization, KnowledgeSource $source): SourceContentSummary
+    {
+        return $this->sources->contentSummary($organization->organizationId(), $source->id);
+    }
+
+    /**
      * Create one source, give it its first item, queue it, and dispatch the submission.
      *
      * ── THE SOURCE IS SUBMITTED, NOT LEFT IN `Draft` ──────────────────────────────────────────

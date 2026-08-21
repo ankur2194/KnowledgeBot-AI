@@ -8,6 +8,7 @@ use App\Models\Bot;
 use App\Services\Bots\BotChildSummary;
 use App\Services\Bots\BotEdit;
 use App\Services\Bots\NewBot;
+use App\Services\Bots\RemovedSourceAssignment;
 use App\Support\Http\ListQuery;
 use Closure;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
@@ -163,17 +164,23 @@ interface BotRepositoryInterface
     ): ?Bot;
 
     /**
-     * Hard-delete one bot and the three child collections that exist only to describe it.
+     * Hard-delete one bot and the four child collections that exist only to describe it.
      *
      * ── THE CHILDREN ARE REMOVED IN CODE BECAUSE THE FOREIGN KEYS ARE `ON DELETE RESTRICT` ─────
      *
-     * `bot_domains`, `bot_starter_questions` and `bot_fallback_models` all reference
-     * `bots (organization_id, id)` with RESTRICT, so a bot with a single origin on its allow-list
-     * cannot be deleted by a bare `DELETE` — it raises SQLSTATE 23503, which the error envelope
-     * renders as a 500. Switching those keys to CASCADE would fix the symptom and lose the
-     * property they were chosen for: with RESTRICT, the blast radius of a delete is written out at
-     * the ONE call site that performs it, and a fourth child table added later fails loudly here
-     * instead of being silently swept away by the database.
+     * `bot_domains`, `bot_starter_questions`, `bot_fallback_models` and `bot_source_assignments`
+     * all reference `bots (organization_id, id)` with RESTRICT, so a bot with a single origin on
+     * its allow-list cannot be deleted by a bare `DELETE` — it raises SQLSTATE 23503, which the
+     * error envelope renders as a 500. Switching those keys to CASCADE would fix the symptom and
+     * lose the property they were chosen for: with RESTRICT, the blast radius of a delete is
+     * written out at the ONE call site that performs it, and a further child table added later
+     * fails loudly here instead of being silently swept away by the database.
+     *
+     * THE FOURTH ONE IS THE CASE THAT SENTENCE PREDICTED, AND IT ARRIVED. `bot_source_assignments`
+     * landed with Phase C1 and nothing wrote to it until C6, so this method was correct and
+     * complete for exactly as long as the table was empty; the first grant would have turned every
+     * delete of that bot into a 500. It is named rather than folded into the list above because
+     * the failure had a window in which no test could see it.
      *
      * Each child DELETE carries the organization predicate as well as the bot predicate. It is
      * redundant against the composite foreign key — a child's bot cannot belong to another
@@ -181,8 +188,27 @@ interface BotRepositoryInterface
      * is: "correct only because of a constraint in another file" is not the property this layer
      * exists to have.
      *
-     * @param  Closure(Bot): void  $audit  invoked inside the transaction, BEFORE the row is removed
-     *                                     — after it there is nothing left to describe
+     * ── THE ASSIGNMENTS ARE THE ONE CHILD COLLECTION WHOSE DESTRUCTION IS ITSELF AUDITED ───────
+     *
+     * The origin allow-list, the starter questions and the fallback chain are summarised onto the
+     * `bot.deleted` row as counts (`BotChildSummary`), and each origin additionally has its own
+     * append-only `bot.domain.created` row from the day it was granted. An assignment has the same
+     * shape and the higher stakes — `AuditLogger` makes both `bot.source_assignment.*` operations
+     * `ON_FAILURE_ABORT` on the ground that a retrieval-scope grant reaching DOCUMENTS is finding
+     * L2 with more to lose — so its removal gets a row of its own too, which is why the audit
+     * closure receives the grants rather than only the bot.
+     *
+     * @param  Closure(Bot, list<RemovedSourceAssignment>): void  $audit  invoked inside the
+     *                                                                    transaction, BEFORE
+     *                                                                    anything is removed —
+     *                                                                    after it there is nothing
+     *                                                                    left to describe. The
+     *                                                                    second argument is every
+     *                                                                    grant this delete is about
+     *                                                                    to destroy, read under the
+     *                                                                    same lock, so the rows it
+     *                                                                    describes are the rows
+     *                                                                    that go
      * @return bool false when no such bot exists in THIS organization
      */
     public function delete(string $organizationId, string $botId, Closure $audit): bool;

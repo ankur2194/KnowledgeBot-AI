@@ -1300,7 +1300,8 @@ it('publishes query parameters only where a request declares them', function ():
     // THE OTHER DIRECTION, and the one a single-endpoint assertion cannot see: a `parameters()` that
     // appended the list-query block to every operation would satisfy the test above and would put
     // `page` on `POST …/bots`. Only requests implementing `ProvidesOpenApiQueryParameters` may
-    // contribute — `IndexBotsRequest` and `IndexSourcesRequest` today, and Phases D and E2 are
+    // contribute — `IndexBotsRequest`, `IndexSourcesRequest` and
+    // `IndexBotSourceAssignmentsRequest` today, and Phases D and E2 are
     // expected to add more, which is why this asserts the RULE rather than the count.
     $document = dumpDocument()['document'];
     $paths = $document['paths'] ?? null;
@@ -1336,6 +1337,12 @@ it('publishes query parameters only where a request declares them', function ():
     expect(array_values(array_unique($withQuery)))
         ->toBe([
             'GET /api/v1/organizations/{organization}/bots',
+            // ADDED WITH PHASE C6. The bot's source assignments are this repository's second
+            // paginated CHILD list, and the name is here because
+            // `IndexBotSourceAssignmentsRequest` closes a sortable set of three columns and caps
+            // its page size — which is the property a reviewer is being asked to confirm rather
+            // than a line to keep the array green.
+            'GET /api/v1/organizations/{organization}/bots/{bot}/source-assignments',
             'GET /api/v1/organizations/{organization}/sources',
         ]);
 });

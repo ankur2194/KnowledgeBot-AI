@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Bots;
 
 /**
- * What a bot's three child collections held at the moment a `bot.*` audit row was written.
+ * What a bot's four child collections held at the moment a `bot.*` audit row was written.
  *
  * ── THIS TYPE EXISTS TO CLOSE FINDING L2, AND THE FINDING IS WORTH RESTATING ──────────────────
  *
@@ -62,6 +62,8 @@ final readonly class BotChildSummary
         public int $starterQuestionCount,
         public int $fallbackModelCount,
         public array $fallbackModelIds,
+        public int $sourceAssignmentCount,
+        public int $enabledSourceAssignmentCount,
     ) {}
 
     /**
@@ -104,6 +106,26 @@ final readonly class BotChildSummary
             'starter_question_count' => $this->starterQuestionCount,
             'fallback_model_count' => $this->fallbackModelCount,
             'fallback_model_ids' => implode(',', $this->fallbackModelIds),
+
+            // ── THE RETRIEVAL SCOPE, AS TWO INTEGERS AND NO LIST ─────────────────────────────
+            //
+            // COUNTED AND NEVER ECHOED, and the asymmetry with `active_origins` is deliberate. An
+            // origin string IS the security fact and losing it loses the ability to answer "what
+            // could reach this bot"; a source id is a pointer whose meaning lives in another table
+            // and whose NAME is unbounded tenant prose. What actually reconstructs the retrieval
+            // scope is the per-grant `bot.source_assignment.created` and `.deleted` rows, which
+            // carry `source_id`, `source_name`, `priority` and `enabled` one grant at a time and
+            // outlive the bot — including the ones a bot delete writes for the grants it destroys.
+            // These two numbers are the TRIPWIRE that sends a reader of `bot.deleted` looking for
+            // them, exactly as `domain_count` does for the allow-list.
+            //
+            // BOTH, because they answer different questions. `source_assignment_count` says how
+            // many rows went; `enabled_source_assignment_count` says how many of them GRANTED
+            // anything, and a bot whose every grant was switched off had exactly as much corpus as
+            // one with none. The same pairing, for the same reason, as `domain_count` beside
+            // `active_domain_count`.
+            'source_assignment_count' => $this->sourceAssignmentCount,
+            'enabled_source_assignment_count' => $this->enabledSourceAssignmentCount,
         ];
     }
 }

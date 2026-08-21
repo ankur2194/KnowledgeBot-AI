@@ -7,6 +7,7 @@ namespace App\Providers;
 use App\Enums\Surface;
 use App\Repositories\Contracts\BotDomainRepositoryInterface;
 use App\Repositories\Contracts\BotRepositoryInterface;
+use App\Repositories\Contracts\BotSourceAssignmentRepositoryInterface;
 use App\Repositories\Contracts\BotStarterQuestionRepositoryInterface;
 use App\Repositories\Contracts\EmbeddingCandidateRepositoryInterface;
 use App\Repositories\Contracts\KnowledgeSourceRepositoryInterface;
@@ -17,6 +18,7 @@ use App\Repositories\Contracts\ProviderModelRepositoryInterface;
 use App\Repositories\Contracts\SparseCorpusStatisticsRepositoryInterface;
 use App\Repositories\Eloquent\EloquentBotDomainRepository;
 use App\Repositories\Eloquent\EloquentBotRepository;
+use App\Repositories\Eloquent\EloquentBotSourceAssignmentRepository;
 use App\Repositories\Eloquent\EloquentBotStarterQuestionRepository;
 use App\Repositories\Eloquent\EloquentEmbeddingCandidateRepository;
 use App\Repositories\Eloquent\EloquentKnowledgeSourceRepository;
@@ -108,6 +110,17 @@ final class AppServiceProvider extends ServiceProvider
         $this->app->bind(
             BotStarterQuestionRepositoryInterface::class,
             EloquentBotStarterQuestionRepository::class,
+        );
+
+        // THE THIRD CHILD COLLECTION, AND THE ONLY ONE WHOSE ROWS CAN NAME TWO ORGANIZATIONS.
+        // `bot_source_assignments` is kb-tenancy-isolation NN2: its own interface rather than more
+        // methods on the bot repository, for the reason the two above give and one more of its own
+        // — every write here has to state the organization explicitly rather than infer it from
+        // either parent, and a seam whose every method takes it as a required positional argument
+        // is what makes inferring it unexpressible.
+        $this->app->bind(
+            BotSourceAssignmentRepositoryInterface::class,
+            EloquentBotSourceAssignmentRepository::class,
         );
 
         $this->app->bind(

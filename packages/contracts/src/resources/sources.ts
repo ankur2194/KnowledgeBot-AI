@@ -193,6 +193,224 @@ export interface SourceCollectionResource {
 }
 
 /**
+ * One advisory parser or OCR warning reported while a source's LIVE content was produced.
+ *
+ * ADVISORY ALWAYS, AND THAT IS THE ONLY THING A RENDERER MUST GET RIGHT. A warning is never a
+ * retrieval predicate — `ready_with_warnings` and `ready` are identical for every query — so this
+ * list is never the answer to "why is this source not answering". It is a quality signal beside the
+ * content, not a fault beside the status, and the tone families in `kb-design-language` have a
+ * separate one for exactly that difference.
+ *
+ * ── `code` IS AN OPEN VOCABULARY AND THERE IS NO UNION HERE ─────────────────────────────────────
+ * The key set belongs to the ingestion service and grows with the parsers, so the document publishes
+ * no enum and this package must not invent one — a closed copy would refuse to render a code that
+ * shipped this morning, which is the argument `tags` makes on `SourceResource` reaching a second
+ * field. `warnings_truncated` on the detail shape exists for the same reason: an open set cannot be
+ * bounded server-side by enumerating it, only by capping the list. Treat an unrecognised code as a
+ * code you have no copy for, not as an error; it is a machine key rather than a sentence, so the
+ * shape that works is a lookup table with a fallback to the raw string.
+ *
+ * ── THE VALUE BEHIND THE KEY IS DELIBERATELY NOT PUBLISHED ──────────────────────────────────────
+ * It is unschema'd and can contain document content, so the server sends a COUNT instead. Do not ask
+ * for the payload as a convenience: that is tenant text arriving on a shape nobody wrote an escape
+ * for, which is the failure `SourceResource`'s tenant-authored-text note is about.
+ */
+export interface SourceWarningResource {
+  /** The warning key as the ingestion pipeline wrote it. Render verbatim; see the docblock. */
+  readonly code: string;
+  /**
+   * How many of the source's LIVE versions reported this code — VERSIONS, never occurrences. How
+   * many pages inside one version were affected lives in the value this shape does not read, so a
+   * `1` on a single-file source is the only value it can ever hold and a `1` on a crawl means one
+   * page carries the problem and says nothing at all about how badly.
+   */
+  readonly versions: number;
+}
+
+/**
+ * The immutable processing result a SINGLE-ITEM source is currently serving.
+ *
+ * It is what an ITEM's active-version pointer names, and the item — one uploaded file, one crawled
+ * page, one paste — is the unit of independent versioning. There is no source-level pointer, so this
+ * shape reaches a client only through `SourceDetailResource.active_version`, and only for a source
+ * whose item count is exactly one.
+ *
+ * ── ITS `status` IS NOT THE SOURCE'S `status`, AND CONFLATING THEM IS THE OBVIOUS BUG ───────────
+ * The source shows the state of the run IN FLIGHT; this shows the state of what is currently
+ * SERVING. A source reading `parsing` above a version reading `ready` is the normal, correct state
+ * during a reprocess — the previous version answers every query until the new one is indexed and
+ * verified (`kb-source-lifecycle`) — so a screen that renders one status for both makes an atomic
+ * publication look like an outage.
+ *
+ * ── THE FOUR `*_cfg_version` STRINGS ARE INGEST-KEY COMPONENTS, NOT DIAGNOSTICS ─────────────────
+ * They are what makes a reprocess produce a NEW version rather than deduplicate against this one, so
+ * they are the honest answer to "why did re-uploading the same file do something this time". Render
+ * them as opaque identifiers; nothing in this package parses them, and a client that split one on
+ * `:` to show a friendlier name would be reading a format the data plane owns.
+ */
+export interface SourceActiveVersionResource {
+  /** ULID of the version. */
+  readonly id: string;
+  /** ULID of the item this version belongs to — the unit of versioning, and not the source. */
+  readonly source_item_id: string;
+  /**
+   * Monotonic per item, starting at 1. A GAP IS INFORMATION: it means a version was created and
+   * never activated, which is what a failed run leaves behind, so "v1 then v3" is a history to show
+   * rather than a sequence to renumber.
+   */
+  readonly version_number: number;
+  /** The version's own lifecycle state, which may differ from the source's — see the docblock. */
+  readonly status: SourceStatus;
+  /**
+   * ISO 8601 with offset. When this version became the one answering.
+   *
+   * A STRING, NOT A `Date`, like every other timestamp in this package. Nullable because the column
+   * is, and never null in practice for a version an item points at: the pointer switch and this
+   * timestamp are written in one transaction, so a null here would be a row that says it is serving
+   * and cannot say since when.
+   */
+  readonly activated_at: string | null;
+  /** The document-parser configuration this version was produced under. */
+  readonly parser_cfg_version: string;
+  /**
+   * The OCR configuration, and a SEPARATE field from the parser's on purpose: a content-only ingest
+   * key would make an OCR retune a silent no-op that reports "already processed".
+   */
+  readonly ocr_cfg_version: string;
+  /** The chunking configuration this version was split under. */
+  readonly chunker_cfg_version: string;
+  /**
+   * Provider, model id, returned vector width and a digest over a fixed probe set — e.g.
+   * `emb/v1:openai:text-embedding-3-large:d3072:9f2a1c4e77b1`.
+   *
+   * NOT A BARE VENDOR MODEL NAME, and the distinction is ADR-035's: a vendor alias can be re-pointed
+   * at different weights with no diff anywhere, so identity is MEASURED rather than declared. Two
+   * versions with different values here are in different vector spaces and their scores are not
+   * comparable — which is a sentence a UI may show and must never act on.
+   */
+  readonly embedding_model_version: string;
+}
+
+/**
+ * One knowledge source WITH WHAT IS INSIDE IT — `GET .../sources/{source}`, unwrapped from `data`.
+ *
+ * ── IT EXTENDS `SourceResource`; IT DOES NOT RESTATE IT ─────────────────────────────────────────
+ * The server composes the same way — the detail resource builds on the list resource's array and
+ * adds to it rather than transcribing its sixteen fields — and `extends` is the only spelling on
+ * this side that keeps the two in step without anybody remembering to. A seventeenth field added to
+ * `SourceResource` tomorrow is on this interface the moment it is on that one; a second flat
+ * interface would go on compiling while missing it, and the detail screen would render `undefined`
+ * where the list screen renders a value, which is a bug with no error and no failing type.
+ *
+ * That is a property rather than a promise. test/resource-drift.test.ts pins the extension at the
+ * TYPE level (assignable in one direction and not the other) and pins the same relationship on the
+ * WIRE, requiring every property published on `SourceResource` to be published AND required on
+ * `SourceDetailResource` too; and the MIRRORED register derives this component's key list from
+ * `SourceResource`'s by spread rather than as a second hand-written list. So the day the server adds
+ * a field to one shape and forgets the other is a red suite naming the field.
+ *
+ * ── THE CONTRADICTION THIS SHAPE MAKES VISIBLE, RECORDED RATHER THAN RESOLVED ───────────────────
+ * The `SourceResource` docblock at the top of this module says there is no active-version pointer on
+ * that shape "and there never will be one". Nothing here weakens it — no field was added to
+ * `SourceResource`, and the type-level pin is what proves that — but the sentence reads as a claim
+ * about SOURCES rather than about a shape, and `active_version` below is a version pointer on a
+ * source. The server's reconciliation is deliberately narrow and is stated on the field: populated
+ * ONLY when the source has exactly one item, null for every crawl and every multi-file upload, with
+ * `active_version_count` answering the question in the general case. Whether the absolute sentence
+ * should be softened is `control-plane-engineer`'s call and not this package's; it is written down
+ * here so the next reader finds the tension instead of rediscovering it.
+ *
+ * ── EVERY COUNT BELOW IS OVER THE LIVE VERSIONS ONLY ────────────────────────────────────────────
+ * The ones an item's active-version pointer names, and nothing else. A source mid-ingestion reports
+ * ZEROES even though rows for the unpublished version already exist, which looks wrong on a progress
+ * screen and is exactly right on a delete confirmation: the question there is what is reachable and
+ * about to stop being. Do not render any of these as ingestion progress — `status_is_processing` is
+ * the field for that, and a count that climbs is not what these numbers do.
+ */
+export interface SourceDetailResource extends SourceResource {
+  /**
+   * Independently-versioned items under this source: one per uploaded file, one per crawled page,
+   * one for a paste. A submitted source always has at least one; a `draft` has none, because nothing
+   * has been submitted into it yet. This is the number that decides whether `active_version` can be
+   * populated at all.
+   */
+  readonly item_count: number;
+  /**
+   * How many of those items currently point at a live version.
+   *
+   * ZERO MEANS NOTHING ABOUT THIS SOURCE IS RETRIEVABLE, whatever `status` says — the active-version
+   * pointer is one of the four mandatory filter terms (`kb-tenancy-isolation` NN 2) and an ingestion
+   * that never completed leaves it empty. Read THIS, not `active_version`, to answer "is any of this
+   * live": the pointer field is null for every multi-item source, including ones serving hundreds of
+   * pages.
+   */
+  readonly active_version_count: number;
+  /**
+   * The live version, FOR A SOURCE WITH EXACTLY ONE ITEM. Null for every other source.
+   *
+   * NULL DOES NOT MEAN "NOTHING IS LIVE" — that is `active_version_count === 0` — and the two are
+   * routinely different: a four-hundred-page crawl with every page serving reports `null` here.
+   * Activation is a pointer on the ITEM and "the current version" of a multi-item source is a set
+   * rather than a value, so there is no honest scalar to publish. A screen that renders this as the
+   * source's version is correct on single-file uploads and silently wrong on everything else.
+   */
+  readonly active_version: SourceActiveVersionResource | null;
+  /**
+   * Distinct pages across the live versions, summed per version — a two-file upload of ten pages
+   * each reports twenty. ZERO IS AMBIGUOUS BY DESIGN and the ambiguity is cheap: a format with no
+   * pages (a deck, a spreadsheet, a crawled page) reports zero exactly as a source with no live
+   * content does, so render the count that fits the `type` rather than every count for every source.
+   */
+  readonly page_count: number;
+  /** Distinct slides, on the same basis as `page_count`. */
+  readonly slide_count: number;
+  /** Distinct spreadsheet sheets, on the same basis as `page_count`. */
+  readonly sheet_count: number;
+  /**
+   * Structural elements — headings, paragraphs, list items, table rows, captions — extracted from
+   * the live versions. The unit citations locate against, and the honest measure of "how much
+   * document is here" for the formats whose page count is structurally zero.
+   */
+  readonly element_count: number;
+  /**
+   * Retrievable chunks derived from the live versions: the number of vectors a deletion removes and
+   * the number a rebuild re-embeds at a provider's per-token price (ADR-030 — embedding is a metered
+   * API call now, not a local model). THIS IS THE FIGURE A DELETE CONFIRMATION SHOULD STATE.
+   */
+  readonly chunk_count: number;
+  /**
+   * Advisory parser and OCR warnings from the live content, as codes with a version count each.
+   * ALWAYS PRESENT, empty when there are none — never null, for the reason `tags` is never null.
+   */
+  readonly warnings: readonly SourceWarningResource[];
+  /**
+   * Whether more distinct warning codes exist than the list publishes. The code set is open (see
+   * `SourceWarningResource`), so the list is capped rather than unbounded, and a true here is "there
+   * is more of this kind of thing" rather than "something is hidden from you".
+   */
+  readonly warnings_truncated: boolean;
+  /**
+   * A BOUNDED excerpt of the extracted text of the live content, in document order, elements
+   * separated by a blank line. Null when nothing has been extracted yet — never an empty string,
+   * because "no content" and "the first element is blank" are different facts and a renderer that
+   * conflates them shows a blank panel for both.
+   *
+   * IT IS UNTRUSTED TENANT DATA AND IT IS THE LEAST OBVIOUSLY UNTRUSTED FIELD ON THIS SHAPE, because
+   * it reads as our own output rather than as somebody's input. It is document text: interpolate it
+   * as a JSX child, never as HTML, never into a `style`, and never into a prompt. `kb-security-
+   * baseline` owns the rendering rule and it is unconditional here — a CSP nonce does not cover
+   * `dangerouslySetInnerHTML` and never covered `style=""`.
+   */
+  readonly content_preview: string | null;
+  /**
+   * Whether the excerpt was cut, by the character cap or by the element cap. TRUE IS THE ORDINARY
+   * CASE for anything longer than a page, so render an ellipsis rather than a warning, and never
+   * imply the document is as short as the excerpt.
+   */
+  readonly content_preview_truncated: boolean;
+}
+
+/**
  * The upload ceilings this deployment enforces, from
  * `GET /api/v1/organizations/{organization}/sources/upload-limits`, unwrapped from `data`.
  *

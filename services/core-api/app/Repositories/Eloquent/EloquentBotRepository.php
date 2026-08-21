@@ -8,11 +8,14 @@ use App\Enums\BotStatus;
 use App\Models\Bot;
 use App\Models\BotDomain;
 use App\Models\BotFallbackEntry;
+use App\Models\BotSourceAssignment;
 use App\Models\BotStarterQuestion;
+use App\Models\KnowledgeSource;
 use App\Repositories\Contracts\BotRepositoryInterface;
 use App\Services\Bots\BotChildSummary;
 use App\Services\Bots\BotEdit;
 use App\Services\Bots\NewBot;
+use App\Services\Bots\RemovedSourceAssignment;
 use App\Support\Http\ListQuery;
 use Closure;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
@@ -134,6 +137,13 @@ final class EloquentBotRepository implements BotRepositoryInterface
 
         $fallbackModelIds = array_values($chain);
 
+        // THE RETRIEVAL SCOPE, COUNTED TWICE. Two statements rather than one read plus a PHP
+        // filter: the rows are never needed here — only their cardinality is — and a bot at the
+        // assignment cap would otherwise hydrate two hundred models to produce two integers.
+        $assignments = BotSourceAssignment::query()
+            ->where('organization_id', '=', $organizationId)
+            ->where('bot_id', '=', $botId);
+
         return new BotChildSummary(
             domainCount: count($domains),
             activeDomainCount: count($activeOrigins),
@@ -144,6 +154,11 @@ final class EloquentBotRepository implements BotRepositoryInterface
                 ->count(),
             fallbackModelCount: count($fallbackModelIds),
             fallbackModelIds: $fallbackModelIds,
+            sourceAssignmentCount: (clone $assignments)->count(),
+            // POSITIVELY, `where('enabled', true)` and never `whereNot('enabled', false)` — the
+            // same direction kb-tenancy-isolation NN5 requires of the filter itself, and the
+            // direction the partial index `... WHERE enabled` is built in.
+            enabledSourceAssignmentCount: (clone $assignments)->where('enabled', '=', true)->count(),
         );
     }
 
@@ -300,7 +315,7 @@ final class EloquentBotRepository implements BotRepositoryInterface
     }
 
     /**
-     * @param  Closure(Bot): void  $audit
+     * @param  Closure(Bot, list<RemovedSourceAssignment>): void  $audit
      */
     public function delete(string $organizationId, string $botId, Closure $audit): bool
     {
@@ -311,22 +326,35 @@ final class EloquentBotRepository implements BotRepositoryInterface
                 return false;
             }
 
-            // BEFORE the children and before the row, because after them there is nothing left to
-            // describe: this is a hard delete and the audit row is the only surviving record of the
-            // bot. It is also inside the transaction, so an ON_FAILURE_ABORT write failure leaves
-            // the whole graph intact rather than removing it untraceably.
-            $audit($bot);
+            // READ BEFORE ANYTHING GOES. The grants have to be described while they still exist,
+            // and with their sources' names, because both parents are hard deletes and a row
+            // carrying only ULIDs resolves to nothing on either end afterwards.
+            $assignments = $this->describeAssignments($organizationId, $botId);
 
-            // THE THREE CHILD COLLECTIONS, IN CODE, BECAUSE EVERY ONE OF THEM REFERENCES
+            // BEFORE the children and before the row, because after them there is nothing left to
+            // describe: this is a hard delete and the audit rows are the only surviving record of
+            // the bot and of what it was allowed to read. It is also inside the transaction, so an
+            // ON_FAILURE_ABORT write failure leaves the whole graph intact rather than removing it
+            // untraceably.
+            $audit($bot, $assignments);
+
+            // THE FOUR CHILD COLLECTIONS, IN CODE, BECAUSE EVERY ONE OF THEM REFERENCES
             // `bots (organization_id, id)` WITH `ON DELETE RESTRICT`. A bot with a single origin on
-            // its allow-list would otherwise raise SQLSTATE 23503 on the DELETE below, rendered by
-            // the error envelope as a 500 for a request that is entirely legitimate. See the
-            // interface for why the keys are not CASCADE.
+            // its allow-list — or, since Phase C6, a single assigned source — would otherwise raise
+            // SQLSTATE 23503 on the DELETE below, rendered by the error envelope as a 500 for a
+            // request that is entirely legitimate. See the interface for why the keys are not
+            // CASCADE, and for why `bot_source_assignments` is called out by name there rather than
+            // simply added to the list.
             //
             // BOTH PREDICATES ON EVERY CHILD DELETE. The organization term is redundant against the
             // composite foreign key and is written out anyway — this layer's property is that it is
             // correct on its own, not that it is correct because of a constraint in another file.
-            foreach ([BotFallbackEntry::class, BotStarterQuestion::class, BotDomain::class] as $child) {
+            foreach ([
+                BotFallbackEntry::class,
+                BotStarterQuestion::class,
+                BotDomain::class,
+                BotSourceAssignment::class,
+            ] as $child) {
                 $child::query()
                     ->where('organization_id', '=', $organizationId)
                     ->where('bot_id', '=', $botId)
@@ -337,6 +365,57 @@ final class EloquentBotRepository implements BotRepositoryInterface
 
             return true;
         });
+    }
+
+    /**
+     * Every grant this bot holds, flattened into scalars, with each source's name beside it.
+     *
+     * ── THE NAME IS READ WITH ITS OWN ORGANIZATION PREDICATE, NEVER THROUGH THE RELATION ──────
+     *
+     * `$assignment->source` would be a lazy load, which `Model::shouldBeStrict()` refuses outright,
+     * and an eager load's scoping would come from the ambient `TenantContext` — the backstop rather
+     * than the mechanism, and the one layer that fails in a pooled worker. Two explicit queries,
+     * each stating the organization it was given, is what makes this method correct on its own.
+     *
+     * ONE EXTRA QUERY AND NOT ONE PER ROW. The names are fetched in a single keyed read over the
+     * ids just collected, so a bot at the assignment cap costs two statements rather than two
+     * hundred and one inside a transaction that already holds a row lock.
+     *
+     * A MISSING NAME IS A NULL AND NOT A FAILURE. The composite foreign key
+     * `bot_source_assignments_source_same_org` makes it unreachable today; if it ever became
+     * reachable, `AuditLogger::sanitize()` skips a null silently and the row still records both
+     * ULIDs, which is strictly better than the row not existing.
+     *
+     * @return list<RemovedSourceAssignment>
+     */
+    private function describeAssignments(string $organizationId, string $botId): array
+    {
+        $rows = BotSourceAssignment::query()
+            ->where('organization_id', '=', $organizationId)
+            ->where('bot_id', '=', $botId)
+            // Deterministic, and it is creation order: `id` is a ULID under COLLATE "C", so
+            // lexicographic order IS byte order IS creation order. The audit rows then land in the
+            // order the grants were made, which is the order an investigation reads them in.
+            ->orderBy('id')
+            ->get();
+
+        /** @var array<string, string> $names */
+        $names = KnowledgeSource::query()
+            ->where('organization_id', '=', $organizationId)
+            ->whereIn('id', $rows->pluck('source_id')->all())
+            ->pluck('name', 'id')
+            ->all();
+
+        return array_values($rows->map(
+            static fn (BotSourceAssignment $row): RemovedSourceAssignment => new RemovedSourceAssignment(
+                id: $row->id,
+                botId: $row->bot_id,
+                sourceId: $row->source_id,
+                sourceName: $names[$row->source_id] ?? null,
+                priority: $row->priority,
+                enabled: $row->enabled,
+            ),
+        )->all());
     }
 
     /**

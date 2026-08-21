@@ -11,6 +11,7 @@ use App\Services\Sources\IngestionProgress;
 use App\Services\Sources\NewSource;
 use App\Services\Sources\NewSourceItem;
 use App\Services\Sources\SourceChildSummary;
+use App\Services\Sources\SourceContentSummary;
 use App\Services\Sources\SourceEdit;
 use App\Support\Http\ListQuery;
 use Closure;
@@ -67,10 +68,18 @@ interface KnowledgeSourceRepositoryInterface
     /**
      * One source of THIS organization, or null.
      *
-     * IT EXISTS FOR THE QUEUE WORKER AND FOR NOTHING ELSE. Every HTTP path already holds the row —
-     * the scoped route binding resolved it through `$organization->sources()` and 404'd a foreign
-     * id at BINDING time, before any policy was constructed. A job has no route and no binding, so
-     * this is where its organization predicate becomes explicit rather than ambient.
+     * IT EXISTS FOR THE CALLERS THAT HAVE NO ROUTE BINDING TO LEAN ON, WHICH IS NOW TWO. Most HTTP
+     * paths already hold the row — the scoped route binding resolved it through
+     * `$organization->sources()` and 404'd a foreign id at BINDING time, before any policy was
+     * constructed — and for those this method is redundant.
+     *
+     * The two that need it: the QUEUE WORKER, which has no route and no binding, so this is where
+     * its organization predicate becomes explicit rather than ambient; and the BOT SOURCE
+     * ASSIGNMENT endpoints, where `source_id` arrives in a request BODY and no binding can scope a
+     * body field. On that second path the organization argument is what turns a foreign id into a
+     * 404 — byte-identical to a path with no route — rather than an existence oracle over every
+     * other customer's document ids. This docblock previously said "and for nothing else", which
+     * went false the day that surface landed.
      */
     public function find(string $organizationId, string $sourceId): ?KnowledgeSource;
 
@@ -226,6 +235,35 @@ interface KnowledgeSourceRepositoryInterface
      * How many items and versions this source has right now, with both tenant predicates.
      */
     public function childSummary(string $organizationId, string $sourceId): SourceChildSummary;
+
+    /**
+     * What is actually inside this source, as of its LIVE versions.
+     *
+     * ── EVERY AGGREGATE READS THROUGH THE ACTIVE-VERSION POINTERS ─────────────────────────────
+     *
+     * The version set is `source_items.current_version_id` for this source's items, and never
+     * `activated_at IS NOT NULL AND retired_at IS NULL` — the pointer is the DEFINITION of live and
+     * the other reading is an inference from a partial unique index, which is the reading that
+     * would survive somebody dropping it. `hasWarnedActiveVersion()` below states the same rule.
+     *
+     * A source mid-ingestion therefore reports zeroes. That is correct rather than a gap: rows for
+     * an unpublished version exist in `document_elements` and `chunks` and NOTHING can retrieve
+     * them, so counting them would tell an operator that deleting the source removes content that
+     * was never reachable.
+     *
+     * ── THE PREVIEW IS BOUNDED IN THE QUERY AND NOT ONLY IN PHP ───────────────────────────────
+     *
+     * `document_elements.text` is tenant-authored content of unbounded length — one serialized
+     * table can be megabytes — so the read caps BOTH the number of elements and the characters
+     * taken from each, in SQL. Truncating in PHP alone would still transfer the whole column.
+     *
+     * ── BOTH TENANT PREDICATES ON EVERY STATEMENT ─────────────────────────────────────────────
+     *
+     * `document_elements`, `chunks` and `source_versions` all carry their own `organization_id`, so
+     * the term is stated directly on each rather than inherited from a join — the same call
+     * `childSummary()` makes and for the same reason.
+     */
+    public function contentSummary(string $organizationId, string $sourceId): SourceContentSummary;
 
     /**
      * Whether any LIVE version of this source published with parser or OCR warnings.

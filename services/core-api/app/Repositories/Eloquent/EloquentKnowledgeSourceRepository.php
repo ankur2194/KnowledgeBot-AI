@@ -5,22 +5,28 @@ declare(strict_types=1);
 namespace App\Repositories\Eloquent;
 
 use App\Enums\SourceState;
+use App\Models\Chunk;
+use App\Models\DocumentElement;
 use App\Models\KnowledgeSource;
 use App\Models\SourceItem;
 use App\Models\SourceVersion;
 use App\Repositories\Contracts\KnowledgeSourceRepositoryInterface;
+use App\Services\Sources\ActiveSourceVersion;
 use App\Services\Sources\IllegalSourceTransition;
 use App\Services\Sources\IngestionApplication;
 use App\Services\Sources\IngestionProgress;
 use App\Services\Sources\NewSource;
 use App\Services\Sources\NewSourceItem;
 use App\Services\Sources\SourceChildSummary;
+use App\Services\Sources\SourceContentSummary;
 use App\Services\Sources\SourceEdit;
+use App\Services\Sources\SourceWarningCount;
 use App\Services\Sources\VersionIdentity;
 use App\Support\Http\ListQuery;
 use Closure;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 
 final class EloquentKnowledgeSourceRepository implements KnowledgeSourceRepositoryInterface
@@ -42,6 +48,56 @@ final class EloquentKnowledgeSourceRepository implements KnowledgeSourceReposito
      * @var list<string>
      */
     private const FILTERABLE = ['name', 'origin_url'];
+
+    /**
+     * The ceiling on how many `document_elements` rows the preview reads.
+     *
+     * TWENTY is a couple of pages of prose and far more than any preview pane renders. It bounds the
+     * ROW count; `PREVIEW_MAX_CHARACTERS` bounds each row, and both bounds are in the SQL because a
+     * cap applied only in PHP still transfers the whole column across the wire.
+     */
+    private const PREVIEW_MAX_ELEMENTS = 20;
+
+    /**
+     * The ceiling on the preview, in characters, applied per element in SQL and again to the joined
+     * string in PHP.
+     *
+     * `substr()` in PostgreSQL counts CHARACTERS rather than bytes, so a cut never lands inside a
+     * multi-byte sequence and what comes back is always valid UTF-8. The PHP pass uses `mb_substr()`
+     * for the same property on the joined string.
+     */
+    private const PREVIEW_MAX_CHARACTERS = 1000;
+
+    /**
+     * The separator between elements in the preview.
+     *
+     * A BLANK LINE, because the elements it joins are a heading, a paragraph, a list item and a
+     * serialized table row — adjacent in document order and unrelated as prose. Running them
+     * together with a single newline produces a paragraph that says something none of them said,
+     * which on a page an administrator reads to decide whether a document parsed correctly is
+     * exactly the wrong artefact.
+     */
+    private const PREVIEW_SEPARATOR = "\n\n";
+
+    /**
+     * The ceiling on how many distinct warning CODES the projection publishes.
+     *
+     * The key set of `warning_summary` belongs to the data plane and is enumerated nowhere on this
+     * side, so it is unbounded by construction — which makes an unbounded projection of it an
+     * unbounded response body. Twenty-five is far past any real parse and short enough that a
+     * console can render the whole list.
+     */
+    private const MAX_WARNING_CODES = 25;
+
+    /**
+     * The ceiling on one warning code's length, in characters.
+     *
+     * A bound on OUR OWN data plane rather than on hostile input — these keys are written by
+     * `services/ai-service` and not by a tenant — and it is here because "the key set is the data
+     * plane's" cuts both ways: nothing on this side constrains what it may write, so nothing on
+     * this side may assume a length.
+     */
+    private const MAX_WARNING_CODE_LENGTH = 128;
 
     /**
      * @return LengthAwarePaginator<int, KnowledgeSource>
@@ -352,6 +408,289 @@ final class EloquentKnowledgeSourceRepository implements KnowledgeSourceReposito
 
             return $source;
         });
+    }
+
+    public function contentSummary(string $organizationId, string $sourceId): SourceContentSummary
+    {
+        // THE ITEMS OF THIS SOURCE, SCOPED. Cloned per use rather than re-declared, so no branch
+        // below can be built without both predicates.
+        $items = SourceItem::query()
+            ->where('organization_id', '=', $organizationId)
+            ->where('source_id', '=', $sourceId);
+
+        $itemCount = (clone $items)->count();
+        $activeVersionCount = (clone $items)->whereNotNull('current_version_id')->count();
+
+        $elements = $this->elementAggregates($organizationId, $sourceId);
+        $warnings = $this->warningCodes($organizationId, $sourceId);
+        $preview = $this->contentPreview($organizationId, $sourceId);
+
+        return new SourceContentSummary(
+            itemCount: $itemCount,
+            activeVersionCount: $activeVersionCount,
+            // ONLY FOR A SINGLE-ITEM SOURCE. See ActiveSourceVersion: there is no source-level
+            // pointer, and naming one for a crawl would be an approximation dressed as a value.
+            activeVersion: $itemCount === 1
+                ? $this->singleActiveVersion($organizationId, $sourceId)
+                : null,
+            pageCount: $elements['pages'],
+            slideCount: $elements['slides'],
+            sheetCount: $elements['sheets'],
+            elementCount: $elements['elements'],
+            chunkCount: Chunk::query()
+                ->where('organization_id', '=', $organizationId)
+                // `chunks.source_id` is DENORMALIZED down the chain and the composite foreign key
+                // `chunks_source_same_org` is what makes the copy checkable, so stating it is a
+                // predicate rather than a shortcut — and it is what lets this count use
+                // `chunks_org_source` instead of walking the version set.
+                ->where('source_id', '=', $sourceId)
+                ->whereIn('source_version_id', $this->activeVersionIds($organizationId, $sourceId))
+                ->count(),
+            warnings: $warnings['codes'],
+            warningsTruncated: $warnings['truncated'],
+            preview: $preview['text'],
+            previewTruncated: $preview['truncated'] || $preview['elements'] < $elements['elements'],
+        );
+    }
+
+    /**
+     * The live version ids of one source, as a SUB-QUERY rather than a list.
+     *
+     * A crawl gives one source hundreds of items, so materialising the pointers into an `IN (…)`
+     * list would put hundreds of bound parameters into each of four statements. Read through
+     * `source_items.current_version_id` — THE POINTER IS THE DEFINITION OF LIVE — and never through
+     * `activated_at IS NOT NULL AND retired_at IS NULL`, which is an inference from a partial unique
+     * index and the reading that would survive somebody dropping it.
+     *
+     * Both tenant predicates are on the sub-query itself, so a caller cannot compose it into a
+     * statement that has lost them.
+     *
+     * @return Builder<SourceItem>
+     */
+    private function activeVersionIds(string $organizationId, string $sourceId): Builder
+    {
+        return SourceItem::query()
+            ->where('organization_id', '=', $organizationId)
+            ->where('source_id', '=', $sourceId)
+            ->whereNotNull('current_version_id')
+            ->select('current_version_id');
+    }
+
+    /**
+     * The live version of a source that has exactly ONE item, or null when that item has no pointer.
+     *
+     * The caller has already established `itemCount === 1`, so `first()` here is not an arbitrary
+     * pick out of a set — there is at most one row for it to return.
+     */
+    private function singleActiveVersion(string $organizationId, string $sourceId): ?ActiveSourceVersion
+    {
+        $version = SourceVersion::query()
+            ->where('organization_id', '=', $organizationId)
+            ->whereIn('id', $this->activeVersionIds($organizationId, $sourceId))
+            ->first();
+
+        if ($version === null) {
+            return null;
+        }
+
+        return new ActiveSourceVersion(
+            id: $version->id,
+            sourceItemId: $version->source_item_id,
+            versionNumber: $version->version_number,
+            status: $version->status,
+            activatedAt: $version->activated_at,
+            parserCfgVersion: $version->parser_cfg_version,
+            ocrCfgVersion: $version->ocr_cfg_version,
+            chunkerCfgVersion: $version->chunker_cfg_version,
+            embeddingModelVersion: $version->embedding_model_version,
+        );
+    }
+
+    /**
+     * Pages, slides, sheets and elements across every LIVE version of one source.
+     *
+     * ── THE DISTINCT COUNTS ARE PER VERSION AND THEN SUMMED, WHICH IS NOT THE SAME AS A GLOBAL
+     *    DISTINCT ──────────────────────────────────────────────────────────────────────────────
+     *
+     * `count(distinct page)` over the whole set would collapse page 1 of the first file into page 1
+     * of the second, because a locator is only unique WITHIN a version. Grouping by
+     * `source_version_id` first and summing after is what makes "a two-file upload of ten pages
+     * each" report twenty rather than ten. For the ordinary single-item source the two are
+     * identical, which is why the wrong one is easy to ship.
+     *
+     * NULLS ARE IGNORED BY `count(distinct …)` BY DEFINITION, and that is the behaviour this wants:
+     * a PDF has pages and no slides, a deck has slides and no pages, a crawled page has neither. The
+     * columns are nullable for exactly that reason and a zero here means "this format does not have
+     * that locator" as much as it means "there are none".
+     *
+     * @return array{pages: int, slides: int, sheets: int, elements: int}
+     */
+    private function elementAggregates(string $organizationId, string $sourceId): array
+    {
+        $rows = DocumentElement::query()
+            ->where('organization_id', '=', $organizationId)
+            ->whereIn('source_version_id', $this->activeVersionIds($organizationId, $sourceId))
+            ->groupBy('source_version_id')
+            // A FIXED STRING WITH NO INTERPOLATION AND NO BINDINGS. Every identifier here is a
+            // column of the table this query is already scoped to; nothing a caller supplied
+            // reaches it.
+            ->selectRaw(
+                'source_version_id, count(*) as element_total, count(distinct page) as page_total, '
+                .'count(distinct slide) as slide_total, count(distinct sheet) as sheet_total',
+            )
+            ->get();
+
+        $totals = ['pages' => 0, 'slides' => 0, 'sheets' => 0, 'elements' => 0];
+
+        foreach ($rows as $row) {
+            $totals['pages'] += $this->intAttribute($row, 'page_total');
+            $totals['slides'] += $this->intAttribute($row, 'slide_total');
+            $totals['sheets'] += $this->intAttribute($row, 'sheet_total');
+            $totals['elements'] += $this->intAttribute($row, 'element_total');
+        }
+
+        return $totals;
+    }
+
+    /**
+     * The advisory warning CODES across a source's live versions, with a version count each.
+     *
+     * ── THE KEYS ARE AGGREGATED IN SQL, AND THE VALUES ARE NEVER READ ────────────────────────
+     *
+     * `jsonb_object_keys()` is a set-returning function, and a function call in `FROM` is
+     * IMPLICITLY LATERAL in PostgreSQL — so it may reference `source_versions.warning_summary` from
+     * the row being joined without the word `LATERAL` appearing. That is what lets the whole
+     * projection be one grouped statement instead of hundreds of jsonb blobs crossing the wire for
+     * a crawl, and it is why the ordering and the cap can be the database's rather than PHP's.
+     *
+     * THE VALUES BEHIND THE KEYS ARE NOT SELECTED, ANYWHERE. `SourceWarningCount`'s docblock
+     * carries the reasoning: the key set is the data plane's, the value shapes are unenumerated on
+     * this side, and a warning about an unplaced table naturally contains the table.
+     *
+     * ORDERED BY COUNT DESCENDING AND THEN BY CODE, so two reads of an unchanged source are
+     * byte-identical — a list whose order the planner chooses makes a contract test a coin flip.
+     *
+     * @return array{codes: list<SourceWarningCount>, truncated: bool} `truncated` says more codes
+     *                                                                 exist than the cap
+     *                                                                 publishes
+     */
+    private function warningCodes(string $organizationId, string $sourceId): array
+    {
+        $rows = SourceVersion::query()
+            ->where('organization_id', '=', $organizationId)
+            ->whereIn('id', $this->activeVersionIds($organizationId, $sourceId))
+            // ── THE ONE RAW EXPRESSION IN THIS FILE, AND IT CARRIES NO PREDICATE ────────────
+            //
+            // A FIXED STRING WITH NO INTERPOLATION AND NO BINDINGS: every identifier in it is a
+            // column of the table this query is already scoped to, and nothing a caller supplied
+            // reaches it. It is a JOIN TARGET rather than a query — the organization predicate and
+            // the live-version sub-query are both on the Eloquent builder above it, and the model's
+            // `#[ScopedBy(OrganizationScope::class)]` still applies — so it is NOT `tenancy-exempt`
+            // and must not be marked as such: nothing about it needs an exemption, and a marker
+            // claiming one would tell a reviewer the opposite of what is true. It is also not
+            // `DB::table(`, `DB::select(`, `DB::statement(` or `withoutGlobalScopes(`, which are
+            // the four shapes `scripts/security/rules/kb-php-tenancy.yaml` names.
+            ->crossJoin(DB::raw('jsonb_object_keys(source_versions.warning_summary) as warning_code'))
+            ->groupBy('warning_code')
+            ->selectRaw('warning_code, count(*) as version_total')
+            ->orderByDesc('version_total')
+            ->orderBy('warning_code')
+            // ONE MORE THAN THE CAP, so "there are more" is something this query ANSWERS rather
+            // than something a second count has to be run for and could disagree with.
+            ->limit(self::MAX_WARNING_CODES + 1)
+            ->get();
+
+        $codes = [];
+
+        foreach ($rows->take(self::MAX_WARNING_CODES) as $row) {
+            $code = $row->getAttribute('warning_code');
+
+            $codes[] = new SourceWarningCount(
+                code: mb_substr(is_string($code) ? $code : '', 0, self::MAX_WARNING_CODE_LENGTH),
+                versions: $this->intAttribute($row, 'version_total'),
+            );
+        }
+
+        return ['codes' => $codes, 'truncated' => $rows->count() > self::MAX_WARNING_CODES];
+    }
+
+    /**
+     * A bounded excerpt of the extracted text of a source's live versions.
+     *
+     * ── IT IS UNTRUSTED DATA AND IT IS BOUNDED TWICE, IN SQL ─────────────────────────────────
+     *
+     * `document_elements.text` is content a tenant uploaded, extracted by a parser, rendered on a
+     * page an administrator reads (non-negotiable 7). One serialized table can be megabytes, so the
+     * row cap alone is not a bound — `substr()` in the SELECT is what stops the column crossing the
+     * wire whole. The column is table-qualified in that expression on purpose: `text` unqualified
+     * is also a type name, and qualifying it removes the question entirely.
+     *
+     * NOTHING HERE ESCAPES THE RESULT. Escaping belongs to the renderer, because only the renderer
+     * knows the context the string is entering.
+     *
+     * ── THE ORDER IS DOCUMENT ORDER WITHIN A VERSION, AND VERSION ORDER ACROSS THEM ──────────
+     *
+     * `source_version_id` then `seq`, which is exactly `document_elements_org_version_seq`'s
+     * trailing pair, so the read walks an index rather than sorting. Version ids are ULIDs under
+     * `COLLATE "C"`, so their order is creation order — for a multi-item source the preview is
+     * therefore the beginning of the OLDEST live version rather than an arbitrary one.
+     *
+     * @return array{text: string|null, truncated: bool, elements: int}
+     */
+    private function contentPreview(string $organizationId, string $sourceId): array
+    {
+        $rows = DocumentElement::query()
+            ->where('organization_id', '=', $organizationId)
+            ->whereIn('source_version_id', $this->activeVersionIds($organizationId, $sourceId))
+            ->orderBy('source_version_id')
+            ->orderBy('seq')
+            ->limit(self::PREVIEW_MAX_ELEMENTS)
+            // ONE MORE CHARACTER THAN THE CAP, so a value that exactly fills it is distinguishable
+            // from one that was cut.
+            ->selectRaw(
+                'substr(document_elements.text, 1, '.(self::PREVIEW_MAX_CHARACTERS + 1).') as excerpt',
+            )
+            ->get();
+
+        if ($rows->isEmpty()) {
+            // NULL AND NOT AN EMPTY STRING. "Nothing has been extracted yet" and "the first element
+            // is blank" are different facts, and two spellings of the first is a branch every
+            // renderer has to have and one of them forgets.
+            return ['text' => null, 'truncated' => false, 'elements' => 0];
+        }
+
+        $joined = implode(self::PREVIEW_SEPARATOR, array_map(
+            static function (DocumentElement $row): string {
+                $excerpt = $row->getAttribute('excerpt');
+
+                return is_string($excerpt) ? $excerpt : '';
+            },
+            $rows->all(),
+        ));
+
+        $truncated = mb_strlen($joined) > self::PREVIEW_MAX_CHARACTERS;
+
+        return [
+            'text' => $truncated ? mb_substr($joined, 0, self::PREVIEW_MAX_CHARACTERS) : $joined,
+            'truncated' => $truncated,
+            'elements' => $rows->count(),
+        ];
+    }
+
+    /**
+     * One aggregate column off a row that was selected with `selectRaw`.
+     *
+     * PostgreSQL returns `count(*)` as `bigint`, which PDO hands back as a STRING on this driver, so
+     * a bare `(int)` cast on a `mixed` is what PHPStan objects to and `is_numeric` is what makes the
+     * conversion honest. A non-numeric value here would mean the aliases below and the select list
+     * above disagree, which is a code error rather than a data one — zero is the safe reading and
+     * the count that is visibly wrong is better than a fatal on a read-only projection.
+     */
+    private function intAttribute(Model $row, string $key): int
+    {
+        $value = $row->getAttribute($key);
+
+        return is_numeric($value) ? (int) $value : 0;
     }
 
     public function childSummary(string $organizationId, string $sourceId): SourceChildSummary

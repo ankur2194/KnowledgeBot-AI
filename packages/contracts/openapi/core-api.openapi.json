@@ -2124,6 +2124,474 @@
                 "x-kb-request-rules": "../rules/UpdateBotDomainRequest.json"
             }
         },
+        "/api/v1/organizations/{organization}/bots/{bot}/source-assignments": {
+            "get": {
+                "operationId": "admin.bots.source-assignments.index",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "bot",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {bot} record, scoped to the organization above it."
+                    },
+                    {
+                        "name": "page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 1
+                        },
+                        "description": "1-based page number, matching `meta.page` in the response and Laravel's own paginator. There is no page 0."
+                    },
+                    {
+                        "name": "per_page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 100,
+                            "default": 25
+                        },
+                        "description": "Rows per page. A value above the maximum is REFUSED with a 422 rather than clamped silently, so a client asking for more than the platform serves finds out rather than paginating against a size it did not choose. The applied value is echoed as `meta.per_page`."
+                    },
+                    {
+                        "name": "sort",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "id",
+                                "priority",
+                                "enabled"
+                            ],
+                            "default": "priority"
+                        },
+                        "description": "Column to order by, from this endpoint's closed set. The set is closed because a caller-chosen sort reaches an `ORDER BY`, so every member here is a column with an index behind it."
+                    },
+                    {
+                        "name": "dir",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "asc",
+                                "desc"
+                            ],
+                            "default": "asc"
+                        },
+                        "description": "Sort direction."
+                    },
+                    {
+                        "name": "filter",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "maxLength": 200
+                        },
+                        "description": "Free-text search term. Deliberately unconstrained in character class — it is a string a human types — and bounded only in length; the endpoint documents which columns it searches. An empty or whitespace-only value is treated as no filter at all, and `meta.filter` comes back null."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "One page of this bot's source assignments, with `meta` beside the array inside `data`. DISABLED GRANTS ARE INCLUDED — a disabled row grants nothing, and hiding it would make \"why is this bot not answering from that document\" unanswerable from the console. Each row carries the full source beside the grant, so no second request is needed to render a name. `page` is 1-based; `per_page`, `sort`, `dir` and `filter` are echoed AS APPLIED, which may differ from what was asked for because the platform clamps the page size and falls back to the endpoint default sort. The filter searches the SOURCE's name and crawl URL, because the grant row itself holds no text.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/BotSourceAssignmentCollectionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/IndexBotSourceAssignmentsRequest.json"
+            },
+            "post": {
+                "operationId": "admin.bots.source-assignments.store",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "bot",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {bot} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "The grant, wrapped in `data`, with the granted source nested inside it. 409 when the organization is not active. 422 when the bot already has this source, when the bot is at the maximum number of assigned sources, or when the source is being deleted. A `source_id` that names no source of THIS organization is a 404 with a body byte-identical to a path with no route — never a validation error, which would be an existence oracle over every customer's document ids rendered as a form message. The grant does NOT make the source answerable on its own: reachability is the AND of the organization, this row's `enabled`, the source's status and the item's active-version pointer.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/BotSourceAssignmentResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "The organization is not active. Its configuration may be read but not changed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/StoreBotSourceAssignmentRequest.json"
+            }
+        },
+        "/api/v1/organizations/{organization}/bots/{bot}/source-assignments/{sourceAssignment}": {
+            "delete": {
+                "operationId": "admin.bots.source-assignments.destroy",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "bot",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {bot} record, scoped to the organization above it."
+                    },
+                    {
+                        "name": "sourceAssignment",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {sourceAssignment} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The grant is gone. The source itself is untouched — withdrawing an assignment removes the bot's access to it, not the document — and every other bot assigned to the same source keeps answering from it. 409 when the organization is not active. A foreign or unknown `{bot}` or `{sourceAssignment}` 404s at binding time, before this action runs, and so does a second delete of the same grant.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/AcknowledgementResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "The organization is not active. Its configuration may be read but not changed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            }
+        },
         "/api/v1/organizations/{organization}/bots/{bot}/starter-questions": {
             "get": {
                 "operationId": "admin.bots.starter-questions.index",
@@ -5662,7 +6130,7 @@
                 ],
                 "responses": {
                     "200": {
-                        "description": "One source, wrapped in `data`. There is no active-version pointer on this shape and there never will be one: a crawl gives a single source hundreds of independently-versioned items, so \"the current version of this source\" is a set and a join rather than a value. A foreign or unknown `{source}` 404s at binding time, before this action runs, and the body is byte-identical to the 404 for a path with no route.",
+                        "description": "One source with what is INSIDE it, wrapped in `data`: every field of the list row, plus the live version, the page/slide/sheet/element/chunk counts, the advisory parser and OCR warnings and a bounded preview of the extracted text. EVERY NUMBER IS OVER THE LIVE VERSIONS ONLY — the ones an item's active-version pointer names — so a source whose ingestion has never completed reports zeroes even though rows for an unpublished version exist. `active_version` is populated only for a source with exactly ONE item: activation is a pointer on the item and there is no source-level counterpart, so \"the current version\" of a crawl is a set rather than a value, and `active_version_count` is what answers it there. `content_preview` is UNTRUSTED TENANT DATA — escape it at render and never interpolate it into a prompt. A foreign or unknown `{source}` 404s at binding time, before this action runs, and the body is byte-identical to the 404 for a path with no route.",
                         "content": {
                             "application/json": {
                                 "schema": {
@@ -5673,7 +6141,7 @@
                                     ],
                                     "properties": {
                                         "data": {
-                                            "$ref": "#/components/schemas/SourceResource"
+                                            "$ref": "#/components/schemas/SourceDetailResource"
                                         }
                                     }
                                 }
@@ -6645,6 +7113,81 @@
                     }
                 }
             },
+            "BotSourceAssignmentCollectionResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One page of the grants that decide which knowledge sources this bot may answer from, with the pagination and applied-query state beside it. `meta` is present on an empty page too — a client that had to branch on its absence would be branching on \"did this list have results\", which is exactly the question `total` answers.",
+                "required": [
+                    "source_assignments",
+                    "meta"
+                ],
+                "properties": {
+                    "source_assignments": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/BotSourceAssignmentResource"
+                        },
+                        "description": "The grants on this page, in the applied order. DISABLED GRANTS ARE INCLUDED: a disabled row grants nothing, and hiding it would make \"why is this bot not answering from that document\" unanswerable from the console while the row sat in the table. The set is scoped to the organization and the bot in the path and to nothing else."
+                    },
+                    "meta": {
+                        "$ref": "#/components/schemas/ListMetaResource",
+                        "description": "Pagination and applied-query state for this page."
+                    }
+                }
+            },
+            "BotSourceAssignmentResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One grant: this bot may answer from this knowledge source. It is the row `bot_ids` — one of the four mandatory vector-search filter terms — is resolved from, so it is what makes a corpus REACHABLE from a bot rather than a preference about it.",
+                "required": [
+                    "id",
+                    "source_id",
+                    "priority",
+                    "enabled",
+                    "created_at",
+                    "updated_at",
+                    "source"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "ULID of the assignment. This is what DELETE addresses — not the source id, because the grant is the resource being withdrawn."
+                    },
+                    "source_id": {
+                        "type": "string",
+                        "description": "ULID of the granted source, identical to `source.id`. Published at the top level because it is the value a client posts to create the equivalent grant on another bot."
+                    },
+                    "priority": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "The operator's preference between this bot's sources. A TIE-BREAK a retrieval stage may consult and NEVER a filter: a lower priority must not make a source unretrievable, because \"less important\" and \"not visible\" are different statements and only the second one is `enabled`. Zero is the default and the floor. Nothing in this platform ranks on it yet, so treat it today as a stable display order."
+                    },
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Whether this grant is live. Distinct from disabling the SOURCE, which removes it from every bot at once. It is ONE TERM OF FOUR and never the whole answer — reachability is the AND of the organization, this flag, the source's status and the item's active-version pointer — so do not render it as \"this bot is answering from this document\"."
+                    },
+                    "created_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "ISO 8601 with offset. When the grant was made."
+                    },
+                    "updated_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "ISO 8601 with offset. In practice equal to `created_at`: there is no endpoint that edits an assignment, because the audit catalog defines a created and a deleted operation and no updated one. Changing the priority or the off switch is a delete and a re-create, and the trail then says both things happened."
+                    },
+                    "source": {
+                        "$ref": "#/components/schemas/SourceResource",
+                        "description": "The granted source, in the same shape the source list and the source detail publish. It is always present: the composite foreign key `bot_source_assignments_source_same_org` refuses an assignment whose source is absent or belongs to another organization, so there is no null case to branch on."
+                    }
+                }
+            },
             "BotStarterQuestionCollectionResource": {
                 "type": "object",
                 "additionalProperties": false,
@@ -7460,6 +8003,82 @@
                     }
                 }
             },
+            "SourceActiveVersionResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "The immutable processing result a single-item source is currently serving. It is what an item's active-version pointer names; there is no source-level pointer, so this shape is present only when the source has exactly one item.",
+                "required": [
+                    "id",
+                    "source_item_id",
+                    "version_number",
+                    "status",
+                    "activated_at",
+                    "parser_cfg_version",
+                    "ocr_cfg_version",
+                    "chunker_cfg_version",
+                    "embedding_model_version"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "ULID of the version."
+                    },
+                    "source_item_id": {
+                        "type": "string",
+                        "description": "ULID of the item this version belongs to. The item — one uploaded file, one crawled page, one paste — is the unit of independent versioning, not the source."
+                    },
+                    "version_number": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Monotonic per item, starting at 1. A gap means a version was created and never activated, which is what a failed run leaves."
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "draft",
+                            "queued",
+                            "fetching",
+                            "parsing",
+                            "normalizing",
+                            "chunking",
+                            "embedding",
+                            "indexing",
+                            "ready",
+                            "ready_with_warnings",
+                            "failed",
+                            "disabled",
+                            "deleting",
+                            "deleted",
+                            "archived"
+                        ],
+                        "description": "The version's own lifecycle state, which may differ from the source's: a source shows the state of the run in flight while this shows the state of what is currently SERVING. `ready` and `ready_with_warnings` are identical for retrieval."
+                    },
+                    "activated_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "ISO 8601 with offset. When this version became the one answering. Never null in practice for a version an item points at, because the pointer switch and this timestamp are written in one transaction."
+                    },
+                    "parser_cfg_version": {
+                        "type": "string",
+                        "description": "The document-parser configuration this version was produced under. An ingest-key component: if it differs from the platform's current one, a reprocess produces a new version rather than deduplicating against this one."
+                    },
+                    "ocr_cfg_version": {
+                        "type": "string",
+                        "description": "The OCR configuration. Also an ingest-key component — which is the whole reason it is a separate field: a content-only key would make an OCR retune silently no-op and report \"already processed\"."
+                    },
+                    "chunker_cfg_version": {
+                        "type": "string",
+                        "description": "The chunking configuration this version was split under."
+                    },
+                    "embedding_model_version": {
+                        "type": "string",
+                        "description": "Provider, model id, returned vector width and a digest over a fixed probe set — e.g. `emb/v1:openai:text-embedding-3-large:d3072:9f2a1c4e77b1`. NOT a bare vendor model name: that is an alias, and an alias can be re-pointed at different weights with no diff anywhere. Two versions with different values here are in different vector spaces and their scores are not comparable."
+                    }
+                }
+            },
             "SourceCollectionResource": {
                 "type": "object",
                 "additionalProperties": false,
@@ -7479,6 +8098,233 @@
                     "meta": {
                         "$ref": "#/components/schemas/ListMetaResource",
                         "description": "Pagination and applied-query state for this page."
+                    }
+                }
+            },
+            "SourceDetailResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One knowledge source with what is inside it: every field of `SourceResource`, plus the live version, the page/slide/sheet/element/chunk counts, the advisory parser and OCR warnings, and a bounded preview of the extracted text. EVERY NUMBER IS OVER THE LIVE VERSIONS ONLY — the ones an item's active-version pointer names — so a source mid-ingestion reports zeroes even though rows for an unpublished version exist. That is the correct reading for a delete confirmation, which is asking what is reachable and about to stop being.",
+                "required": [
+                    "id",
+                    "type",
+                    "name",
+                    "description",
+                    "origin_url",
+                    "status",
+                    "status_permits_retrieval",
+                    "status_is_processing",
+                    "tags",
+                    "effective_at",
+                    "expires_at",
+                    "created_by",
+                    "created_at",
+                    "updated_at",
+                    "deleted_at",
+                    "purged_at",
+                    "item_count",
+                    "active_version_count",
+                    "active_version",
+                    "page_count",
+                    "slide_count",
+                    "sheet_count",
+                    "element_count",
+                    "chunk_count",
+                    "warnings",
+                    "warnings_truncated",
+                    "content_preview",
+                    "content_preview_truncated"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "ULID of the source."
+                    },
+                    "type": {
+                        "type": "string",
+                        "enum": [
+                            "file",
+                            "url",
+                            "text"
+                        ],
+                        "description": "What kind of thing this is, and deliberately not what kind of FILE it is: a PDF, a DOCX, a spreadsheet and a slide deck are all `file`, because the parser decides from the sniffed MIME type rather than from a column somebody typed."
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "The operator's label for the whole source. TENANT-AUTHORED TEXT: escape it at render, in every client, because only the renderer knows the context it is entering. Never blank."
+                    },
+                    "description": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "Optional operator note. Null means not set; it is never an empty string, because two spellings of \"unset\" are two branches every renderer has to have and one of them forgets."
+                    },
+                    "origin_url": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "The crawl target. Present exactly when `type` is `url` and null otherwise — the database enforces the equality in both directions, so a `file` source can never carry one. This is the column that answers \"which sources cause this platform to make outbound requests\"."
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "draft",
+                            "queued",
+                            "fetching",
+                            "parsing",
+                            "normalizing",
+                            "chunking",
+                            "embedding",
+                            "indexing",
+                            "ready",
+                            "ready_with_warnings",
+                            "failed",
+                            "disabled",
+                            "deleting",
+                            "deleted",
+                            "archived"
+                        ],
+                        "description": "One of the fifteen lifecycle states, in contract order. `ready` and `ready_with_warnings` are IDENTICAL for retrieval — the warnings are advisory and never a retrieval predicate — and they are two values rather than one because collapsing them loses the only signal that says \"this document parsed badly and published anyway\"."
+                    },
+                    "status_permits_retrieval": {
+                        "type": "boolean",
+                        "description": "Whether the STATUS term of the retrieval filter is satisfied — ONE OF FOUR, and never the whole answer. Reachability is the AND of this, the item's active-version pointer, the bot assignment and the organization. Do not render it as \"this source is answering\"."
+                    },
+                    "status_is_processing": {
+                        "type": "boolean",
+                        "description": "Whether an ingestion run is in flight. `queued` is deliberately NOT included: a source queued for an hour is a scheduling problem and one parsing for an hour is a document problem, and the distinction is what a stuck-run sweep keys off."
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Operator labels. Always present, empty when nobody has tagged the source; never null, and never containing a blank element."
+                    },
+                    "effective_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "Start of the retrieval window, ISO 8601 with offset. Null means \"from always\"."
+                    },
+                    "expires_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "End of the retrieval window. Null means \"until further notice\"; when set it is always after `effective_at`."
+                    },
+                    "created_by": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "ULID of the administrator who added the source. Null for anything the platform created without a person behind it."
+                    },
+                    "created_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "ISO 8601 with offset."
+                    },
+                    "updated_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "ISO 8601 with offset. Moves on a metadata edit AND on every lifecycle transition, including the ones the ingestion pipeline reports, so it is a freshness signal rather than an edit log."
+                    },
+                    "deleted_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "When the source stopped being retrievable — phase 1 of a two-phase removal, immediate, and the only half a customer experiences. Non-null with a null `purged_at` means the purge is still in flight."
+                    },
+                    "purged_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "When the background purge was VERIFIED — vectors, objects and cache entries confirmed gone. This is the timestamp a retention or erasure obligation is measured against, and it is a different claim from `deleted_at`: one says we removed it, the other says we proved it."
+                    },
+                    "item_count": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Independently-versioned items under this source: one per uploaded file, one per crawled page, one for a paste. A submitted source always has at least one; a source still in `draft` has none, because nothing has been submitted into it yet."
+                    },
+                    "active_version_count": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "How many of those items currently point at a live version. ZERO MEANS NOTHING ABOUT THIS SOURCE IS RETRIEVABLE, whatever `status` says — the active-version pointer is one of the four mandatory filter terms, and an ingestion that has never completed leaves it empty. It is also why every count below can legitimately be 0 on a source that looks busy."
+                    },
+                    "active_version": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/SourceActiveVersionResource"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "description": "The live version, for a source with EXACTLY ONE ITEM. Null for every other source, including a multi-item upload and every crawl: activation is a pointer on the ITEM, there is no source-level pointer, and \"the current version\" of a four-hundred-page crawl is a set rather than a value. Null does NOT mean \"nothing is live\" — read `active_version_count` for that."
+                    },
+                    "page_count": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Distinct pages across this source's live versions, summed per version so a two-file upload of ten pages each reports twenty. Zero for a format with no pages — a slide deck, a spreadsheet, a crawled page — as much as for a source with no live content."
+                    },
+                    "slide_count": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Distinct slides, on the same basis as `page_count`."
+                    },
+                    "sheet_count": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Distinct spreadsheet sheets, on the same basis as `page_count`."
+                    },
+                    "element_count": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Structural elements — headings, paragraphs, list items, table rows, captions — extracted from this source's live versions. The unit citations locate against, and the honest measure of \"how much document is here\" for formats that have no pages."
+                    },
+                    "chunk_count": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Retrievable chunks derived from this source's live versions — the number of vectors a deletion would remove, and the number a rebuild would re-embed at a provider's per-token price. This is the figure a delete confirmation should state."
+                    },
+                    "warnings": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/SourceWarningResource"
+                        },
+                        "description": "Advisory parser and OCR warnings reported while the live content was produced, as CODES with a version count each. Always present and empty when there are none. ADVISORY ALWAYS: a warning never gates retrieval, so do not render this as a reason the source is not answering."
+                    },
+                    "warnings_truncated": {
+                        "type": "boolean",
+                        "description": "Whether more distinct warning codes exist than this list publishes. The key set belongs to the ingestion service and is not enumerated here, so the list is capped rather than unbounded."
+                    },
+                    "content_preview": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "A BOUNDED excerpt of the extracted text of the live content, in document order, elements separated by a blank line. Null when nothing has been extracted yet — never an empty string, because \"no content\" and \"the first element is blank\" are different facts. IT IS UNTRUSTED TENANT DATA: escape it at render, in every client, and never interpolate it into a prompt or interpret it as markup."
+                    },
+                    "content_preview_truncated": {
+                        "type": "boolean",
+                        "description": "Whether the excerpt was cut — by the character cap or by the element cap. True is the ordinary case for anything longer than a page; render an ellipsis rather than implying the document is that short."
                     }
                 }
             },
@@ -7626,6 +8472,26 @@
                         ],
                         "format": "date-time",
                         "description": "When the background purge was VERIFIED — vectors, objects and cache entries confirmed gone. This is the timestamp a retention or erasure obligation is measured against, and it is a different claim from `deleted_at`: one says we removed it, the other says we proved it."
+                    }
+                }
+            },
+            "SourceWarningResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One advisory parser or OCR warning reported while this source's live content was produced. Advisory ALWAYS: it never gates retrieval, and a `ready_with_warnings` source is identical to a `ready` one for every query.",
+                "required": [
+                    "code",
+                    "versions"
+                ],
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "The warning key, as the ingestion pipeline wrote it. THE SET IS OPEN AND IS NOT ENUMERATED IN THIS DOCUMENT: it belongs to the ingestion service and grows with the parsers, so treat an unknown code as a code you have no copy for rather than as an error, and render it verbatim. The value behind the key is deliberately not published — it is unschema'd and can contain document content."
+                    },
+                    "versions": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "How many of this source's LIVE versions reported this code. It is a count of VERSIONS and not of occurrences — how many pages inside a version were affected is inside the value this shape does not read — so for a single-file source it is always 1 and for a crawl it says how many pages carry the problem."
                     }
                 }
             },

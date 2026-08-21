@@ -888,6 +888,75 @@ const NO_CLIENT_FORM: Readonly<Record<string, string>> = {
   'App\\Http\\Requests\\UpdateSourceStatusRequest':
     'OWED, not exempt: the enable/disable control on the sources detail screen (apps/web/src/features/sources) is the next batch\'s and the schema ships with it. Unlike UpdateBotStatusRequest this exemption pins nothing loose — `SourceStatus` is a union pinned against the document in test/resource-drift.test.ts, and this manifest\'s two-member transition set is read from the manifest there rather than restated in TypeScript',
 
+  // ── THE TWO BOT↔SOURCE ASSIGNMENT MANIFESTS: ONE EXEMPT, ONE OWED ───────────────────────────
+  //
+  // Same split as the source-lifecycle block above and for the same reasons, which is the point of
+  // repeating the shape rather than a sign nobody thought about it: the query-string manifest is
+  // exempt on the merits and the body manifest is a to-do this suite is holding. The RESPONSE side
+  // went the other way in the same change — `BotSourceAssignmentResource` and its collection are
+  // MIRRORED in test/resource-drift.test.ts — which is `rhf-zod-forms` NN3 again.
+
+  // EXEMPT ON THE MERITS. THE THIRD QUERY-STRING MANIFEST, and `IndexBotsRequest`'s argument reaches
+  // all five of its fields verbatim: they are read out of the URL by `apps/web/src/lib/table/params.ts`,
+  // which CLAMPS — a `sort` outside the endpoint's sortable set degrades to the default, a `per_page`
+  // outside the declared sizes degrades to the default, a filter past `MAX_FILTER_LENGTH` is truncated
+  // — where a Zod mirror would have to REJECT, with no field, no control and no per-field error to key
+  // a message to. This harness can say accept or reject and has no vocabulary for "degrades to the
+  // default", so a mirror would either report the clamping module as drift or force it to 422 its own
+  // users.
+  //
+  // WHAT THE THIRD ONE SETTLES. `IndexBotsRequest`'s note offered the SORTABLE SET as the one piece
+  // worth lifting into this package if a third list endpoint arrived; `IndexSourcesRequest` then
+  // measured a second set that differed in one member and concluded the set is per-endpoint after
+  // all. This is the third, and it is not a near-miss like the second: `id,priority,enabled` shares
+  // exactly ONE member with `id,name,slug,status` and one with `id,name,type,status`, and it is the
+  // first that sorts on a BOOLEAN. So the question is closed rather than open — there is no shared
+  // vocabulary here to lift, which is the same fact `ListMetaResource.sort` records by being typed
+  // `string` rather than a union.
+  //
+  // AND THE EXEMPTION NOW PINS LESS THAN THE FIRST TWO DID, which is the one thing that changed:
+  // test/resource-drift.test.ts reads this manifest's `in:` members and requires each to be a
+  // property `BotSourceAssignmentResource` publishes. That is the same move the source-status suite
+  // makes on `UpdateSourceStatusRequest`, and it means a server that renamed `priority` while
+  // updating its own whitelist fails a suite instead of leaving every table sorting by a column
+  // nothing publishes, with a 422 as the only symptom.
+  'App\\Http\\Requests\\IndexBotSourceAssignmentsRequest':
+    'EXEMPT: the third query-string manifest, not a form — no control, no resolver and no per-field error, and the client CLAMPS every one of these five values (apps/web/src/lib/table/params.ts) where a mirroring schema would have to reject. Its sortable set shares one member with each of the other two and sorts on a boolean, which closes the "lift the sortable set" question the first two left open; the set is compared against the published resource in test/resource-drift.test.ts rather than going unwatched',
+
+  // OWED, NOT EXEMPT — and it is the entry in this list with the LEAST to say against mirroring,
+  // which is exactly why the reason has to be stated rather than assumed. There is no credential
+  // here, no security grammar, no `@server-only` rule, no cross-field pairing and no rule name this
+  // harness cannot probe: `source_id` is `required|string|ulid`, `priority` is
+  // `sometimes|integer|min:0|max:9999` and `enabled` is `sometimes|boolean`, and every one of those
+  // seven names is in PROBED_RULES today. Nothing about the shape resists a mirror. There is simply
+  // no form yet.
+  //
+  // `rhf-zod-forms` NN3 is the rule — a schema ships WITH the form that renders it — and the
+  // alternative was measured rather than waved away: a schema written now would be an unread
+  // declaration, and an unread declaration is one whose drift nobody notices, because the only thing
+  // that reads a form schema is a resolver. `UpdateSourceRequest` and `UpdateSourceStatusRequest`
+  // above are the same call made twice this phase, and both times the form arrived later than the
+  // batch that would have written the schema.
+  //
+  // THE ONE ARGUMENT FOR EXEMPTING IT INSTEAD, CONSIDERED AND REJECTED. `source_id` is PICKED from a
+  // list rather than typed, which is the shape `SwitchOrganizationRequest`'s exemption rests on — an
+  // id the user chose from data the server sent, with no per-field error to render. But that
+  // exemption's actual load-bearing clause is that `organization_id` is banned from every schema in
+  // this package by OWNERSHIP_KEYS, and `source_id` is not: it names a sibling row, not the owner of
+  // one. And the other two fields are ordinary editable controls — a number input and a switch —
+  // whose `min:0|max:9999` and boolean coercion are exactly what a resolver is for. So the analogy
+  // reaches one field of three and the exemption does not follow from it.
+  //
+  // WHAT CLOSES IT: the assignment screen under a bot (`apps/web/src/features/bots`, the next task's)
+  // renders the picker, the priority input and the switch; the schema arrives with it as a
+  // `z.strictObject` of three paths — `source_id` a ULID string, `priority` the usual `intField`
+  // preprocess so a cleared input reads "required" rather than "must be at least 0", `enabled` a
+  // boolean — and this entry becomes a MIRRORS entry with a baseline. It can be written mechanically
+  // from the manifest the day the form exists, and none of its probes are suppressed in the
+  // meantime, so it cannot graduate into agreeing with the server by being unprobed.
+  'App\\Http\\Requests\\StoreBotSourceAssignmentRequest':
+    'OWED, not exempt: three fields, no credential, no security grammar and no unprobed rule name — nothing about it resists mirroring, there is simply no form yet. The bot\'s source-assignment screen (apps/web/src/features/bots) is the next task\'s and the schema ships with it, per rhf-zod-forms NN3. The SwitchOrganizationRequest analogy for `source_id` was considered and does not reach: that exemption rests on OWNERSHIP_KEYS, and `priority`/`enabled` are ordinary controls with per-field errors',
+
   // `StoreInvitationRequest` USED TO SIT HERE, recorded as OWED rather than exempt, with the exact
   // three-step diff that would close it. It is now a MIRRORS entry above, and the note is kept for
   // one reason: it is the worked example of what this list is FOR. An entry here means "no client

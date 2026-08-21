@@ -11,6 +11,7 @@ use App\Http\Requests\IndexSourcesRequest;
 use App\Http\Requests\StoreSourceRequest;
 use App\Http\Requests\UpdateSourceRequest;
 use App\Http\Resources\SourceCollectionResource;
+use App\Http\Resources\SourceDetailResource;
 use App\Http\Resources\SourceResource;
 use App\Models\KnowledgeSource;
 use App\Models\Organization;
@@ -156,22 +157,42 @@ final class SourceController extends Controller
      */
     #[ResponseShape(
         status: 200,
-        properties: ['data' => SourceResource::class],
-        description: 'One source, wrapped in `data`. There is no active-version pointer on this '
-            .'shape and there never will be one: a crawl gives a single source hundreds of '
-            .'independently-versioned items, so "the current version of this source" is a set and a '
-            .'join rather than a value. A foreign or unknown `{source}` 404s at binding time, '
-            .'before this action runs, and the body is byte-identical to the 404 for a path with no '
-            .'route.',
+        properties: ['data' => SourceDetailResource::class],
+        description: 'One source with what is INSIDE it, wrapped in `data`: every field of the list '
+            .'row, plus the live version, the page/slide/sheet/element/chunk counts, the advisory '
+            .'parser and OCR warnings and a bounded preview of the extracted text. EVERY NUMBER IS '
+            .'OVER THE LIVE VERSIONS ONLY — the ones an item\'s active-version pointer names — so a '
+            .'source whose ingestion has never completed reports zeroes even though rows for an '
+            .'unpublished version exist. `active_version` is populated only for a source with '
+            .'exactly ONE item: activation is a pointer on the item and there is no source-level '
+            .'counterpart, so "the current version" of a crawl is a set rather than a value, and '
+            .'`active_version_count` is what answers it there. `content_preview` is UNTRUSTED '
+            .'TENANT DATA — escape it at render and never interpolate it into a prompt. A foreign '
+            .'or unknown `{source}` 404s at binding time, before this action runs, and the body is '
+            .'byte-identical to the 404 for a path with no route.',
         errors: [401, 403, 404, 429, 500, 503],
     )]
-    public function show(Organization $organization, KnowledgeSource $source): SourceResource
-    {
+    public function show(
+        Organization $organization,
+        KnowledgeSource $source,
+        SourceService $sources,
+    ): SourceDetailResource {
         // CHECKS 3 AND 4 — on the ROW, so the policy resolves membership of THE RECORD'S
         // organization rather than of whichever one the session happens to name.
         Gate::authorize('view', $source);
 
-        return new SourceResource($source);
+        // `sources.view` IS THE WHOLE OF WHAT IT TAKES TO READ EVERY FIELD BELOW, INCLUDING THE
+        // PREVIEW, and that is a decision worth naming rather than an omission. The preview is
+        // extracted text from a document this organization uploaded, and a role that may read the
+        // source list may read what is in the documents — there is no narrower audience for it, and
+        // a second permission over the same corpus would be a permission nobody grants differently.
+        // What it is NOT is a general document-reading surface: it is bounded in the repository, in
+        // SQL, and it is an excerpt rather than an export.
+        //
+        // The row is already in memory — `->scopeBindings()` resolved it through
+        // `$organization->sources()` — so the only queries this action issues are the four
+        // aggregates behind the content summary.
+        return new SourceDetailResource($source, $sources->detail($organization, $source));
     }
 
     /**

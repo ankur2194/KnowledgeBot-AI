@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use App\Http\Controllers\Api\V1\BotController;
 use App\Http\Controllers\Api\V1\BotDomainController;
+use App\Http\Controllers\Api\V1\BotSourceAssignmentController;
 use App\Http\Controllers\Api\V1\BotStarterQuestionController;
 use App\Http\Controllers\Api\V1\BotStatusController;
 use App\Http\Controllers\Api\V1\EmbeddingConfigurationController;
@@ -487,6 +488,80 @@ Route::middleware(['auth:sanctum', 'surface:admin', 'org.member', 'verified', 't
             [BotStarterQuestionController::class, 'destroy'],
         )
             ->name('bots.starter-questions.destroy');
+
+        /*
+         * THE RETRIEVAL SCOPE — which knowledge sources this bot may answer from (docs/02 §8.3,
+         * docs/11 §16.3).
+         *
+         * THE HIGHEST-STAKES CHILD SURFACE ON A BOT, and higher than the origin allow-list above.
+         * `bot_ids` is one of the four mandatory Qdrant filter terms and it is resolved from
+         * `bot_source_assignments`, so a row here does not merely permit something — it is what a
+         * correctly-filtered vector query MATCHES ON. A wrong row is not caught by the tenant
+         * filter; it is ENFORCED by it, and the answer comes back at normal latency with a
+         * well-formed citation and an HTTP 200.
+         *
+         * IT IS ALSO THE ONE ROW IN THE SCHEMA THAT CAN SPAN TWO ORGANIZATIONS
+         * (kb-tenancy-isolation NN2). `bot_id` and `source_id` each inherit their own organization
+         * and nothing in the foreign-key graph forces them to agree; what forces them is the
+         * denormalized `organization_id` plus `bot_source_assignments_bot_same_org` and
+         * `bot_source_assignments_source_same_org`. The endpoints below do not replace that guard
+         * and could not: a caller really can be a legitimate admin of the organization whose bot is
+         * named. tests/Security/BotSourceAssignmentAccessTest.php asserts BOTH halves — the service
+         * refusal and the constraint by name — because either alone leaves the other untested.
+         *
+         * `{sourceAssignment}` RESOLVES THROUGH `$bot->sourceAssignments()` because the group calls
+         * ->scopeBindings(), and `{bot}` resolves through `$organization->bots()`. THE PARENT IS THE
+         * PRECEDING BOUND PARAMETER, NOT THE FIRST ONE: `Route::parentOfParameter()` returns
+         * `array_values($this->parameters)[$key - 1]`, so this is two scoped hops, exactly as for
+         * `{domain}` and `{starterQuestion}` above. Losing the second hop does not expose another
+         * tenant's row — `#[ScopedBy(OrganizationScope::class)]` still appends the organization
+         * predicate — what is lost is the BOT predicate, so any grant of any of this organization's
+         * bots would resolve under any other bot's URL.
+         *
+         * THE SEGMENT NAME IS THE WIRING. `Model::childRouteBindingRelationshipName()` is
+         * `Str::plural(Str::camel($childType))`, so `{sourceAssignment}` derives
+         * `sourceAssignments()` — App\Models\Bot::sourceAssignments(), which exists for exactly
+         * this. `{assignment}` would derive `assignments()`, which the bot does not have, and every
+         * request here would 404.
+         *
+         * DELETE ADDRESSES THE GRANT AND NOT THE SOURCE. `…/source-assignments/{sourceAssignment}`
+         * rather than `…/sources/{source}`, because the resource being withdrawn is the assignment:
+         * a path naming the source would read as "delete this document from this bot", and the one
+         * thing this endpoint must never be mistaken for is a source delete.
+         *
+         * TWO GATES ON TWO RECORDS, AND NEITHER IS THE ORGANIZATION. `Permission::SourcesAssign`
+         * states the split: the SOURCE carries `sources.assign` through
+         * `KnowledgeSourcePolicy::assign()`, and the BOT is additionally authorized with
+         * `bots.view` — which is why `Permission::BotsView` is granted to all four roles, and the
+         * reason `BotPolicy` gives for granting it to knowledge_manager is this surface by name.
+         * `BotPolicy::manageChildren()` is deliberately NOT used: it carries `bots.manage`, which
+         * knowledge_manager does not hold, so it would deny the one role the permission catalog
+         * names as this action's performer. What is copied from that ability is the IDIOM — the
+         * record authorized is the PARENT BOT and never the organization, because authorizing
+         * against the organization would pass for a caller addressing a bot they were never shown.
+         *
+         * THERE IS NO PATCH, AND THE ABSENCE IS A DECISION. `AuditLogger` defines
+         * `bot.source_assignment.created` and `bot.source_assignment.deleted` and no updated
+         * operation, both ON_FAILURE_ABORT. A PATCH on `priority` or `enabled` would either change
+         * the retrieval scope with no audit row — the finding those two operations exist to close —
+         * or invent an operation. Changing either is a delete and a re-create, and the trail then
+         * says both things happened. Same call as `origin` being immutable on the allow-list above.
+         *
+         * NO SECOND LIMITER. Granting a bot access to a document this organization already owns
+         * touches no credential, verifies no password and consumes no storage, so `throttle:admin`'s
+         * (organization, user) budget is the whole of check 6.
+         */
+        Route::get('/bots/{bot}/source-assignments', [BotSourceAssignmentController::class, 'index'])
+            ->name('bots.source-assignments.index');
+
+        Route::post('/bots/{bot}/source-assignments', [BotSourceAssignmentController::class, 'store'])
+            ->name('bots.source-assignments.store');
+
+        Route::delete(
+            '/bots/{bot}/source-assignments/{sourceAssignment}',
+            [BotSourceAssignmentController::class, 'destroy'],
+        )
+            ->name('bots.source-assignments.destroy');
 
         /*
          * MEMBERS AND INVITATIONS — org-scoped tenant data, so they go where all org-scoped data

@@ -11,6 +11,7 @@ use App\Enums\OrgRole;
 use App\Enums\Provider;
 use App\Models\AuditLog;
 use App\Models\Bot;
+use App\Models\KnowledgeSource;
 use App\Models\Organization;
 use App\Models\ProviderConnection;
 use App\Models\ProviderModelEntry;
@@ -1132,6 +1133,45 @@ it('refuses to publish a bot that could not answer, and refuses every edit to an
     // that matters: the guard still reads the state the write LEAVES the bot in, which is what the
     // next block proves against a request that does not mention `status` at all.
     currentTest()->patchJson($url, ['allow_general_answers' => true], spaHeaders())->assertOk();
+
+    // NO ASSIGNED SOURCE — the guard's THIRD refusal, and the one that could not exist until
+    // `bot_source_assignments` and its endpoints did. The two modes fail differently and neither
+    // announces itself: `strict` refuses every question, which reads from the console exactly like
+    // a broken retrieval pipeline, and `rag_first` — which this bot is now in, with the escape
+    // hatch the refusal above forced open — answers every question from general model knowledge
+    // with no sources and no citations.
+    currentTest()->putJson($statusUrl, ['status' => BotStatus::Published->value], spaHeaders())
+        ->assertStatus(409)
+        ->assertJsonPath('message', BotService::PUBLISH_NEEDS_ASSIGNED_SOURCE);
+
+    // A DISABLED GRANT DOES NOT COUNT, and this is the assertion that pins it. A check written as
+    // "does this bot have any assignment" passes here, which is precisely the configuration the
+    // refusal exists for: `enabled: false` is what the per-assignment off switch MEANS, so a bot
+    // whose every grant is switched off has exactly as much corpus as one with none.
+    $source = KnowledgeSource::factory()->recycle($fixture['orgA'])
+        ->create(['name' => 'ALPHA publish corpus']);
+
+    currentTest()->postJson(
+        $url.'/source-assignments',
+        ['source_id' => $source->id, 'enabled' => false],
+        spaHeaders(),
+    )->assertCreated();
+
+    currentTest()->putJson($statusUrl, ['status' => BotStatus::Published->value], spaHeaders())
+        ->assertStatus(409)
+        ->assertJsonPath('message', BotService::PUBLISH_NEEDS_ASSIGNED_SOURCE);
+
+    // AND NOW AN ENABLED ONE. There is no PATCH on an assignment — the audit catalog has a created
+    // and a deleted operation and no updated one — so switching the grant on is a second grant on a
+    // second source, which is also what an operator would do.
+    $live = KnowledgeSource::factory()->recycle($fixture['orgA'])
+        ->create(['name' => 'ALPHA live corpus']);
+
+    currentTest()->postJson(
+        $url.'/source-assignments',
+        ['source_id' => $live->id],
+        spaHeaders(),
+    )->assertCreated();
 
     currentTest()->putJson($statusUrl, ['status' => BotStatus::Published->value], spaHeaders())
         ->assertOk()

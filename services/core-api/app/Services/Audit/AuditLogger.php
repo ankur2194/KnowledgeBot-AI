@@ -1146,6 +1146,28 @@ final class AuditLogger
                 // per-row `bot.fallback_model.*` operations the origins now have.
                 'fallback_model_count' => self::ECHOED,
                 'fallback_model_ids' => self::ECHOED,
+
+                // ── THE RETRIEVAL SCOPE, AS TWO INTEGERS AND NO LIST ────────────────────────
+                //
+                // `bot_source_assignments` is the FOURTH child collection a bot delete destroys,
+                // and the one whose rows decide which DOCUMENTS the bot could read: `bot_ids` is
+                // one of the four mandatory Qdrant filter terms and is resolved from that table.
+                //
+                // COUNTED AND NEVER ECHOED, unlike the origins. An origin string IS the security
+                // fact; a source id is a pointer whose meaning lives in another table, and its
+                // NAME is unbounded tenant prose of exactly the kind this table refuses from a
+                // `bot.*` row. What reconstructs the scope is the per-grant
+                // `bot.source_assignment.created` and `.deleted` rows, which carry `source_id`,
+                // `source_name`, `priority` and `enabled` one grant at a time and outlive the bot
+                // — including the rows a bot delete writes for the grants it takes with it. These
+                // two numbers are the TRIPWIRE that sends a reader here looking for those.
+                //
+                // BOTH, because they answer different questions: how many grants existed, and how
+                // many of them GRANTED anything. A bot whose every assignment was switched off had
+                // exactly as much corpus as one with none. The same pairing, for the same reason,
+                // as `domain_count` beside `active_domain_count`.
+                'source_assignment_count' => self::ECHOED,
+                'enabled_source_assignment_count' => self::ECHOED,
             ],
         ],
         self::BOT_UPDATED => [
@@ -1190,6 +1212,9 @@ final class AuditLogger
                 'starter_question_count' => self::ECHOED,
                 'fallback_model_count' => self::ECHOED,
                 'fallback_model_ids' => self::ECHOED,
+                // THE RETRIEVAL SCOPE — see BOT_CREATED above for the whole argument.
+                'source_assignment_count' => self::ECHOED,
+                'enabled_source_assignment_count' => self::ECHOED,
             ],
         ],
         self::BOT_DELETED => [
@@ -1223,6 +1248,9 @@ final class AuditLogger
                 'starter_question_count' => self::ECHOED,
                 'fallback_model_count' => self::ECHOED,
                 'fallback_model_ids' => self::ECHOED,
+                // THE RETRIEVAL SCOPE — see BOT_CREATED above for the whole argument.
+                'source_assignment_count' => self::ECHOED,
+                'enabled_source_assignment_count' => self::ECHOED,
             ],
         ],
 

@@ -138,8 +138,24 @@ export type {
  */
 export type {
   OrgUploadLimits,
+  SourceActiveVersionResource,
   SourceCollectionResource,
+  SourceDetailResource,
   SourceResource,
   SourceStatus,
   SourceType,
+  SourceWarningResource,
 } from './resources/sources.js';
+
+/**
+ * The bot↔source grant. Same `export type` discipline, and the module it comes from is the one place
+ * in `src/resources/` that exists for a STRUCTURAL reason rather than a subject one: the shape joins
+ * two surfaces, so putting it in `bots.ts` would have made that module import from `sources.ts` while
+ * `sources.ts` already imports `ListMetaResource` back out of it. The argument is at the head of the
+ * module; the consequence here is that this block is a third source of source-shaped types and the
+ * `SourceResource` it nests is the one declared once in `./resources/sources.js`.
+ */
+export type {
+  BotSourceAssignmentCollectionResource,
+  BotSourceAssignmentResource,
+} from './resources/bot-source-assignments.js';
