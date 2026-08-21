@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Repositories\Eloquent;
 
 use App\Enums\SourceState;
+use App\Exceptions\IllegalSourceTransition;
 use App\Models\Chunk;
 use App\Models\DocumentElement;
 use App\Models\KnowledgeSource;
@@ -12,7 +13,6 @@ use App\Models\SourceItem;
 use App\Models\SourceVersion;
 use App\Repositories\Contracts\KnowledgeSourceRepositoryInterface;
 use App\Services\Sources\ActiveSourceVersion;
-use App\Services\Sources\IllegalSourceTransition;
 use App\Services\Sources\IngestionApplication;
 use App\Services\Sources\IngestionProgress;
 use App\Services\Sources\NewSource;

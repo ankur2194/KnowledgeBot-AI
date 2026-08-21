@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace App\Services\Sources\Upload;
+namespace App\Exceptions;
 
 use App\Enums\UploadRejectionReason;
 use RuntimeException;

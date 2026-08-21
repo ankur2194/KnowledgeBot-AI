@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 use App\Enums\SourceState;
-use App\Services\Sources\IllegalSourceTransition;
+use App\Exceptions\IllegalSourceTransition;
 
 /*
 |--------------------------------------------------------------------------

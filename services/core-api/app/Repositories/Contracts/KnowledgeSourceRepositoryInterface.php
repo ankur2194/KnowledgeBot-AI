@@ -175,7 +175,7 @@ interface KnowledgeSourceRepositoryInterface
      *                                                              before this call
      * @return KnowledgeSource|null null when no such source exists in THIS organization
      *
-     * @throws \App\Services\Sources\IllegalSourceTransition
+     * @throws \App\Exceptions\IllegalSourceTransition
      */
     public function transition(
         string $organizationId,
@@ -204,7 +204,7 @@ interface KnowledgeSourceRepositoryInterface
      *                                                      have it dropped and reported
      * @return KnowledgeSource|null null when no such source exists in THIS organization
      *
-     * @throws \App\Services\Sources\IllegalSourceTransition
+     * @throws \App\Exceptions\IllegalSourceTransition
      */
     public function requeue(
         string $organizationId,
@@ -227,7 +227,7 @@ interface KnowledgeSourceRepositoryInterface
      *                                                 reads describe the rows that are about to go
      * @return KnowledgeSource|null null when no such source exists in THIS organization
      *
-     * @throws \App\Services\Sources\IllegalSourceTransition
+     * @throws \App\Exceptions\IllegalSourceTransition
      */
     public function softDelete(string $organizationId, string $sourceId, Closure $audit): ?KnowledgeSource;
 
@@ -302,7 +302,7 @@ interface KnowledgeSourceRepositoryInterface
      * @param  Closure(IngestionApplication): void  $audit  invoked inside the transaction, and only
      *                                                      when the frame was applied
      *
-     * @throws \App\Services\Sources\IllegalSourceTransition
+     * @throws \App\Exceptions\IllegalSourceTransition
      */
     public function applyIngestionProgress(
         string $organizationId,

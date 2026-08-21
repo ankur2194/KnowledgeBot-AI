@@ -2255,3 +2255,274 @@ appearing in a capacity or backup-window conversation with its on-disk size quot
 that point is not "switch to `bytea`" but "switch **and** move the two `str`-composition sites in
 `identity.py` and the payload projection with it", and this ADR's job is to make sure whoever does it
 knows that is three changes rather than one.
+
+### ADR-066: `original/` Is Source-Scoped and Sits *Beside* `versions/`, Not Inside It
+
+**Status: `Accepted`. Supersedes no ADR. It contradicts an accepted skill:
+`.claude/skills/seaweedfs-s3/SKILL.md` non-negotiable 1 (line 15) and its layout diagram (lines
+28–37) fix every key as
+`org/{org_id}/sources/{source_id}/versions/{source_version_id}/` with `original/` and `derived/` as
+tails *inside* it, and line 37 justifies that with "the phase-2 sweep and its verification are the
+same prefix string". Those lines are now wrong about `original/` and remain right about `derived/`.
+`.claude/skills/kb-tenancy-isolation/SKILL.md` line 97 restates the same prefix and inherits the
+same correction. This register does not edit skills; the obligation is recorded in `docs/22` § Q11.
+Owed since commit `ec58a19` (2026-08-20), which shipped the departure and said an ADR was owed.**
+
+**Decision:** the irreplaceable bytes of a source live at
+
+```
+org/{org_id}/sources/{source_id}/original/{content_hash}        ← uploads, no suffix
+org/{org_id}/sources/{source_id}/original/{content_hash}.txt    ← pasted text
+org/{org_id}/sources/{source_id}/versions/{source_version_id}/derived/…
+```
+
+`original/` is a sibling of `versions/`, scoped to the **source**; `derived/` is unchanged and stays
+scoped to the **version**. On the Laravel side every one of these strings is built by
+`App\Support\Kb\ObjectKey` and by nothing else. **On the data-plane side the twin does not exist
+yet** — `services/ai-service/app/storage/` is not a directory, although two files quote
+`version_prefix()` from it as though it were (`docs/22` § Q8) — so when it is written it must be
+written against this ADR rather than against the skill's diagram, or the two planes will build two
+different layouts.
+
+**Reason: the fixed layout cannot be honoured by the code that holds the bytes, and that is
+structural rather than a preference.** `2026_08_20_002000_create_source_versions_table.php` makes
+`ingest_key`, `parser_cfg_version`, `ocr_cfg_version`, `chunker_cfg_version` and
+`embedding_model_version` all `NOT NULL`, with CHECKs (`^[0-9a-f]{64}$` on the key, `btrim(…) <> ''`
+on each configuration version) that refuse a placeholder. **Every one of those values is produced by
+the data plane, during and after parsing.** So Laravel structurally cannot mint a `source_versions`
+row at intake: there is no version id at the moment the bytes arrive, and there cannot be one. A key
+that names a version therefore cannot be built by the request that has the content. This is not a
+sequencing problem that better code would solve — it is ADR-063's schema being applied to the moment
+before the schema has anything to say.
+
+**Rejected.**
+
+- **Mint the version row at intake and keep the specified key.** Blocked by the five columns above.
+  The only way through is to relax them, which is the sub-option below.
+- **Relax the CHECKs so intake can write a placeholder version row.** This is the one that looks
+  cheapest and is the most expensive. `ingest_key` is the dedup — `UNIQUE (source_item_id,
+  ingest_key)` is what makes a resubmission recognise its own completed run — and a placeholder key
+  is a perfectly well-formed 64-character string that hashes to an identity nothing else will ever
+  compute. The row never dedupes against the real run, the real run inserts a second row, and
+  nothing raises. It is exactly ADR-065's `bin2hex`-on-hex failure shape, one table over.
+- **Keep the shipped key, `org/{org}/sources/text/{sha256}.txt`.** Rejected on **two independent
+  defects**, both found by writing `ObjectKey` rather than by review. (a) **Nothing could ever
+  delete it.** The phase-2 purge sweeps the prefixes it is given, under a docstring that forbids
+  widening one to make a sweep succeed, and verification enumerates under those same prefixes — so a
+  key outside them is not merely missed, it is **certified clean while it survives**. That is
+  Non-negotiable 6 failing in the one direction that produces a signed proof of a deletion that did
+  not happen. (b) **It deduped across sources with no reference count.** `{content_hash}.txt`
+  directly under `sources/` is one object for every source in the organization whose bytes are
+  identical, so deleting either of two identical pastes took the other's body.
+- **Keep cross-source dedupe and add a reference count.** The correct refcount for a body referenced
+  by an unbounded number of sources is a table nobody has asked for, on the delete path, where a
+  wrong count is another tenant's content. A duplicate object costs bytes; a shared object costs
+  someone else's document.
+- **Write the original under a synthetic pending prefix and *move* it once the version exists.** An
+  S3 move is a copy plus a delete, performed on the one object in this system that cannot be
+  recomputed from anything else, with a window in which the copy is the only copy. It also puts two
+  prefixes on the sweep instead of one and makes a crashed ingest leave bytes in a location whose
+  disposition nobody recorded.
+- **A separate `uploads/` segment beside `original/`, so pasted and uploaded bodies never share a
+  prefix.** Rejected because it is a second string to keep in step with
+  `_purge_objects(…, include_original=…)` on the other side of the seam, for a distinction that
+  cannot arise: a source is either pasted or uploaded, never both.
+
+**Consequences, including the ones that hurt.**
+
+1. **`purge_retired_version` must never pass `include_original`, unconditionally and with no
+   caller-supplied flag.** One object now serves *every* version of the source, so a call that was
+   harmless under the specified layout — where each version owned its own copy — would destroy the
+   bytes the *successor* version was built from, and fail silently until the next reprocess found
+   nothing to read. This is the single most important line in this ADR and it is a rule with no
+   mechanism behind it: `include_original` derives from `original_disposition`, and nothing checks
+   that it does.
+2. **`seaweedfs-s3` line 37's justification splits in two.** "The sweep and its verification are the
+   same prefix string" was already conditional — it held because `original/` sat inside the prefix
+   being asserted. It is now true of `derived/` (one prefix per version) and false of `original/`
+   (one prefix per source, swept once). The deletion seam therefore carries **two** prefix strings
+   where the skill promised one, and the compensating property is stated below.
+3. **Verification keeps the distinction that is its whole value, and it does not come from the
+   filesystem.** Retained and missed are told apart by the **disposition recorded before the
+   sweep**, never by what enumeration finds. An object under `original/` when the disposition was
+   *remove* is a failed purge; an **empty** `original/` when the disposition was *retain* is the
+   opposite finding — a retention obligation destroyed while the admin view is about to report an
+   object that is gone. Only one of those two is visible if the code infers intent from what it
+   sees.
+4. **Dedupe is now scoped to one source by construction**, which is defect (b) above gone rather
+   than compensated for. The cost is real: two sources holding the same PDF hold two objects.
+5. **The purge already had the ids it needs.** `_purge_objects(org_id, source_id, version_ids, *,
+   include_original)` receives both ids and already treated `original/` as a separate disposition,
+   so the change needed no new argument and no widened prefix — which is why this ADR is a
+   correction to two docstrings and a skill rather than to a signature.
+
+**Trade-off.** The repository now disagrees in writing with an accepted skill about a key format,
+and a key format is exactly the kind of rule a reader looks up rather than derives. Until
+`seaweedfs-s3` moves, someone consulting it — correctly — will write a version-scoped `original/`
+key, and the failure that produces is the certified-clean survivor from rejected option (b): an
+object outside every swept prefix. `ObjectKey`'s class docblock and `deletion/tasks.py:186-241` are
+the compensating controls, and both are prose.
+
+**Revisit when** a *derived* artifact needs to outlive the version that produced it, or an
+*original* genuinely differs per version. The observable for the first is `derived/snapshot/`, which
+`seaweedfs-s3:137` already classifies as irreplaceable and tier-1-offsite while its own phase-2
+sweep drops `derived/` unconditionally (`docs/22` § Q12 — a contradiction this ADR did not create
+and does not fix). The observable for the second is a source type whose bytes are re-fetched per
+version rather than re-parsed per version; recrawl is the candidate, and if a crawl ever stores a
+per-version body under `original/`, the source-scoped prefix is wrong and this decision is due
+again.
+
+### ADR-067: Ingestion Is Organization-Scoped; `X-KB-Bot-Id` Is Absent, and Bot Access Stays a Query-Time Filter
+
+**Status: `Accepted`. Supersedes no ADR. It contradicts an accepted skill:
+`.claude/skills/kb-internal-api-contracts/SKILL.md` line 64 lists **ingestion** among the
+`X-KB-Bot-Id` bot-scoped operations, and names only `provider.test` and health as the exceptions.
+That row is wrong for ingestion. The obligation is `docs/22` § Q13; this register does not edit
+skills.**
+
+**Decision:** `X-KB-Bot-Id` is **absent** on `ingestion.submit` and on `embedding.readiness`. Bot
+access to indexed content is enforced where it already is — as a **query-time** Qdrant payload
+filter (Non-negotiable 2, `kb-tenancy-isolation`) — and never as an index-time scope.
+
+**Reason.** A knowledge source is owned by the **organization** and assigned to **zero or many**
+bots; `bot_source_assignments` is the many-to-many that Phase C's C6 step landed. There is
+therefore no single bot id to send, and at the moment that matters most there is no bot id at all:
+the first upload of a source happens *before* any assignment exists, because the console's
+assignment panel lives on the source-detail screen the upload creates. The data plane already agrees
+— `app/api/deps.py:132` types `bot_id` as `str | None` and `:456-458` names the case in a comment:
+*"absent for an organization-scoped operation — embedding readiness, a source upload before
+assignment"*. So the two live artifacts on this seam are consistent with each other and the
+published table is the outlier.
+
+**This is a wire decision and not an editorial one, which is why it is an ADR.** The `X-KB-*`
+headers are inside the canonical string, and the verifier recomputes the covered set from **all
+`X-KB-*` headers actually present** rather than from a caller-supplied list. Adding or removing one
+therefore breaks the signature by construction — so "the table is wrong" cannot be fixed on one side
+and cannot be fixed by a patch release of a document. Both signers change together or every
+submission is a 401.
+
+**The failure the table would have caused is total and one-directional.** A FastAPI ingestion router
+written from line 64 would call `required("x-kb-bot-id")`, and every ingestion submission from every
+tenant would be `validation` → **422** before a byte was parsed, with Laravel correct in every log —
+the same shape as `docs/22` § Q2's deadline defect, discovered at the same seam and for the same
+reason: the two sides were built from different documents.
+
+**Rejected.**
+
+- **Send the id of one assigned bot.** There is no primary assignment — the grant carries a priority
+  and an enabled flag, not a rank among peers — so "one" means "whichever the query returned first".
+  It also puts a bot inside a *signed tenant scope* that scopes nothing, which is worse than an
+  absent header: a reviewer reading the canonical string would reasonably conclude the far side
+  filters on it.
+- **Refuse ingestion until the source has at least one assignment.** This inverts the product model
+  (upload, then assign) and would make the first upload into a brand-new organization impossible.
+  It also cannot work for crawl, where the source exists before anyone has decided which bots
+  should see it.
+- **Send a sentinel — `-`, `all`, or the organization id.** The header is signed, so a sentinel is a
+  value both sides must special-case forever. `deps.py` already collapses empty to `None` and states
+  that *absent and empty mean the same thing; neither is a default* — a sentinel makes that three
+  spellings of one condition, which is how the next reader gets it wrong.
+- **Make bot access an index-time scope: write the assigned bot ids into the Qdrant payload at
+  upsert, so the header would have something to mean.** This is the only option that is
+  architecturally coherent, and it is the one to understand. It is rejected because assignment
+  changes *after* indexing: granting one bot access to an existing source would require a payload
+  rewrite across every point of every version of that source, and revoking it would require the same
+  rewrite with a data-exposure deadline attached. It also makes a chunk's stored payload depend on
+  which *other* records reference it, so an ADR-010 rebuild from PostgreSQL would have to reproduce
+  the assignment table's state at index time rather than its state now — which is the payload-drift
+  failure `kb-architecture-map` Gotcha 5 describes, arrived at deliberately.
+- **Leave the table alone and let each router author decide.** The header set is signed; two authors
+  deciding differently is a 401, not a divergence.
+
+**Consequences.** `X-KB-Actor-Type` becomes the only header narrowing an ingestion request beyond
+the organization, which is what actually gates diagnostics on the far side. Per-bot ingestion
+metrics are unavailable by construction and must be derived from the assignment table at read time.
+And the operation's rate-limit bucket keys on `(org, operation)` rather than `(org, bot)` — a
+tenant with many bots gets one ingestion budget, which is the correct reading of a shared corpus and
+is stated here so nobody re-derives it as a bug.
+
+**Revisit when** an ingestion-time decision genuinely depends on which bot will read the result —
+bot-specific chunking, a bot-specific embedding model, or per-bot redaction. Any of those makes the
+source stop being organization-scoped, at which point the header becomes meaningful and this
+decision is wrong. The observable is a `bot_id` parameter appearing on any function under
+`app/ingestion/`.
+
+### ADR-068: `docs/08` §13.3 Describes the **Ingest Key**, Not the Transport Replay Key; the Two Are Different Keys With Different Components
+
+**Status: `Accepted`. Supersedes no ADR. Deviates from `docs/08` §13.3, which is one component list
+serving two purposes, and corrects `.claude/skills/kb-internal-api-contracts/SKILL.md` line 122's
+`ingestion.submit` fingerprint row and line 208's hazard note, both of which cite §13.3 for the
+**transport** key. `docs/22` § _Spec defects_ items 1 and 2 recorded the two symptoms in the first
+research pass; this ADR names the cause. ADR-063 is the schema half of the same defect. Skill
+obligation: `docs/22` § Q13.**
+
+**Decision:** there are two keys and `app/ingestion/identity.py` is authoritative on the first.
+
+| | **Ingest key** | **Transport idempotency key** |
+|---|---|---|
+| Who owns it | data plane, `identity.py` | control plane, `IngestionSubmission::fingerprint()` |
+| Where it lives | `source_versions.ingest_key`, `UNIQUE (source_item_id, ingest_key)` | `X-KB-Idempotency-Key`, Valkey, 24 h |
+| What it dedupes | **work identity** — does this version already exist? | **delivery** — is this the same submission again? |
+| Components | `INGEST_KEY_PARTS`, including all three `*_cfg_version` and `embedding_model_version` | source id, then per item `(item id, canonical key, content hash)`, then `force_nonce` |
+| Configuration versions | **in** | **absent, necessarily** |
+
+**Reason, and it is the same structural fact ADR-066 rests on.** The three configuration versions and
+the embedding-model identity are produced by the data plane, during and after parsing. Laravel does
+not have them at submission time and cannot. A transport fingerprint that included them would be a
+fingerprint Laravel cannot compute — so §13.3's list is not a specification of the replay key at all;
+it is a specification of the *ingest* key, being cited for the wrong one.
+
+**Two things follow, and both were already recorded as defects without the cause being named.**
+
+1. **§13.3 omits `ocr_cfg_version` while §13.4 makes an OCR configuration change a version
+   trigger.** Read literally, an OCR retune is a **silent no-op**: the resubmission dedupes against
+   the completed run, the admin sees "already processed", and the new settings never reach a
+   document. `INGEST_KEY_PARTS` includes it, and `compute_ingest_key` raises `VALIDATION` on an
+   empty component with a message naming this exact failure. `identity.py` wins.
+2. **§13.3 lists "source version" as a component, which is impossible.** The ingest key is what
+   *decides* whether a version row should exist, so a key containing the version id is circular.
+   `INGEST_KEY_PARTS` substitutes `source_item_id`, which is the identity that exists before the
+   run. The circularity is not a typo: it is what a single list looks like once it has been asked to
+   serve both keys, because a *transport* key legitimately may name a version and an *identity* key
+   never can.
+
+**How the hazard the skill warns about is actually covered.** Line 208 says that a fingerprint
+omitting the configuration versions makes *"a reprocess triggered by a config change dedupe against
+the original job and return its stale `job_id`"*. That is true of a design where the transport key is
+the only key, and it is not true here: the shipped fingerprint carries `force_nonce`, which is what
+an explicit reprocess moves, and the *ingest* key carries the configuration versions, so a
+configuration change that the operator did not ask for still produces a new version. The two keys
+cover the two cases between them, and neither covers both alone. **That is the reason to keep them
+separate rather than an accident of who could compute what.**
+
+**Rejected.**
+
+- **One key for both jobs, computed by Laravel from what it has.** This is §13.3 read literally. It
+  cannot include the configuration versions, so it silently becomes a delivery key wearing an
+  identity key's name — and the first OCR retune is the silent no-op above.
+- **One key for both jobs, computed by the data plane and returned to Laravel.** Inverts the
+  transport: the replay key has to exist *before* the request, because its whole purpose is to
+  recognise a retry of a request that may never have arrived.
+- **Have Laravel pin the configuration versions at submission time from a snapshot.** Tempting,
+  because the snapshot mechanism already exists for chat. Rejected because the values are not
+  configuration Laravel resolves — they are outputs of parsing (which OCR ran, at what settings, on
+  this document), so a pinned value would be a guess that the run then contradicts, and the ingest
+  key would name an identity the work does not have.
+- **Drop the transport key on `ingestion.submit` and rely on the ingest key alone.** The ingest key
+  is computed too late: a duplicate submission that never reaches parsing is not deduped by anything,
+  and `SubmitIngestionJob` has already demonstrated (commit `ec58a19`) what a wrong uniqueness key on
+  that path costs — a silently discarded dispatch with nothing in `failed_jobs`.
+- **Edit `docs/08` §13.3.** Barred by `docs/00-index.md`: `01`–`21` are verbatim extracts and a
+  deviation is recorded as an ADR, never by rewriting the extract.
+
+**Consequences.** `docs/08` §13.3 stays wrong on the page, and it is short, plausible and exactly
+where an implementer looks — so this ADR and § Q13's skill correction are the only things standing
+between the next reader and a fingerprint that dedupes an OCR retune away. The two keys also mean
+two separate "did we already do this?" answers on one submission path, which can disagree: a replayed
+delivery of an unchanged submission is a transport replay (stored response returned verbatim), while
+a *new* submission whose configuration is unchanged is an ingest-key hit (no new version). Anyone
+debugging "why did nothing happen" has to establish which of the two fired.
+
+**Revisit when** `INGEST_KEY_PARTS` gains or loses a member — the same tripwire ADR-063 names — or
+when the control plane acquires a legitimate reason to know a configuration version before the run,
+which today it does not and cannot.

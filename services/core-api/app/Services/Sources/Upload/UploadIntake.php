@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Sources\Upload;
 
 use App\Enums\UploadRejectionReason;
+use App\Exceptions\UploadRejected;
 use finfo;
 use Illuminate\Http\UploadedFile;
 use Normalizer;

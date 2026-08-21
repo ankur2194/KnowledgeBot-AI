@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace App\Services\Sources;
+namespace App\Exceptions;
 
 use App\Enums\SourceState;
 use RuntimeException;

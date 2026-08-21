@@ -473,6 +473,39 @@ evidence about the planner those paragraphs reason about — and the phase added
 than the row was written against. The correctness half remains expected to be a no-op; the plan half
 is the one to re-capture when Docker is available.
 
+## Re-checked at the close of Phase C — the same five, plus one that is new in kind
+
+**Four of the five rows above are unchanged and are not re-tabled.** PostgreSQL is still 16 against a
+pin of 18, `ext-bcmath` is still unmet and waived, Docker is still unreachable, and the Playwright
+directory is still symlinks into a build the lockfile does not name. Phase C shipped three more
+screens — the sources list, the upload screen and the source detail screen with its assignment panel
+— and **every one of them inherits every accessibility row above**: no axe run, no keyboard-only
+walk, nothing viewed by a person. The e2e specs written for them **self-skip**, because nothing on
+this host writes the admin auth state, so they encode the walk rather than performing it; that is a
+stronger statement than "unrun", and it is the same distinction § I6 turned on.
+
+**What is new in kind: the whole Laravel↔FastAPI ingestion seam has no far side, so nothing about it
+has been exercised even once.** This is not a host limitation and it will not close by getting a
+browser or a database — `POST /internal/{v}/ingestion/jobs` does not exist, and
+`services/ai-service/app/contracts/internal/` holds `__init__.py` and `.gitkeep`. Everything Phase C
+decided about that seam is therefore verified only against itself:
+
+- **The deadline fix (`docs/22` § Q2)** is proved by a unit test and by mutation, and has never been
+  read by a receiver that clamps a budget.
+- **`X-KB-Bot-Id`'s absence (ADR-067)** is agreed on by `deps.py` and `InternalAiClient` and
+  contradicted by the published header table. The signature covers the header set, so the first
+  real request is also the first test of whether the two signers agree.
+- **The internal body's shape (`docs/22` § Q7)** has no schema on either side. Its timestamp
+  rendering (`+00:00`) and its nullability are facts about one PHP method today.
+- **The two object-key prefixes (ADR-066)** are a contract handed over before implementation:
+  `purge_retired_version` and `_purge_objects` are both still unimplemented, so *"never pass
+  `include_original`"* — the rule whose violation destroys the bytes a successor version was built
+  from — has no code to be true of yet.
+
+**Stated plainly because the shape is familiar:** a decision agreed on by two documents and zero
+running processes reads exactly like a verified one, and Phase C produced several. Each is recorded
+with the observable that will test it, not with a claim that it works.
+
 ## Full list, by file
 
 Line numbers are accurate as of this commit and will drift as files are edited.

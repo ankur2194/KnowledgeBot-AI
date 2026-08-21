@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Services\Sources\Upload;
 
+use App\Exceptions\UploadRejected;
+
 /**
  * The verdict on one multipart batch: what passed, and what each refusal was.
  *

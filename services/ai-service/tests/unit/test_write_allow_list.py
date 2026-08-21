@@ -22,7 +22,7 @@ from typing import Final
 import pytest
 
 from app.db.writes import ALLOWED_TABLES
-from tests.support.tree import SERVICE_ROOT
+from tests.support.tree import APP_ROOT, SERVICE_ROOT
 
 #: ``services/core-api/database/migrations``. The data plane owns no migration, so every table
 #: it writes has its schema defined over here — "we write rows into a schema we do not define".
@@ -30,11 +30,51 @@ MIGRATIONS: Final[Path] = SERVICE_ROOT.parent / "core-api" / "database" / "migra
 
 _CREATE_TABLE = re.compile(r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?\"?([a-z_][a-z0-9_]*)", re.I)
 
+#: The statement forms that make property 3 *bite*. A name with no migration and no statement
+#: is a placeholder; a name with no migration and a statement is finding #79's exact shape.
+_WRITES_TO = re.compile(r"\b(?:DELETE\s+FROM|INSERT\s+INTO|UPDATE)\s+\"?([a-z_][a-z0-9_]*)", re.I)
+
 #: The C2 pair. Named here because the *relationship* between them is what the test is about,
 #: and the relationship cannot be read off the tuple.
 SPARSE_TABLES: Final[tuple[str, str]] = (
     "sparse_version_statistics",
     "sparse_term_frequencies",
+)
+
+#: Allow-listed names that **no Laravel migration in this repository creates**, each excused
+#: because nothing here writes it yet.
+#:
+#: This is an exception list, not a permission. It replaced a ``name.startswith("sparse_")``
+#: filter, which was a *proxy* for "we expect this one to have a migration" and had the failure
+#: mode every proxy has: it could not tell a name that legitimately has no migration from one
+#: that lost its migration, and it silently stopped covering ``chunks`` and
+#: ``document_elements`` on the day Phase C1 gave them one.
+#:
+#: **The list is self-expiring, by the three independent paths ``KB_MIGRATION_PIN_79`` had** —
+#: which is the shape that would have caught the C1 drift on the day it landed instead of eight
+#: days later. Each path is a test below:
+#:
+#: 1. an excused name that **gains a migration** fails (``…_no_longer_needs_its_excuse``);
+#: 2. an excused name that **gains a writer** fails (``…_is_written_by_nothing``) — that is
+#:    ADR-033 property 3 actually biting, and the reason a bare "no migration yet" is not by
+#:    itself a violation;
+#: 3. an excused name that **leaves ALLOWED_TABLES** fails the closing set comparison
+#:    (``…_is_still_on_the_allow_list``).
+#:
+#: Do not add a name here to make a red test green. A name belongs here only while all three
+#: paths are honest about it, and adding one is the same review stop that adding one to
+#: ``ALLOWED_TABLES`` is.
+NO_MIGRATION_YET: Final[frozenset[str]] = frozenset(
+    {
+        # Per-query retrieval diagnostics. `app/retrieval/` holds no statement against it and
+        # `app/deletion/tasks.py` only names it in prose, describing the redaction it will
+        # eventually need on `selected_evidence`.
+        "retrieval_traces",
+        # Per-case evaluation detail. `app/evaluation/run.py` and `tasks.py` describe the row
+        # they will write; `evaluation/`'s orchestration is a deliberate stub (CLAUDE.md), so
+        # the writer does not exist and neither does the schema.
+        "evaluation_results",
+    }
 )
 
 
@@ -46,11 +86,51 @@ def _migrated_tables() -> set[str]:
     }
 
 
+def _tables_written_by_this_service() -> dict[str, set[str]]:
+    """Every table name this service issues a DML statement against, to the file it is in.
+
+    A source scan and not an import: the modules that hold these statements pull in psycopg,
+    Celery and a populated environment, and the ``unit/`` tier runs on a bare interpreter.
+    Prose is not a false positive here — a docstring saying "its ``evaluation_results`` row"
+    does not contain ``INSERT INTO evaluation_results``, and the positive control below is
+    what keeps that claim honest rather than assumed.
+    """
+    found: dict[str, set[str]] = {}
+
+    for path in APP_ROOT.rglob("*.py"):
+        for match in _WRITES_TO.finditer(path.read_text(encoding="utf-8")):
+            found.setdefault(match.group(1).lower(), set()).add(str(path.relative_to(SERVICE_ROOT)))
+
+    return found
+
+
 def test_the_migration_scan_found_something() -> None:
     """Positive control. Every cross-plane assertion below is "name X was created over there",
     and all of them pass trivially against an empty set if the path or the glob is wrong."""
     assert MIGRATIONS.is_dir(), f"{MIGRATIONS} is not a directory"
     assert len(_migrated_tables()) >= 3, sorted(_migrated_tables())
+
+
+def test_the_statement_scan_found_something() -> None:
+    """The second positive control, and it is the one that is easy to leave out.
+
+    ``_tables_written_by_this_service()`` is used *negatively* — "no excused name appears in
+    it" — so a broken regex, a moved ``app/`` or a changed statement style yields an empty
+    mapping, and an empty mapping satisfies every negative assertion made against it. Then the
+    self-expiring exception list stops expiring and nothing anywhere is red.
+
+    The floor is stated against ``ALLOWED_TABLES`` rather than as a literal: the four names
+    ``app/deletion/relational.py`` purges are all allow-listed, so a scan that finds fewer
+    distinct allow-listed names than it did has lost sight of some of them.
+    """
+    written = _tables_written_by_this_service()
+    allow_listed = sorted(set(written) & set(ALLOWED_TABLES))
+
+    assert len(allow_listed) >= 4, (
+        f"the DML scan over {APP_ROOT} found statements against only {allow_listed}. It is used "
+        f"to decide whether an excused name has gained a writer, and that decision is vacuous "
+        f"against an empty scan. Everything it found: {sorted(written)}"
+    )
 
 
 # ── the sparse arm needs BOTH tables, and the second is not a convenience ─────
@@ -106,9 +186,9 @@ def test_the_frequencies_table_never_travels_without_the_version_total() -> None
         )
 
 
-def test_every_sparse_table_on_the_allow_list_is_created_by_a_laravel_migration() -> None:
-    """The data plane owns no migration, so an allow-listed name it cannot find over there is
-    a table it would write into nothing.
+def test_every_allow_listed_table_is_created_by_a_laravel_migration() -> None:
+    """ADR-033 property 3, per name: the data plane owns no migration, so an allow-listed name
+    it cannot find over there is a table it would write into nothing.
 
     Read out of ``ALLOWED_TABLES`` and not from this file's own constant, deliberately: the
     failure being caught is a **spelling** one, and a test that names both sides itself cannot
@@ -116,24 +196,85 @@ def test_every_sparse_table_on_the_allow_list_is_created_by_a_laravel_migration(
     each side alone and fails only at the first ``INSERT``, inside a Celery task, after the
     parse and the OCR spend.
 
-    Scoped to the ``sparse_`` prefix, and that scope is now **wider than it needs to be**. It
-    was written when none of the four older names had a migration here. As of 2026-08-20 two of
-    them do — Phase C1 landed ``2026_08_20_002200_create_chunks_table.php`` and
-    ``2026_08_20_002100_create_document_elements_table.php`` — so the assertion could cover
-    ``chunks`` and ``document_elements`` as well and does not. ``retrieval_traces`` and
-    ``evaluation_results`` still have no migration in this repository; widening to the *whole*
-    allow-list would fail on that genuine gap rather than on a spelling error.
-
-    Deliberately left as it is by the pass that corrected this note, because changing what a test
-    asserts is a separate decision from correcting prose about it. The recommendation is recorded
-    for this file's owner; do not read the narrow scope as evidence that the wider one is wrong.
+    This used to be scoped to a ``sparse_`` name prefix. The prefix was a *proxy* for "we
+    expect this one to have a migration", and it went stale the way proxies do: Phase C1 gave
+    ``chunks`` and ``document_elements`` migrations on 2026-08-20 and the assertion went on not
+    covering them, so it could not have noticed either one losing its migration again. The
+    scope is now the whole allow-list minus a named, self-expiring exception list.
     """
-    allowed_sparse = [name for name in ALLOWED_TABLES if name.startswith("sparse_")]
-    assert allowed_sparse, "the C2 tables left ALLOWED_TABLES; this assertion is now vacuous"
+    migrated = _migrated_tables()
+    expected = [name for name in ALLOWED_TABLES if name not in NO_MIGRATION_YET]
 
-    missing = [name for name in allowed_sparse if name not in _migrated_tables()]
+    assert expected, (
+        "every allow-listed name is excused, so this assertion covers nothing. Either "
+        "ALLOWED_TABLES was emptied or NO_MIGRATION_YET has swallowed it."
+    )
+
+    missing = [name for name in expected if name not in migrated]
     assert not missing, (
-        f"{missing} are in ALLOWED_TABLES but no migration in {MIGRATIONS} creates them"
+        f"{missing} are in ALLOWED_TABLES but no migration in {MIGRATIONS} creates them, and "
+        f"they are not excused in NO_MIGRATION_YET. Either the migration was removed or renamed, "
+        f"or the name is spelled differently on the two sides. Adding the name to "
+        f"NO_MIGRATION_YET is not the fix unless nothing here writes it."
+    )
+
+
+@pytest.mark.parametrize("table", sorted(NO_MIGRATION_YET))
+def test_an_excused_table_no_longer_needs_its_excuse(table: str) -> None:
+    """Self-expiry path 1: an excused name that GAINS a migration fails the build.
+
+    This is the half that would have caught the drift of 2026-08-20 on the day it landed. The
+    excuse is "Laravel has not defined this schema yet"; the moment Laravel does, the name
+    belongs under the assertion above and leaving it excused silently narrows the coverage
+    again — which is exactly how the ``sparse_`` prefix stopped covering ``chunks``.
+    """
+    created_by = sorted(
+        path.name
+        for path in MIGRATIONS.glob("*.php")
+        for match in _CREATE_TABLE.finditer(path.read_text(encoding="utf-8"))
+        if match.group(1).lower() == table
+    )
+
+    assert not created_by, (
+        f"{table} is excused in NO_MIGRATION_YET but {created_by} creates it. The excuse has "
+        f"expired: remove the name from NO_MIGRATION_YET so the property-3 assertion covers it."
+    )
+
+
+@pytest.mark.parametrize("table", sorted(NO_MIGRATION_YET))
+def test_an_excused_table_is_written_by_nothing(table: str) -> None:
+    """Self-expiry path 2, and the one that is the actual violation rather than a bookkeeping
+    slip. **A name nothing writes yet is not a property-3 violation** — the property bites
+    where a statement exists, which is precisely finding #79's shape: the data plane issued
+    ``DELETE FROM chunks`` and ``DELETE FROM document_elements`` while no Laravel migration
+    created either, and it stayed true for eight days.
+
+    So an excused name is allowed to have no migration only while it also has no writer. The
+    day one of these gets its first statement, this fails and the answer is a migration, not a
+    wider excuse.
+    """
+    written = _tables_written_by_this_service()
+
+    assert table not in written, (
+        f"{table} has no Laravel migration and {sorted(written[table])} issues a statement "
+        f"against it. That is ADR-033 property 3 violated — finding #79's exact shape under a "
+        f"new name. The repair is the migration; do not repair it here."
+    )
+
+
+def test_every_excused_table_is_still_on_the_allow_list() -> None:
+    """Self-expiry path 3: the closing set comparison ``KB_MIGRATION_PIN_79`` also had.
+
+    A name removed from ``ALLOWED_TABLES`` but left here is an exception protecting nothing,
+    and it makes the list read as though more is outstanding than is. Membership of
+    ``ALLOWED_TABLES`` is a review decision and is not this file's to change — but an excuse
+    for a name that is no longer on it is this file's to delete.
+    """
+    orphans = sorted(NO_MIGRATION_YET - set(ALLOWED_TABLES))
+
+    assert not orphans, (
+        f"{orphans} are excused in NO_MIGRATION_YET but are no longer in ALLOWED_TABLES. The "
+        f"exception outlived the entry it was written for; delete it."
     )
 
 

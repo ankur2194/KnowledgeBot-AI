@@ -1,4 +1,5 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
@@ -51,6 +52,13 @@ import { expect, test, type Page } from '@playwright/test';
  * About a third of the job (`kb-ui-accessibility`). A `div[role="button"]` with `tabindex="0"` and no
  * key handler scans clean, so the second describe block covers what it can and the keyboard-only pass
  * stays a human step.
+ *
+ * ── WHAT HAS ACTUALLY BEEN EXECUTED, AS OF 2026-08-21 ───────────────────────────────────────────
+ *
+ * Exactly one thing: the declaration-time guard below, via `playwright test --list`, in both
+ * directions — green against the component as it stands, and red (with the whole run refusing to
+ * collect) when its first pattern was made to miss. Every `page.*` line in this file remains
+ * unobserved, and the header above still governs how to read a first red run.
  */
 
 /** Relative to `apps/web`, matching `playwright.config.ts`'s `storageState` for the admin project. */
@@ -96,11 +104,112 @@ async function openSources(page: Page): Promise<void> {
   ).toBeVisible();
 }
 
-/** The first row's Delete control, or null when this organization has no source to delete. */
-function firstDeleteButton(page: Page) {
-  // Every row action's accessible name ends with the source's own name, so the prefix match is what
-  // addresses "the delete button on some row" without knowing which sources are seeded.
-  return page.getByRole('button', { name: /^Delete .+/ }).first();
+/**
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * DECLARATION-TIME STALENESS GUARD — the reason the locators below cannot rot in silence again
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * THE FAILURE THIS EXISTS FOR ALREADY HAPPENED, AND IT WAS QUIETER THAN A FALSE PASS. Until
+ * 2026-08-21 the three tests that reach a row action located
+ * `getByRole('button', { name: /^Delete .+/ })`. The row actions had become an overflow menu several
+ * batches earlier — one trigger named `Actions for {name}`, with `Delete` as a `menuitem` inside it —
+ * so the locator matched zero elements and each test hit its own
+ * `test.skip((await trigger.count()) === 0, …)` and reported "skipped". A skip reads as "the fixture
+ * did not have one of those", which is a legitimate outcome here, so nothing about the output said
+ * the spec was addressing a control that no longer exists.
+ *
+ * A `count() === 0` skip cannot distinguish "this account may not delete" from "this locator is
+ * wrong", and it never will. What CAN distinguish them is the component's own source, so that is
+ * what is asserted — synchronously, in the file body, which Playwright executes while COLLECTING
+ * even though every test in this file is skipped for want of `playwright/.auth/admin.json`. A throw
+ * here fails `playwright test` and even `playwright test --list`; there is no run of any project in
+ * which it is not evaluated. That is the whole point: this file's tests cannot run in the
+ * environments that currently exist, so the guard has to be the part that does.
+ *
+ * ITS BLAST RADIUS IS THE WHOLE RUN, AND THAT IS THE PRICE. A collection-time throw takes every
+ * project down with it — measured 2026-08-21 by making the first pattern miss on purpose:
+ * `playwright test --list` printed the message below and then `Total: 0 tests in 0 files`, so the
+ * `public` project stops running too. That is the correct trade only because the guard cannot fire
+ * on a seeded-data difference, a flaky network or a slow page: it reads one file off disk and
+ * matches three literals. If it is red, the spec is wrong, and a spec that addresses controls which
+ * do not exist is not usefully "passing" for the other projects' sake.
+ *
+ * IT IS NOT A SUBSTITUTE FOR RUNNING THE SPEC. It proves the markup the locators name is still in
+ * the component. It cannot prove the control renders, is reachable, or behaves — those are the
+ * assertions below, and they remain unexecuted (see this file's header).
+ */
+const ROW_ACTIONS_COMPONENT = fileURLToPath(
+  new URL('../../../src/features/sources/source-row-actions.tsx', import.meta.url),
+);
+
+/**
+ * The literal fragments every locator in this file depends on, each paired with the assertion that
+ * would start skipping silently if it disappeared. Matched against the component SOURCE, so a rename
+ * in `src/` is a red collection rather than three quiet skips.
+ */
+const ROW_ACTION_CONTRACT: ReadonlyArray<{ pattern: RegExp; why: string }> = [
+  {
+    // Anchored on `source.name` and not just on the words: a trigger labelled `Actions` with the
+    // name somewhere else would satisfy a looser pattern and break every locator here.
+    pattern: /aria-label=\{`Actions for \$\{source\.name\}`\}/,
+    why: 'rowActionsTrigger() locates the overflow trigger by the accessible name `Actions for <name>`, and every test here derives the source name by stripping that prefix',
+  },
+  {
+    // A DropdownMenuItem and not a Button — that distinction IS the drift this guard exists for.
+    // `variant="destructive"` alone would also match the inline <Alert>, so the element name is
+    // part of the pattern.
+    pattern: /<DropdownMenuItem\s+variant="destructive"/,
+    why: "the Delete entry is a `menuitem` inside the overflow menu, not a row button; openDeleteDialog() opens the menu and then selects it by role `menuitem` and the name `Delete`",
+  },
+  {
+    pattern: /confirmLabel="Delete source"/,
+    why: 'the confirm button in the destructive dialog is located by the name `Delete source`, which must match the verb in the title rather than being "OK" or "Confirm"',
+  },
+];
+
+const ROW_ACTIONS_SOURCE = readFileSync(ROW_ACTIONS_COMPONENT, 'utf8');
+
+for (const { pattern, why } of ROW_ACTION_CONTRACT) {
+  if (!pattern.test(ROW_ACTIONS_SOURCE)) {
+    throw new Error(
+      `tests/e2e/admin/sources.spec.ts is stale: ${ROW_ACTIONS_COMPONENT} no longer matches ` +
+        `${String(pattern)}.\n  ${why}.\n` +
+        '  Every test in this file that reaches a row action would now match zero elements and ' +
+        'SKIP rather than fail, which is quieter than a false pass. Update the locators (and this ' +
+        'contract) to whatever the component renders now — do not delete the guard, and do not ' +
+        'relax it to a pattern that would match anything.',
+    );
+  }
+}
+
+/**
+ * The first row's overflow-menu trigger, whose accessible name carries the source's own name.
+ *
+ * Zero matches is still a legitimate outcome — the cluster renders for `sources.manage` only, and
+ * not at all on a row whose removal is already under way — which is why the call sites skip on it.
+ * The guard above is what keeps that skip meaning what it says.
+ */
+function rowActionsTrigger(page: Page) {
+  return page.getByRole('button', { name: /^Actions for .+/ }).first();
+}
+
+/** `Actions for Quarterly report.pdf` -> `Quarterly report.pdf`. */
+async function sourceNameFrom(trigger: ReturnType<typeof rowActionsTrigger>): Promise<string> {
+  return ((await trigger.getAttribute('aria-label')) ?? '').replace(/^Actions for /, '');
+}
+
+/**
+ * Open the row's menu and choose Delete, which is what opens the destructive dialog.
+ *
+ * Two steps and not one, mirroring `source-detail.spec.ts` — the same component, reached from the
+ * other screen, already located this way there. `Delete` performs nothing on selection; it opens the
+ * dialog, and the menu closes first so focus is never trapped between two overlays.
+ */
+async function openDeleteDialog(page: Page, trigger: ReturnType<typeof rowActionsTrigger>) {
+  await trigger.click();
+  await page.getByRole('menuitem', { name: 'Delete' }).click();
+
+  return page.getByRole('dialog');
 }
 
 test.describe('axe-core, WCAG 2.2 AA', () => {
@@ -130,13 +239,15 @@ test.describe('axe-core, WCAG 2.2 AA', () => {
   test('the delete confirmation has no violations while open', async ({ page }) => {
     await openSources(page);
 
-    const trigger = firstDeleteButton(page);
-    // The control renders for `sources.manage` only, and not at all on a row whose removal is already
+    const trigger = rowActionsTrigger(page);
+    // The cluster renders for `sources.manage` only, and not at all on a row whose removal is already
     // under way — so its absence is a legitimate outcome of what is seeded rather than a failure.
-    test.skip((await trigger.count()) === 0, 'no deletable source is visible for this account');
+    // That this skip means what it says, rather than "the locator is stale", is what the
+    // declaration-time guard above holds.
+    test.skip((await trigger.count()) === 0, 'no manageable source is visible for this account');
 
-    await trigger.click();
-    await expect(page.getByRole('dialog')).toBeVisible();
+    const dialog = await openDeleteDialog(page, trigger);
+    await expect(dialog).toBeVisible();
 
     const results = await scan(page).analyze();
     const summary = summarize(results.violations);
@@ -153,14 +264,13 @@ test.describe('operability, which a scanner cannot test', () => {
      */
     await openSources(page);
 
-    const trigger = firstDeleteButton(page);
-    test.skip((await trigger.count()) === 0, 'no deletable source is visible for this account');
+    const trigger = rowActionsTrigger(page);
+    test.skip((await trigger.count()) === 0, 'no manageable source is visible for this account');
 
-    // The accessible name is `Delete <name>`; the name itself is what has to be typed.
-    const name = ((await trigger.getAttribute('aria-label')) ?? '').replace(/^Delete /, '');
-    await trigger.click();
+    // The trigger's accessible name is `Actions for <name>`; the name itself is what has to be typed.
+    const name = await sourceNameFrom(trigger);
 
-    const dialog = page.getByRole('dialog');
+    const dialog = await openDeleteDialog(page, trigger);
     await expect(dialog).toBeVisible();
     // The verb in the button matches the verb in the title, and neither is "OK" or "Confirm".
     const confirm = dialog.getByRole('button', { name: 'Delete source' });
@@ -174,36 +284,57 @@ test.describe('operability, which a scanner cannot test', () => {
     await dialog.getByRole('textbox').fill(name);
     await expect(confirm).toBeEnabled();
 
-    // ESCAPE CLOSES IT AND NOTHING IS DELETED. Focus returns to the trigger, which is the primitive's
-    // job and is exactly the part a hand-rolled dialog loses.
+    // ESCAPE CLOSES IT AND NOTHING IS DELETED.
+    //
+    // It does NOT assert where focus lands afterwards, and that omission is deliberate rather than an
+    // oversight: the dialog was opened from a menu item that has already unmounted, so "focus returns
+    // to the trigger" depends on how the menu and the dialog hand off — a claim about two Radix
+    // primitives interacting that nobody here has watched happen. `source-detail.spec.ts` reaches the
+    // same dialog through the same component and stops at the same line. It is step 4 of that file's
+    // written-down keyboard walk, which is where an unautomatable claim belongs.
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden();
-    await expect(trigger).toBeFocused();
   });
 
   test('every row action is reachable and named without a mouse', async ({ page }) => {
     /**
      * `kb-ui-accessibility` §8.18: keyboard access AND a screen-reader label, which are two checks. A
-     * row of `<Button>`s scans clean whether or not their names distinguish the rows, and twenty-five
-     * controls called "Delete" are unusable with a screen reader and ambiguous to every locator.
+     * row of icon-only `<Button>`s scans clean whether or not their names distinguish the rows, and
+     * twenty-five triggers announcing "Actions" are unusable with a screen reader and ambiguous to
+     * every locator — which is the failure the component's own comment at the trigger names.
      */
     await openSources(page);
 
-    const deletes = page.getByRole('button', { name: /^Delete .+/ });
-    const count = await deletes.count();
-    test.skip(count === 0, 'no deletable source is visible for this account');
+    const triggers = page.getByRole('button', { name: /^Actions for .+/ });
+    test.skip((await triggers.count()) === 0, 'no manageable source is visible for this account');
 
     const names = await Promise.all(
-      (await deletes.all()).map((control) => control.getAttribute('aria-label')),
+      (await triggers.all()).map((control) => control.getAttribute('aria-label')),
     );
     // Each one names its own row, so they are distinct.
     expect(new Set(names).size).toBe(names.length);
 
-    // And the control is genuinely a button: focusable, and activatable from the keyboard.
-    await deletes.first().focus();
-    await expect(deletes.first()).toBeFocused();
+    // And the control is genuinely a button: focusable, and activatable from the keyboard. Enter
+    // opens the MENU — the trigger performs nothing itself — so the assertion is the menu and its
+    // three named items, not a dialog. Anything past this point (Down/Up between the items, where
+    // focus lands when the menu closes) is step 3 of `source-detail.spec.ts`'s written-down keyboard
+    // walk, because what it is really about is what a person hears.
+    await triggers.first().focus();
+    await expect(triggers.first()).toBeFocused();
     await page.keyboard.press('Enter');
-    await expect(page.getByRole('dialog')).toBeVisible();
+
+    const menu = page.getByRole('menu');
+    await expect(menu).toBeVisible();
+    await expect(menu.getByRole('menuitem', { name: 'Reprocess' })).toBeVisible();
+    await expect(menu.getByRole('menuitem', { name: /^(Disable|Enable)$/ })).toBeVisible();
+    await expect(menu.getByRole('menuitem', { name: 'Delete' })).toBeVisible();
+
+    // Escape closes the menu and returns focus to the trigger, which is the primitive's job and the
+    // part a hand-rolled menu loses. Unlike the dialog hand-off above, this one is a single
+    // primitive's documented behaviour.
+    await page.keyboard.press('Escape');
+    await expect(menu).toBeHidden();
+    await expect(triggers.first()).toBeFocused();
   });
 
   test('every column header that sorts says so, and is a button', async ({ page }) => {

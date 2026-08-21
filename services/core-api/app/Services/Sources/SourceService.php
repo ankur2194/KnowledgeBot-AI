@@ -6,6 +6,7 @@ namespace App\Services\Sources;
 
 use App\Enums\SourceState;
 use App\Enums\SourceType;
+use App\Exceptions\IllegalSourceTransition;
 use App\Jobs\SubmitIngestionJob;
 use App\Models\KnowledgeSource;
 use App\Models\Organization;
