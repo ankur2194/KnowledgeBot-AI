@@ -152,13 +152,22 @@ function postIngestionFrame(
     // the replay test would then pass a fresh nonce on both calls and assert nothing.
     $headers = $headerOverrides + $headers;
 
-    $keyId = (string) config('services.ai.hmac.active');
-
+    // THE CALLBACK RING, because this helper plays the part of FastAPI. `services.ai.hmac.*` is
+    // the OUTBOUND ring this application signs WITH, and signing a callback with it is the exact
+    // production defect the two-ring split exists to prevent — a helper that used it would make
+    // every assertion below pass against a verifier wired to the wrong direction.
     /** @var array<string, string> $keys */
-    $keys = (array) config('services.ai.hmac.keys');
+    $keys = (array) config('services.ai.callback_hmac.keys');
+    $keyId = (string) array_key_first($keys);
+
+    // The prefix the PEER emits, taken from the list this application accepts. Not
+    // `kb.signing_prefix`: that is what Laravel emits outbound, and the two are only equal
+    // until someone bumps one of them.
+    /** @var list<string> $prefixes */
+    $prefixes = (array) config('services.ai.callback_hmac.accepted_prefixes');
 
     $signature = $signatureOverride ?? (new InternalRequestSigner(
-        (string) config('kb.signing_prefix'),
+        (string) ($prefixes[0] ?? 'KB1'),
         $keyId,
         $keys[$keyId],
     ))->sign('POST', $path, $payload, $headers);
@@ -204,6 +213,102 @@ it('refuses an unsigned callback, and says nothing about which check failed', fu
     expect($strip($unsigned))->toBe($strip($forged));
 
     expect($f['source']->fresh()?->status)->toBe(SourceState::Queued);
+});
+
+it('refuses a callback signed with the OUTBOUND key ring', function (): void {
+    $f = ingestionRunFixture();
+
+    $body = [
+        'job_id' => $f['item']->current_job_id, 'source_id' => $f['source']->id,
+        'source_item_id' => $f['item']->id, 'sequence' => 1, 'stage' => 'fetch',
+        'status' => SourceState::Fetching->value,
+    ];
+
+    // THE DIRECTION IS THE POINT. `k1` is what Laravel signs its own outbound calls with; a
+    // verifier that resolved secrets from that ring would 401 every real callback (FastAPI signs
+    // with `c1`) AND would make a leaked outbound key sufficient to forge one with any
+    // `X-KB-Org-Id` it liked. Both halves are the same one-line config read, so this test pins it.
+    $headers = [
+        'X-KB-Org-Id' => $f['org']->id,
+        'X-KB-Actor-Type' => 'system',
+        'X-KB-Operation' => 'ingestion.progress',
+        'X-KB-Request-Id' => (string) Str::ulid(),
+        'X-KB-Contract-Version' => (string) config('kb.contract_version'),
+        'X-KB-Timestamp' => (string) time(),
+    ];
+
+    /** @var array<string, string> $outbound */
+    $outbound = (array) config('services.ai.hmac.keys');
+    $outboundId = (string) config('services.ai.hmac.active');
+
+    $signature = (new InternalRequestSigner(
+        (string) config('kb.signing_prefix'),
+        $outboundId,
+        $outbound[$outboundId],
+    ))->sign('POST', '/internal/v1/callbacks/ingestion', json_encode($body, JSON_THROW_ON_ERROR), $headers);
+
+    postIngestionFrame($f['org']->id, $body, $headers, $signature)
+        ->assertStatus(401)->assertJsonPath('error_class', 'authentication');
+
+    expect($f['source']->fresh()?->status)->toBe(SourceState::Queued);
+});
+
+it('honours every prefix in the inbound accepted list, and no other', function (): void {
+    // THE TWO-DEPLOY PREFIX BUMP, which is the only reason this is configuration rather than a
+    // constant. A verifier reading a key no deployment sets would default to ['KB1'] and this
+    // would fail on the retired prefix while the operator's variable did nothing.
+    config(['services.ai.callback_hmac.accepted_prefixes' => ['KB2', 'KB1']]);
+
+    $f = ingestionRunFixture();
+
+    $frame = fn (int $sequence, string $prefix): array => [
+        'body' => [
+            'job_id' => $f['item']->current_job_id, 'source_id' => $f['source']->id,
+            'source_item_id' => $f['item']->id, 'sequence' => $sequence, 'stage' => 'fetch',
+            'status' => SourceState::Fetching->value,
+        ],
+        'prefix' => $prefix,
+    ];
+
+    /** @var array<string, string> $keys */
+    $keys = (array) config('services.ai.callback_hmac.keys');
+    $keyId = (string) array_key_first($keys);
+
+    $sign = function (array $body, string $prefix, array $headers) use ($keys, $keyId): string {
+        return (new InternalRequestSigner($prefix, $keyId, $keys[$keyId]))
+            ->sign('POST', '/internal/v1/callbacks/ingestion', json_encode($body, JSON_THROW_ON_ERROR), $headers);
+    };
+
+    foreach (['KB1', 'KB2'] as $i => $prefix) {
+        $body = $frame($i + 1, $prefix)['body'];
+
+        $headers = [
+            'X-KB-Org-Id' => $f['org']->id,
+            'X-KB-Actor-Type' => 'system',
+            'X-KB-Operation' => 'ingestion.progress',
+            'X-KB-Request-Id' => (string) Str::ulid(),
+            'X-KB-Contract-Version' => (string) config('kb.contract_version'),
+            'X-KB-Timestamp' => (string) time(),
+        ];
+
+        postIngestionFrame($f['org']->id, $body, $headers, $sign($body, $prefix, $headers))->assertOk();
+    }
+
+    // AND NOTHING ELSE. A prefix that left the list is refused on the second deploy, which is what
+    // makes dropping it a real retirement rather than a comment.
+    $body = $frame(3, 'KB3')['body'];
+
+    $headers = [
+        'X-KB-Org-Id' => $f['org']->id,
+        'X-KB-Actor-Type' => 'system',
+        'X-KB-Operation' => 'ingestion.progress',
+        'X-KB-Request-Id' => (string) Str::ulid(),
+        'X-KB-Contract-Version' => (string) config('kb.contract_version'),
+        'X-KB-Timestamp' => (string) time(),
+    ];
+
+    postIngestionFrame($f['org']->id, $body, $headers, $sign($body, 'KB3', $headers))
+        ->assertStatus(401)->assertJsonPath('error_class', 'authentication');
 });
 
 it('refuses a replayed request id and a stale timestamp', function (): void {
@@ -327,6 +432,193 @@ it('refuses a frame describing an item this organization does not have', functio
 });
 
 // ── the version row, the verification gate, and activation ───────────────────────────────────────
+
+it('rolls the SOURCE up from every item, so one finishing early cannot strand the others', function (): void {
+    // ── THE ORDINARY CASE, NOT AN EXOTIC ONE ─────────────────────────────────────────────────
+    //
+    // `UploadIntake::MAX_BATCH` is 10, so a source with several items is what a multi-file upload
+    // always produces. Each item is its own run with its own frames, and the runs do not proceed in
+    // lockstep. Mirroring the newest frame onto the source reported whichever item spoke last and
+    // then asked the transition table for the edge between two items' unrelated stages: file A
+    // reaching `ready` put the SOURCE in `ready`, file B's next `chunking` frame found no
+    // `Ready -> Chunking` edge, and the 422 it produced is `validation` — non-retryable, so the
+    // worker gave up. The rollback took B's `progress_sequence` with it, so B could never publish.
+    $f = ingestionRunFixture();
+
+    $itemB = new SourceItem;
+    $itemB->organization_id = $f['org']->id;
+    $itemB->source_id = $f['source']->id;
+    $itemB->canonical_key = 'text:'.$f['source']->id.':b';
+    $itemB->current_job_id = $f['item']->current_job_id;
+    $itemB->save();
+
+    $send = function (SourceItem $item, int $sequence, SourceState $status, array $extra = []) use ($f): TestResponse {
+        return postIngestionFrame($f['org']->id, [
+            'job_id' => $item->current_job_id,
+            'source_id' => $f['source']->id,
+            'source_item_id' => $item->id,
+            'sequence' => $sequence,
+            'stage' => $status->value,
+            'status' => $status->value,
+        ] + $extra);
+    };
+
+    $identityA = ingestionIdentity('item-a');
+    $identityB = ingestionIdentity('item-b');
+
+    // A runs all the way through while B has not started.
+    $send($f['item'], 1, SourceState::Fetching)->assertOk();
+    $send($f['item'], 2, SourceState::Parsing, ['version' => $identityA])->assertOk();
+
+    // THE SOURCE SHOWS THE LEAST ADVANCED ITEM. B has no version row at all, which is `queued`.
+    expect($f['source']->fresh()?->status)->toBe(SourceState::Queued);
+
+    foreach ([3 => SourceState::Normalizing, 4 => SourceState::Chunking, 5 => SourceState::Embedding, 6 => SourceState::Indexing] as $seq => $status) {
+        $send($f['item'], $seq, $status, ['version' => $identityA])->assertOk();
+    }
+
+    $send($f['item'], 7, SourceState::Ready, ['version' => $identityA, 'verified' => true])->assertOk();
+
+    // A HAS PUBLISHED AND THE SOURCE HAS NOT. Its own version is `ready` and its pointer is set;
+    // the source still reports the work B has not done.
+    expect($f['source']->fresh()?->status)->toBe(SourceState::Queued);
+    expect($f['item']->fresh()?->current_version_id)->not->toBeNull();
+
+    // ── AND B CAN STILL RUN, WHICH IS THE WHOLE FINDING ──────────────────────────────────────
+    $send($itemB, 1, SourceState::Fetching)->assertOk();
+    $send($itemB, 2, SourceState::Parsing, ['version' => $identityB])->assertOk();
+
+    expect($f['source']->fresh()?->status)->toBe(SourceState::Parsing);
+
+    foreach ([3 => SourceState::Normalizing, 4 => SourceState::Chunking, 5 => SourceState::Embedding, 6 => SourceState::Indexing] as $seq => $status) {
+        $send($itemB, $seq, $status, ['version' => $identityB])->assertOk();
+    }
+
+    $send($itemB, 7, SourceState::Ready, ['version' => $identityB, 'verified' => true])->assertOk();
+
+    // EVERY ITEM SETTLED CLEAN, so and only so does the source.
+    expect($f['source']->fresh()?->status)->toBe(SourceState::Ready);
+});
+
+it('reports the source as failed when any item failed, even with a sibling ready', function (): void {
+    $f = ingestionRunFixture();
+
+    $itemB = new SourceItem;
+    $itemB->organization_id = $f['org']->id;
+    $itemB->source_id = $f['source']->id;
+    $itemB->canonical_key = 'text:'.$f['source']->id.':b';
+    $itemB->current_job_id = $f['item']->current_job_id;
+    $itemB->save();
+
+    $send = function (SourceItem $item, int $sequence, SourceState $status, array $extra = []) use ($f): TestResponse {
+        return postIngestionFrame($f['org']->id, [
+            'job_id' => $item->current_job_id,
+            'source_id' => $f['source']->id,
+            'source_item_id' => $item->id,
+            'sequence' => $sequence,
+            'stage' => $status->value,
+            'status' => $status->value,
+        ] + $extra);
+    };
+
+    $identity = ingestionIdentity('failing-sibling');
+
+    $send($f['item'], 1, SourceState::Fetching)->assertOk();
+    $send($f['item'], 2, SourceState::Parsing, ['version' => $identity])->assertOk();
+    foreach ([3 => SourceState::Normalizing, 4 => SourceState::Chunking, 5 => SourceState::Embedding, 6 => SourceState::Indexing] as $seq => $status) {
+        $send($f['item'], $seq, $status, ['version' => $identity])->assertOk();
+    }
+    $send($f['item'], 7, SourceState::Ready, ['version' => $identity, 'verified' => true])->assertOk();
+
+    $send($itemB, 1, SourceState::Fetching)->assertOk();
+    $send($itemB, 2, SourceState::Failed)->assertOk();
+
+    // ANY FAILURE, NOT ALL OF THEM. Half a source is not `ready`: the pill is the operator's only
+    // signal that a document they uploaded is not answerable, and averaging it away turns a red
+    // badge into a support ticket.
+    expect($f['source']->fresh()?->status)->toBe(SourceState::Failed);
+});
+
+it('lets a retired version be re-derived, and refuses to walk the LIVE one backwards', function (): void {
+    // ── THE CRAWLED PAGE THAT GOES A -> B -> BACK TO A ───────────────────────────────────────
+    //
+    // `(source_item_id, ingest_key)` is unique, so re-deriving old content resolves the OLD version
+    // row rather than minting one. That row is `ready` or `ready_with_warnings`, and the table has
+    // no edge out of either to `parsing` — so the page could never be ingested again: every frame
+    // 422'd as `validation`, which is non-retryable.
+    $f = ingestionRunFixture();
+
+    $send = function (int $sequence, SourceState $status, array $extra = []) use ($f): TestResponse {
+        return postIngestionFrame($f['org']->id, [
+            'job_id' => $f['item']->current_job_id,
+            'source_id' => $f['source']->id,
+            'source_item_id' => $f['item']->id,
+            'sequence' => $sequence,
+            'stage' => $status->value,
+            'status' => $status->value,
+        ] + $extra);
+    };
+
+    $contentA = ingestionIdentity('content-a');
+    $contentB = ingestionIdentity('content-b');
+
+    $run = function (int $base, array $identity) use ($send): void {
+        $send($base + 1, SourceState::Fetching)->assertOk();
+        $send($base + 2, SourceState::Parsing, ['version' => $identity])->assertOk();
+        foreach ([3 => SourceState::Normalizing, 4 => SourceState::Chunking, 5 => SourceState::Embedding, 6 => SourceState::Indexing] as $offset => $status) {
+            $send($base + $offset, $status, ['version' => $identity])->assertOk();
+        }
+        $send($base + 7, SourceState::Ready, ['version' => $identity, 'verified' => true])->assertOk();
+    };
+
+    $run(0, $contentA);
+    $run(10, $contentB);
+
+    $versionA = SourceVersion::query()->withoutGlobalScopes()
+        ->where('ingest_key', '=', $contentA['ingest_key'])->sole();
+
+    expect($versionA->retired_at)->not->toBeNull();
+
+    // ── CONTENT REVERTS TO A ─────────────────────────────────────────────────────────────────
+    $send(21, SourceState::Fetching)->assertOk();
+    $send(22, SourceState::Parsing, ['version' => $contentA])->assertOk();
+
+    $versionA = SourceVersion::query()->withoutGlobalScopes()
+        ->where('ingest_key', '=', $contentA['ingest_key'])->sole();
+
+    // THE ROW RE-ENTERED, and its retirement stamp went with the run that retired it. A row left
+    // outside `source_versions_one_active_per_item` — activated, still retired — is a row nothing
+    // stops a second version being activated beside.
+    expect($versionA->status)->toBe(SourceState::Parsing);
+    expect($versionA->retired_at)->toBeNull();
+    expect($versionA->activated_at)->toBeNull();
+    expect($versionA->delivery_count)->toBe(0);
+
+    foreach ([23 => SourceState::Normalizing, 24 => SourceState::Chunking, 25 => SourceState::Embedding, 26 => SourceState::Indexing] as $seq => $status) {
+        $send($seq, $status, ['version' => $contentA])->assertOk();
+    }
+
+    $send(27, SourceState::Ready, ['version' => $contentA, 'verified' => true])
+        ->assertOk()->assertJsonPath('data.activated', true);
+
+    expect($f['item']->fresh()?->current_version_id)->toBe($versionA->id);
+
+    // ── AND THE LIVE VERSION IS NOT WALKED BACKWARDS ─────────────────────────────────────────
+    //
+    // A run that re-derives the identity of the version currently SERVING has nothing to publish.
+    // Taking it to `parsing` would drop a published version out of retrieval for the length of a
+    // run whose only outcome is the row that is already there — NN5 says the previous version
+    // serves until the new one is verified, and there is no new one.
+    $send(28, SourceState::Parsing, ['version' => $contentA])
+        ->assertOk()
+        ->assertJsonPath('data.applied', false)
+        ->assertJsonPath('data.reason', 'live_version_unchanged')
+        ->assertJsonPath('data.status', SourceState::Ready->value);
+
+    expect(SourceVersion::query()->withoutGlobalScopes()
+        ->where('ingest_key', '=', $contentA['ingest_key'])->sole()->status)->toBe(SourceState::Ready);
+    expect($f['item']->fresh()?->current_version_id)->toBe($versionA->id);
+});
 
 it('walks a run to a verified publication and switches the active-version pointer', function (): void {
     $f = ingestionRunFixture();
@@ -482,6 +774,45 @@ it('retires the prior version when a second one publishes, and never before', fu
 
     expect($retired->details['superseded_by_version_id'] ?? null)->toBe($secondVersion->id);
     expect($retired->subject_id)->toBe($firstVersion->id);
+});
+
+it('refuses an EMPTY version object, which required_with reads as absent', function (): void {
+    $f = ingestionRunFixture();
+
+    // ── THE ONE SHAPE THAT FELL THROUGH ─────────────────────────────────────────────────────
+    //
+    // `Validator::validateRequired()` treats `[]` as absent, so `required_with:version` fired on
+    // none of the six component rules and `{"version": {}}` validated clean. `toFrame()` then
+    // handed the empty array to `VersionIdentity::fromArray()`, whose `str()` raises on the first
+    // missing key — a 500 classed `internal_dependency`, which the taxonomy marks RETRYABLE, so
+    // the worker redelivered a frame that would fail identically forever.
+    postIngestionFrame($f['org']->id, [
+        'job_id' => $f['item']->current_job_id,
+        'source_id' => $f['source']->id,
+        'source_item_id' => $f['item']->id,
+        'sequence' => 1,
+        'stage' => 'parsing',
+        'status' => SourceState::Parsing->value,
+        'version' => [],
+    ])->assertStatus(422)
+        ->assertJsonPath('error_class', 'validation')
+        ->assertJsonValidationErrors(['version']);
+
+    // A PARTIAL-BUT-NON-EMPTY IDENTITY ALWAYS 422'D CORRECTLY, and still does — the components are
+    // `required_with` precisely because a half-identity would mint a version whose ingest key
+    // describes a different run than the row it sits on.
+    postIngestionFrame($f['org']->id, [
+        'job_id' => $f['item']->current_job_id,
+        'source_id' => $f['source']->id,
+        'source_item_id' => $f['item']->id,
+        'sequence' => 1,
+        'stage' => 'parsing',
+        'status' => SourceState::Parsing->value,
+        'version' => ['content_hash' => hash('sha256', 'x')],
+    ])->assertStatus(422)->assertJsonPath('error_class', 'validation');
+
+    expect(SourceVersion::query()->withoutGlobalScopes()
+        ->where('source_item_id', '=', $f['item']->id)->count())->toBe(0);
 });
 
 it('refuses to mint a version straight into a ready state', function (): void {

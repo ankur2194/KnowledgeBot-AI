@@ -225,13 +225,17 @@ export function SourceBotAssignments({
    *  409 — which arrives as `internal_dependency` + `retryable: false`, the pair a genuine 500 also
    *  carries, so only the envelope's `actionable` flag separates them. The envelope's `message` is
    *  never rendered on any other path: it is operator-facing. */
+  //
+  //  THE SENTENCE BELONGS TO THE WRITE THE USER LAST MADE. `grant.error ?? withdraw.error` reads
+  //  both forever: a mutation's error is cleared when THAT mutation runs again and never when the
+  //  other one succeeds, so a refused grant left its message on screen under a Remove that worked.
+  //  `submittedAt` is `0` until a mutation has run, which is also the idle case.
+  const latestWrite = grant.submittedAt >= withdraw.submittedAt ? grant : withdraw;
+
   const writeError =
-    grant.error === null && withdraw.error === null
+    latestWrite.submittedAt === 0 || latestWrite.error === null
       ? null
-      : (() => {
-          const error = grant.error ?? withdraw.error;
-          return actionableConflictMessage(error) ?? actionErrorCopy(error);
-        })();
+      : (actionableConflictMessage(latestWrite.error) ?? actionErrorCopy(latestWrite.error));
 
   return (
     <Card>

@@ -93,12 +93,15 @@ final class IngestionAcknowledgementResource extends JsonResource implements Pro
                             IngestionApplication::STALE_JOB,
                             IngestionApplication::UNKNOWN_ITEM,
                             IngestionApplication::ITEM_SOURCE_MISMATCH,
+                            IngestionApplication::LIVE_VERSION_UNCHANGED,
                         ],
                         'description' => 'Why. `out_of_order` is expected under redelivery; '
                             .'`stale_job` means a reprocess superseded this run mid-flight; '
-                            .'`unknown_item` and `item_source_mismatch` mean the frame describes a '
-                            .'row this organization does not have, which is neither and is worth an '
-                            .'alert.',
+                            .'`live_version_unchanged` means the frame re-derived the identity of '
+                            .'the version already serving this item, so the run is a no-op and the '
+                            .'live version was left alone; `unknown_item` and '
+                            .'`item_source_mismatch` mean the frame describes a row this '
+                            .'organization does not have, which is neither and is worth an alert.',
                     ],
                     'status' => [
                         'type' => ['string', 'null'],

@@ -456,6 +456,39 @@ it('refuses an OPC package carrying an /embeddings/ part', function (): void {
         ->and($screening->rejected[0]->getMessage())->toContain('embedded object');
 });
 
+it('refuses an embeddings part that has no parent directory, which a substring test could not see', function (): void {
+    // ── THE BYTE-IDENTICAL PACKAGE ONE DIRECTORY UP ─────────────────────────────────────────
+    //
+    // The refusal used to be `str_contains($lower, '/embeddings/')`, which requires the directory
+    // to HAVE a parent: `word/embeddings/oleObject1.bin` matched and `embeddings/oleObject1.bin`
+    // did not. Both are legal OPC part names, and the second is what a relationship target of
+    // `../embeddings/oleObject1.bin` resolves to for a real consumer — so the same payload was
+    // accepted, stored and re-served depending only on how deep the author put it. The VBA arm
+    // never had the gap, because `basename()` does not care how deep the part sits.
+    //
+    // MUTATION CHECK: restoring the substring test with the leading slash makes this row pass the
+    // gate — `hasRejections()` false — while the `word/embeddings/…` row above keeps passing.
+    $bytes = intakeZipBytes(intakeDocxParts() + ['embeddings/oleObject1.bin' => "\xD0\xCF\x11\xE0ole"]);
+
+    $screening = (new UploadIntake)->screen([0 => intakeFile('Handbook.docx', $bytes)]);
+
+    expect($screening->accepted)->toBe([])
+        ->and($screening->rejected[0]->reason)->toBe(UploadRejectionReason::MacroPayload)
+        ->and($screening->rejected[0]->getMessage())->toContain('embedded object');
+});
+
+it('does not refuse a part merely NAMED embeddings, because the test is on segments', function (): void {
+    // THE OTHER HALF OF "SEGMENT". A segment test that had become a bare `str_contains($lower,
+    // 'embeddings')` would refuse an ordinary `word/embeddings.xml`, which is a part name and not a
+    // directory — a false refusal on a legitimate document, and the reason the old value carried
+    // slashes at all.
+    $bytes = intakeZipBytes(intakeDocxParts() + ['word/embeddings.xml' => '<x/>']);
+
+    $screening = (new UploadIntake)->screen([0 => intakeFile('Handbook.docx', $bytes)]);
+
+    expect($screening->rejected)->toBe([]);
+});
+
 it('refuses the same two parts spelled with backslashes, because basename() does not on POSIX', function (array $parts, string $fragment): void {
     // ── THE MIXED SPELLING IS THE REACHABLE SHAPE, AND IT IS DELIBERATE ──────────────────────
     //

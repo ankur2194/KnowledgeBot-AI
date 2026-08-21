@@ -29,6 +29,7 @@ use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use RuntimeException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
+use Throwable;
 
 /**
  * The organization's knowledge sources: list, create, edit, disable, enable, reprocess, delete —
@@ -351,6 +352,12 @@ final class SourceService
      * the same key, dedupe against the completed run, and tell the admin "already processed" — the
      * exact silent no-op `force_nonce` exists to make impossible.
      *
+     * WHICH IS PRECISELY WHY THE WINDOW HAS TO BE PROPAGATED RATHER THAN RE-DERIVED.
+     * `EloquentKnowledgeSourceRepository::propagateRetrievalWindow()` carries an edited window down
+     * onto this source's chunks inside the same transaction, because the reprocess that would
+     * otherwise rebuild them is a no-op by construction. Read its docblock for what that does and
+     * does not reach — PostgreSQL, from which Qdrant is rebuildable; not the live payload.
+     *
      * @throws NotFoundHttpException when the row disappeared between the binding and the write
      */
     public function update(
@@ -441,9 +448,24 @@ final class SourceService
      * that says "this document parsed badly and published anyway".
      *
      * So the request says "enabled" and this method reads the live versions to decide which of the
-     * two it means. A source with no live version at all re-enables as `Ready`: there is nothing
-     * warned about, and the state is honest — retrievability additionally requires an active-version
-     * pointer, which such a source does not have, so the status alone cannot make it answerable.
+     * two it means.
+     *
+     * ── AND A SOURCE THAT HAS NEVER PUBLISHED CANNOT BE ENABLED AT ALL ────────────────────────
+     *
+     * `SourceState::transitionTable()` names `Failed -> Ready without a new run` as one of the four
+     * transitions it refuses BY CONSTRUCTION, and `IllegalSourceTransition` says the same. It is
+     * refused in ONE hop and it was reachable in TWO: `Failed -> Disabled` and `Disabled -> Ready`
+     * are both edges, and `UpdateSourceStatusRequest` accepts exactly those two values. A source
+     * whose only run failed therefore reached `status = ready` with `current_version_id` still
+     * null — `isRetrievable()` true, the console pill green, and not one chunk behind it.
+     *
+     * This used to be argued away on the grounds that retrievability additionally requires an
+     * active-version pointer, so the status alone cannot make the source answerable. That is true
+     * of the QUERY and false of everything an operator sees: the pill, the list filter, and the bot
+     * publish gate, which counts assignments rather than corpus. A state the machine documents as
+     * unreachable must not be reachable by walking around it, so the enable is refused instead —
+     * `POST .../sources/{source}/reprocess` is the route that turns a failed source into a ready
+     * one, and it is the route that actually indexes something.
      *
      * TODO(phase-c): THE MIRROR OF `disable()`'s MARKER, AND IT IS THE MORE DANGEROUS DIRECTION.
      * Re-enabling is a metadata write here and nowhere else: the same `set_payload` and the same
@@ -463,10 +485,29 @@ final class SourceService
         ?string $actorId = null,
         ?Request $request = null,
     ): KnowledgeSource {
+        $target = $this->readyFlavourFor($organization, $source);
+
+        // BEHIND THE TRANSITION TABLE, NEVER IN FRONT OF IT. A source in `deleting` or `deleted`
+        // also has no active version, and it must be refused for the reason the TABLE gives — the
+        // message that names both ends of the edge the caller asked for. Answering it with the
+        // corpus message instead would tell an operator to press Reprocess on a row being purged.
+        // So this only speaks about a move the table would otherwise allow.
+        if (
+            $source->status->canTransitionTo($target)
+            && ! $this->sources->hasActiveVersion($organization->organizationId(), $source->id)
+        ) {
+            throw ValidationException::withMessages([
+                'status' => 'This source has no indexed content, so enabling it would show it as '
+                    .'ready while every question about it goes unanswered. Its last run either '
+                    .'failed or has not published a version yet. Use Reprocess to run it again; '
+                    .'it becomes ready on its own once a version indexes and verifies.',
+            ]);
+        }
+
         return $this->move(
             $organization,
             $source,
-            $this->readyFlavourFor($organization, $source),
+            $target,
             AuditLogger::SOURCE_ENABLED,
             $actorId,
             $request,
@@ -1095,6 +1136,26 @@ final class SourceService
 
     /**
      * Dispatch the submission. One call site, so the job's shape is decided once.
+     *
+     * ── THE DISPATCH IS OUTSIDE THE TRANSACTION, SO IT NEEDS A COMPENSATION ───────────────────
+     *
+     * By the time this runs, the source is COMMITTED at `queued` and the reprocess audit row is
+     * written. A broker that is unreachable for the two seconds this takes therefore used to leave
+     * a source queued for a job that does not exist — and `queued -> queued` is deliberately not an
+     * edge of the transition table, so the operator's obvious repair, pressing Reprocess again,
+     * 422s forever. Nothing else would ever run: `SubmitIngestionJob::failed()` is a handler for a
+     * job that was never enqueued. The source was unrecoverable short of deleting it.
+     *
+     * `queued -> failed` IS an edge, and `failed -> queued` is the edge back, so moving the row to
+     * `failed` here is both truthful and the thing that makes Reprocess work. Same shape as
+     * `SubmitIngestionJob::failed()`, and the same reasoning about the audit trail: there is no
+     * operation in the catalog for "the platform could not enqueue", the actor already has their
+     * `source.created` or `source.reprocess.requested` row, and inventing one is not this method's
+     * to invent.
+     *
+     * THE COMPENSATION SWALLOWS ITS OWN FAILURE AND THE ORIGINAL EXCEPTION IS RETHROWN. If the
+     * database is unreachable too there is nothing left to write with, and losing the real cause to
+     * a secondary error would leave the operator debugging the wrong outage.
      */
     private function dispatchSubmission(
         string $organizationId,
@@ -1103,7 +1164,24 @@ final class SourceService
         ?string $forceNonce,
         ?string $actorId,
     ): void {
-        SubmitIngestionJob::dispatch($organizationId, $sourceId, $jobId, $forceNonce, $actorId);
+        try {
+            SubmitIngestionJob::dispatch($organizationId, $sourceId, $jobId, $forceNonce, $actorId);
+        } catch (Throwable $exception) {
+            try {
+                $this->sources->transition(
+                    $organizationId,
+                    $sourceId,
+                    SourceState::Failed,
+                    verified: false,
+                    // Deliberately empty; see the docblock.
+                    audit: static function (): void {},
+                );
+            } catch (Throwable) {
+                // See the docblock: the original cause is the one worth having.
+            }
+
+            throw $exception;
+        }
     }
 
     /**

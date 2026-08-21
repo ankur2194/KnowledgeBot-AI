@@ -227,6 +227,16 @@
         <env name="AI_SERVICE_URL" value="http://ai-api:8000"/>
         <env name="AI_HMAC_ACTIVE_KEY_ID" value="k1"/>
         <env name="AI_HMAC_KEY_K1" value="test-hmac-secret-k1"/>
+
+        <!--
+            The INBOUND ring, and it holds DIFFERENT secrets from the outbound one on purpose.
+            `k*` is Laravel -> FastAPI; `c*` is FastAPI -> Laravel. If the two directions shared a
+            value here, a verifier wired to the wrong ring would still pass every callback test,
+            which is exactly the defect the split exists to make visible. Two ids so a rotation
+            window — verifier holding c1 and c2 while the peer signs with one — is testable.
+        -->
+        <env name="AI_CALLBACK_HMAC_KEY_C1" value="test-callback-hmac-secret-c1"/>
+        <env name="AI_CALLBACK_HMAC_KEY_C2" value="test-callback-hmac-secret-c2"/>
         <env name="QDRANT_COLLECTION" value="kb_test"/>
     </php>
 </phpunit>

@@ -44,13 +44,21 @@ use Symfony\Component\HttpFoundation\Response;
  * with its own copy of the format is the bug that cannot be caught by an integration test: it
  * reports a 401 on a request that looks correct in every log.
  *
- * ── WHICH KEYS VERIFY ─────────────────────────────────────────────────────────────────────────
+ * ── WHICH KEYS VERIFY: THE CALLBACK RING, NEVER THE REQUEST RING ─────────────────────────────
  *
- * Every id in `services.ai.hmac.keys`, not just the `active` one. `active` says which id THIS
- * application SIGNS with; a verifier that only accepted that id would reject every callback signed
- * by the other live key during a rotation, which is precisely the window the id exists to survive.
- * The contract notes that callbacks may use their own key id — that is satisfied by adding an entry
- * to the same map, with no code change here.
+ * Every id in `services.ai.callback_hmac.keys` (`c1`, `c2`) — the INBOUND direction's ring — and
+ * never `services.ai.hmac.keys` (`k1`, `k2`), which is what THIS application signs its outbound
+ * calls WITH. The two directions are deliberately disjoint (config/services.php, and
+ * `app/core/keys.py` on the far side, which signs callbacks with `callback_active_key_id = c1`)
+ * so that a compromised outbound key cannot forge a callback. Verifying inbound with the outbound
+ * ring collapses that property twice over: it 401s every real callback, because FastAPI signs with
+ * `c1` and this map does not hold it, and it makes the outbound secret sufficient to forge one —
+ * with an attacker-chosen `X-KB-Org-Id`, since the org scope is a signed header and nothing after
+ * this middleware re-establishes it.
+ *
+ * All ids in the ring, not just the active one: a verifier that accepted only the peer's current
+ * id would reject every callback signed by the other live key during a rotation, which is
+ * precisely the window the id exists to survive.
  *
  * ── EVERY REFUSAL IS `authentication` / 401, AND THE MESSAGE NEVER SAYS WHICH CHECK FAILED ───
  *
@@ -86,7 +94,7 @@ final class VerifyInternalSignature
         [$keyId, $provided] = $parts;
 
         /** @var array<string, string> $keys */
-        $keys = (array) config('services.ai.hmac.keys', []);
+        $keys = (array) config('services.ai.callback_hmac.keys', []);
         $secret = $keys[$keyId] ?? null;
 
         if (! is_string($secret) || $secret === '') {
@@ -138,8 +146,11 @@ final class VerifyInternalSignature
         // ── RULES 2 AND 4 ─────────────────────────────────────────────────────────────────────
         $verified = false;
 
+        // The INBOUND list, which lives with the inbound key ring. `kb.signing_prefix` is the
+        // outbound emitter and is not a verifier input; there is deliberately no second
+        // accepted-prefix key under `kb.` for this to drift against (config/kb.php).
         /** @var list<string> $prefixes */
-        $prefixes = (array) config('kb.accepted_signing_prefixes', []);
+        $prefixes = (array) config('services.ai.callback_hmac.accepted_prefixes', []);
 
         foreach ($prefixes as $prefix) {
             $canonical = (new InternalRequestSigner((string) $prefix, $keyId, $secret))

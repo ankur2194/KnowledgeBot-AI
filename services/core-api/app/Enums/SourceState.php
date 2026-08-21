@@ -213,6 +213,37 @@ enum SourceState: string
     }
 
     /**
+     * How far through ONE RUN this state is, or null if it is not a state a run passes through.
+     *
+     * THE ONLY CONSUMER IS THE MULTI-ITEM ROLLUP, and it exists because a source with more than
+     * one item has no single state — `MAX_BATCH` is 10, so that is the ordinary case rather than
+     * the exotic one. Two files uploaded together are two items, two runs and two independent
+     * sequences of frames; mirroring whichever frame arrived last onto the source produces
+     * `ready` from the file that finished, and then asks the transition table for a `Ready ->
+     * Chunking` edge when the other file reports in. There is no such edge, so the second file
+     * 422s forever and can never publish.
+     *
+     * The rank makes the aggregate expressible: the source displays the LEAST advanced item, so it
+     * reads `chunking` while anything is still chunking and reaches a Ready flavour only when
+     * every item has. `Queued` is rank 0 here even though `isProcessing()` excludes it — that
+     * predicate answers "is work in flight", and this one answers "how far along", for which
+     * acceptance is the start rather than nothing.
+     */
+    public function runProgressRank(): ?int
+    {
+        return match ($this) {
+            self::Queued => 0,
+            self::Fetching => 1,
+            self::Parsing => 2,
+            self::Normalizing => 3,
+            self::Chunking => 4,
+            self::Embedding => 5,
+            self::Indexing => 6,
+            default => null,
+        };
+    }
+
+    /**
      * Whether NO legal edge leaves this state.
      *
      * Exactly one value, and it is not `Failed`. `Failed` is terminal for the RUN and not for the

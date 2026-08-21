@@ -232,9 +232,18 @@ final class UploadLimits
      *
      * `vbaProject.bin` is matched on its BASENAME, case-insensitively, because the part may sit at
      * `word/vbaProject.bin`, `xl/vbaProject.bin` or `ppt/vbaProject.bin` and Windows-authored
-     * archives are inconsistent about its case. `/embeddings/` is matched as a path segment —
-     * `word/embeddings/oleObject1.bin` — so a file whose NAME merely contains the word is not
-     * caught by accident.
+     * archives are inconsistent about its case. `embeddings` is matched as a whole DIRECTORY
+     * SEGMENT, so a file merely NAMED `embeddings.xml` is not caught by accident and a part at
+     * `embeddings/oleObject1.bin` — no parent directory — is.
+     *
+     * THE SEGMENT COMPARISON REPLACED A SUBSTRING ONE, AND THE DIFFERENCE WAS REACHABLE. The value
+     * used to be `'/embeddings/'` tested with `str_contains`, which requires the directory to have
+     * a PARENT: `word/embeddings/oleObject1.bin` matched and the byte-identical package with the
+     * part one level up did not. A `.docx` whose root part is `word/document.xml` (so the OPC
+     * identity check passes) and whose relationship targets `../embeddings/oleObject1.bin` stores
+     * that entry as `embeddings/oleObject1.bin` and resolves to the OPC part
+     * `/embeddings/oleObject1.bin` for a real consumer — accepted, stored and re-served. Its VBA
+     * sibling never had the gap, because `basename()` does not care how deep the part sits.
      *
      * BOTH VALUES ARE SPELLED WITH FORWARD SLASHES AND THE CALLER NORMALIZES BEFORE COMPARING.
      * `UploadIntake::assertPackageIsSafe()` step (d) runs `str_replace('\\', '/', …)` first, because
@@ -244,7 +253,7 @@ final class UploadLimits
      */
     public const VBA_PART_BASENAME = 'vbaproject.bin';
 
-    public const EMBEDDINGS_PART_SEGMENT = '/embeddings/';
+    public const EMBEDDINGS_PART_SEGMENT = 'embeddings';
 
     /**
      * The per-file ceiling in BYTES. The one conversion site — see the class docblock.

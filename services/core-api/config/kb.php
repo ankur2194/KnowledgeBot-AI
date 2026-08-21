@@ -147,28 +147,24 @@ return [
      * THE SEAM. `contract_version` mirrors the /internal/v1 path prefix and rides as
      * X-KB-Contract-Version; a mismatch between the two is a 409, not a best-effort guess.
      *
-     * `signing_prefix` is what this application EMITS. `accepted_signing_prefixes` is what it
-     * ACCEPTS on inbound callbacks, and it is configuration rather than a constant precisely so a
-     * prefix bump can be a two-deploy operation: the verifier accepts both for one release window
-     * while the signer emits one (ADR-018).
+     * `signing_prefix` is what this application EMITS on the OUTBOUND direction (Laravel ->
+     * FastAPI). What it ACCEPTS on an inbound callback is `services.ai.callback_hmac
+     * .accepted_prefixes`, and it lives beside the callback KEY RING rather than here on purpose:
+     * the two are one direction's configuration and separating them is how a verifier ends up
+     * reading one direction's prefixes against the other direction's keys (ADR-018).
      */
     'contract_version' => 'v1',
     'signing_prefix' => 'KB1',
 
     /*
-     * What this application ACCEPTS on an inbound signed callback. A LIST, not a scalar, and the
-     * plurality is the whole mechanism: during a prefix bump the verifier accepts both for one
-     * release window while the signer emits only the new one, because signer and verifier deploy at
-     * different times and a single-value scheme 401s every callback through a rolling deploy.
-     * Dropping the retired prefix is a DELIBERATE SECOND DEPLOY, never part of the first.
-     *
-     * It is configuration rather than a constant for exactly that reason (ADR-018). The comment
-     * above has named this key since the seam was designed; this is it.
+     * THERE IS NO `accepted_signing_prefixes` KEY HERE, and its absence is load-bearing. The
+     * inbound list is `services.ai.callback_hmac.accepted_prefixes` (env
+     * `AI_CALLBACK_ACCEPTED_PREFIXES`), which is what every .env.example and the Compose env file
+     * have shipped since the seam was designed. A second key of the same meaning under `kb.` read
+     * from an env var no deployment sets would SILENTLY DEFAULT to `['KB1']` and make the
+     * documented two-deploy prefix bump a no-op — the verifier would keep accepting exactly one
+     * prefix however the operator set the variable they were told to set.
      */
-    'accepted_signing_prefixes' => array_values(array_filter(array_map(
-        'trim',
-        explode(',', (string) env('KB_ACCEPTED_SIGNING_PREFIXES', 'KB1')),
-    ))),
     'signature_skew_seconds' => 60,
     'replay_nonce_ttl_seconds' => 120,
 

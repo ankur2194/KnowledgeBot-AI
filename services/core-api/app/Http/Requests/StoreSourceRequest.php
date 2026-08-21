@@ -103,6 +103,27 @@ final class StoreSourceRequest extends FormRequest
     public const MAX_TEXT_LENGTH = 500_000;
 
     /**
+     * `knowledge_sources_origin_url_scheme` AND `source_items_url_scheme`, AS A PCRE.
+     *
+     * THE TWO HALVES HAVE TO AGREE OR THE DIFFERENCE IS A 500. Anything this pattern admits and
+     * the CHECK refuses reaches PostgreSQL as an `IntegrityError` nothing in the taxonomy converts;
+     * anything the CHECK admits and this refuses is a URL a caller cannot submit and cannot find
+     * out why. The pattern is therefore transcribed rather than approximated:
+     *
+     *   ^https?://              the two schemes
+     *   [^@/?#\s]+              the AUTHORITY, with NO `@` — no `user:password@host`, which we
+     *                           would send to a host we do not control and log on the way
+     *   ([/?#]\S*)?             optionally path/query/fragment, where `@` is ordinary (`/@handle`)
+     *   $
+     *
+     * `\s` for POSIX `[:space:]` and `https?` for `https{0,1}`; the two engines spell the same
+     * two things differently and mean exactly the same set. `D` so `$` cannot match before a
+     * trailing newline — PCRE's default would otherwise admit `"https://host\n"`, which POSIX
+     * `[:space:]` refuses, and a newline in a URL is a log-forging shape as well as a parse error.
+     */
+    public const URL_AUTHORITY_PATTERN = '/^https?:\/\/[^@\/?#\s]+([\/?#]\S*)?$/D';
+
+    /**
      * Authorization is `Gate::authorize()` in the controller. See `IndexSourcesRequest`.
      */
     public function authorize(): bool
@@ -138,12 +159,23 @@ final class StoreSourceRequest extends FormRequest
             // is NOT the SSRF check and must never be read as one — that is the crawler's, it
             // resolves DNS, re-checks after every redirect, and nothing a validation rule can
             // express substitutes for it (`kb-security-baseline`).
+            //
+            // AND THE `regex` BESIDE IT IS NOT REDUNDANT. `url:http,https` permits `@` in the
+            // userinfo group, so `https://user:password@host/` validates — and
+            // `knowledge_sources_origin_url_scheme` refuses it, as an unconverted `QueryException`
+            // and a 500 on a route whose documented failure shape is a per-field 422. The pattern
+            // here is the CHECK's, character for character (see the
+            // `narrow_url_checks_to_the_authority` migration), so the refusal happens where it can
+            // name the field. Credentials in a crawl target are refused because we would send them
+            // to a host we do not control and log them on the way; `@` in the PATH is ordinary and
+            // is allowed by both halves.
             'origin_url' => [
                 'bail',
                 'required_if:type,'.SourceType::Url->value,
                 'prohibited_unless:type,'.SourceType::Url->value,
                 'string',
                 'url:http,https',
+                'regex:'.self::URL_AUTHORITY_PATTERN,
                 'max:2048',
             ],
 

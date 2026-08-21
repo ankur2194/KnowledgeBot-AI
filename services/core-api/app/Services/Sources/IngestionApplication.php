@@ -36,6 +36,18 @@ final readonly class IngestionApplication
 
     public const ITEM_SOURCE_MISMATCH = 'item_source_mismatch';
 
+    /**
+     * The frame re-derives content that is ALREADY THE LIVE VERSION of this item.
+     *
+     * `source_versions_item_ingest_key` is unique on `(source_item_id, ingest_key)`, so a re-run
+     * over unchanged bytes and unchanged configuration resolves to the EXISTING row — and when
+     * that row is the one `source_items.current_version_id` points at, walking it back through
+     * `parsing` would take a published version out of retrieval for the length of the run. NN5:
+     * "the previous version serves until the new one is verified". There is no new one; there is
+     * one row, and it is serving. Acknowledged, nothing written.
+     */
+    public const LIVE_VERSION_UNCHANGED = 'live_version_unchanged';
+
     public function __construct(
         public bool $applied,
         public string $reason,

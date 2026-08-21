@@ -162,7 +162,17 @@ final class IngestionCallbackRequest extends FormRequest
             // identity is worse than none: it would mint a version row whose ingest key describes a
             // different run than the row it sits on, and the dedup index would then match a future
             // request against a version that is not what it asked for.
-            'version' => ['bail', 'sometimes', 'array'],
+            //
+            // `min:1` AND IT IS NOT DECORATION. `required_with` treats an EMPTY ARRAY as absent —
+            // `Validator::validateRequired()` returns false for `[]` — so `{"version": {}}` fires
+            // none of the six rules below and validates clean. `toFrame()` then hands the empty
+            // array to `VersionIdentity::fromArray()`, whose `str()` raises on the first missing
+            // key, and the 500 that produces is `internal_dependency` — which the taxonomy marks
+            // RETRYABLE, so the worker redelivers a frame that will fail identically forever. A
+            // partial-but-non-empty `version` 422s correctly; only the empty one falls through,
+            // which is exactly the shape a worker emits when it builds the object before it has
+            // anything to put in it.
+            'version' => ['bail', 'sometimes', 'array', 'min:1'],
             'version.content_hash' => ['bail', 'required_with:version', 'string', 'regex:/\A[0-9a-f]{64}\z/'],
             'version.ingest_key' => ['bail', 'required_with:version', 'string', 'regex:/\A[0-9a-f]{64}\z/'],
             'version.parser_cfg_version' => ['bail', 'required_with:version', 'string', 'max:200'],

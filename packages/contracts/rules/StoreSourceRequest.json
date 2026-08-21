@@ -52,6 +52,7 @@
             "prohibited_unless:type,url",
             "string",
             "url:http,https",
+            "regex:/^https?:\\/\\/[^@\\/?#\\s]+([\\/?#]\\S*)?$/D",
             "max:2048"
         ],
         "tags": [

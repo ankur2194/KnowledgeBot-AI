@@ -2,20 +2,30 @@
 
 declare(strict_types=1);
 
+use App\Enums\ChunkContentType;
+use App\Enums\ChunkIndexStatus;
+use App\Enums\DocumentElementKind;
 use App\Enums\OrganizationStatus;
 use App\Enums\OrgRole;
 use App\Enums\SourceState;
 use App\Enums\SourceType;
 use App\Jobs\SubmitIngestionJob;
 use App\Models\AuditLog;
+use App\Models\Chunk;
+use App\Models\DocumentElement;
 use App\Models\KnowledgeSource;
 use App\Models\Organization;
 use App\Models\SourceItem;
+use App\Models\SourceVersion;
 use App\Models\User;
 use App\Services\Audit\AuditLogger;
 use App\Support\Http\ListQuery;
+use Carbon\CarbonImmutable;
+use Illuminate\Bus\Dispatcher as BusDispatcher;
+use Illuminate\Contracts\Bus\Dispatcher;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Tests\Support\SpaSession;
 
 /*
@@ -242,6 +252,39 @@ it('creates a url source with its origin, and no object behind it', function ():
     expect($item->content_hash)->toBeNull();
 });
 
+it('agrees with the database about which URLs are acceptable, in both directions', function (): void {
+    $f = sourceCrudFixture();
+
+    SpaSession::establish(currentTest(), $f['ownerA']);
+
+    $url = "/api/v1/organizations/{$f['orgA']->id}/sources";
+
+    // ── ACCEPTED: `@` IN THE PATH IS ORDINARY ────────────────────────────────────────────────
+    //
+    // Mastodon and Medium address a profile as `/@handle`, and a documentation page can perfectly
+    // well be `/u/a@b.com`. The CHECK used to forbid `@` anywhere after the scheme, so these were
+    // refused by PostgreSQL — as an unconverted `QueryException` and therefore a 500, because
+    // `url:http,https` had already let them through.
+    foreach (['https://docs.example.com/u/a@b.com', 'https://mastodon.social/@user'] as $accepted) {
+        currentTest()->postJson($url, [
+            'type' => 'url', 'name' => 'Handbook', 'origin_url' => $accepted,
+        ], spaHeaders())->assertCreated()->assertJsonPath('data.origin_url', $accepted);
+    }
+
+    // ── REFUSED, AND AS A 422 RATHER THAN A 500 ──────────────────────────────────────────────
+    //
+    // Credentials in a crawl target are the hazard the constraint exists for: we would send them to
+    // a host we do not control and log them on the way. `url:http,https` permits the userinfo
+    // group, so the request-side rule has to state it too or the refusal happens at the INSERT.
+    $refused = currentTest()->postJson($url, [
+        'type' => 'url', 'name' => 'Handbook', 'origin_url' => 'https://user:password@internal.example.com/',
+    ], spaHeaders());
+
+    $refused->assertStatus(422)
+        ->assertJsonPath('error_class', 'validation')
+        ->assertJsonValidationErrors(['origin_url']);
+});
+
 it('refuses a body whose content does not match its declared type, in both directions', function (): void {
     $f = sourceCrudFixture();
 
@@ -404,6 +447,108 @@ it('edits metadata and refuses the four fields that have their own routes', func
     Queue::assertNothingPushed();
 });
 
+it('checks the retrieval window against the STORED row, so a partial PATCH cannot invert it', function (): void {
+    $f = sourceCrudFixture();
+
+    $source = KnowledgeSource::factory()->recycle($f['orgA'])->status(SourceState::Ready)->create([
+        'effective_at' => CarbonImmutable::parse('2026-09-01T00:00:00Z'),
+        'expires_at' => null,
+    ]);
+
+    SpaSession::establish(currentTest(), $f['ownerA']);
+
+    $url = "/api/v1/organizations/{$f['orgA']->id}/sources/{$source->id}";
+
+    // ── THE HALF A `date` RULE CANNOT SEE ────────────────────────────────────────────────────
+    //
+    // `after:effective_at` compares against `$this->input('effective_at')`, which on a PATCH that
+    // does not name it is `null` — and every timestamp is "after" null, so the rule passed
+    // vacuously while nothing checked the value on the row. The request then reached
+    // `knowledge_sources_window_ordered` and came back as an unconverted `QueryException`: a 500
+    // on a route whose documented failure shape is a per-field map.
+    currentTest()->patchJson($url, ['expires_at' => '2026-08-01T00:00:00Z'], spaHeaders())
+        ->assertStatus(422)
+        ->assertJsonPath('error_class', 'validation')
+        ->assertJsonValidationErrors(['expires_at']);
+
+    // THE OTHER DIRECTION, because a caller can invert the window from either end.
+    $source->forceFill(['expires_at' => CarbonImmutable::parse('2026-10-01T00:00:00Z')])->save();
+
+    currentTest()->patchJson($url, ['effective_at' => '2026-11-01T00:00:00Z'], spaHeaders())
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['expires_at']);
+
+    // AN EXPLICIT NULL CLEARS THAT END, which makes the window open-ended and therefore valid. The
+    // presence test is `has()` and not `filled()` for exactly this: `filled()` reads the clear as
+    // "not supplied" and would compare against the value the request is removing.
+    currentTest()->patchJson($url, ['expires_at' => null], spaHeaders())->assertOk();
+
+    // AND A WINDOW THAT IS ORDERED IS STILL ACCEPTED.
+    currentTest()->patchJson($url, ['expires_at' => '2027-01-01T00:00:00Z'], spaHeaders())->assertOk();
+});
+
+it('carries an edited retrieval window down onto the chunks a query actually reads', function (): void {
+    $f = sourceCrudFixture();
+
+    $source = KnowledgeSource::factory()->recycle($f['orgA'])->status(SourceState::Ready)->create([
+        'effective_at' => null,
+        'expires_at' => null,
+    ]);
+
+    $version = crudLiveVersion($source, SourceState::Ready);
+
+    // One element and one chunk, built with the window the source had AT CHUNK TIME — which is how
+    // the data plane writes it: a Qdrant filter cannot reach up a foreign-key chain, so the pair is
+    // denormalized onto every chunk rather than read off the source at query time.
+    $element = new DocumentElement;
+    $element->organization_id = $source->organization_id;
+    $element->source_version_id = $version->id;
+    $element->seq = 0;
+    $element->kind = DocumentElementKind::Text;
+    $element->text = 'Refunds are accepted for 30 days.';
+    $element->char_start = 0;
+    $element->char_end = 33;
+    $element->save();
+
+    $chunk = new Chunk;
+    $chunk->organization_id = $source->organization_id;
+    $chunk->source_id = $source->id;
+    $chunk->source_item_id = $version->source_item_id;
+    $chunk->source_version_id = $version->id;
+    $chunk->seq = 0;
+    $chunk->document_element_id = $element->id;
+    $chunk->element_ids = [$element->id];
+    $chunk->heading_path = [];
+    $chunk->char_start = 0;
+    $chunk->char_end = 33;
+    $chunk->lang = 'en';
+    $chunk->content_type = ChunkContentType::Prose;
+    $chunk->token_count = 8;
+    $chunk->content_hash = hash('sha256', 'chunk');
+    $chunk->text = $element->text;
+    $chunk->vector_point_id = (string) Str::uuid();
+    $chunk->index_status = ChunkIndexStatus::Indexed;
+    $chunk->embedding_model_id = $version->embedding_model_version;
+    $chunk->parser_version = $version->parser_cfg_version;
+    $chunk->chunker_version = $version->chunker_cfg_version;
+    $chunk->save();
+
+    expect($chunk->expires_at)->toBeNull();
+
+    SpaSession::establish(currentTest(), $f['ownerA']);
+
+    currentTest()->patchJson(
+        "/api/v1/organizations/{$f['orgA']->id}/sources/{$source->id}",
+        ['expires_at' => '2026-08-01T00:00:00Z'],
+        spaHeaders(),
+    )->assertOk();
+
+    // WITHOUT THIS THE EDIT REACHES NOTHING. A reprocess cannot repair it either: neither column is
+    // a component of the ingest key, so a re-run dedupes against the completed version and changes
+    // nothing. PostgreSQL is what Qdrant is rebuilt FROM, so this is where the window has to land.
+    expect($chunk->fresh()?->expires_at)->not->toBeNull();
+});
+
 it('refuses an edit that names nothing, so the trail cannot record a change that did not happen', function (): void {
     $f = sourceCrudFixture();
 
@@ -550,16 +695,54 @@ it('disables a source immediately and audits it with the status it actually held
     Queue::assertNothingPushed();
 });
 
+/**
+ * One item with one ACTIVATED version, which is what makes a source enable-able at all.
+ *
+ * The pointer is written separately from `activated_at` deliberately: the enable path reads
+ * `source_items.current_version_id` and never the timestamps, so a fixture that set only the
+ * timestamps would pass against an implementation that had quietly switched to the other reading.
+ */
+function crudLiveVersion(KnowledgeSource $source, SourceState $status): SourceVersion
+{
+    $item = new SourceItem;
+    $item->organization_id = $source->organization_id;
+    $item->source_id = $source->id;
+    $item->canonical_key = 'text:'.$source->id;
+    $item->save();
+
+    $version = new SourceVersion;
+    $version->organization_id = $source->organization_id;
+    $version->source_item_id = $item->id;
+    $version->version_number = 1;
+    $version->content_hash = hash('sha256', $item->id.':content');
+    $version->ingest_key = hash('sha256', $item->id.':key');
+    $version->parser_cfg_version = 'parser/v1:docling-2.118';
+    $version->ocr_cfg_version = 'ocr/v1:rapidocr';
+    $version->chunker_cfg_version = 'chunker/v1:structure';
+    $version->embedding_model_version = 'emb/v1:openai:text-embedding-3-large:d3072:9f2a1c4e77b1';
+    $version->status = $status;
+    $version->warning_summary = [];
+    $version->activated_at = now()->toImmutable();
+    $version->save();
+
+    SourceItem::withoutGlobalScopes()->whereKey($item->id)
+        ->update(['current_version_id' => $version->id]);
+
+    return $version;
+}
+
 it('re-enables into the flavour the live version published as, not the one the client asked for', function (): void {
     $f = sourceCrudFixture();
 
     $source = KnowledgeSource::factory()->recycle($f['orgA'])->status(SourceState::Disabled)->create();
 
+    // A LIVE VERSION THAT PUBLISHED CLEAN, so the answer is plain `ready` because of what the
+    // VERSION says rather than because there was nothing to ask. The warned case is the sibling
+    // test above; the no-corpus case is the one below.
+    crudLiveVersion($source, SourceState::Ready);
+
     SpaSession::establish(currentTest(), $f['ownerA']);
 
-    // WITH NO LIVE VERSION AT ALL the answer is plain `ready`: there is nothing warned about, and
-    // the state is honest — retrievability additionally requires an active-version pointer, which
-    // this source does not have, so the status alone cannot make it answerable.
     currentTest()->putJson(
         "/api/v1/organizations/{$f['orgA']->id}/sources/{$source->id}/status",
         ['status' => 'ready'],
@@ -568,6 +751,39 @@ it('re-enables into the flavour the live version published as, not the one the c
 
     expect(AuditLog::query()->where('operation', '=', AuditLogger::SOURCE_ENABLED)->sole()
         ->details['previous_status'] ?? null)->toBe(SourceState::Disabled->value);
+});
+
+it('refuses to enable a source that has never published a version', function (): void {
+    $f = sourceCrudFixture();
+
+    // THE TWO-HOP ROUTE AROUND A REFUSAL THE TABLE DOCUMENTS AS IMPOSSIBLE. `Failed -> Ready`
+    // without a new run is one of the four transitions `SourceState::transitionTable()` names as
+    // refused by construction — and `Failed -> Disabled` and `Disabled -> Ready` are both edges, so
+    // walking around it took two requests. The source came out `ready` with `current_version_id`
+    // null: `status_permits_retrieval` true, the console pill green, and not one chunk behind it.
+    $source = KnowledgeSource::factory()->recycle($f['orgA'])->status(SourceState::Failed)->create();
+
+    SpaSession::establish(currentTest(), $f['ownerA']);
+
+    currentTest()->putJson(
+        "/api/v1/organizations/{$f['orgA']->id}/sources/{$source->id}/status",
+        ['status' => 'disabled'],
+        spaHeaders(),
+    )->assertOk();
+
+    $refused = currentTest()->putJson(
+        "/api/v1/organizations/{$f['orgA']->id}/sources/{$source->id}/status",
+        ['status' => 'ready'],
+        spaHeaders(),
+    );
+
+    $refused->assertStatus(422)->assertJsonPath('error_class', 'validation')
+        ->assertJsonValidationErrors(['status']);
+
+    // AND IT POINTS AT THE ROUTE THAT ACTUALLY INDEXES SOMETHING, rather than at the state machine.
+    expect((string) $refused->json('errors.status.0'))->toContain('Reprocess');
+
+    expect($source->fresh()?->status)->toBe(SourceState::Disabled);
 });
 
 // ── reprocess ────────────────────────────────────────────────────────────────────────────────────
@@ -631,6 +847,43 @@ it('reprocesses with a fresh force nonce, re-claims every item, and answers 202'
 });
 
 // ── delete ───────────────────────────────────────────────────────────────────────────────────────
+
+it('fails a source whose submission could not be enqueued, so Reprocess is not a dead button', function (): void {
+    $f = sourceCrudFixture();
+
+    $source = KnowledgeSource::factory()->recycle($f['orgA'])->status(SourceState::Ready)->create();
+
+    SpaSession::establish(currentTest(), $f['ownerA']);
+
+    // ── THE DISPATCH IS OUTSIDE THE TRANSACTION AND HAD NO COMPENSATION ─────────────────────
+    //
+    // By the time it runs, the source is COMMITTED at `queued` and the audit row is written. A
+    // broker unreachable for those two seconds left a source queued for a job that does not exist —
+    // and `queued -> queued` is deliberately not an edge, so pressing Reprocess again 422s forever.
+    // Nothing else would ever run: `SubmitIngestionJob::failed()` is a handler for a job that was
+    // never enqueued. The source was unrecoverable short of deleting it.
+    // `app()->instance()` and not Mockery: the same swap every other suite here uses, and it keeps
+    // the double's shape visible to the analyser rather than behind a magic method. It EXTENDS the
+    // real dispatcher rather than reimplementing the interface, so a method added to the contract
+    // later cannot make this test the thing that has to be edited.
+    app()->instance(Dispatcher::class, new class(app()) extends BusDispatcher
+    {
+        public function dispatch($command): mixed
+        {
+            throw new \RuntimeException('the broker is unreachable');
+        }
+    });
+
+    currentTest()->postJson(
+        "/api/v1/organizations/{$f['orgA']->id}/sources/{$source->id}/reprocess",
+        [],
+        spaHeaders(),
+    )->assertStatus(500);
+
+    // `queued -> failed` IS an edge and `failed -> queued` is the edge back, so the operator's
+    // obvious repair works. The original exception is what surfaced; the compensation is silent.
+    expect($source->fresh()?->status)->toBe(SourceState::Failed);
+});
 
 it('deletes in two phases: the row survives, out of retrieval, with nothing proven yet', function (): void {
     $f = sourceCrudFixture();

@@ -732,7 +732,16 @@ final class UploadIntake
                     );
                 }
 
-                if (str_contains($lower, UploadLimits::EMBEDDINGS_PART_SEGMENT)) {
+                // SEGMENTS, NEVER A SUBSTRING. `str_contains($lower, '/embeddings/')` requires
+                // the directory to have a PARENT, so `word/embeddings/oleObject1.bin` was refused
+                // while `embeddings/oleObject1.bin` — the same payload, one level up, reachable
+                // through a `../embeddings/…` relationship target and a legal OPC part name — was
+                // accepted and stored. Every segment but the last is a directory; `basename()` on
+                // the VBA arm above already had this right.
+                $segments = explode('/', $lower);
+                array_pop($segments);
+
+                if (in_array(UploadLimits::EMBEDDINGS_PART_SEGMENT, $segments, true)) {
                     throw $refuse(
                         UploadRejectionReason::MacroPayload,
                         'This document carries an embedded object (`'.$name.'`). An OLE object inside a '
