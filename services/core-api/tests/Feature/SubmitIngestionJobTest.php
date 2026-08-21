@@ -256,6 +256,38 @@ it('fails the source rather than leaving it queued forever when submission canno
     expect($f['source']->fresh()?->status)->toBe(SourceState::Failed);
 });
 
+it('does not force `failed` onto a run that has already started, or onto a newer dispatch', function (): void {
+    // ── `failed()` RUNS AFTER THE LAST ATTEMPT, WHICH IS NOT "THE RUN FAILED" ────────────────
+    //
+    // The submission has a 20 s timeout and the far side does not roll back. A 202 lost to that
+    // timeout means the Celery task IS running, its first callback has already moved this source to
+    // `parsing`, and stamping `failed` on top of it is worse than the state it replaces:
+    // `Failed -> Parsing` is not an edge, so every subsequent frame 422s as `validation` —
+    // non-retryable, so the worker gives up — the run completes on the far side, and nothing is
+    // ever activated. `handle()` has guarded on both of these since it was written; `failed()`
+    // guarded on neither.
+    $f = submitJobFixture();
+
+    $f['source']->forceFill(['status' => SourceState::Parsing->value])->save();
+
+    $f['job']->failed(new \RuntimeException('a 202 we never saw'));
+
+    expect($f['source']->fresh()?->status)->toBe(SourceState::Parsing);
+
+    // ── AND SUPERSESSION ────────────────────────────────────────────────────────────────────
+    //
+    // A second reprocess re-stamped every item while this dispatch was exhausting its attempts. The
+    // source is `queued` for the NEW run, and failing it here kills a submission nothing has tried.
+    $f['source']->forceFill(['status' => SourceState::Queued->value])->save();
+
+    SourceItem::withoutGlobalScopes()->whereKey($f['item']->id)
+        ->update(['current_job_id' => (string) Str::ulid()]);
+
+    $f['job']->failed(new \RuntimeException('superseded before it ran'));
+
+    expect($f['source']->fresh()?->status)->toBe(SourceState::Queued);
+});
+
 // ── the deadline epoch (finding B1) ──────────────────────────────────────────────────────────────
 
 it('measures X-KB-Deadline from the moment the job runs, never from the worker\'s boot', function (): void {

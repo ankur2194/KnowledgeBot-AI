@@ -172,8 +172,24 @@ export function SourceRowActions({
     return actionErrorCopy(error);
   };
 
-  const message =
-    failure(remove.error) ?? failure(toggle.error) ?? failure(reprocess.error) ?? null;
+  /**
+   * THE BANNER BELONGS TO THE ACTION THE USER LAST TOOK, AND TO NO OTHER.
+   *
+   * This used to read `failure(remove.error) ?? failure(toggle.error) ?? failure(reprocess.error)`,
+   * which is every mutation's error forever. TanStack Query clears an error when THAT mutation runs
+   * again and nothing clears it when a DIFFERENT one succeeds — so a refused Reprocess left its
+   * sentence on screen underneath a Disable that worked, telling the user an action failed when the
+   * one they just took did not, about a row whose state has since moved.
+   *
+   * `submittedAt` and NOT an `onMutate` callback: this app writes no optimistic pre-mutation state
+   * anywhere (see `use-file-uploads.ts`'s docblock, which explains why that grep must stay empty).
+   * It is `0` while a mutation has never run, so the idle case falls out of the same comparison.
+   */
+  const latestWrite = [reprocess, toggle, remove].reduce((newest, candidate) =>
+    candidate.submittedAt > newest.submittedAt ? candidate : newest,
+  );
+
+  const message = latestWrite.submittedAt === 0 ? null : failure(latestWrite.error);
 
   if (!canManage) {
     // No menu at all rather than one full of disabled items: a viewer who may read this list and

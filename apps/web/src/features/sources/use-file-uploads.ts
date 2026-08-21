@@ -103,6 +103,16 @@ export interface FileUploads {
   /** Removes a row that has not started, or one that has finished. Cancels first if it is running. */
   readonly remove: (id: string) => void;
   readonly cancel: (id: string) => void;
+  /**
+   * Starts every `queued` row.
+   *
+   * TAKES NO ARGUMENT, AND KEEPING IT THAT WAY IS DELIBERATE: it is handed straight to an `onClick`
+   * in more than one place, so an optional first parameter would silently receive a `MouseEvent`.
+   * The single-row form is internal and `requeue` is its only caller.
+   *
+   * A row leaves `queued` SYNCHRONOUSLY as its request is opened, so `isPending` is true before
+   * this returns and a second press cannot re-send a batch that is already on the wire.
+   */
   readonly start: () => void;
   /**
    * Puts one settled row back in the queue and starts it. The USER-INITIATED retry, and it is a
@@ -213,78 +223,111 @@ export function useFileUploads(options: UseFileUploadsOptions): FileUploads {
     [cancel, commit],
   );
 
+  const launch = useCallback(
+    (only?: string): void => {
+      for (const item of itemsRef.current) {
+        // Only `queued` starts. `failed` deliberately does NOT restart here: an upload carries no
+        // idempotency key, so re-sending is a second source row, and that has to be a thing the user
+        // asks for on a row they can see rather than something a batch-level Start does for them.
+        if (item.phase !== 'queued') continue;
+
+        // ONE ROW WHEN THE CALLER NAMED ONE. `requeue` used to call this with no argument, so
+        // retrying a single failed row also uploaded every row the user had STAGED but not
+        // submitted — bypassing `uploadSchema(limits)`, which runs inside `form.handleSubmit` and
+        // nowhere else. An oversized or wrong-type file went on the wire while its own row was
+        // still showing the red issue note that said it would not.
+        if (only !== undefined && item.id !== only) continue;
+
+        // ── THE PHASE IS WRITTEN BEFORE THE REQUEST, NOT BY ITS FIRST PROGRESS EVENT ─────────
+        //
+        // `uploadFile` opens the XHR and returns; the first `on_progress` lands a network round
+        // trip later. Leaving the row at `queued` for that window left `isPending` false and the
+        // submit button enabled, so a second click ~200 ms after the first re-entered this loop,
+        // saw every row still `queued`, and sent the whole batch AGAIN. There is no
+        // `Idempotency-Key` on this route by design, so that is a duplicate source row, a duplicate
+        // parse, a duplicate embedding bill and duplicate passages in the index — and the second
+        // `controllers.current.set` overwrote the first controller, so the first request could no
+        // longer be cancelled either.
+        //
+        // `progress: null` stays null: the bar is indeterminate until there is something to
+        // measure, which is exactly what null means here.
+        patch(item.id, { phase: 'uploading', progress: null, error: null });
+
+        const controller = new AbortController();
+        controllers.current.set(item.id, controller);
+
+        void latest.current
+          .upload(item.file, {
+            signal: controller.signal,
+            on_progress: (progress) => {
+              // The row goes to `finishing` the moment the last byte is out, so the bar stops
+              // claiming to measure the server's half of the work.
+              patch(item.id, {
+                phase: progress.percent === 100 ? 'finishing' : 'uploading',
+                progress,
+              });
+            },
+          })
+          .then(
+            () => {
+              patch(item.id, { phase: 'done', error: null });
+            },
+            (cause: unknown) => {
+              // CANCELLATION IS AN OUTCOME, NOT A FAILURE — the same reading `stream-answer.ts`
+              // gives it. No error state, no banner, no retry affordance: the user asked for this.
+              if (cause instanceof Error && cause.name === 'AbortError') {
+                patch(item.id, { phase: 'cancelled', error: null });
+                return;
+              }
+
+              // Anything else is a `KbError` from `lib/api/upload.ts`. A non-KbError can only be a
+              // defect in the uploader itself, and it renders as the null-class sentence, which is
+              // the honest reading of "we do not know what happened".
+              const error =
+                cause instanceof KbError
+                  ? cause
+                  : new KbError(null, false, null, null, String(cause));
+
+              patch(item.id, { phase: 'failed', error });
+
+              // The 422 field map, handed on for the form to attach to `files.<index>`. Present
+              // ONLY on `error_class: 'validation'` — never `{}` on any other class — so the guard
+              // is on the map itself rather than on the class name.
+              //
+              // The index is read at REJECTION time, not captured when the request started: a row
+              // removed while the batch was in flight renumbers the ones after it, and form state's
+              // `files.<index>` is the position the control has NOW. `-1` means the row was removed
+              // while its request was on the wire — there is no control to write to, so nothing is.
+              if (error.errors !== null) {
+                const index = itemsRef.current.findIndex((row) => row.id === item.id);
+                if (index !== -1) latest.current.onFileRejected?.(index, error.errors);
+              }
+            },
+          )
+          .finally(() => {
+            controllers.current.delete(item.id);
+          });
+      }
+    },
+    [patch],
+  );
+
   const start = useCallback((): void => {
-    for (const item of itemsRef.current) {
-      // Only `queued` starts. `failed` deliberately does NOT restart here: an upload carries no
-      // idempotency key, so re-sending is a second source row, and that has to be a thing the user
-      // asks for on a row they can see rather than something a batch-level Start does for them.
-      if (item.phase !== 'queued') continue;
-
-      const controller = new AbortController();
-      controllers.current.set(item.id, controller);
-
-      void latest.current
-        .upload(item.file, {
-          signal: controller.signal,
-          on_progress: (progress) => {
-            // The row goes to `finishing` the moment the last byte is out, so the bar stops
-            // claiming to measure the server's half of the work.
-            patch(item.id, {
-              phase: progress.percent === 100 ? 'finishing' : 'uploading',
-              progress,
-            });
-          },
-        })
-        .then(
-          () => {
-            patch(item.id, { phase: 'done', error: null });
-          },
-          (cause: unknown) => {
-            // CANCELLATION IS AN OUTCOME, NOT A FAILURE — the same reading `stream-answer.ts`
-            // gives it. No error state, no banner, no retry affordance: the user asked for this.
-            if (cause instanceof Error && cause.name === 'AbortError') {
-              patch(item.id, { phase: 'cancelled', error: null });
-              return;
-            }
-
-            // Anything else is a `KbError` from `lib/api/upload.ts`. A non-KbError can only be a
-            // defect in the uploader itself, and it renders as the null-class sentence, which is
-            // the honest reading of "we do not know what happened".
-            const error =
-              cause instanceof KbError
-                ? cause
-                : new KbError(null, false, null, null, String(cause));
-
-            patch(item.id, { phase: 'failed', error });
-
-            // The 422 field map, handed on for the form to attach to `files.<index>`. Present ONLY
-            // on `error_class: 'validation'` — never `{}` on any other class — so the guard is on
-            // the map itself rather than on the class name.
-            //
-            // The index is read at REJECTION time, not captured when the request started: a row
-            // removed while the batch was in flight renumbers the ones after it, and form state's
-            // `files.<index>` is the position the control has NOW. `-1` means the row was removed
-            // while its request was on the wire — there is no control to write to, so nothing is.
-            if (error.errors !== null) {
-              const index = itemsRef.current.findIndex((row) => row.id === item.id);
-              if (index !== -1) latest.current.onFileRejected?.(index, error.errors);
-            }
-          },
-        )
-        .finally(() => {
-          controllers.current.delete(item.id);
-        });
-    }
-  }, [patch]);
+    launch();
+  }, [launch]);
 
   const requeue = useCallback(
     (id: string): void => {
       // `progress: null` too, or the bar reappears at the percentage the failed attempt reached and
       // then jumps backwards when the new request's first event lands.
       patch(id, { phase: 'queued', error: null, progress: null });
-      start();
+
+      // THIS ROW AND NO OTHER. `requeue` used to call the batch-wide `start()`, which also
+      // uploaded every row the user had STAGED but not submitted — bypassing `uploadSchema(limits)`,
+      // which runs inside `form.handleSubmit` and nowhere else.
+      launch(id);
     },
-    [patch, start],
+    [patch, launch],
   );
 
   return {

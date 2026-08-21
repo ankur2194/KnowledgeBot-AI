@@ -65,7 +65,8 @@
         "version": [
             "bail",
             "sometimes",
-            "array"
+            "array",
+            "min:1"
         ],
         "version.chunker_cfg_version": [
             "bail",

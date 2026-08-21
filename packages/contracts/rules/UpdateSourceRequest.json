@@ -21,8 +21,7 @@
             "bail",
             "sometimes",
             "nullable",
-            "date",
-            "after:effective_at"
+            "date"
         ],
         "name": [
             "bail",

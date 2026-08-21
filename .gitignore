@@ -135,3 +135,7 @@ blob-report/
 #                                        from the same directory, so a missing source would become
 #                                        a Docker-created directory and the gateway would run with
 #                                        no concurrency or bandwidth limit at all.
+
+# Git bundles are transfer artifacts, never source. One was swept into a commit by an
+# `add -A` and caught before it reached the remote; the blob would have been permanent.
+*.bundle

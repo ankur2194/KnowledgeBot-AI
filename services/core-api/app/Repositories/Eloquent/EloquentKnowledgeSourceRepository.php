@@ -314,8 +314,51 @@ final class EloquentKnowledgeSourceRepository implements KnowledgeSourceReposito
                 $audit($source);
             }
 
+            $this->propagateRetrievalWindow($organizationId, $source);
+
             return $source;
         });
+    }
+
+    /**
+     * Carry an edited retrieval window down onto this source's chunks.
+     *
+     * ── WHY THE EDIT DOES NOT TAKE EFFECT WITHOUT THIS ────────────────────────────────────────
+     *
+     * `effective_at` and `expires_at` are a RETRIEVAL window, and a Qdrant filter cannot reach up a
+     * foreign-key chain — so the pair is denormalized onto every chunk at chunk time
+     * (`create_chunks_table`, and `ChunkMetadata` on the data-plane side). Writing only
+     * `knowledge_sources` therefore produces a 200, an audit row and a console that shows the
+     * source as expired, while the rows a query actually reads keep the window they were built
+     * with. Nor does a reprocess repair it: neither column is a component of the ingest key, so a
+     * re-run dedupes against the completed version and changes nothing.
+     *
+     * ── WHAT THIS FIXES AND WHAT IT DOES NOT ──────────────────────────────────────────────────
+     *
+     * PostgreSQL is the source of truth and Qdrant is rebuildable FROM it (NN4), so writing the
+     * window here is what makes a rebuild correct. IT DOES NOT UPDATE THE LIVE QDRANT PAYLOAD —
+     * that is a data-plane write on a collection this application never touches, and there is no
+     * re-index job to ask for yet. Until one exists, an edited window reaches a running query only
+     * after the next full re-index. Recorded as the residual rather than papered over: the failure
+     * this closes is the one where the window is wrong FOREVER, including after a rebuild.
+     *
+     * Only when a window column actually moved. `wasChanged()` and not `isDirty()`, for the same
+     * reason the audit gate above uses it.
+     */
+    private function propagateRetrievalWindow(string $organizationId, KnowledgeSource $source): void
+    {
+        if (! $source->wasChanged('effective_at') && ! $source->wasChanged('expires_at')) {
+            return;
+        }
+
+        Chunk::query()
+            ->where('organization_id', '=', $organizationId)
+            ->where('source_id', '=', $source->id)
+            ->update([
+                'effective_at' => $source->effective_at,
+                'expires_at' => $source->expires_at,
+                'updated_at' => now()->toImmutable(),
+            ]);
     }
 
     /**
@@ -734,6 +777,15 @@ final class EloquentKnowledgeSourceRepository implements KnowledgeSourceReposito
             ->exists();
     }
 
+    public function hasActiveVersion(string $organizationId, string $sourceId): bool
+    {
+        return SourceItem::query()
+            ->where('organization_id', '=', $organizationId)
+            ->where('source_id', '=', $sourceId)
+            ->whereNotNull('current_version_id')
+            ->exists();
+    }
+
     /**
      * @return list<SourceItem>
      */
@@ -759,6 +811,25 @@ final class EloquentKnowledgeSourceRepository implements KnowledgeSourceReposito
     ): IngestionApplication {
         return DB::transaction(function () use ($organizationId, $frame, $audit): IngestionApplication {
             // ── THE GUARD, IN ORDER, ALL OF IT UNDER ONE LOCK ────────────────────────────────
+            //
+            // SOURCE FIRST, THEN ITEM, AND THE ORDER IS THE WHOLE POINT. `requeue()` locks the
+            // source and then claims its items; this path used to lock the item and then reach for
+            // its source in the middle of the checks, which is a textbook lock-order inversion — a
+            // redelivered callback racing an administrator's Reprocess deadlocks, PostgreSQL aborts
+            // one side with 40P01, and the taxonomy has nowhere to put that but a 500. One global
+            // order, stated once, honoured in both places.
+            //
+            // The source is locked by the id the FRAME names, before anything has verified the item
+            // belongs to it. That is safe and deliberate: the row is organization-scoped, so a
+            // frame naming another tenant's source finds nothing, and the
+            // `item->source_id !== frame->sourceId` mismatch is still checked below — it simply now
+            // runs with both rows already held rather than acquiring the second one late.
+            $source = $this->lock($organizationId, $frame->sourceId);
+
+            if ($source === null) {
+                return IngestionApplication::refused(IngestionApplication::ITEM_SOURCE_MISMATCH);
+            }
+
             $item = SourceItem::query()
                 ->where('organization_id', '=', $organizationId)
                 ->whereKey($frame->sourceItemId)
@@ -791,12 +862,6 @@ final class EloquentKnowledgeSourceRepository implements KnowledgeSourceReposito
                 return IngestionApplication::refused(IngestionApplication::OUT_OF_ORDER);
             }
 
-            $source = $this->lock($organizationId, $frame->sourceId);
-
-            if ($source === null) {
-                return IngestionApplication::refused(IngestionApplication::ITEM_SOURCE_MISMATCH);
-            }
-
             $identity = $frame->identity;
 
             // NO IDENTITY ON THIS FRAME MEANS THIS FRAME IS ABOUT NO VERSION AT ALL, and falling
@@ -810,6 +875,72 @@ final class EloquentKnowledgeSourceRepository implements KnowledgeSourceReposito
             $version = $identity === null
                 ? null
                 : $this->resolveVersion($organizationId, $item, $frame, $identity);
+
+            if ($version !== null && ! $version->wasRecentlyCreated) {
+                // ── A RUN THAT LANDED ON AN EXISTING VERSION ROW ─────────────────────────────
+                //
+                // `resolveVersion()` dedupes on `(source_item_id, ingest_key)`, so a re-run over
+                // content and configuration that have not changed resolves to a row that already
+                // exists — and that row may be FINISHED. Two shapes, and they are not the same
+                // thing:
+                //
+                //   1. IT IS THE LIVE VERSION. Content went out and came back unchanged, or the
+                //      same bytes were submitted twice. Walking `ready -> parsing` would take a
+                //      published version out of retrieval for the length of a run that has nothing
+                //      to publish — NN5 says the previous version serves until the new one is
+                //      verified, and here there is no new one. Acknowledged and left alone.
+                //   2. IT IS A TERMINAL ROW THAT IS NOT LIVE — retired, or failed. A crawled page
+                //      whose content goes A -> B -> back to A re-derives v1's ingest key, and v1 is
+                //      retired. This is a genuine new run over an existing row, so the row RE-ENTERS
+                //      at the frame's own status, exactly as a newly minted row is BORN at it: the
+                //      transition table is strictly sequential and `ready`/`failed` have no edge to
+                //      `parsing`, which is the state a crawl's first identity-carrying frame
+                //      reports. Without this the page can never be ingested again — every frame
+                //      422s as `validation`, which the taxonomy marks non-retryable.
+                //
+                // A ROW CAN NEVER RE-ENTER STRAIGHT INTO A READY FLAVOUR, for the same reason it
+                // may never be BORN into one (see `resolveVersion()`): publication is the act of
+                // superseding something, and nothing was verified. That is structural here rather
+                // than a check — re-entry requires the frame to be reporting work in flight, and a
+                // frame that reports a Ready flavour is by definition not.
+                $live = $item->current_version_id === $version->id;
+
+                // SETTLED means the RUN that produced this row finished — the three outcomes a run
+                // has, and nothing else. A version sitting in `deleting` or `archived` is
+                // deliberately NOT settled by this definition: a callback must not resurrect one,
+                // so those fall through to the strict `moveVersion()` below and are refused there.
+                $settled = $version->status->isRetrievable() || $version->status === SourceState::Failed;
+                $frameSettles = $frame->status->isRetrievable() || $frame->status === SourceState::Failed;
+
+                $reentering = $settled && ! $frameSettles;
+
+                if ($reentering && $live && $version->status->isRetrievable()) {
+                    // CARRIES THE SOURCE, unlike the four refusals above. Those could not resolve a
+                    // row at all, which is what the acknowledgement's null `status` means; this one
+                    // resolved everything and decided to write nothing, so the honest answer to
+                    // "what state is this source in" is the state it is in.
+                    return new IngestionApplication(
+                        applied: false,
+                        reason: IngestionApplication::LIVE_VERSION_UNCHANGED,
+                        source: $source,
+                        version: $version,
+                    );
+                }
+
+                if ($reentering) {
+                    // A NEW RUN, SO THE RUN-SCOPED FIELDS RESET. `delivery_count` is the bound on
+                    // THIS run's redeliveries and would otherwise start above the cap; the warning
+                    // summary describes the previous run's output; and `activated_at`/`retired_at`
+                    // are cleared together so the row leaves the partial unique index cleanly
+                    // rather than sitting outside it with a stale retirement stamp (see the
+                    // activation branch below, and `source_versions_retired_after_activated`).
+                    $version->status = $frame->status;
+                    $version->delivery_count = 0;
+                    $version->warning_summary = [];
+                    $version->activated_at = null;
+                    $version->retired_at = null;
+                }
+            }
 
             if ($version !== null) {
                 // THE DELIVERY COUNTER, APPLIED AS A CEILING RATHER THAN AN INCREMENT. The frame
@@ -867,8 +998,17 @@ final class EloquentKnowledgeSourceRepository implements KnowledgeSourceReposito
                     }
                 }
 
-                if ($version->activated_at === null) {
+                // BOTH TIMESTAMPS, ALWAYS TOGETHER. `source_versions_one_active_per_item` is
+                // UNIQUE on `(source_item_id)` WHERE `activated_at IS NOT NULL AND retired_at IS
+                // NULL`, so a row activated with a stale `retired_at` still set falls OUTSIDE the
+                // index — the pointer names it, every query serves it, and nothing then prevents a
+                // second version of the same item being activated alongside it. Stamping
+                // `activated_at` afresh also keeps `source_versions_retired_after_activated`
+                // (`retired_at >= activated_at`) true of the NEXT retirement rather than of the
+                // previous one.
+                if ($version->activated_at === null || $version->retired_at !== null) {
                     $version->activated_at = now()->toImmutable();
+                    $version->retired_at = null;
                 }
 
                 $item->current_version_id = $version->id;
@@ -877,18 +1017,11 @@ final class EloquentKnowledgeSourceRepository implements KnowledgeSourceReposito
 
             $version?->save();
 
-            if ($source->status !== $frame->status) {
-                // THE ROLLUP. Ruling R3: `knowledge_sources.status` and `source_versions.status`
-                // share one fifteen-value vocabulary precisely so the version's processing state
-                // can be displayed ON the source. It is a real transition and it goes through the
-                // same table — a source in `deleting` cannot be dragged back to `parsing` by a
-                // frame from a run that was already superseded.
-                $this->move($source, $frame->status, $frame->verified);
-                $source->save();
-            }
-
+            // The item's own contribution is settled before the rollup reads its siblings.
             $item->progress_sequence = $frame->sequence;
             $item->save();
+
+            $this->rollUpSourceStatus($organizationId, $source, $item, $frame);
 
             $application = new IngestionApplication(
                 applied: true,
@@ -903,6 +1036,165 @@ final class EloquentKnowledgeSourceRepository implements KnowledgeSourceReposito
 
             return $application;
         });
+    }
+
+    /**
+     * Project every item's state onto the source, and write it if the projection may be written.
+     *
+     * ── WHY THIS IS AN AGGREGATE AND NOT THE FRAME'S OWN STATUS ───────────────────────────────
+     *
+     * A source has up to `UploadIntake::MAX_BATCH` items, so a multi-item source is the ORDINARY
+     * case. Each item is a separate run with its own frames, and the runs do not proceed in
+     * lockstep. Mirroring the newest frame onto the source therefore reports whichever item spoke
+     * last — and, worse, asks the transition table for the edge between two items' unrelated
+     * stages. Two files, A finishing first: the source reaches `ready`, B then reports `chunking`,
+     * `Ready -> Chunking` is not an edge, and the frame 422s as `validation`. The taxonomy marks
+     * that non-retryable, so the worker gives up, and because the whole application runs in one
+     * transaction the rollback also discards B's `progress_sequence` bump. B can never publish.
+     *
+     * ── THE PROJECTION ────────────────────────────────────────────────────────────────────────
+     *
+     * The source shows the LEAST ADVANCED item while any run is in flight, and settles only when
+     * every item has: failed if any failed, `ready_with_warnings` if any warned, `ready` if all
+     * are clean. That is the reading an operator expects from a progress column — "this source is
+     * chunking" means something is still chunking — and it is monotonic through a run in the
+     * normal case.
+     *
+     * ── WHY IT IS WRITTEN AND NOT TRANSITIONED ────────────────────────────────────────────────
+     *
+     * IT IS DELIBERATELY NOT `move()`, and that is the part to read twice. An aggregate can jump:
+     * three items at `ready`, `indexing` and `fetching` project `fetching`, and the moment the
+     * `fetching` one FAILS the projection becomes `indexing` — a legal state of the world with no
+     * edge between the two. A strict transition here would refuse a frame that describes reality
+     * correctly, which is the same defect one layer up.
+     *
+     * What `move()` was actually protecting is kept, and stated as two allow-lists rather than
+     * inherited from a table that answers a different question: the rollup may only write when the
+     * source is in a state THIS RUN OWNS, and may only write another such state. A source in
+     * `deleting`, `deleted`, `archived`, `disabled` or `draft` is never touched by a callback — a
+     * superseded frame cannot drag a source being purged back to `parsing`, which is the specific
+     * thing the transition table was there to stop. The version rows remain strictly transitioned;
+     * they are the durable truth, and `knowledge_sources.status` is the display rollup R3 says it
+     * is.
+     */
+    private function rollUpSourceStatus(
+        string $organizationId,
+        KnowledgeSource $source,
+        SourceItem $item,
+        IngestionProgress $frame,
+    ): void {
+        // ONLY FROM A STATE THE RUN OWNS. Everything else is an administrative state a callback
+        // has no business writing over.
+        $writableFrom = $source->status->runProgressRank() !== null
+            || $source->status->isRetrievable()
+            || $source->status === SourceState::Failed;
+
+        if (! $writableFrom) {
+            return;
+        }
+
+        /** @var list<SourceState> $states */
+        $states = [$frame->status];
+
+        // Every OTHER item of this source, by the state of its most recent version row. An item
+        // with no version row yet has been accepted and nothing more, which is `Queued` — and it
+        // must count, or a source whose second file has not been picked up would settle `ready`
+        // with half its content unindexed.
+        $siblings = SourceItem::query()
+            ->where('organization_id', '=', $organizationId)
+            ->where('source_id', '=', $source->id)
+            ->whereKeyNot($item->id)
+            ->get();
+
+        foreach ($siblings as $sibling) {
+            $latest = SourceVersion::query()
+                ->where('organization_id', '=', $organizationId)
+                ->where('source_item_id', '=', $sibling->id)
+                ->orderByDesc('version_number')
+                ->first();
+
+            // An item with no version row yet is `Queued` — accepted and nothing more.
+            $states[] = $latest === null ? SourceState::Queued : $latest->status;
+        }
+
+        $target = $this->projectSourceStatus($states);
+
+        if ($target === null || $target === $source->status) {
+            return;
+        }
+
+        // The target is drawn from the same closed set as `$writableFrom` above by construction —
+        // `projectSourceStatus()` returns only run states, Failed, or a Ready flavour — so there is
+        // no second allow-list to keep in step here.
+        $source->status = $target;
+        $source->save();
+    }
+
+    /**
+     * The aggregate of one source's item states, or null when the items have nothing to say.
+     *
+     * @param  list<SourceState>  $states
+     */
+    private function projectSourceStatus(array $states): ?SourceState
+    {
+        $lowestRank = null;
+        $anyFailed = false;
+        $anyWarned = false;
+        $anyReady = false;
+
+        foreach ($states as $state) {
+            $rank = $state->runProgressRank();
+
+            if ($rank !== null) {
+                $lowestRank = $lowestRank === null ? $rank : min($lowestRank, $rank);
+
+                continue;
+            }
+
+            if ($state === SourceState::Failed) {
+                $anyFailed = true;
+
+                continue;
+            }
+
+            if ($state === SourceState::ReadyWithWarnings) {
+                $anyWarned = true;
+                $anyReady = true;
+
+                continue;
+            }
+
+            if ($state === SourceState::Ready) {
+                $anyReady = true;
+            }
+
+            // Anything else is an administrative state — disabled, deleting, archived, deleted,
+            // draft. It is neither in flight nor a run outcome, so it contributes nothing and the
+            // rest of the items decide. A source ALL of whose items are in that shape projects
+            // null and is left entirely alone.
+        }
+
+        // ANYTHING STILL RUNNING WINS, at its least advanced stage.
+        if ($lowestRank !== null) {
+            foreach (SourceState::cases() as $case) {
+                if ($case->runProgressRank() === $lowestRank) {
+                    return $case;
+                }
+            }
+        }
+
+        // ANY failure, not all of them. A source half of whose files failed is not `ready`: the
+        // console pill is the operator's only signal that a document they uploaded is not
+        // answerable, and averaging it away turns a red badge into a support ticket.
+        if ($anyFailed) {
+            return SourceState::Failed;
+        }
+
+        if ($anyWarned) {
+            return SourceState::ReadyWithWarnings;
+        }
+
+        return $anyReady ? SourceState::Ready : null;
     }
 
     /**

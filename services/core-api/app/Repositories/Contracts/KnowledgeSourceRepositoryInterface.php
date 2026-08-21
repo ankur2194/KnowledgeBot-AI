@@ -283,6 +283,15 @@ interface KnowledgeSourceRepositoryInterface
     public function hasWarnedActiveVersion(string $organizationId, string $sourceId): bool;
 
     /**
+     * Does ANY item of this source currently point at a version?
+     *
+     * The cheap half of `contentSummary()->activeVersionCount`, existing separately because the
+     * enable path asks only whether the number is zero and has no use for the other eleven
+     * aggregates that summary computes.
+     */
+    public function hasActiveVersion(string $organizationId, string $sourceId): bool;
+
+    /**
      * The `source_items` rows of one source, oldest first, for the ingestion submission body.
      *
      * @return list<\App\Models\SourceItem>

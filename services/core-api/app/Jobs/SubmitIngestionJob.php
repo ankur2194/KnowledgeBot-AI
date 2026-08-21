@@ -249,6 +249,35 @@ final class SubmitIngestionJob implements ShouldBeEncrypted, ShouldBeUniqueUntil
             $sources = $this->container()->make(KnowledgeSourceRepositoryInterface::class);
 
             $tenancy->runFor($this->organizationId, function () use ($sources): void {
+                // ── THE SAME TWO GUARDS `handle()` APPLIES, FOR THE SAME REASON ──────────────
+                //
+                // `failed()` runs after the LAST attempt, which is not the same thing as the run
+                // having failed. The submission has a 20 s timeout and the far side does not
+                // rollback: a 202 lost to a timeout means the Celery task IS running, its first
+                // callback has already moved this source to `parsing`, and forcing `failed` on top
+                // of it is worse than the state it replaces. `Failed -> Parsing` is not an edge of
+                // the table, so every subsequent frame 422s as `validation` — non-retryable, so
+                // the worker gives up — the run completes on the far side, and nothing is ever
+                // activated. The source is stuck with no operator action that recovers it.
+                //
+                // `Queued` is therefore the only state this may write from, exactly as it is the
+                // only state a submission is meaningful from. Reading the ROW rather than trusting
+                // that the attempt count implies anything about the far side.
+                $source = $sources->find($this->organizationId, $this->sourceId);
+
+                if ($source === null || $source->status !== SourceState::Queued) {
+                    return;
+                }
+
+                // AND SUPERSESSION. A second reprocess re-stamped every item while this dispatch
+                // was exhausting its attempts; the source is `queued` for the NEW run, and failing
+                // it here would kill a submission that has not been tried yet.
+                $items = $sources->itemsFor($this->organizationId, $this->sourceId);
+
+                if ($items === [] || $items[0]->current_job_id !== $this->jobId) {
+                    return;
+                }
+
                 $sources->transition(
                     $this->organizationId,
                     $this->sourceId,

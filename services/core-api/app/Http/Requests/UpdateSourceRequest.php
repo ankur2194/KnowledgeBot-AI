@@ -4,9 +4,12 @@ declare(strict_types=1);
 
 namespace App\Http\Requests;
 
+use App\Models\KnowledgeSource;
 use App\Services\Sources\SourceEdit;
 use Carbon\CarbonImmutable;
+use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
+use Throwable;
 
 /**
  * `PATCH .../sources/{source}` — edit one source's METADATA. An absent field is left alone.
@@ -63,8 +66,16 @@ final class UpdateSourceRequest extends FormRequest
             'tags' => ['bail', 'sometimes', 'array', 'max:50'],
             'tags.*' => ['bail', 'string', 'min:1', 'max:64', 'distinct'],
 
+            // NO `after:effective_at` HERE, AND ITS ABSENCE IS THE FIX. On a PATCH the sibling is
+            // usually ABSENT, and Laravel's `after` compares against whatever `$this->input()`
+            // returns for the named field — `null` — which every timestamp is "after". The rule
+            // passed vacuously while nothing checked the value actually STORED, so
+            // `{"expires_at": "2026-08-01"}` against a stored `effective_at` of `2026-09-01`
+            // reached the INSERT, hit `knowledge_sources_window_ordered`, and surfaced as an
+            // unconverted `QueryException` — a 500 on a response documented as 422. The window is
+            // checked against the MERGED row in `withValidator()` below instead.
             'effective_at' => ['bail', 'sometimes', 'nullable', 'date'],
-            'expires_at' => ['bail', 'sometimes', 'nullable', 'date', 'after:effective_at'],
+            'expires_at' => ['bail', 'sometimes', 'nullable', 'date'],
 
             // See the class docblock. `missing`, never `prohibited`.
             'status' => ['missing'],
@@ -72,6 +83,78 @@ final class UpdateSourceRequest extends FormRequest
             'origin_url' => ['missing'],
             'content' => ['missing'],
         ];
+    }
+
+    /**
+     * THE WINDOW IS A PROPERTY OF THE MERGED ROW, NOT OF THE REQUEST BODY.
+     *
+     * A PATCH names one end of the window and leaves the other stored, so the only comparison that
+     * means anything is between what the caller sent and what is already on the row. Both
+     * directions matter and neither is expressible as a `date` rule: sending only `expires_at`
+     * must be checked against the stored `effective_at`, and sending only `effective_at` against
+     * the stored `expires_at` — a caller can invert the window from either end.
+     *
+     * `has()` AND NOT `filled()`. An explicit `null` CLEARS that end, which makes the window
+     * open-ended and therefore always valid; `filled()` would read the clear as "not supplied" and
+     * compare against a value the request is removing.
+     *
+     * The refusal is a per-field 422, which is the whole point — `knowledge_sources_window_ordered`
+     * would catch it either way, as a `QueryException` nothing converts, on a route whose
+     * documented failure shape is a field map.
+     */
+    public function withValidator(Validator $validator): void
+    {
+        $validator->after(function (Validator $validator): void {
+            // Only when both ends parsed. Comparing a value the `date` rule already rejected would
+            // add a second, confusing error to a field that has one.
+            if ($validator->errors()->hasAny(['effective_at', 'expires_at'])) {
+                return;
+            }
+
+            $source = $this->route('source');
+
+            if (! $source instanceof KnowledgeSource) {
+                return;
+            }
+
+            $effective = $this->has('effective_at')
+                ? $this->windowEnd($this->input('effective_at'))
+                : $source->effective_at;
+
+            $expires = $this->has('expires_at')
+                ? $this->windowEnd($this->input('expires_at'))
+                : $source->expires_at;
+
+            if ($effective === null || $expires === null) {
+                return;
+            }
+
+            if ($expires->greaterThan($effective)) {
+                return;
+            }
+
+            $validator->errors()->add('expires_at', 'A source stops answering strictly after it '
+                .'starts. This request would leave the window ending at or before it begins, '
+                .'counting the value already stored for the end it does not name — which is a row '
+                .'`knowledge_sources_window_ordered` refuses, and a refusal that reaches the '
+                .'database arrives as a 500 rather than as this message.');
+        });
+    }
+
+    private function windowEnd(mixed $value): ?CarbonImmutable
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        try {
+            return CarbonImmutable::parse((string) $value);
+        } catch (Throwable) {
+            // Unparsable, which the `date` rule has already refused — the guard above means this
+            // is unreachable, and returning null rather than raising keeps it that way if it ever
+            // is not.
+            return null;
+        }
     }
 
     /**
