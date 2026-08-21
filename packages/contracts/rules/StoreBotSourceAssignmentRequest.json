@@ -1,0 +1,23 @@
+{
+    "class": "App\\Http\\Requests\\StoreBotSourceAssignmentRequest",
+    "rules": {
+        "enabled": [
+            "bail",
+            "sometimes",
+            "boolean"
+        ],
+        "priority": [
+            "bail",
+            "sometimes",
+            "integer",
+            "min:0",
+            "max:9999"
+        ],
+        "source_id": [
+            "bail",
+            "required",
+            "string",
+            "ulid"
+        ]
+    }
+}

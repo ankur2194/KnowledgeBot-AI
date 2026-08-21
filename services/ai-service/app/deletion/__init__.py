@@ -13,8 +13,9 @@ half-purged version — chunk rows gone but points alive, or points alive but th
 holding the citation excerpt already swept. The user sees a citation that resolves to
 nothing, which is worse than the stale answer the delete was meant to prevent.
 
-    filters.py       the seven-key allow-list, and the one module CI permits to build a
-                     payload key from a variable — exempted by its literal path
+    filters.py       the seven-key allow-list, and the only module that may build a payload
+                     key from a variable. A deleted CI job exempted it by literal path; two
+                     unit tests and one runtime guard are what hold it now
     tasks.py         the ordered purge, its reaper, retention and legal hold
     verification.py  the proof. `Deleted` is written by a passing verification pass, never
                      by a store returning 200

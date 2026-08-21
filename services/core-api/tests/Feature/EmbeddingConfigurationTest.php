@@ -254,6 +254,39 @@ it('sends X-KB-Config-Version, in the decimal shape the verifier requires', func
         ->toBeLessThan(72057594037927936, 'X-KB-Config-Version is wider than seven bytes; some bodies will exceed the verifier\'s 18 digits');
 });
 
+it('measures X-KB-Deadline from the start of the REQUEST, not from a fresh clock', function (): void {
+    // THE OTHER HALF OF FINDING B1, and the reason the client now names its two epochs separately.
+    // A request-scoped caller must keep measuring from LARAVEL_START — that is the entire point of
+    // the constant (public/index.php) and of an ABSOLUTE deadline: the far side's remaining time
+    // shrinks as ours does instead of restarting downstream. A queued caller must NOT, because
+    // there the constant is the worker's boot; that direction is asserted in
+    // tests/Feature/SubmitIngestionJobTest.php.
+    expect(defined('LARAVEL_START'))->toBeTrue(
+        'LARAVEL_START is not defined in this process, so the client is taking its fallback branch '
+        .'and this assertion is about a code path that does not ship. tests/bootstrap.php defines '
+        .'it; if phpunit.xml no longer points at that file, restore it before reading this green.',
+    );
+
+    $fixture = orgWithEmbeddingConnection();
+
+    fakeReadiness(readyVerdict($fixture['connection']->id));
+
+    currentTest()->actingAs($fixture['actor'])
+        ->getJson("/api/v1/organizations/{$fixture['org']->id}/embedding-configuration")
+        ->assertOk();
+
+    $sent = sentReadinessRequest();
+
+    // EXACT, not a window. There is only one instant this may be derived from, so the assertion can
+    // name it — and a client that had quietly moved to `microtime(true)` here would fail by the
+    // whole age of the process rather than by a rounding error.
+    expect((int) ($sent['headers']['X-KB-Deadline'] ?? 0))->toBe(
+        (int) round((LARAVEL_START + (float) config('kb.timeouts.readiness')) * 1000),
+        'X-KB-Deadline on a request-scoped internal call is not LARAVEL_START plus this call\'s '
+        .'budget, so the budget has been restarted somewhere inside the request',
+    );
+});
+
 it('covers X-KB-Config-Version with the signature rather than merely sending it', function (): void {
     // A header outside the signature is a header any hop may rewrite. The client is written so the
     // signed set and the sent set are ONE array — this asserts that property holds for the new

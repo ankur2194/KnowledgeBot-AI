@@ -101,6 +101,25 @@ final class Organization extends Model implements OrgOwned
     }
 
     /**
+     * REQUIRED BY ROUTE BINDING, not merely convenient. Every admin source route is mounted under
+     * `organizations/{organization}` with `->scopeBindings()`, and
+     * `Model::childRouteBindingRelationshipName()` is `Str::plural(Str::camel($childType))` — so
+     * the `{source}` segment resolves through THIS method. Without it the nested binding has
+     * nothing to scope by and every source route 404s, including for the organization that owns the
+     * row. With it, a source id belonging to another organization 404s at BINDING time, before any
+     * policy is constructed and before the row is in memory, which is the enumeration-safe order.
+     *
+     * THE SEGMENT IS `{source}` AND NOT `{knowledgeSource}` for exactly that derivation:
+     * `{knowledgeSource}` would look for `knowledgeSources()`, which does not exist.
+     *
+     * @return HasMany<KnowledgeSource, $this>
+     */
+    public function sources(): HasMany
+    {
+        return $this->hasMany(KnowledgeSource::class);
+    }
+
+    /**
      * @return HasMany<OrganizationUser, $this>
      */
     public function memberships(): HasMany

@@ -17,6 +17,10 @@ import type {
   EvidenceThresholdScale,
   ListMetaResource,
 } from '../src/resources/bots.js';
+import type {
+  BotSourceAssignmentCollectionResource,
+  BotSourceAssignmentResource,
+} from '../src/resources/bot-source-assignments.js';
 import type { InvitationResource, MemberResource } from '../src/resources/members.js';
 import type {
   ProviderModelCollectionResource,
@@ -39,6 +43,16 @@ import type {
   SessionResource,
   SessionUser,
 } from '../src/resources/session.js';
+import type {
+  OrgUploadLimits,
+  SourceActiveVersionResource,
+  SourceCollectionResource,
+  SourceDetailResource,
+  SourceResource,
+  SourceStatus,
+  SourceType,
+  SourceWarningResource,
+} from '../src/resources/sources.js';
 
 /**
  * `src/resources/session.ts` is HAND-WRITTEN — there is no TypeScript generator in this repo — so
@@ -87,7 +101,23 @@ interface OpenApiSchemaNode {
   readonly type?: string | readonly string[];
   /** A nullable OBJECT is `anyOf: [{$ref}, {type: null}]`; a `$ref` cannot carry a type array. */
   readonly anyOf?: readonly OpenApiSchemaNode[];
+  /**
+   * The element schema of an array property. Declared for the same reason `$ref` is: an array of a
+   * published component is where a near-identical copy of that component gets inlined instead, and
+   * `warnings: {type: 'array', items: {$ref: SourceWarningResource}}` is only distinguishable from
+   * `warnings: {type: 'array', items: {type: 'object', properties: …}}` by reading this node.
+   */
+  readonly items?: OpenApiSchemaNode;
   readonly required?: readonly string[];
+  /**
+   * A non-nullable reference to another component, which the nullable case above spells inside
+   * `anyOf` instead. Declared so a suite can assert WHICH component a property points at: the second
+   * paginated list is exactly where a near-identical `PaginationMeta` would have been declared beside
+   * the collection instead of `ListMetaResource` being reused, and reading the `$ref` is the only way
+   * to tell the two apart from this side of the wire — a property-NAME comparison sees `meta` either
+   * way.
+   */
+  readonly $ref?: string;
 }
 
 /**
@@ -672,6 +702,528 @@ describe('the hand-written bot types', () => {
   });
 });
 
+/**
+ * The knowledge-source types, pinned the same three ways — plus the vocabulary pin, which is the only
+ * thing standing under `SourceStatus` at all.
+ *
+ * `bots.ts` holds each of its five vocabularies TWICE on purpose (a union here, an iterable tuple
+ * behind `@kb/contracts/forms`) and each spelling has its own pin: the union against the document's
+ * inlined enum, the tuple against the `in:` probes in form-drift.test.ts. `sources.ts` holds its two
+ * ONCE, because no source form ships yet — `UpdateSourceStatusRequest` is NO_CLIENT_FORM over there,
+ * recorded as OWED — so the enum comparison below is the whole of the pin rather than half of it.
+ * That is the correct amount for a vocabulary nothing iterates, and it is the assertion that has to
+ * survive the day the tuple arrives: it goes on pinning the union, and the tuple brings its own.
+ */
+describe('the hand-written source types', () => {
+  it('SourceResource declares exactly sixteen keys, and no ownership or version-pointer one', () => {
+    const keys: Record<keyof SourceResource, true> = {
+      id: true,
+      type: true,
+      name: true,
+      description: true,
+      origin_url: true,
+      status: true,
+      status_permits_retrieval: true,
+      status_is_processing: true,
+      tags: true,
+      effective_at: true,
+      expires_at: true,
+      created_by: true,
+      created_at: true,
+      updated_at: true,
+      deleted_at: true,
+      purged_at: true,
+    };
+    expect(Object.keys(keys)).toHaveLength(16);
+
+    // `organization_id` is the one every tenant-owned resource in this document withholds, for the
+    // reason `rhf-zod-forms` NN1 and `kb-tenancy-isolation` NN6 agree on: the organization comes from
+    // the authenticated context, and a shape that carried it invites a client to send it back.
+    //
+    // THE OTHER THREE ARE THE INTERESTING ONES, and they are absent because a SOURCE IS NOT THE UNIT
+    // OF VERSIONING. One crawl source owns hundreds of independently-versioned items, so there is no
+    // single active version to point at — a field named any of these would be a scalar answer to a
+    // per-item question, and every client that read it would render one document's state as the whole
+    // source's.
+    for (const banned of [
+      'organization_id',
+      'active_version_id',
+      'source_version_id',
+      'content_hash',
+    ]) {
+      expect(Object.keys(keys), `${banned} must not be on this shape`).not.toContain(banned);
+    }
+  });
+
+  it('publishes both lifecycle predicates as booleans, so no client re-derives them', () => {
+    // THE SAME PROPERTY `permits_embedding` HOLDS ON `BotDomainResource`, and it is here for the same
+    // failure: a check spelled "not disabled" admits `deleting`, and a sixteenth state would be
+    // admitted by every negative test in every client. Both are REQUIRED booleans rather than
+    // nullable ones — "the server did not say" is not a state a predicate may express.
+    const source = schemas['SourceResource'];
+    for (const predicate of ['status_permits_retrieval', 'status_is_processing']) {
+      expect(source?.properties?.[predicate], predicate).toMatchObject({ type: 'boolean' });
+      expect(source?.required ?? [], predicate).toContain(predicate);
+    }
+
+    // The TYPE side of the same claim, asserted by assignment rather than by a string: a
+    // `boolean | null` on either member is a typecheck failure in this file.
+    const predicates: Pick<
+      SourceResource,
+      'status_permits_retrieval' | 'status_is_processing'
+    > = { status_permits_retrieval: false, status_is_processing: false };
+    expect(predicates.status_permits_retrieval).toBe(false);
+
+    // `status_permits_retrieval` IS ONE TERM OF FOUR (kb-tenancy-isolation NN2), so the shape must not
+    // publish anything that reads as the whole answer. A `retrievable` or `is_live` field would be a
+    // claim this service cannot make: the other three terms are the item's active-version pointer, the
+    // bot assignment and the organization, and none of them is on this row.
+    for (const overclaim of ['retrievable', 'is_live', 'searchable']) {
+      expect(Object.keys(source?.properties ?? {}), overclaim).not.toContain(overclaim);
+    }
+  });
+
+  it('publishes `tags` as a non-null array of strings, which is why nothing guards it', () => {
+    // ALWAYS PRESENT, EMPTY WHEN UNTAGGED. Null would be a second spelling of "no tags" and every
+    // renderer would need a nullish guard that one of them forgets — the same argument `description`
+    // makes in the other direction, where null IS the only spelling of unset.
+    const tags = schemas['SourceResource']?.properties?.['tags'];
+    expect(tags?.type).toBe('array');
+    expect(wireNullable(tags)).toBe(false);
+
+    // Open, with no enum on either side: the vocabulary is whatever operators typed, and a closed copy
+    // in this package would reject a tag somebody created this morning.
+    expect(tags?.enum).toBeUndefined();
+
+    // …and therefore this module exports no tuple, no status list and no constant at all. The
+    // assertion is against the module's own text rather than an export list, because pin 3 below only
+    // proves the ROOT entry stayed clean — a value declared here and not re-exported would pass it.
+    const text = readFileSync(join(here, '..', 'src', 'resources', 'sources.ts'), 'utf8');
+    expect(text).not.toMatch(/export const/);
+  });
+
+  it('agrees with the document about both closed vocabularies, member for member', () => {
+    const types: Record<SourceType, true> = { file: true, url: true, text: true };
+    const statuses: Record<SourceStatus, true> = {
+      draft: true,
+      queued: true,
+      fetching: true,
+      parsing: true,
+      normalizing: true,
+      chunking: true,
+      embedding: true,
+      indexing: true,
+      ready: true,
+      ready_with_warnings: true,
+      failed: true,
+      disabled: true,
+      deleting: true,
+      deleted: true,
+      archived: true,
+    };
+
+    // READ OFF THE PROPERTY, not off a named component: the dumper INLINES an enum into the property
+    // that carries it. A sixteenth lifecycle state is a server change first, and — with no tuple
+    // sibling behind `@kb/contracts/forms` — this is the ONLY place a client finds out.
+    const source = schemas['SourceResource']?.properties;
+    expect(new Set(source?.['type']?.enum ?? []), 'type enum').toEqual(new Set(Object.keys(types)));
+    expect(new Set(source?.['status']?.enum ?? []), 'status enum').toEqual(
+      new Set(Object.keys(statuses)),
+    );
+
+    // Neither is nullable, unlike `BotResource.evidence_threshold_scale`: a source always has a kind
+    // and always has a state, and a null in either slot would be a row no screen could render.
+    expect(source?.['type']?.enum).not.toContain(null);
+    expect(source?.['status']?.enum).not.toContain(null);
+
+    // THE FIFTEEN ARE THE INGESTION LIFECYCLE, NOT THE TRANSITION VOCABULARY. `UpdateSourceStatusRequest`
+    // accepts exactly two of them (`disabled`, `ready`) — every other move is the pipeline's, and a
+    // console offering a `<Select>` over this union would be offering to publish a version nothing
+    // verified. Read off the rules manifest rather than restated here, so the day the server widens the
+    // transition set this comparison is what notices.
+    const transition = JSON.parse(
+      readFileSync(join(here, '..', 'rules', 'UpdateSourceStatusRequest.json'), 'utf8'),
+    ) as { rules: Readonly<Record<string, readonly string[]>> };
+    const members = (transition.rules['status'] ?? [])
+      .filter((rule) => rule.startsWith('in:'))
+      .flatMap((rule) => rule.slice('in:'.length).split(','))
+      .map((member) => member.replace(/^"|"$/g, ''));
+
+    expect(new Set(members)).toEqual(new Set(['disabled', 'ready']));
+    for (const member of members) expect(Object.keys(statuses)).toContain(member);
+  });
+
+  it('OrgUploadLimits declares exactly the three ceilings the server publishes', () => {
+    // PIN 1, TYPE-LEVEL, and it is the ONLY type-level link this shape has: it declares no nullable
+    // property, so the `NULLABLE` map in section 2 has no entry for it, and the `MIRRORED` comparison
+    // there is a list of STRINGS that would go on passing if the interface were renamed out from
+    // under it. `Record<keyof OrgUploadLimits, true>` closes that — a renamed or added member fails
+    // the TYPECHECK here, in a file a reader is looking at.
+    const keys: Record<keyof OrgUploadLimits, true> = {
+      max_bytes: true,
+      allowed_mime: true,
+      max_batch: true,
+    };
+    expect(Object.keys(keys)).toHaveLength(3);
+
+    // PIN 2, WIRE-LEVEL, on the two things the property-name comparison cannot say. `max_bytes` is
+    // BYTES on this wire while the server's rule is enforced in kibibytes — the conversion happens
+    // once, server-side — so an `integer` here is the number a `File.size` is compared against and a
+    // client that converts again is 1024× off. `allowed_mime` is an ARRAY: a string would be a
+    // comma-joined list every reader would split differently, and `accept=` would be the only one
+    // that happened to work.
+    const wire = schemas['OrgUploadLimitsResource'];
+    expect(wire?.properties?.['max_bytes']).toMatchObject({ type: 'integer' });
+    expect(wire?.properties?.['max_batch']).toMatchObject({ type: 'integer' });
+    expect(wire?.properties?.['allowed_mime']).toMatchObject({
+      type: 'array',
+      items: { type: 'string' },
+    });
+
+    // THE OPERATION ITSELF IS NOT ASSERTED HERE, and the omission is deliberate rather than an
+    // oversight. `GET .../sources/upload-limits` (`admin.sources.upload-limits`) is what makes this a
+    // mirror rather than an invention, but no suite in this file reads `paths` — the harness types
+    // `components.schemas` and nothing else — and growing a path-item type for one operation would be
+    // a second document reader that only this test uses. A component that stopped being served would
+    // stop being emitted, and the set comparison in section 2 fails on it by name.
+  });
+
+  it('SourceCollectionResource wraps the array under a named key, beside the SHARED meta', () => {
+    const keys: Record<keyof SourceCollectionResource, true> = { sources: true, meta: true };
+    expect(Object.keys(keys).sort()).toEqual(['meta', 'sources']);
+
+    // `meta` is a `$ref` to `ListMetaResource` — the SAME component the bot list uses — and the type
+    // imports it rather than declaring a near-identical `PaginationMeta`. That duplication is what
+    // this whole suite was rewritten to catch, and a second paginated list is precisely where it would
+    // have happened.
+    expect(schemas['SourceCollectionResource']?.properties?.['meta']?.$ref).toBe(
+      '#/components/schemas/ListMetaResource',
+    );
+    // Present on an EMPTY page too: a client that branched on its absence would be branching on "did
+    // this list have results", which is the question `total` answers.
+    expect(schemas['SourceCollectionResource']?.required ?? []).toContain('meta');
+  });
+
+  /**
+   * ── THE EXTENSION PIN, AND IT IS THE POINT OF THIS WHOLE PAIR OF TYPES ─────────────────────────
+   *
+   * `SourceDetailResource` is declared as `extends SourceResource` rather than as a second flat
+   * interface, because the SERVER composes the same way: the detail resource builds on the list
+   * resource's array and adds to it. The failure a transcription invites has no error and no failing
+   * type — the server adds a seventeenth field, the list screen renders it, the detail screen renders
+   * `undefined` — so the relationship is asserted here in both spellings that can catch it.
+   *
+   * This one is the TYPE-LEVEL half. A conditional type resolved to a literal and then ASSIGNED is
+   * the assertion: if somebody re-declares the detail as a flat interface that happens to be missing
+   * a field, the first line stops being `true` and `pnpm contracts:typecheck` fails in a test file a
+   * reader is looking at. The SECOND line matters just as much and is easy to leave out: without it a
+   * detail type that had drifted into being IDENTICAL to `SourceResource` — every detail-only field
+   * dropped — would satisfy the first assertion perfectly.
+   */
+  it('SourceDetailResource IS a SourceResource, at the type level and in one direction only', () => {
+    const detailIsASource: SourceDetailResource extends SourceResource ? true : false = true;
+    const sourceIsNotADetail: SourceResource extends SourceDetailResource ? true : false = false;
+
+    expect([detailIsASource, sourceIsNotADetail]).toEqual([true, false]);
+  });
+
+  it('SourceDetailResource adds twelve keys and re-declares none of the sixteen', () => {
+    // `Record<keyof X, true>` again, TOTAL and CLOSED in both directions — and here it is closed over
+    // the INHERITED members too, which is what makes it a check on the extension rather than on the
+    // twelve: drop `extends` and this map is missing sixteen entries.
+    const keys: Record<keyof SourceDetailResource, true> = {
+      id: true,
+      type: true,
+      name: true,
+      description: true,
+      origin_url: true,
+      status: true,
+      status_permits_retrieval: true,
+      status_is_processing: true,
+      tags: true,
+      effective_at: true,
+      expires_at: true,
+      created_by: true,
+      created_at: true,
+      updated_at: true,
+      deleted_at: true,
+      purged_at: true,
+      item_count: true,
+      active_version_count: true,
+      active_version: true,
+      page_count: true,
+      slide_count: true,
+      sheet_count: true,
+      element_count: true,
+      chunk_count: true,
+      warnings: true,
+      warnings_truncated: true,
+      content_preview: true,
+      content_preview_truncated: true,
+    };
+    expect(Object.keys(keys)).toHaveLength(28);
+
+    // THE FOUR BANNED NAMES FROM `SourceResource` ARE STILL BANNED, and that is not automatic on this
+    // shape — this is the one resource in the document that legitimately carries version information,
+    // so it is exactly where `active_version_id` would land. It does not: the field is
+    // `active_version`, a whole nested resource or null, and the difference is that a bare id invites
+    // a client to treat "the source's version" as a scalar, which it is not for any multi-item source.
+    for (const banned of [
+      'organization_id',
+      'active_version_id',
+      'source_version_id',
+      'content_hash',
+    ]) {
+      expect(Object.keys(keys), `${banned} must not be on this shape`).not.toContain(banned);
+    }
+  });
+
+  /**
+   * The WIRE-LEVEL half of the extension pin, and the half that catches the failure this side cannot
+   * see: the server changing `SourceResource` and NOT carrying it into the detail projection. Read
+   * out of the document rather than restated, so it needs no maintenance and cannot be satisfied by
+   * updating a list here.
+   */
+  it('the wire composes the same way: every SourceResource property is on the detail, and required', () => {
+    // Positive control — an empty base would make the loop below vacuous.
+    const base = Object.keys(schemas['SourceResource']?.properties ?? {});
+    expect(base.length, 'SourceResource must publish properties').toBeGreaterThan(0);
+
+    const detail = schemas['SourceDetailResource'];
+    for (const key of base) {
+      expect(Object.keys(detail?.properties ?? {}), key).toContain(key);
+      // `required` too: an inherited field that arrived OPTIONAL on the detail would be a type
+      // promising a value the server may omit, which the `declares every property required` loop in
+      // section 2 asserts globally and this states for the composition specifically.
+      expect(detail?.required ?? [], key).toContain(key);
+    }
+
+    // NULLABILITY CARRIES TOO. `description` non-null on the detail and nullable on the list would be
+    // one field with two contracts, and the TypeScript side cannot express the difference at all —
+    // `extends` gives the inherited member exactly one type.
+    const detailNullable = wireNullableKeys('SourceDetailResource');
+    for (const key of wireNullableKeys('SourceResource')) {
+      expect(detailNullable, `${key} is nullable on SourceResource`).toContain(key);
+    }
+  });
+
+  /**
+   * THE STRONGEST FORM OF THE SAME PIN, AND IT COSTS NOTHING BECAUSE IT COMPARES THE DOCUMENT WITH
+   * ITSELF — which is why it is worth having where the third axis is otherwise DECLINED in this file.
+   *
+   * The decline is a few hundred lines below: scalar TYPE (`string` vs `integer` vs `boolean`) is
+   * unasserted here because closing it needs a hand-written expected JSON type per property, i.e. a
+   * third spelling of every resource that nobody updates. That argument does not reach this pair.
+   * There is no third copy: `SourceResource`'s node IS the expected value for `SourceDetailResource`'s
+   * node, because the server composes one from the other. So `origin_url` going from `string` to
+   * `integer` on one shape and not the other fails here, on the one pair of components where the
+   * question can be asked for free.
+   *
+   * `description` IS EXCLUDED, AND THE EXCLUSION IS SLACK RATHER THAN AN OVERSIGHT. All sixteen
+   * property nodes are byte-identical today — measured, not assumed, which is itself the evidence
+   * that the server composes rather than transcribes — so pinning the prose would cost nothing on
+   * the day it was written. It is excluded anyway because a reworded sentence on one shape is a
+   * legitimate, harmless server change, and a suite that reds for a harmless reason is a suite
+   * somebody loosens in a hurry, taking the type and nullability half with it.
+   */
+  it('and it composes rather than transcribes: each inherited node is the list\'s node', () => {
+    const withoutProse = (node: OpenApiSchemaNode | undefined): string =>
+      JSON.stringify({ ...node, description: undefined });
+
+    const base = schemas['SourceResource']?.properties ?? {};
+    const detail = schemas['SourceDetailResource']?.properties ?? {};
+
+    expect(Object.keys(base).length, 'SourceResource must publish properties').toBeGreaterThan(0);
+    for (const [key, node] of Object.entries(base)) {
+      expect(withoutProse(detail[key]), key).toBe(withoutProse(node));
+    }
+  });
+
+  it('the detail nests its two child components by $ref rather than inlining them', () => {
+    // The same property the `meta` assertions make, on the two places a copy would go instead. An
+    // inlined object here would be a second declaration of a published component, invisible to the
+    // `MIRRORED` comparison — which reads property NAMES and would see `active_version` either way.
+    expect(schemas['SourceDetailResource']?.properties?.['active_version']?.anyOf).toEqual([
+      { $ref: '#/components/schemas/SourceActiveVersionResource' },
+      { type: 'null' },
+    ]);
+
+    const warnings = schemas['SourceDetailResource']?.properties?.['warnings'];
+    expect(warnings?.type).toBe('array');
+    expect(warnings?.items?.$ref).toBe('#/components/schemas/SourceWarningResource');
+    // ALWAYS PRESENT, EMPTY WHEN THERE ARE NONE — null would be a second spelling of "no warnings",
+    // which is the argument `tags` makes one suite above.
+    expect(wireNullable(warnings)).toBe(false);
+  });
+
+  it('the active version reuses SourceStatus rather than publishing a second lifecycle', () => {
+    // The version's state and the source's are DIFFERENT FACTS drawn from the SAME vocabulary — a
+    // source reading `parsing` above a version reading `ready` is the normal state of a reprocess.
+    // The type says so by reusing `SourceStatus`; this says the document agrees, member for member,
+    // so a sixteenth state cannot arrive on one shape and not the other.
+    const version: Pick<SourceActiveVersionResource, 'status'> = { status: 'ready_with_warnings' };
+    expect(version.status).toBe('ready_with_warnings');
+
+    expect(new Set(schemas['SourceActiveVersionResource']?.properties?.['status']?.enum ?? [])).toEqual(
+      new Set(schemas['SourceResource']?.properties?.['status']?.enum ?? []),
+    );
+  });
+
+  it('SourceWarningResource publishes a code and a COUNT, and never the value behind the key', () => {
+    const keys: Record<keyof SourceWarningResource, true> = { code: true, versions: true };
+    expect(Object.keys(keys).sort()).toEqual(['code', 'versions']);
+
+    // OPEN VOCABULARY, NO ENUM ON EITHER SIDE — the code set belongs to the ingestion service and
+    // grows with the parsers, so a union in this package would refuse to render a code shipped this
+    // morning. Same shape as `tags`, and the reason `warnings_truncated` exists at all.
+    expect(schemas['SourceWarningResource']?.properties?.['code']?.enum).toBeUndefined();
+
+    // THE PAYLOAD IS NOT PUBLISHED, and asserting the absence is worth a line because it is the field
+    // somebody would add as a convenience: the warning's value is unschema'd and can carry document
+    // content, which is tenant text arriving on a shape with no escape story.
+    for (const overshare of ['value', 'detail', 'context', 'payload', 'message']) {
+      expect(Object.keys(schemas['SourceWarningResource']?.properties ?? {}), overshare).not.toContain(
+        overshare,
+      );
+    }
+  });
+});
+
+/**
+ * The bot↔source grant, pinned the same three ways — and it is the first shape in this package that
+ * NESTS a published resource, so it adds one assertion the others have no use for: that `source` is a
+ * `$ref` to `SourceResource` rather than a copy of it.
+ *
+ * That is the same failure the `meta` assertions catch, arriving through the other door. The
+ * `MIRRORED` comparison in section 2 reads property NAMES, so an inlined sixteen-field object under
+ * `source` and a `$ref` to the component look identical to it; reading the `$ref` is the only way to
+ * tell a shared declaration from a second one. A second one is what 6B found in apps/web
+ * (`MemberResource`, hand-written from the PHP by eye) and it is what this whole suite exists to stop.
+ */
+describe('the hand-written bot↔source assignment types', () => {
+  it('BotSourceAssignmentResource declares exactly seven keys, and no ownership one', () => {
+    const keys: Record<keyof BotSourceAssignmentResource, true> = {
+      id: true,
+      source_id: true,
+      priority: true,
+      enabled: true,
+      created_at: true,
+      updated_at: true,
+      source: true,
+    };
+    expect(Object.keys(keys)).toHaveLength(7);
+
+    // `bot_id` IS ABSENT AND THAT IS NOT AN OVERSIGHT: the bot is in the PATH, so a row that repeated
+    // it would be publishing the same fact twice and inviting a client to post it back — the argument
+    // `organization_id` makes on every other resource in this document, one scope down.
+    for (const banned of ['organization_id', 'bot_id', 'organization']) {
+      expect(Object.keys(keys), `${banned} must not be on this shape`).not.toContain(banned);
+    }
+  });
+
+  it('nests the granted source by $ref, and it is SourceResource and not the detail', () => {
+    const assignment = schemas['BotSourceAssignmentResource'];
+
+    expect(assignment?.properties?.['source']?.$ref).toBe('#/components/schemas/SourceResource');
+    // NOT `SourceDetailResource`. A list of grants that carried a content excerpt and a warning list
+    // per row would be shipping tenant document text into a table with nowhere to escape it, and it
+    // would make one page of assignments cost a detail projection per row server-side.
+    expect(assignment?.properties?.['source']?.$ref).not.toContain('SourceDetailResource');
+
+    // NEVER NULL, so no client branches on its absence: the composite foreign key
+    // `bot_source_assignments_source_same_org` refuses a grant whose source is missing or belongs to
+    // another organization, which is the tenancy guarantee this nesting rests on.
+    expect(wireNullable(assignment?.properties?.['source'])).toBe(false);
+    expect(assignment?.required ?? []).toContain('source');
+
+    // The TYPE side of the same claim, by assignment rather than by a string: `source` typed as
+    // anything but the imported `SourceResource` fails the typecheck here.
+    const nested: Pick<BotSourceAssignmentResource, 'source'>['source'] extends SourceResource
+      ? true
+      : false = true;
+    expect(nested).toBe(true);
+  });
+
+  it('publishes `enabled` and `priority` as what they are: a filter term and a tie-break', () => {
+    const assignment = schemas['BotSourceAssignmentResource'];
+
+    // Both REQUIRED and neither nullable. "The server did not say whether this grant is live" is not
+    // a state a permission may express, and a null priority would put a hole in an ordering.
+    expect(assignment?.properties?.['enabled']).toMatchObject({ type: 'boolean' });
+    expect(assignment?.properties?.['priority']).toMatchObject({ type: 'integer' });
+    for (const key of ['enabled', 'priority']) {
+      expect(assignment?.required ?? [], key).toContain(key);
+      expect(wireNullable(assignment?.properties?.[key]), key).toBe(false);
+    }
+
+    // `enabled` IS ONE TERM OF FOUR (kb-tenancy-isolation NN 2), so the shape must not publish
+    // anything that reads as the whole answer — the same overclaim guard `SourceResource` carries for
+    // `status_permits_retrieval`. `retrievable` here would be a claim this row cannot make: the other
+    // three terms are the organization, the source's status and the item's active-version pointer,
+    // and only the second of those is even on the nested resource.
+    for (const overclaim of ['retrievable', 'is_live', 'answering', 'searchable']) {
+      expect(Object.keys(assignment?.properties ?? {}), overclaim).not.toContain(overclaim);
+    }
+  });
+
+  it('BotSourceAssignmentCollectionResource wraps the array under a named key, beside the SHARED meta', () => {
+    const keys: Record<keyof BotSourceAssignmentCollectionResource, true> = {
+      source_assignments: true,
+      meta: true,
+    };
+    expect(Object.keys(keys).sort()).toEqual(['meta', 'source_assignments']);
+
+    // THE THIRD PAGINATED LIST, AND THE THIRD PLACE A NEAR-IDENTICAL `PaginationMeta` WOULD HAVE GONE.
+    // `meta` is a `$ref` to `ListMetaResource` — the same component the bot and source lists use — and
+    // the type imports it rather than re-declaring it. A property-NAME comparison sees `meta` either
+    // way, which is why this reads the `$ref`.
+    expect(schemas['BotSourceAssignmentCollectionResource']?.properties?.['meta']?.$ref).toBe(
+      '#/components/schemas/ListMetaResource',
+    );
+    // Present on an EMPTY page too: branching on its absence is branching on "did this list have
+    // results", which is the question `total` answers.
+    expect(schemas['BotSourceAssignmentCollectionResource']?.required ?? []).toContain('meta');
+
+    // The rows are the published component rather than an inlined copy, for the reason the `source`
+    // nesting above is: an array of an inlined object is where a second declaration hides.
+    expect(
+      schemas['BotSourceAssignmentCollectionResource']?.properties?.['source_assignments']?.items
+        ?.$ref,
+    ).toBe('#/components/schemas/BotSourceAssignmentResource');
+  });
+
+  /**
+   * `IndexBotSourceAssignmentsRequest` is NO_CLIENT_FORM in test/form-drift.test.ts — a query-string
+   * manifest, the third of them, exempt on the merits for the reason the other two are. That
+   * exemption leaves its SORTABLE SET compared to nothing, and this is where that is repaired: the
+   * three members are read out of the dumped manifest and each is required to be a property this
+   * component actually publishes.
+   *
+   * It is the same move the source-status suite makes — read the manifest, do not restate it — and it
+   * is worth making here because the set is the one thing about a list endpoint a client genuinely
+   * has to hard-code (each table declares its own, per the measurement recorded in that exemption).
+   * A server that renames `priority` and updates the sort whitelist would otherwise leave every table
+   * sorting by a column nothing publishes, with a 422 as the only symptom.
+   */
+  it('every sortable column the request accepts is a property this resource publishes', () => {
+    const manifest = JSON.parse(
+      readFileSync(join(here, '..', 'rules', 'IndexBotSourceAssignmentsRequest.json'), 'utf8'),
+    ) as { rules: Readonly<Record<string, readonly string[]>> };
+
+    const members = (manifest.rules['sort'] ?? [])
+      .filter((rule) => rule.startsWith('in:'))
+      .flatMap((rule) => rule.slice('in:'.length).split(','))
+      .map((member) => member.replace(/^"|"$/g, ''));
+
+    // Positive control: an empty set would make the loop below vacuous, which is how a renamed rule
+    // key would pass in silence.
+    expect(members).toEqual(['id', 'priority', 'enabled']);
+
+    const published = Object.keys(schemas['BotSourceAssignmentResource']?.properties ?? {});
+    for (const member of members) expect(published, `sortable by ${member}`).toContain(member);
+  });
+});
+
 // ── 2. the wire-level pin ────────────────────────────────────────────────────────────────────────
 
 /**
@@ -715,6 +1267,37 @@ describe('every published component is mirrored here or exempt with a reason', (
    * is not always the TS type name (`InvitationPreviewResource` ↔ `InvitationPreview`); see the mapping
    * note in the SessionResource suite for why that asymmetry is real and not worth "fixing".
    */
+  /**
+   * `SourceResource`'s property set, LIFTED OUT OF THE REGISTER because two entries need it.
+   *
+   * `SourceDetailResource` publishes every one of these plus twelve of its own — the server composes
+   * the detail resource from the list resource rather than transcribing it, and the TypeScript side
+   * says so with `extends`. Writing the sixteen names a second time inside this object would be the
+   * third copy, and it is the copy that goes stale: a field added to `SourceResource` would be added
+   * to its own entry (the comparison fails by name) and silently omitted from the detail's, where
+   * nothing would fail — the property-name comparison would pass against a list that had simply
+   * agreed to stop looking. Spreading it makes both entries move together, which is the same property
+   * `extends` gives the types.
+   */
+  const SOURCE_RESOURCE_KEYS = [
+    'id',
+    'type',
+    'name',
+    'description',
+    'origin_url',
+    'status',
+    'status_permits_retrieval',
+    'status_is_processing',
+    'tags',
+    'effective_at',
+    'expires_at',
+    'created_by',
+    'created_at',
+    'updated_at',
+    'deleted_at',
+    'purged_at',
+  ] as const satisfies readonly (keyof SourceResource)[];
+
   const MIRRORED: Readonly<Record<string, readonly string[]>> = {
     SessionResource: ['user', 'current_organization_id', 'organizations'],
     SessionUser: ['id', 'name', 'email', 'email_verified', 'is_platform_owner'],
@@ -849,6 +1432,145 @@ describe('every published component is mirrored here or exempt with a reason', (
     BotDomainCollectionResource: ['domains'],
     BotStarterQuestionResource: ['id', 'question', 'sort_order', 'created_at', 'updated_at'],
     BotStarterQuestionCollectionResource: ['starter_questions'],
+
+    // ── the knowledge-source surface, mirrored by src/resources/sources.ts ─────────────────────
+    // MIRRORED RATHER THAN EXEMPTED WITH A CLAIMANT, and the decision is the same one the two child
+    // collections above record, made against a screen that is one batch away rather than in
+    // parallel: `/sources` is a placeholder page today and the detail screen does not exist.
+    //
+    // What makes it MIRRORED anyway is that a reader already exists and has ALREADY PAID the price
+    // this list exists to prevent. `apps/web/src/features/sources/api.ts` resolves `void` from
+    // `uploadSourceFile` with a docblock saying, in as many words, that declaring a `SourceResource`
+    // locally "would start the exact chain this codebase has already paid for once — fixture ->
+    // hand-written type -> PHP resource, with no assertion at any step" (the `MemberResource`
+    // episode, 6B). It declined and named this package as the owner. Leaving these two exempt would
+    // make that decline cost the next agent a type they need, which is the pressure that produces
+    // the hand-written copy.
+    //
+    // THE REQUEST SIDE WENT THE OTHER WAY IN THE SAME CHANGE, and the asymmetry is deliberate rather
+    // than an oversight: all five source FormRequests are NO_CLIENT_FORM in form-drift.test.ts,
+    // three of them recorded as OWED. A RESPONSE type has one correct shape the moment the server
+    // publishes it and is wrong the moment a client re-declares it; a REQUEST schema is only correct
+    // beside the form that renders it (`rhf-zod-forms` NN3). So the response is mirrored now and the
+    // schemas ship with their screens.
+    //
+    // `created_by` is the field worth naming twice. It is on the RESOURCE and is a member of
+    // `OWNERSHIP_KEYS`, so it is readable here and unrepresentable in every form schema in this
+    // package — which is the same readable-never-writable asymmetry `retrieval_configuration_version`
+    // holds on `BotResource`, arrived at from the opposite direction.
+    // ── the upload ceilings, mirrored by `OrgUploadLimits` in the SAME module ──────────────────
+    // MIRRORED, AND FOR ONCE THE USUAL QUESTION — "is there a reader today?" — is not the one that
+    // decides it. The reader has existed for batches: `uploadSchema` in src/forms/upload.ts is a
+    // FACTORY over this exact shape (§8.10 makes the cap and the media types per-organization, so
+    // there is no byte constant in this package to build a fixed schema from), and apps/web's
+    // dropzone reads `max_bytes`, `allowed_mime` and `max_batch` off it today. What was missing was
+    // the other half: nothing published the shape, so the client's copy was an INVENTION nobody could
+    // compare to anything. A `NO_CLIENT_TYPE` entry would therefore have been false the moment it was
+    // written — not "no client yet" but "the client got there first".
+    //
+    // THE NAMING COLLISION IS THE PART WORTH RECORDING. The dumper keys components by short class
+    // name, so the published component is `OrgUploadLimitsResource` while the type is
+    // `OrgUploadLimits` — the same asymmetry `InvitationPreviewResource` ↔ `InvitationPreview`
+    // carries, and this register is keyed by WIRE name precisely so the mapping is an assertion
+    // rather than a convention. The two shapes were compared field by field before this entry landed
+    // and are IDENTICAL: three properties, all three required on both sides, none nullable,
+    // `additionalProperties: false` against an interface with no index signature, and the two
+    // `integer`s are `number` because TypeScript has no narrower spelling. Had they differed by one
+    // optionality, the finding would have been that `uploadSchema` was validating against a shape the
+    // server does not send — which is worse than a missing mirror, and is why the comparison happened
+    // before the entry rather than after it.
+    //
+    // The type MOVED for this entry, from src/forms/upload.ts to src/resources/sources.ts, and the
+    // move is what makes "one shape, one definition" true rather than asserted. It sat behind the Zod
+    // subpath while it was a factory PARAMETER the client had invented; it is a published response
+    // now, so it belongs where the other mirrors are and where these three pins can reach it.
+    // src/forms/upload.ts re-exports it — erased, so no bundle moves — and every existing
+    // `import type { OrgUploadLimits } from '@kb/contracts/forms'` is unaffected.
+    //
+    // THREE PROPERTIES, AND THE SERVER'S ADMISSION RULE HAS FOUR TERMS. There is no
+    // `allowed_extensions` here, so a picker built from `allowed_mime` alone over-accepts wherever
+    // one sniffed type covers several extensions. That is recorded where a reader building the picker
+    // will hit it (the `OrgUploadLimits` docblock and `uploadSchema`'s), NOT asserted here as a banned
+    // field: the extension list is one the server could legitimately publish tomorrow, and a
+    // `not.toContain` would fail that day with a message saying the opposite of what was wrong.
+    OrgUploadLimitsResource: ['max_bytes', 'allowed_mime', 'max_batch'],
+
+    SourceResource: SOURCE_RESOURCE_KEYS,
+    SourceCollectionResource: ['sources', 'meta'],
+
+    // ── the source DETAIL projection, mirrored by `SourceDetailResource` in the same module ────
+    // MIRRORED, and here the usual question — "is there a reader today?" — answers no in a way that
+    // is about to change rather than in the way that argues for an exemption: `GET .../sources/{source}`
+    // is served, this component is what it returns, and the detail screen is the next task. A
+    // NO_CLIENT_TYPE entry would be false the week it was written, which is the test the
+    // `OrgUploadLimitsResource` note states and the one this fails.
+    //
+    // THE ENTRY IS A SPREAD, NOT A LIST, and that is the register's half of the composition pin. The
+    // type's half is `extends SourceResource`; the wire's half is `the wire composes the same way`
+    // above, which reads both components out of the document and requires every base property to be
+    // published AND required here. Between the three, a field added to `SourceResource` tomorrow
+    // cannot go missing from the detail on any of the three sides without a red suite naming it.
+    //
+    // `active_version` IS THE FIELD WORTH NAMING TWICE, because registering it makes a contradiction
+    // visible from this side: `SourceResource`'s docblock says there is no active-version pointer on
+    // that shape "and there never will be one", and this shape carries one. Nothing was added to
+    // `SourceResource` — the type-level pin proves that — and the server's reconciliation is narrow:
+    // populated only when the source has exactly one item, null for every crawl and multi-file
+    // upload, with `active_version_count` answering the general question. Whether the absolute
+    // sentence should be softened is the control plane's call; it is recorded in src/resources/sources.ts
+    // rather than ruled on here.
+    SourceDetailResource: [
+      ...SOURCE_RESOURCE_KEYS,
+      'item_count',
+      'active_version_count',
+      'active_version',
+      'page_count',
+      'slide_count',
+      'sheet_count',
+      'element_count',
+      'chunk_count',
+      'warnings',
+      'warnings_truncated',
+      'content_preview',
+      'content_preview_truncated',
+    ],
+    SourceActiveVersionResource: [
+      'id',
+      'source_item_id',
+      'version_number',
+      'status',
+      'activated_at',
+      'parser_cfg_version',
+      'ocr_cfg_version',
+      'chunker_cfg_version',
+      'embedding_model_version',
+    ],
+    SourceWarningResource: ['code', 'versions'],
+
+    // ── the bot↔source grant, mirrored by src/resources/bot-source-assignments.ts ──────────────
+    // MIRRORED for the reason the two bot child collections are, and the pressure here is higher than
+    // it was for either: this resource NESTS a published component. An unmirrored response type whose
+    // body contains a sixteen-field source object is not a type somebody declines to write — it is a
+    // type somebody writes locally, and the copy they write is of `SourceResource`, which is the
+    // exact shape 6B already found hand-written in apps/web once (`MemberResource`). The assignment
+    // UI is the next task's; leaving these exempt would make the decline cost that agent two types
+    // rather than one.
+    //
+    // THE REQUEST SIDE WENT THE OTHER WAY IN THE SAME CHANGE, as it did for sources: both assignment
+    // FormRequests are NO_CLIENT_FORM in test/form-drift.test.ts, one exempt on the merits and one
+    // OWED. `rhf-zod-forms` NN3 is the asymmetry — a response type is correct the moment the server
+    // publishes it and wrong the moment a client re-declares it, while a request schema is only
+    // correct beside the form that renders it.
+    BotSourceAssignmentResource: [
+      'id',
+      'source_id',
+      'priority',
+      'enabled',
+      'created_at',
+      'updated_at',
+      'source',
+    ],
+    BotSourceAssignmentCollectionResource: ['source_assignments', 'meta'],
   };
 
   /**
@@ -1035,6 +1757,96 @@ describe('every published component is mirrored here or exempt with a reason', (
       ListMetaResource: {
         filter: true,
       } satisfies Record<NullableKeys<ListMetaResource>, true>,
+
+      /**
+       * NINE OF SIXTEEN, and unlike `BotResource`'s fifteen these are not mostly "not configured".
+       * Four of them are the two-phase removal and the retrieval window, and each carries a distinct
+       * claim that a non-nullable type would collapse:
+       *
+       *   `deleted_at` and `purged_at` are "we removed it" and "we PROVED we removed it"
+       *   (kb-deletion-and-verification). Non-null deleted with a null purge is a purge in flight,
+       *   which is a state the list renders; two non-nulls is the pair a retention obligation is
+       *   measured against. One nullable timestamp cannot say both things.
+       *
+       *   `effective_at`/`expires_at` are "from always" and "until further notice". A default date
+       *   would be a window somebody chose, rendered identically to one nobody did.
+       *
+       *   `origin_url` is null EXACTLY WHEN `type` is not `url`, enforced in both directions by a
+       *   check constraint — so it is a discriminated absence rather than an unset field, and the
+       *   nullability is what makes the union expressible at all.
+       *
+       * `tags` IS DELIBERATELY NOT HERE and the omission is the assertion: an empty array is the
+       * untagged state, so a null would be a second spelling of it.
+       */
+      SourceResource: {
+        description: true,
+        origin_url: true,
+        effective_at: true,
+        expires_at: true,
+        created_by: true,
+        created_at: true,
+        updated_at: true,
+        deleted_at: true,
+        purged_at: true,
+      } satisfies Record<NullableKeys<SourceResource>, true>,
+
+      /**
+       * ELEVEN, AND NINE OF THEM ARE `SourceResource`'S — inherited through `extends`, so this map is
+       * not free to disagree with the one above even if somebody wanted it to: `NullableKeys` reads
+       * the resolved interface, and a base field that gained or lost a `| null` moves both maps in
+       * the same commit or fails the typecheck in this file.
+       *
+       * The two that are this shape's own carry distinct claims:
+       *
+       *   `active_version` is null for a source with more than one item — a four-hundred-page crawl
+       *   with every page serving reports null here — so the null is "there is no scalar answer",
+       *   NOT "nothing is live". `active_version_count` is the field that answers the second, and it
+       *   is a number precisely so it cannot be confused with this one.
+       *
+       *   `content_preview` is null when nothing has been extracted yet, never `''`. An empty string
+       *   is a document whose first element is blank, which is a different fact and a different
+       *   rendering; collapsing them is how a panel shows "no content" for a page of whitespace.
+       *
+       * `warnings` IS DELIBERATELY NOT HERE and the omission is the assertion, exactly as `tags`'
+       * is on the base shape: the empty array is the no-warnings state, so a null would be a second
+       * spelling of it. So are the eight counts — a nullable integer here would be a count no pager,
+       * badge or delete confirmation could do arithmetic with.
+       */
+      SourceDetailResource: {
+        description: true,
+        origin_url: true,
+        effective_at: true,
+        expires_at: true,
+        created_by: true,
+        created_at: true,
+        updated_at: true,
+        deleted_at: true,
+        purged_at: true,
+        active_version: true,
+        content_preview: true,
+      } satisfies Record<NullableKeys<SourceDetailResource>, true>,
+
+      // ONE, and it is nullable only because the column is. A version an item POINTS AT always has
+      // it: the pointer switch and this timestamp are written in one transaction, so a null here
+      // would be a row claiming to serve without being able to say since when. The four
+      // `*_cfg_version` strings are NOT nullable and that is load-bearing — they are ingest-key
+      // components, and an absent one would make a reprocess's dedupe decision unanswerable.
+      SourceActiveVersionResource: {
+        activated_at: true,
+      } satisfies Record<NullableKeys<SourceActiveVersionResource>, true>,
+
+      // `SourceWarningResource` IS ABSENT ON PURPOSE, which the loop below reads as "no nullable
+      // property": a null `code` is a warning nobody can look up and a null `versions` is a count,
+      // and the whole shape is two required scalars.
+
+      // The same nullable pair every other row in this document carries, and nothing else. `enabled`,
+      // `priority` and `source` are all non-nullable, and each for its own reason: a permission with
+      // no answer is not a state, a null position puts a hole in an ordering, and the composite
+      // foreign key makes a grant without a source unrepresentable in the database.
+      BotSourceAssignmentResource: {
+        created_at: true,
+        updated_at: true,
+      } satisfies Record<NullableKeys<BotSourceAssignmentResource>, true>,
     };
 
     for (const component of Object.keys(MIRRORED)) {
@@ -1219,6 +2031,25 @@ describe('the root entry export list', () => {
     expect(emitted).not.toContain('resources/bots');
     expect(emitted).not.toContain('unit_interval');
     expect(emitted).not.toContain('public_bot_id');
+    // And the source surface, whose second string is chosen for the reason that module holds its two
+    // vocabularies ONCE — as unions, with no tuple sibling behind `@kb/contracts/forms`. That makes
+    // the pressure to declare `SOURCE_STATUSES` here rather than there strictly higher than it was
+    // for `BOT_STATUSES`, since there is no other file it obviously belongs in; `ready_with_warnings`
+    // in the ROOT entry is what a tuple written in `src/resources/sources.ts` would look like, and it
+    // is a widget app-shell regression that compiles, typechecks and passes review.
+    expect(emitted).not.toContain('resources/sources');
+    expect(emitted).not.toContain('ready_with_warnings');
+    // The detail projection's second string is chosen the same way, against the value that module is
+    // most likely to grow: a preview character cap or an element cap declared here would be a client
+    // restating a bound the server enforces — and it would arrive as the first `export const` in
+    // `src/resources/sources.ts`, which the tags suite above also refuses by reading the module text.
+    expect(emitted).not.toContain('content_preview');
+    // And the grant surface. It declares no closed vocabulary at all — `priority` is an integer and
+    // `enabled` a boolean — so there is no enum member to use as the second string; the collection's
+    // response key is the next best thing, because a runtime value in that module would most
+    // plausibly be an envelope-key constant or a default sort, and either would emit this literal.
+    expect(emitted).not.toContain('resources/bot-source-assignments');
+    expect(emitted).not.toContain('source_assignments');
   });
 
   it('keeps zod out of the root entry', () => {

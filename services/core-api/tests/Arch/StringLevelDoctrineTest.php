@@ -482,3 +482,81 @@ test('the control plane runs no vector search of its own', function (): void {
         ],
     )));
 });
+
+/*
+|--------------------------------------------------------------------------
+| 6. the upload path never materialises an object in PHP memory — seaweedfs-s3
+|--------------------------------------------------------------------------
+|
+| A SIXTH RULE, ADDED WITH THE UPLOAD INTAKE RATHER THAN INHERITED FROM A DELETED GREP. It exists
+| because `seaweedfs-s3`'s Definition of done states its invariant as a grep and the failure it
+| guards is invisible in every test: `Storage::put($key, file_get_contents($path))` works perfectly
+| on a 40 KB fixture and OOMs an FPM worker on a real batch, because `memory_limit` is per PROCESS
+| and ten 25 MB files arrive at one of them.
+|
+| SCOPED TO app/Services/Sources/Upload/, NOT TO app/. `file_get_contents()` is a perfectly ordinary
+| call elsewhere — this very file makes five of them — and a repository-wide ban would be an
+| allow-list within a week. What is banned is buffering an UNTRUSTED UPLOAD, in the four files that
+| are the only ones holding one.
+|
+| THE SCOPE EXCLUDES ONE WRITE THAT LOOKS LIKE A VIOLATION AND IS NOT, AND NAMING IT IS THE POINT.
+| `SourceService::storeText()` calls `Storage::disk('s3')->put($key, $content)` — the whole-string
+| form `seaweedfs-s3`'s Definition of done names — and it stays that way deliberately. `$content` is
+| a REQUEST FIELD, so the bytes are already a resident PHP string before that line runs; handing
+| them to `MultipartUploader` would mean writing them into a `php://temp` stream first, which is a
+| COPY and raises peak memory rather than lowering it. It is also bounded before it arrives, at
+| `StoreSourceRequest::MAX_TEXT_LENGTH` (500,000 characters, so under 2 MB of UTF-8), where an
+| upload's only bound is 25 MB per file times ten files at one FPM worker. The full argument and the
+| two conditions that would reopen it are on `storeText()`'s own docblock. An unexplained exclusion
+| reads as an oversight to the next person, who removes it or widens the rule to catch it; this
+| paragraph is what makes it a decision instead.
+*/
+test('the upload path streams its object rather than buffering it', function (): void {
+    $violations = [];
+
+    foreach (kbPhpFilesUnder(['app/Services/Sources/Upload']) as $file) {
+        // `hash_file()` and `fopen()` are the two reads this path DOES make, and both stream. The
+        // banned set is the whole-file forms: anything whose result is a string the size of the
+        // object.
+        //
+        // `file()` IS NOT IN THE SET AND THAT IS THE SCANNER'S LIMIT RATHER THAN A DECISION. This
+        // rule matches a T_STRING followed by `(` and does not resolve a receiver, and `finfo::
+        // file()` — the libmagic sniff, which reads a fixed-size window and is the whole of step 3 —
+        // wears the same name. Banning it reported that call as a violation. Adding receiver
+        // analysis for one name would be a second matcher to get wrong; the whole-file PHP `file()`
+        // is not a call this path has any reason to make, and the positive assertion below is what
+        // actually holds the streaming property.
+        foreach (kbCallsTo((string) file_get_contents($file), ['file_get_contents', 'readfile']) as $call) {
+            $violations[] = sprintf('%s:%d — %s()', kbRelativePath($file), $call['line'], $call['name']);
+        }
+    }
+
+    expect($violations)->toBe([], implode("\n", array_merge(
+        ['the upload path reads a whole object into a PHP string:'],
+        $violations,
+        [
+            'seaweedfs-s3, Gotchas: "PHP dies with `Allowed memory size exhausted` on a file well '
+            .'under `upload_max_filesize`." memory_limit is per PROCESS, so the ceiling that bites '
+            .'is not the 25 MB per-file cap but a batch of them arriving at one FPM worker. Stream '
+            .'in with MultipartUploader; hash with hash_file(), which reads in blocks.',
+        ],
+    )));
+
+    // ── AND THE POSITIVE HALF, because an absence assertion passes against a file that does
+    //    nothing at all. SourceObjectWriter must actually NAME the streaming uploader, in CODE
+    //    rather than in the docblock that explains it — which is exactly the distinction this
+    //    file's tokenizer exists to make.
+    $writer = kbSignificantTokens(
+        (string) file_get_contents(dirname(__DIR__, 2).'/app/Services/Sources/Upload/SourceObjectWriter.php'),
+    );
+
+    $names = array_values(array_filter(array_map(
+        static fn (array|string $token): string => is_array($token) ? $token[1] : '',
+        $writer,
+    )));
+
+    expect($names)->toContain(
+        'MultipartUploader',
+        'AwsS3V3Adapter',
+    );
+});

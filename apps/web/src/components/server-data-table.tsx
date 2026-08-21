@@ -235,6 +235,9 @@ export function ServerDataTable<TData extends RowData>({
                         className={cn(
                           'px-card-pad-md',
                           cell.column.columnDef.meta?.align === 'end' && 'text-right',
+                          // A secondary column the density table drops between 768px and 1279px, so
+                          // the actions column is not the thing the container's scroller hides.
+                          cell.column.columnDef.meta?.showFrom === 'xl' && 'hidden xl:table-cell',
                         )}
                       >
                         <table.FlexRender cell={cell} />
@@ -337,6 +340,8 @@ function SortableHeaderCell<TData extends RowData>({
   const cellClass = cn(
     'bg-card-inset px-card-pad-md text-caption font-medium text-muted-foreground uppercase',
     alignEnd && 'text-right',
+    // Same rule as the body cell: header and cell hide together, or the columns shear.
+    header.column.columnDef.meta?.showFrom === 'xl' && 'hidden xl:table-cell',
   );
 
   if (!canSort) {

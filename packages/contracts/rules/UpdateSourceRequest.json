@@ -1,0 +1,56 @@
+{
+    "class": "App\\Http\\Requests\\UpdateSourceRequest",
+    "rules": {
+        "content": [
+            "missing"
+        ],
+        "description": [
+            "bail",
+            "sometimes",
+            "nullable",
+            "string",
+            "max:2000"
+        ],
+        "effective_at": [
+            "bail",
+            "sometimes",
+            "nullable",
+            "date"
+        ],
+        "expires_at": [
+            "bail",
+            "sometimes",
+            "nullable",
+            "date",
+            "after:effective_at"
+        ],
+        "name": [
+            "bail",
+            "sometimes",
+            "string",
+            "max:200"
+        ],
+        "origin_url": [
+            "missing"
+        ],
+        "status": [
+            "missing"
+        ],
+        "tags": [
+            "bail",
+            "sometimes",
+            "array",
+            "max:50"
+        ],
+        "tags.*": [
+            "bail",
+            "string",
+            "min:1",
+            "max:64",
+            "distinct"
+        ],
+        "type": [
+            "missing"
+        ]
+    }
+}

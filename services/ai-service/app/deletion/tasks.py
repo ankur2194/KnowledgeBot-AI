@@ -134,6 +134,16 @@ def purge_retired_version(
     Runs as a backstop as well as inline — beat re-enqueues it for versions that were retired
     but whose artifacts are still present, which is how a publication that crashed between
     activation and cleanup gets finished.
+
+    **The original never goes with a retired version.** Phase C hoisted `original/` out of the
+    version prefix to `org/{org_id}/sources/{source_id}/original/{content_hash}`, so one object
+    now serves every version of the source: a reprocess under a new parser configuration mints a
+    new version from the *same* bytes, which is exactly what `force_nonce` exists to trigger. This
+    task therefore sweeps `derived/` under its one version id and calls `_purge_objects` with
+    `include_original=False`, without a condition and without a caller-supplied flag. Under the
+    old layout each version carried its own copy and passing true here was harmless; now it
+    destroys the bytes the live version was built from, and nothing fails until the next reprocess
+    or the next restore reconciliation against `source_items.content_hash`.
     """
     raise NotImplementedError
 
@@ -170,17 +180,67 @@ def _purge_objects(
     *,
     include_original: bool,
 ) -> None:
-    """Step 2. Sweep the version-scoped prefixes, and only then consider the original.
+    """Step 2. Sweep the derived prefixes under every version, then decide the original separately.
 
-    `derived/` goes unconditionally; `original/` goes only when `include_original` — which
-    comes from `original_disposition`, never from a caller's assumption. Removing knowledge is
-    not removing the file, and a source can legitimately end as *knowledge removed, original
-    retained*. The admin view has to say so.
+    **Two prefix families, and they are no longer nested.** `derived/` is version-scoped;
+    `original/` is source-scoped:
+
+        org/{org_id}/sources/{source_id}/versions/{source_version_id}/derived/…
+        org/{org_id}/sources/{source_id}/original/{content_hash}
+
+    `original/` is a **sibling of `versions/`, not a child of one**, and the docstring that stood
+    here said otherwise: it described every prefix this function builds as starting
+    `org/{org_id}/sources/{source_id}/versions/{id}/`. That was true of `derived/` and wrong about
+    `original/`, and the wrongness had exactly one direction. A sweep that walks only the version
+    prefixes never reaches the original, and the verification that enumerates those same prefixes
+    then reports the source clean — a signed proof of a deletion that did not happen, which is the
+    one outcome this subsystem exists to prevent. So the shape is written out here rather than
+    referred to.
+
+    Why it moved is structural, and it is not this side's to undo.
+    `2026_08_20_002000_create_source_versions_table.php` makes `ingest_key`, all three
+    `*_cfg_version` columns and `embedding_model_version` `NOT NULL`, with CHECKs that reject a
+    placeholder — and every one of those values is produced by this service, during and after
+    parsing. Laravel therefore cannot mint a `source_versions` row at intake, so the request
+    holding the bytes has no version id to put in a key and cannot acquire one. The single builder
+    is `ObjectKey::originalPrefix()` in `services/core-api/app/Support/Kb/ObjectKey.php`, whose
+    class docblock carries the whole ruling — including that `seaweedfs-s3` non-negotiable 1 still
+    states the old layout and that an ADR is owed for the departure. Read it before changing a
+    prefix string on either side of the seam. `source_items.storage_key` additionally carries a
+    CHECK that the key begins `org/‹its own organization_id›/`, so a key built for the wrong tenant
+    is refused by the INSERT rather than swept for by this function later.
+
+    **What that means for this function.** It already receives `(org_id, source_id)` and already
+    treats `include_original` as a disposition separate from `derived/`, so it needs no new
+    argument — but the two families are built from different identifiers and one of them is not in
+    the version loop:
+
+    * `derived/` — one prefix per resolved version id, swept unconditionally. Everything under it
+      is rebuildable from the original plus PostgreSQL, which is what makes "unconditionally" safe.
+    * `original/` — **one prefix per source**, built from `source_id` alone and swept once, only
+      when `include_original`. Never appended to a version prefix: that names a location nothing
+      has ever written, and enumerating it comes back empty for a source whose original is sitting
+      one level up.
+
+    Two consequences follow from the original outliving every version. A source that resolved to
+    **no** versions still has an original to consider, so the disposition is asked and acted on
+    even when the derived loop does nothing. And `purge_retired_version` must pass
+    `include_original=False`, always — the object is shared by every version of the source, so
+    removing it when one version retires destroys the bytes its successor was built from.
+
+    `include_original` comes from `original_disposition`, never from a caller's assumption.
+    Removing knowledge is not removing the file, and a source can legitimately end as *knowledge
+    removed, original retained*. The admin view has to say so — and the hoisted prefix is what lets
+    that retained object be enumerated and reported on its own rather than filtered out of a
+    listing it shares with derived artifacts.
 
     Extracted images are content-hash-deduped **within** the organization, so they are
     dropped only once no surviving element references them. Never widen a prefix to make a
-    sweep succeed: prefixes start `org/{org_id}/sources/{source_id}/versions/{id}/` and one
-    segment too few is another tenant's data.
+    sweep succeed: every prefix here starts `org/{org_id}/sources/{source_id}/` and one
+    segment too few is another tenant's data. That source prefix is also the widest string this
+    function may ever name, and only with `include_original` true — sweeping it with the flag
+    false takes the retained original with it, and the disposition that was recorded and reported
+    becomes a lie no listing afterwards can distinguish from a purge that worked.
 
     The batch delete reports per-key failures inside a 200 response body, and `Quiet` mode
     suppresses only the successes — inspect the error list on every call, or this step reports
@@ -293,12 +353,20 @@ def _sweep_organization_residue(org_id: str) -> Mapping[str, int]:
     it in the verification artifact and the audit entry — identifiers and counts, never contents —
     even when the run passes.
 
-    **What this does not close.** Residue under an organization that keeps operating stays
-    unreachable. Identifying it needs an anti-join against `source_versions` (`… AND NOT EXISTS
-    (SELECT 1 FROM source_versions sv WHERE sv.organization_id = %s AND sv.id = source_version_id)`)
-    and no migration in this repository creates that table. Do not approximate it with a
-    caller-supplied list of live versions: that is the version-scoped predicate again, and a
-    resolver that returned a short list would delete live statistics for every version it omitted.
+    **What this does not close, and what stopped being open.** Identifying residue under an
+    organization that keeps operating needs an anti-join against `source_versions` (`… AND NOT
+    EXISTS (SELECT 1 FROM source_versions sv WHERE sv.organization_id = %s AND sv.id =
+    source_version_id)`), and that used to be blocked on a table no migration created.
+    `2026_08_20_002000` creates it; `2026_08_20_002400` then adds the composite `ON DELETE
+    CASCADE` that makes the anti-join vacuous wherever it would run, because a validated foreign
+    key cannot leave a row naming a version that does not exist. It is still deliberately not
+    written, now for that reason rather than the earlier one — `relational`'s module docstring
+    carries the argument. What remains open is narrower and is about deployment rather than
+    schema: these statements run against whatever database this worker is pointed at, and a
+    constraint is a property of a migrated one. Do not approximate the anti-join with a
+    caller-supplied list of live versions either way: that is the version-scoped predicate again,
+    and a resolver that returned a short list would delete live statistics for every version it
+    omitted.
     """
     raise NotImplementedError
 
@@ -342,10 +410,12 @@ def purge_organization(self: Any, *, org_id: str, job_id: str) -> None:
     reporting an organization clean: rows keyed to a `source_version_id` whose source is already
     gone. `_purge_relational` names its rows through the version list resolved from the source, so
     residue left by a purge that predates that step has nothing left to resolve it. Every
-    `RELATIONAL_PURGE_ORDER` table is exposed to this, and the two sparse ones are where it was
-    actually accumulating. It surfaces as a foreign-key violation at the very end — the
-    `organizations` edge is `ON DELETE RESTRICT` everywhere in this schema, so the residue refuses
-    the organization row rather than riding along with it. That is the correct failure and a bad
+    `RELATIONAL_PURGE_ORDER` table was exposed to this, and the two sparse ones are where it was
+    actually accumulating; Phase C's composite foreign keys close the class wherever they are
+    deployed, which makes this sweep the measurement that says so rather than the repair it was.
+    Untreated it surfaces as a foreign-key violation at the very end — the `organizations` edge is
+    `ON DELETE RESTRICT` everywhere in this schema, so the residue refuses the organization row
+    rather than riding along with it. That is the correct failure and a bad
     diagnosis: the fix is `_sweep_organization_residue` below, recorded as evidence, not a wider
     delete. Never widen one of these statements to make an organization purge finish.
 

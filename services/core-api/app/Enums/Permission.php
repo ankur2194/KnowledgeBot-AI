@@ -98,6 +98,95 @@ enum Permission: string
      */
     case BotsManage = 'bots.manage';
 
+    /**
+     * Read a knowledge source, its items, its versions and their freshness.
+     *
+     * ── FOUR SOURCE PERMISSIONS, REGISTERED IN ONE PASS, AND THREE ROLES OUT OF FOUR HOLD THEM ─
+     *
+     * All four `sources.*` cases below are registered together, before the endpoints that check
+     * them exist, because Phase C's later steps are forbidden from editing this file. That is a
+     * deliberate sequencing decision and it has a cost worth naming: a permission with no call site
+     * is a permission nothing exercises, so the ROLE MATRIX is what proves each one is granted the
+     * way the specification says (`tests/Unit/RolePermissionMatrixTest.php` restates the whole
+     * table independently) and the policy that consumes them is what proves they are reachable.
+     *
+     * ── THE GRANT IS A READING OF §6.4, NOT AN EXTENSION OF IT ────────────────────────────────
+     *
+     * Unlike `bots.view` one block up — which is an extension decided with the repo owner because
+     * §6.4 and §6.5 never mention bots in either direction — the source permissions ARE what the
+     * specification says. §6.4 gives the Knowledge Manager a six-item list and every item is a
+     * source operation: upload documents, add websites, review parsed content, trigger
+     * reprocessing, disable/archive/delete sources, view freshness. §6.2 and §6.3 give the Owner
+     * and the Administrator everything above that.
+     *
+     * THE ANALYST HOLDS NONE OF THE FOUR, AND THAT IS A DECISION RATHER THAN A SILENCE. §6.5 is
+     * reporting-only and never mentions sources, so — by the same rule the bot grants state —
+     * silence is not a grant. The obvious argument for giving an analyst `sources.view` is that
+     * Phase E has them review conversations, and a transcript cites sources. It does not hold:
+     * `citations` denormalizes the label, display title, location and excerpt onto the citation row
+     * precisely so a transcript stays readable after the source is purged, so conversation review
+     * reads NOTHING from `knowledge_sources`. A grant here would widen an analyst's reach to every
+     * document title, tag and crawl URL in the organization to make a screen work that does not
+     * read them.
+     */
+    case SourcesView = 'sources.view';
+
+    /**
+     * Create, rename, retag, disable, enable, archive, reprocess or delete a knowledge source.
+     *
+     * The write permission for everything about a source that is not the act of putting bytes in it
+     * or the act of pointing a bot at it. `sources.upload` and `sources.assign` are those two, and
+     * the block below states why they are separate cases even though all three are granted to the
+     * same three roles today.
+     */
+    case SourcesManage = 'sources.manage';
+
+    /**
+     * Put bytes in: upload a file, submit pasted text, or start a crawl.
+     *
+     * ── THIS IS THE ONE PERMISSION IN THE CATALOG THAT KNOWINGLY BREAKS THIS FILE'S OWN RULE ──
+     *
+     * `Permission::BotsManage` records the rule: *"a permission nobody grants differently is a
+     * permission that fails silently in both directions"*, which is why there is no `bots.publish`.
+     * `sources.upload` IS granted to exactly the same three roles as `sources.manage` today, so by
+     * that rule it should not exist. It exists because the repo owner ruled Phase C's permission set
+     * in one pass, and the reasoning is recorded here rather than left to look like an oversight:
+     *
+     *   IT IS THE ONLY SOURCE ACTION THAT CONSUMES A QUOTA AND RUNS AN UNTRUSTED PARSER. Renaming a
+     *   source costs nothing and cannot fail dangerously. An upload writes to object storage
+     *   against the organization's plan, hands bytes to Docling and an OCR engine, and is the entry
+     *   point `kb-security-baseline`'s whole upload section exists for. Plan gating and per-role
+     *   upload limits are the first two things a billing surface will want to attach to, and both
+     *   attach to a permission or to nothing.
+     *
+     *   THE COST OF BEING WRONG IS ASYMMETRIC. A case that turns out to be redundant is one row in
+     *   the role matrix that never diverges. A case that turns out to be needed after the endpoints
+     *   are written cannot be added, because this file is closed to Phase C's later steps.
+     *
+     * A reviewer who disagrees should note that the rule and this case cannot both be silently
+     * right; the divergence is stated so the next person can decide it deliberately.
+     */
+    case SourcesUpload = 'sources.upload';
+
+    /**
+     * Assign a knowledge source to a bot, or remove the assignment.
+     *
+     * ── SEPARATE FROM `sources.manage` BECAUSE IT IS THE ONE SOURCE ACTION THAT CHANGES WHAT A
+     *    BOT CAN SAY ─────────────────────────────────────────────────────────────────────────
+     *
+     * Every other source operation changes the CORPUS. This one changes the SCOPE: it writes the
+     * row that `bot_ids` — one of the four mandatory Qdrant filter terms — is resolved from, and it
+     * is the only row in the schema that can span two organizations. The composite foreign keys are
+     * what make the cross-tenant version of it impossible; this permission is what decides who may
+     * make the legal version of it.
+     *
+     * It is authorized against the SOURCE (`KnowledgeSourcePolicy::assign()`) and the bot is
+     * additionally authorized with `bots.view`, which is exactly why `Permission::BotsView` is
+     * granted to all four roles: §6.4's Knowledge Manager performs this action, and a role that
+     * cannot read a bot cannot choose one from a list.
+     */
+    case SourcesAssign = 'sources.assign';
+
     /** List the organization's members and its invitations. */
     case MembersView = 'members.view';
 

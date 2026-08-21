@@ -16,10 +16,19 @@ use Throwable;
  * Dump every FormRequest's rule set to packages/contracts/rules/ as JSON.
  *
  * WHY THIS EXISTS. The OpenAPI document in packages/contracts/ is generated, never hand-edited, so
- * the FormRequest is the single place a request rule can change. This command is what makes that
- * enforceable: CI runs it and fails on a diff, so changing a validation rule without regenerating
- * the contract is a red build rather than a client that 422s in production on a field it was never
- * told about.
+ * the FormRequest is the single place a request rule can change. This command is what makes the
+ * drift VISIBLE: `--check` exits non-zero when the tree and packages/contracts/rules/ disagree, so
+ * a validation rule changed without regenerating the contract can be caught before it becomes a
+ * client that 422s in production on a field it was never told about.
+ *
+ * NOTHING RUNS IT AUTOMATICALLY, AND THIS PARAGRAPH USED TO SAY OTHERWISE. It read: "CI runs it and
+ * fails on a diff… is a red build". There is no CI — `.github/` was deleted on 2026-08-17 and
+ * nothing replaced it — so `--check` is a command a human or a review runs, and a rule changed
+ * without a regeneration is a SILENT divergence between this tree and the published contract, not a
+ * red build. tests/Feature/DumpFormRulesCommandTest.php proves the command itself works (it is
+ * deterministic across two runs, and `--check` catches a single changed byte) against a temporary
+ * directory; it deliberately never touches packages/contracts/rules/, so it cannot and does not
+ * assert that the published documents are current.
  *
  * DETERMINISM IS THE WHOLE POINT. Two things guarantee it and both are load-bearing:
  *   - keys are sorted (ksort), because reflection order follows source order and a reordered method

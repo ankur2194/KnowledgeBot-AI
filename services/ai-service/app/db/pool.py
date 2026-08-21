@@ -10,8 +10,11 @@ query corruption. Open it in a ``worker_process_init`` signal handler.
 
 psycopg, deliberately, and there is no ORM and no migration tool anywhere under
 ``services/ai-service/app``: this service writes a small set of derived, rebuildable tables
-into a schema Laravel's migrations define (`kb-architecture-map`). CI fails the build on the
-name of an ORM appearing in this tree at all, including in prose.
+into a schema Laravel's migrations define (`kb-architecture-map`). **Nothing enforces that.**
+The gate that grepped this tree for the name of an ORM or a migration tool was deleted with
+``.github/`` on 2026-08-17 and no test replaced it, so the rule holds by review alone. The
+prohibition on such a name appearing *in prose* was a property of that grep and went with it.
+``app/db/writes.py`` carries the full reasoning and the current enforcement status.
 """
 
 from __future__ import annotations

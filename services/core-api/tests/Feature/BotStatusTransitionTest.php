@@ -8,6 +8,7 @@ use App\Enums\OrgRole;
 use App\Models\AuditLog;
 use App\Models\Bot;
 use App\Models\BotFallbackEntry;
+use App\Models\KnowledgeSource;
 use App\Models\Organization;
 use App\Models\ProviderConnection;
 use App\Models\ProviderModelEntry;
@@ -59,15 +60,25 @@ function botStatusFixture(): array
     $model = ProviderModelEntry::factory()->recycle($orgA)->recycle($connection)
         ->supporting(['text'])->create(['model' => 'gpt-5.1']);
 
+    // FULLY CONFIGURED, so `published` is reachable and the transitions below are testing the
+    // endpoint rather than re-testing the publish guard.
+    $botA = Bot::factory()->recycle($orgA)->usingModel($connection, $model)
+        ->create(['name' => 'ALPHA status bot', 'slug' => 'alpha-status']);
+
+    // AND ASSIGNED A SOURCE, which is the guard's THIRD refusal and the newest of the three. It
+    // has to come after the bot exists: `assignedTo()` writes `bot_source_assignments`, whose
+    // `organization_id` is stated from the RECYCLED organization and checked against BOTH parents
+    // by the two composite foreign keys. Without this line every publish below is a 409 naming
+    // `PUBLISH_NEEDS_ASSIGNED_SOURCE`, which is the guard working rather than the endpoint failing.
+    KnowledgeSource::factory()->recycle($orgA)->assignedTo($botA)
+        ->create(['name' => 'ALPHA status corpus']);
+
     return [
         'orgA' => $orgA,
         'orgB' => $orgB,
         'ownerA' => User::factory()->recycle($orgA)->orgRole(OrgRole::Owner)
             ->create(['email' => SpaSession::uniqueEmail('status-owner-alpha')]),
-        // FULLY CONFIGURED, so `published` is reachable and the transitions below are testing the
-        // endpoint rather than re-testing the publish guard.
-        'botA' => Bot::factory()->recycle($orgA)->usingModel($connection, $model)
-            ->create(['name' => 'ALPHA status bot', 'slug' => 'alpha-status']),
+        'botA' => $botA,
         'botB' => Bot::factory()->recycle($orgB)->create(['name' => 'BRAVO status bot', 'slug' => 'bravo-status']),
     ];
 }

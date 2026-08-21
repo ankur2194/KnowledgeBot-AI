@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Support;
 
 use App\Models\Bot;
+use App\Models\KnowledgeSource;
 use App\Models\Organization;
 use App\Models\User;
 
@@ -27,8 +28,27 @@ use App\Models\User;
  * makes a negative assertion run as the organization that PLANTED the canary and pass while proving
  * the opposite of what it claims — would type-check silently.
  *
- * `App\Models\KnowledgeSource` is the one that has not landed, and it has no property here yet:
- * tenancy.php carries the Phase C TODO for it, and the canary moves into its content when it does.
+ * `$sourceB` LANDED WITH PHASE C1 AND IS NARROWED LIKE THE REST. It is a real, assigned
+ * `KnowledgeSource` in Org B — the row `bot_ids` is resolved from — and it is what makes a
+ * source-shaped isolation assertion expressible at all: before it, every §22.5 test had a bot to
+ * compare and nothing on the knowledge side.
+ *
+ * ── IT IS DELIBERATELY NOT PAIRED, AND THE ASYMMETRY IS THE ONE EXCEPTION IN THIS FILE ───────
+ *
+ * Every other model on this fixture comes in a pair, because a test that reads "the" organization
+ * has not decided which one it meant. There is no `$sourceA`, and adding one would not be a
+ * symmetry improvement: the fixture's negative assertions run AS Org A and assert that Org B's
+ * canary is absent, so Org A needs to have no knowledge of its own for the assertion to mean
+ * anything. A source in Org A would give a leak somewhere to hide in plain sight — a response body
+ * containing a source name would satisfy a reader's eye without anyone checking WHOSE.
+ *
+ * A test that genuinely needs a source in Org A creates one explicitly, with
+ * `KnowledgeSource::factory()->recycle($t->a)`, which is one line and says which tenant it meant.
+ *
+ * THE CANARY IS STILL IN `$botB->welcome_message` AND DID NOT MOVE ONTO THIS SOURCE. It moves when
+ * `KnowledgeSourceFactory::indexed()` lands — see tenancy.php. Putting it on a source whose content
+ * never reaches the index would make every isolation test assert against a string no retrieval path
+ * could have leaked: a weaker test that reads as a stronger one.
  *
  * FLAG for whoever enables the commented-out arch rule in tests/Arch/DoctrineTest.php — "a
  * controller cannot touch a model", `expect('App\Models')->toOnlyBeUsedIn([...])`. These three
@@ -44,6 +64,7 @@ final readonly class TenantPair
         public Organization $b,
         public Bot $botA,
         public Bot $botB,       // the only bot that may see the canary
+        public KnowledgeSource $sourceB, // assigned to $botB; unpaired on purpose, see above
         public string $canary,  // fresh per test; planted in ORG B's content only
         public User $actorA,    // admin of A
         public User $actorB,    // admin of B

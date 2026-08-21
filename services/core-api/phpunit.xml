@@ -1,7 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+    BOOTSTRAP IS tests/bootstrap.php, NOT vendor/autoload.php. It defines LARAVEL_START and then
+    requires the autoloader. That file records why in full; the short version is that LARAVEL_START
+    is defined only by public/index.php and artisan, so a suite bootstrapped from the autoloader
+    alone never executes InternalAiClient's request-scoped deadline branch — and the assertion
+    guarding it therefore could not fail.
+-->
 <phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
-         bootstrap="vendor/autoload.php"
+         bootstrap="tests/bootstrap.php"
          colors="true"
          cacheDirectory=".phpunit.cache"
          executionOrder="depends,defects"

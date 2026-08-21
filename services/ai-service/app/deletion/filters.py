@@ -1,25 +1,50 @@
 """The delete-key allow-list, and the one module allowed to name a payload key from a variable.
 
-CI's deletion-key gate greps the whole data plane for `FieldCondition(` with a `key=`, then
-extracts every key literal named on the matched line and tests each one against `DELETE_KEYS`
-separately. Per occurrence, not per line, and the distinction is a fix rather than a detail:
-the subtraction used to drop a whole line because *something* on it was allow-listed, so a
-`must=[…]` list holding an allow-listed condition and a content-addressed one — one line, the
-way a formatter leaves a short list — laundered the second key behind the first. What the gate
-still cannot see is a key built from a variable: a loop over field names passes it while
-naming anything at all. So rather than a blanket escape hatch the gate subtracts **this file
-by its literal path** (`grep -vF 'app/deletion/filters.py'`). Two consequences worth knowing
-before touching anything here:
+**What used to enforce this, and what does now.** A `gates.yml` job greped the whole data plane
+for `FieldCondition(` with a `key=`, extracted every key literal named on the matched line and
+tested each one against `DELETE_KEYS` separately — per occurrence rather than per line, which was
+itself a fix: the earlier subtraction dropped a whole line because *something* on it was
+allow-listed, so a `must=[…]` holding an allow-listed condition and a content-addressed one, the
+way a formatter leaves a short list, laundered the second key behind the first. **That job was
+deleted with `.github/` on 2026-08-17 and nothing replaced it.** No scan of any kind now reads the
+rest of the data plane looking for a payload key that names content. This paragraph is history,
+and it is kept because the arrangement it describes is still the arrangement — what changed is
+who checks it.
 
-* **The path is load-bearing.** Rename or move this module and the exemption stops matching:
-  either the gate starts failing on every builder below, or, worse, the builders move to a
-  path the gate never inspected and the allow-list stops being enforced anywhere.
-* **A second exempted file is a review stop, not a merge.** The exemption is affordable only
-  because exactly one module can construct keys, and that module is unit-tested.
+What checks it today, exhaustively:
 
-What earns the exemption is `DELETE_KEYS` together with `tests/unit/test_delete_keys.py`.
-The tuple is the allow-list expressed in code; the test is the only thing in the repository
-that fails when someone edits it.
+* `assert_delete_key` below, at runtime, on every key any builder here emits. It is the only
+  check that can see a key built from a variable at all — see its own docstring.
+* The two `assert` statements at the foot of this file, which run at import in the process whose
+  job is destroying data.
+* `tests/unit/test_delete_keys.py`, which pins the tuple positionally, holds it against
+  `app/retrieval/collection.py`'s `PAYLOAD_INDEXES` and `app/retrieval/tenancy.py`'s
+  `MANDATORY_FILTER_KEYS`, and asserts no content-addressed name is a member.
+* `tests/unit/test_deletion_filters.py`, which walks every filter every builder here returns and
+  asserts each key it finds is allow-listed and is not content-addressed.
+
+**Checked by nothing:** a `FieldCondition(key="text")`, a `MatchText`, or a delete or exact-count
+call taking a text or content-hash keyword argument, written anywhere in the data plane outside
+this module. That is a correct statement of the state, not a to-do this file can discharge — the
+four checks above are all in-process or in-suite and none of them can see another package's
+source. Two files still shape their code for the vanished grep, keeping `key=` on the same
+physical line as its `FieldCondition(` because "grep is line-based":
+`app/retrieval/tenancy.py:158` and `app/ingestion/indexing/upserter.py:354`. Neither is this
+module's to edit; both are recorded here rather than corrected.
+
+Two properties of the old exemption that outlive it, because the tests above are written against
+the same arrangement the gate was:
+
+* **The path is load-bearing.** The gate subtracted this module by its literal path
+  (`grep -vF 'app/deletion/filters.py'`). Nothing subtracts anything now, but every reference
+  above names this module by path or by import; move or rename it and they go stale together.
+* **A second module that builds a payload key from a variable is a review stop, not a merge.**
+  The arrangement was affordable because exactly one module can construct keys and that module is
+  unit-tested. With no scan left, "exactly one" is the whole of the remaining structure.
+
+What earns that position is `DELETE_KEYS` together with `tests/unit/test_delete_keys.py`. The
+tuple is the allow-list expressed in code; that test is the only thing in the repository that
+fails when someone edits it, and its own docstring records the same deletion from the other side.
 """
 
 from __future__ import annotations
@@ -29,9 +54,10 @@ from typing import Final
 
 # A runtime import, as the comment that stood here said it would become "in the same change as
 # the first real body". It was type-only while the bodies raised, so that `DELETE_KEYS` — the
-# allow-list CI reads — could be imported by a unit test without pulling a vector client into a
-# test that never talks to a vector store. The builders below *construct* `models.Filter`
-# objects rather than merely annotating one, so the name has to exist when a worker calls them.
+# allow-list, which a deleted CI job read and two unit tests read now — could be imported by a
+# unit test without pulling a vector client into a test that never talks to a vector store. The
+# builders below *construct* `models.Filter` objects rather than merely annotating one, so the
+# name has to exist when a worker calls them.
 # The tuple is still importable and the test still opens no socket: importing `qdrant_client`
 # connects to nothing.
 from qdrant_client import models
@@ -84,11 +110,16 @@ DELETE_KEYS: Final[tuple[str, ...]] = (
 # observed weeks later as a bot that stopped citing a clause nobody edited — with no trace
 # back to the delete that did it, because the delete recorded identifiers it never used.
 #
-# CI enforces this separately from the allow-list above, because a variable key is invisible
-# to an allow-list over literals: it greps the whole data plane for Qdrant's full-text match
-# condition, and for any delete or exact-count call taking a text, content or content-hash
-# keyword argument. Both of those greps run over this file too — the path exemption covers
-# only the `FieldCondition` key check, nothing else.
+# This was enforced separately from the allow-list above, because a variable key is invisible
+# to an allow-list over literals: a second and a third grep looked across the whole data plane
+# for Qdrant's full-text match condition, and for any delete or exact-count call taking a text,
+# content or content-hash keyword argument. Both ran over this file too — the path exemption
+# covered only the `FieldCondition` key check. **Both went with `.github/` on 2026-08-17 and
+# nothing performs them now.** Inside this module the rule is enforced by `assert_delete_key`,
+# which refuses any key that is not an identifier PostgreSQL issued, and by the two tests the
+# module docstring names. Outside it, this rule is carried by review alone: no test in the
+# repository reads another package's source, so a full-text condition written in `app/retrieval/`
+# or `app/ingestion/` would be caught by a reader or not at all.
 #
 # The same rule is why verification never searches for the removed content to prove it is
 # gone: that is this banned shape wearing a proof's clothes. Absence is asserted against the
@@ -98,9 +129,12 @@ DELETE_KEYS: Final[tuple[str, ...]] = (
 def assert_delete_key(key: str) -> str:
     """Gate every dynamically constructed payload key. Returns the key, so it can be inlined.
 
-    This is the check the CI grep is structurally unable to perform, and the reason the grep
-    tolerates this file at all. Enforce the allow-list here, once, before a key can reach a
-    filter.
+    **A grep over string literals is structurally unable to perform this check**, and that point
+    survives the gate that used to make it: a key built from a variable — a loop over field names,
+    an argument, a value read from config — names anything at all and matches no pattern over
+    source text. It is why this module was the one path the deleted CI job exempted, and it is why
+    this function is now the whole of the enforcement rather than the part of it that ran in the
+    worker. Enforce the allow-list here, once, before a key can reach a filter.
 
     Raise on an unknown key — never skip it. Skipping drops one term from the `must` list and
     the delete then proceeds *wider* than intended, which is the exact failure this module

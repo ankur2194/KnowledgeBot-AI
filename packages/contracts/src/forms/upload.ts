@@ -1,23 +1,80 @@
+/**
+ * The upload form, and the per-organization limits it is a function of — which are a PUBLISHED shape
+ * now, defined once in `src/resources/sources.ts` and re-exported below rather than declared here.
+ * §8.10 makes maximum file size and the accepted media types CONFIGURABLE, so there is no byte
+ * constant and no MIME constant anywhere in apps/web or packages/contracts: the schema below is a
+ * FACTORY over that DTO, and a hard-coded ceiling enforces one organization's limits on every other.
+ *
+ * THIS IS ASSERTED NOW, AND THE SENTENCE THAT USED TO BE HERE WAS WRONG TWICE OVER. It read
+ * "test/form-drift.test.ts does not import `uploadSchema` at all", which went false the day the
+ * ownership loop stopped being a hand-written pair of names and started iterating `MIRRORS` plus
+ * this factory; and it went on to name the case that would close the real property — one `File`
+ * parsed against two different `OrgUploadLimits`, expecting opposite results. That case exists:
+ * `describe('the upload form: the limits are the organization's, not this package's')`. It holds
+ * the file fixed and varies the DTO on size, on the size BOUNDARY, on MIME and on the batch cap,
+ * with the positive control first each time — because a factory quietly collapsed into a fixed
+ * schema keeps every other test in this file green while enforcing somebody else's limits.
+ *
+ * WHAT IS STILL NOT ASSERTED, said out loud rather than left to be rediscovered: NOTHING COMPARES
+ * THIS SCHEMA TO LARAVEL'S `rules()`, and that is now a decision rather than a gap.
+ *
+ * The sentence here used to end "until `packages/contracts/rules/StoreSourceRequest.json` lands". It
+ * landed — and `uploadSchema` did NOT become a `MIRRORS` entry, because the manifest turned out to
+ * describe a THREE-ARM body (`file` / `url` / `text`, discriminated by `type`) of which this schema
+ * covers one arm: eleven validated paths against this object's two, size probes the generic sizer
+ * answers with a list of `'a'` strings and a bare number where `z.file()` demands a `File`, and a
+ * `files.*` rule (`file`) no JSON probe can synthesize at all. `StoreSourceRequest` is therefore
+ * `NO_CLIENT_FORM`, recorded as OWED with the measurement and with what closes it — the upload
+ * intake, the `OrgUploadLimits` endpoint that must publish the server's own constants, and a create
+ * form covering all three arms. Read that entry before writing a mirror; the argument is there rather
+ * than here because that is the file the assertion lives in.
+ *
+ * Until then, drift against the server is a reviewer check on this file. (A CI job used to run over
+ * packages/, and only over packages/design-tokens/generated — nothing in it read this file — and it
+ * is gone regardless.)
+ *
+ * TWO OF THOSE THREE CONDITIONS HAVE SINCE BEEN MET, and saying which keeps the paragraph above from
+ * reading as still-owed in full: the intake landed, and `GET .../sources/upload-limits` publishes the
+ * server's own constants as `OrgUploadLimitsResource`. `StoreSourceRequest` stays `NO_CLIENT_FORM` as
+ * OWED, because the third condition — a create form covering all three arms — is what the eleven-path
+ * measurement is actually about, and it does not exist.
+ *
+ * THE SECOND OF THOSE ALSO STRUCK ONE OF THE REGISTER ENTRY'S THREE REASONS, on 2026-08-21, and it is
+ * the one this file is named in. It read that the FormRequest states its per-file cap as a platform
+ * constant in KILOBYTES while this factory takes a per-organization cap in BYTES, so "the two agree
+ * only by coincidence". They agree by construction now: `StoreSourceRequest::MAX_FILE_KILOBYTES` IS
+ * `UploadLimits::MAX_FILE_KILOBYTES` — a definition rather than a second copy —
+ * `OrgUploadLimitsResource` renders `UploadLimits::maxBytes()`, and the kilobyte-to-byte
+ * multiplication happens at exactly one site on the server.
+ *
+ * THIS FACTORY DOES NOT BECOME A CONSTANT AS A RESULT, which is the inference to refuse. §8.10 is
+ * about the SHAPE; the endpoint exists so a per-plan ceiling can arrive without a client change; and
+ * "every number here is a platform constant today" is the resource's own wording about the numbers
+ * rather than about the contract. A byte literal in this package would be wrong for exactly the reason
+ * it always was.
+ */
+
 import { z } from 'zod';
 
+import type { OrgUploadLimits } from '../resources/sources.js';
+
 /**
- * Per-organization upload limits, returned by the bootstrap/config endpoint. §8.10 makes maximum
- * file size and per-organization storage limits CONFIGURABLE, so there must be no byte constant
- * and no MIME constant anywhere in apps/web or packages/contracts — the schema below is a FACTORY
- * over this DTO. Hard-code either one and the form silently enforces a different limit from the
- * organization it is rendering for, which reads as a rejected upload nobody can explain.
+ * THE INTERFACE MOVED TO `src/resources/sources.ts` AND THIS IS THE ONLY TYPE-LEVEL TRACE OF IT.
  *
- * NOTHING ASSERTS THIS. test/form-drift.test.ts does not import `uploadSchema` at all (it covers
- * the manifest count and the ownership keys). A CI job used to run over packages/, and only over
- * packages/design-tokens/generated — nothing in it read this file — and it is gone regardless.
- * It is a reviewer check until the drift suite gains an upload case that parses the same File
- * against two different `OrgUploadLimits` and expects opposite results.
+ * Not a rename and not a second declaration: a published component may have exactly one mirror in
+ * this package, and `test/resource-drift.test.ts` now holds `OrgUploadLimitsResource` in `MIRRORED`
+ * with the reasoning. What used to be an interface hand-written HERE — as the parameter of the
+ * factory below, invented by the client because no endpoint returned it — is the server's shape now,
+ * so it lives beside every other mirrored response and is pinned the same three ways.
+ *
+ * THE RE-EXPORT IS THE POINT AND NOT AN AFTERTHOUGHT. `uploadSchema`'s signature is public API inside
+ * this monorepo and apps/web already imports the parameter type from `@kb/contracts/forms` in both
+ * source and test — `rg 'OrgUploadLimits' apps/web` is the list, and it is a list rather than a
+ * number here on purpose — so the door stays where callers already knock rather than a rename being
+ * charged to an app this package cannot edit. `export type` is erased under `verbatimModuleSyntax`,
+ * so `@kb/contracts/forms` gains nothing at runtime and the root entry's <=1 kB budget never sees it.
  */
-export interface OrgUploadLimits {
-  readonly max_bytes: number;
-  readonly allowed_mime: readonly string[];
-  readonly max_batch: number;
-}
+export type { OrgUploadLimits } from '../resources/sources.js';
 
 /**
  * `.mime()` reads `File.type`, which the browser derives from the EXTENSION on most platforms and
@@ -27,9 +84,39 @@ export interface OrgUploadLimits {
  * check here and must still be rejected server-side, so this form renders server field errors like
  * any other.
  *
+ * `.mime(limits.allowed_mime)` IS ALSO NARROWER THAN THE SERVER'S ADMISSION RULE, and that gap is
+ * now measurable rather than theoretical. The intake admits a part only if the sniffed type is on
+ * this list AND the final extension is on a SECOND allow-list AND the two agree; the published shape
+ * carries three fields and no `allowed_extensions`, so this schema — and any `accept=` built from the
+ * same list — OVER-ACCEPTS wherever the two sets are not in bijection. `.md` and `.csv` both sniff as
+ * `text/plain`, so a picker offering `text/plain` offers a `.txt` the extension step refuses. The
+ * refusal arrives as a 422 keyed on the part and is the only place it can be seen. Render it; do not
+ * guess the extension list here, and do not tell the user the picker's filter is what will be
+ * accepted. See `OrgUploadLimits` in `src/resources/sources.ts` for the full statement.
+ *
  * `z.file()` over `z.instanceof(FileList)`: `FileList` is a DOM type absent from Node, and
  * `z.instanceof` evaluates at module load — importing this file from a server component or a
  * node-environment test would crash it outright.
+ *
+ * ── EVERY MESSAGE HERE IS RENDERED TO A CUSTOMER, WHICH IS WHY THEY ARE WRITTEN ────────────────
+ * Zod's defaults are developer copy and they reach a screen verbatim: `.mime()` unset emits
+ * `Invalid option: expected one of "application/pdf"|"text/csv"|"image/png"` and `.max()` on a file
+ * emits `Too big: expected file to have <=10485760 bytes`. Both were measured in a rendered upload
+ * row on 2026-08-20 and both break `kb-ui-patterns` -> references/states.md's microcopy rules in the
+ * same three ways: they are not sentence case, they surface internal vocabulary (a MIME union, a
+ * raw byte count), and they state no next step. Validation strings are the ONE class of server-or-
+ * schema text this product renders verbatim, so they have to be copy somebody wrote.
+ *
+ * TWO OF THEM DELIBERATELY CARRY NO NUMBER. The per-file ceiling is stated once, in the reader's own
+ * units, by the screen that has a formatter (`formatBytes` in apps/web) — repeating it here would
+ * need a second byte formatter inside a package that is zero-dependency and Node-builtins-only on
+ * purpose, and two formatters is two answers to "what is 10 MB". The BATCH cap is a count rather
+ * than a size, so it can be interpolated with no formatter and no second copy of anything.
+ *
+ * They are also deliberately silent about WHY a type was refused, because this schema does not know:
+ * `allowed_mime` is one of two terms the server admits a file on (the paragraph above), so "this file
+ * type isn't one this organization accepts" is true of everything it rejects, while any more
+ * specific sentence would be a claim about a rule nobody sent us.
  */
 export const uploadSchema = (limits: OrgUploadLimits) =>
   z.strictObject({
@@ -37,13 +124,46 @@ export const uploadSchema = (limits: OrgUploadLimits) =>
       .array(
         z
           .file()
-          .max(limits.max_bytes)
-          .mime([...limits.allowed_mime]),
+          .max(limits.max_bytes, { error: 'This file is larger than this organization allows.' })
+          .mime([...limits.allowed_mime], {
+            error: 'This file type isn’t one this organization accepts.',
+          }),
       )
-      .min(1)
-      .max(limits.max_batch),
+      .min(1, { error: 'Choose at least one file to upload.' })
+      .max(limits.max_batch, {
+        error: `Upload at most ${limits.max_batch} files at a time.`,
+      }),
   });
 
 export type UploadSchema = ReturnType<typeof uploadSchema>;
 export type UploadIn = z.input<UploadSchema>;
 export type UploadOut = z.output<UploadSchema>;
+
+/**
+ * An empty upload form. The only defaults factory in this directory that takes NO argument and
+ * mirrors NO server row, and both halves are the point.
+ *
+ * NO ARGUMENT, because there is nothing to seed from: an upload creates, so there is no resource in
+ * scope, and unlike `botDomainCreateDefaults()` there is not even a string to blank out. It exists
+ * anyway, rather than being a `{ files: [] }` literal at the call site, for the reason every sibling
+ * exists: the ONE path from "nothing chosen yet" into form state runs through this module, so a
+ * caller cannot reach for `reset(someServerObject)` and there is exactly one place to change when
+ * the form grows a second field.
+ *
+ * NOT `UploadIn`, and that is not a shortcut. `UploadIn` is `z.input<UploadSchema>` and
+ * `UploadSchema` is `ReturnType<typeof uploadSchema>` — the return of the FACTORY, which TypeScript
+ * resolves against one anonymous instantiation. The field type is identical for every
+ * `OrgUploadLimits` (a `File[]`; `.max()`/`.mime()` are refinements and change no type), so the
+ * annotation below says the same thing without pretending this value belongs to one organization's
+ * limits. It does not: an empty list is valid input to every instantiation and is refused by all of
+ * them, because `.min(1)` is the whole reason "no files chosen" is not a submittable form.
+ *
+ * `[]` IS DELIBERATELY NOT A SCHEMA-VALID VALUE, which makes this the one defaults factory whose
+ * output fails its own schema — see the `.min(1)` above. That is correct: the Upload button is
+ * disabled until the user picks something, and RHF's `isValid` is what disables it. A default that
+ * parsed would mean an empty batch is postable.
+ *
+ * A FRESH ARRAY PER CALL, never a shared frozen constant. RHF takes ownership of `defaultValues`
+ * and a module-level `[]` handed to two mounted forms is one array behind two file lists.
+ */
+export const uploadDefaults = (): { files: File[] } => ({ files: [] });

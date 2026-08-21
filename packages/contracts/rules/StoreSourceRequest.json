@@ -1,0 +1,77 @@
+{
+    "class": "App\\Http\\Requests\\StoreSourceRequest",
+    "rules": {
+        "content": [
+            "bail",
+            "required_if:type,text",
+            "prohibited_unless:type,text",
+            "string",
+            "max:500000"
+        ],
+        "description": [
+            "bail",
+            "sometimes",
+            "nullable",
+            "string",
+            "max:2000"
+        ],
+        "effective_at": [
+            "bail",
+            "sometimes",
+            "nullable",
+            "date"
+        ],
+        "expires_at": [
+            "bail",
+            "sometimes",
+            "nullable",
+            "date",
+            "after:effective_at"
+        ],
+        "files": [
+            "bail",
+            "required_if:type,file",
+            "prohibited_unless:type,file",
+            "array",
+            "max:10"
+        ],
+        "files.*": [
+            "bail",
+            "file",
+            "max:25600"
+        ],
+        "name": [
+            "bail",
+            "required",
+            "string",
+            "max:200"
+        ],
+        "origin_url": [
+            "bail",
+            "required_if:type,url",
+            "prohibited_unless:type,url",
+            "string",
+            "url:http,https",
+            "max:2048"
+        ],
+        "tags": [
+            "bail",
+            "sometimes",
+            "array",
+            "max:50"
+        ],
+        "tags.*": [
+            "bail",
+            "string",
+            "min:1",
+            "max:64",
+            "distinct"
+        ],
+        "type": [
+            "bail",
+            "required",
+            "string",
+            "in:\"file\",\"url\",\"text\""
+        ]
+    }
+}

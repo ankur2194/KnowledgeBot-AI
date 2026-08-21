@@ -41,7 +41,23 @@ final class InternalRequestSigner
      */
     public function canonicalString(string $method, string $path, string $body, array $kbHeaders): string
     {
-        $timestamp = $kbHeaders['X-KB-Timestamp'] ?? '';
+        // CASE-INSENSITIVE, AND THAT IS NOT DEFENSIVENESS. This method serves BOTH directions:
+        // the outbound signer hands it the canonical `X-KB-Timestamp` spelling it is about to put
+        // on the wire, and the inbound VERIFIER hands it the set it recomputed from
+        // `$request->headers->all()`, which Symfony normalises to lower case. A literal key lookup
+        // silently yields the EMPTY STRING on the verifier's side, so the fourth line of the
+        // canonical string differs while every other line matches — and the only symptom is a 401
+        // on a request that is correct in every log. Measured, not imagined: it was this method's
+        // first bug.
+        $timestamp = '';
+
+        foreach ($kbHeaders as $name => $value) {
+            if (strcasecmp($name, 'X-KB-Timestamp') === 0) {
+                $timestamp = $value;
+
+                break;
+            }
+        }
 
         $canonical = $this->prefix."\n".strtoupper($method)."\n".$path."\n"
             .$timestamp."\n".hash('sha256', $body)."\n";
@@ -49,6 +65,23 @@ final class InternalRequestSigner
         $lines = [];
 
         foreach ($kbHeaders as $name => $value) {
+            // ── THE FILTER IS HERE BECAUSE THE VERIFIER'S IS ─────────────────────────────────
+            //
+            // `services/ai-service/app/core/signing.py` filters to `x-kb-*` INSIDE the function
+            // that builds the canonical string. This side used to emit every key it was handed and
+            // rely on both call sites to pre-filter. They do — but the day one does not, PHP
+            // includes a header Python drops, the two canonical strings differ by one line, and the
+            // symptom is a 401 on a request that is correct in every log: exactly the failure this
+            // class's docblock says it exists to prevent, reintroduced through the one asymmetry
+            // between the two implementations.
+            //
+            // A no-op today, deliberately. The two implementations of one format are only worth
+            // trusting where they are the same shape, and "the caller always filters" is a property
+            // of two call sites rather than of the format.
+            if (stripos($name, 'x-kb-') !== 0) {
+                continue;
+            }
+
             if (strcasecmp($name, 'X-KB-Signature') === 0) {
                 continue;
             }

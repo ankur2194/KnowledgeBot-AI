@@ -3716,6 +3716,78 @@ host: **all seven exit 0.** The second claim is doubly worth retiring — steps 
 reachable, so nothing had ever executed them; see **G14** for the separate diagnosis error that
 accompanied it, and `docs/23` for the caveat that this is still a local emulation.
 
+**CLOSED 2026-08-20 by Phase C1, on the removal condition this ruling stated — and closed with no
+gate, because the gate predeceased the event.** Phase C1 landed the
+`knowledge_sources -> source_items -> source_versions` cascade and, with it, `chunks` and
+`document_elements`. That is *"the pin comes out when the source lifecycle lands"*, verbatim, so the
+close required no re-litigation: nothing about the 2026-08-12 reasoning was revisited, and neither of
+the two repairs it rejected was adopted. Property 3 is satisfied the way the ruling always said it
+would be — by Laravel owning the migration, not by narrowing the purge plan.
+
+**Three things about this close are worth more than the close itself.**
+
+**One: the trap fired at nobody.** The *"Removal condition"* paragraph above is written as a warning
+to whoever lands the migrations — the build goes red until the name leaves `KB_MIGRATION_PIN_79`, and
+*"that failure is a success and the flag text says so"*. `.github/` was deleted on **2026-08-17**
+(§ *Removing CI/CD*), three days before the landing. So the one enforcement in this repository that
+was designed to expire on exactly this event was removed three days early, and the event passed in
+silence. The pin was unpinned because a person read a paragraph. **A self-expiring gate is only as
+durable as the workflow it lives in**, and that dependency is invisible from the gate's own design:
+each of its three paths was independently fatal, and all three shared a single point of deletion.
+
+**Two: the close is stated as a command rather than as an outcome** (ADR-036). This one imports the
+tuple instead of restating it, which is what the deleted `(b1)` check did and the reason it could not
+go stale:
+
+```bash
+# ADR-033 property 3, per allow-listed name: does a Laravel migration create it?
+python3 - <<'EOPY'
+import re, pathlib
+ns = {}
+exec(compile(pathlib.Path('services/ai-service/app/db/writes.py').read_text(), 'writes.py', 'exec'), ns)
+mig = list(pathlib.Path('services/core-api/database/migrations').iterdir())
+for t in ns['ALLOWED_TABLES']:
+    hit = any(re.search(rf"CREATE TABLE (IF NOT EXISTS )?{t}\b|Schema::create\('{t}'", p.read_text()) for p in mig)
+    print(f"{'ok      ' if hit else 'MISSING '}{t}")
+EOPY
+```
+
+**The close is asserted against the step and the step is measurable, which is deliberate.** This note
+was written *alongside* the migrations rather than after them — the record and the DDL are two halves
+of one change — so if the command above reports `chunks` or `document_elements` as `MISSING`, this
+close is premature, the pin is live again, and the ruling above is the one in force. That is stated
+rather than assumed because the mechanism that used to make the question unnecessary is the one thing
+this finding no longer has.
+
+**Three: that command is wider than #79, and the widening is a trap of its own.** It reports every
+allow-listed name with no migration, and on the day of the close two such names were **not**
+violations — their writers are stubs, so no statement exists to violate anything. Property 3 bites
+where a write exists, which is why the original finding cited four line numbers in
+`app/deletion/relational.py` rather than a membership list. The second half of the check is therefore
+`grep -rn 'DELETE FROM\|INSERT INTO\|UPDATE ' services/ai-service/app --include=*.py`; a name that
+is `MISSING` in the first command *and* present in the second is this finding recurring under a new
+name. Recorded here because a reader running only the first command will otherwise open two findings
+that do not exist, or — worse — conclude from two false alarms that the command is noise.
+
+**A code comment goes false with this close, in a tree `docs/` does not own.**
+`services/ai-service/app/deletion/relational.py:193-196` states that **no migration in this
+repository creates either table** and marks those two entries' column names as unverified against a
+schema *"in a way the two sparse entries are not"*. Both halves are now wrong, and the second half is
+the useful one: those column names can be checked against a real migration for the first time. It is
+`deletion-engineer`'s to correct; see § P2.
+
+**Cross-reference defect, fixed in the same pass and recorded rather than quietly corrected.** This
+ruling is **G2**. Three documents cited it as **G1** — `CLAUDE.md`'s #79 paragraph and two
+*"What this effort did not touch"* notes in this file (§ ADR-047…052 and § ADR-055…059) — until
+2026-08-20. **G1 is the ADR-036 ruling**, one heading above, and it is about counts in prose, so each
+of those three citations landed a reader on a page about a different subject that reads as plausibly
+related. All three are corrected. The shape is already known here — § L1's preamble records an ADR
+amendment citing *"finding S2"* that had landed on the wrong one, and § C1 and § F12/S12 carry
+head-of-finding pointers for the same reason — and the lesson is the same: a label one character from
+another label has to be checked **at the target**, never at the source. What let this instance survive
+is that the wrong target was *adjacent*, so nothing about the reading experience said "wrong page".
+
+
 ### G3 — #80: the near-duplicate penalty is dropped by ruling, so a verbatim spec line now has no code behind it
 
 **Ruling:** `penalize_near_duplicates` and the `near_duplicate_penalized` exclusion reason are both
@@ -5522,6 +5594,17 @@ mentions still in this file are history and are meant to stay.
   have got a red build until they unpinned the name. Now nothing will remind them. The 2026-08-12
   ruling stands; only its enforcement left.
 
+  **Amended 2026-08-20 — this is the one prediction in this section that came true, and it came
+  true three days later.** Phase C1 landed the `knowledge_sources → source_items → source_versions`
+  cascade together with `chunks` and `document_elements`, which is exactly the event the pin was
+  built to catch, and **nothing objected**: no red build, no reminder, the name unpinned by hand
+  because a person read this bullet. The finding is **closed** — see § *The rulings of 2026-08-12*,
+  **G2** and its closing note for the measuring command, which imports `ALLOWED_TABLES` rather than
+  restating it. The paragraph above stays in the present tense it was written in, because it
+  describes what was true on 2026-08-17 and because the interval it left open — a self-expiring
+  gate deleted three days before the change it expired on — is the whole lesson. It is also the
+  reason the close is recorded in three places rather than one.
+
 ### Two smaller consequences worth naming
 
 * **`scripts/security/rule_count_check.sh` is orphaned.** It was written *because* a gate needed a
@@ -5594,7 +5677,8 @@ different invariant — `apps/web` discriminates the ADR-031 resolver refusal on
 map**, which is sound only while every other `validation` keeps one.
 
 **What this effort did *not* touch:** finding **#79** stays pinned exactly as the 2026-08-12 ruling
-left it (§ *The rulings of 2026-08-12*, G1). Nothing here goes near `chunks`, `document_elements` or
+left it (§ *The rulings of 2026-08-12*, **G2** — cited as G1 here until 2026-08-20; G1 is the
+ADR-036 ruling). Nothing here goes near `chunks`, `document_elements` or
 the `source_versions → source_items → knowledge_sources` cascade, and `ALLOWED_TABLES` is unchanged.
 
 ## Found while building the provider surface — 2026-08-19
@@ -5908,7 +5992,8 @@ built against: an object wrapper (because `#[ResponseShape]` cannot express "an 
 clamps `per_page` silently for callers that never ran a FormRequest.
 
 **What this step did not touch:** finding **#79** stays pinned exactly as the 2026-08-12 ruling left
-it (§ *The rulings of 2026-08-12*, G1). Nothing here goes near `chunks`, `document_elements` or the
+it (§ *The rulings of 2026-08-12*, **G2** — cited as G1 here until 2026-08-20; G1 is the ADR-036
+ruling). Nothing here goes near `chunks`, `document_elements` or the
 `source_versions → source_items → knowledge_sources` cascade, and `ALLOWED_TABLES` is unchanged.
 
 ## Found while landing the bots schema — 2026-08-19
@@ -6799,3 +6884,726 @@ extended to one**: a review is a hypothesis with a suggested fix attached, the f
 the hypothesis is wrong, and the cheap way to tell — measuring the claim against the installed
 dependency before editing anything — is also the only way. Applying the review's wording without it
 would have produced two entries here that read as authoritative and were false.
+
+## The Phase C1 DDL decisions — ADR-062…065, 2026-08-20
+
+Four decisions from **Phase C, step C1** — the step that lands the
+`knowledge_sources → source_items → source_versions → document_elements / chunks` cascade as Laravel
+migrations. Decision text, rejected options, costs and revisit conditions are in
+[`docs/19`](19-repo-structure-adrs.md); this section records the *shape* the four have in common,
+because it is the reason there are four of them rather than none.
+
+**All four are the same kind of question: two sources inside this repository disagreed about a
+column, and DDL cannot abstain.** Prose can carry a disagreement indefinitely — this file is largely a
+record of that — but a `CREATE TABLE` picks one spelling and every reader downstream inherits it. So
+the four were forced by the medium, not by anyone deciding to revisit the schema.
+
+**The losing side was the same document in all four cases**, and naming it is the point:
+`services/core-api/database/factories/KnowledgeSourceFactory.php`'s docblock, whose *"COLUMNS THIS
+MUST PRODUCE"* list is a faithful transcription of `docs/11` §16.4 and has **never been executed by
+anything**, because `definition()` throws. A column list that no statement has ever run against is
+indistinguishable, on the page, from one that has — it is well-organized, it cites its sources, and it
+was wrong in four places. **That is the finding underneath the four ADRs**, and it generalizes past
+this factory: a scaffold that documents a contract it cannot exercise decays exactly like a count in
+prose (ADR-036) and has no measuring command, because there is nothing to measure until the thing it
+describes exists.
+
+**Three of the four are the specification losing to an implementation contract written later.**
+ADR-062 drops the `knowledge_sources` active-version pointer that §16.4 lists; ADR-063 adds an
+`ocr_cfg_version` §16.4 does not have and keeps `activated_at`/`retired_at` over the factory's
+`published_at`; ADR-064 keeps one 15-value vocabulary against the factory's seven-value rollup. Each
+names its deviation in its own status line rather than editing an extract, per `docs/00-index.md`'s
+rule. **ADR-065 goes the other way and is the one to read**: it overrules
+`.claude/skills/postgresql-patterns/SKILL.md`, which is an accepted skill and is normally the binding
+side — and it leaves that skill wrong in writing, which is § P1 below.
+
+**Two of the four rest on a constraint rather than on a preference, and those are the ones a future
+change is most likely to undo by accident.** ADR-062's single pointer and ADR-063's two timestamps are
+not naming choices: they are the two terms of
+`CREATE UNIQUE INDEX … WHERE activated_at IS NOT NULL AND retired_at IS NULL`, the index that makes
+*at most one live version per item* provable by PostgreSQL instead of by ordering discipline inside a
+Celery task that is delivered at least once. A schema that adopted `published_at`, or a sibling
+pointer on `knowledge_sources`, would still pass every test in the suite on the day it landed.
+
+**And C1 closed finding #79**, on the removal condition the 2026-08-12 ruling stated — see
+§ *The rulings of 2026-08-12*, **G2** and the closing note appended to it. The close required no
+re-litigation and adopted neither of the two repairs that ruling rejected.
+
+## Found while landing the source cascade — P1–P3, 2026-08-20
+
+**Why `P`.** `O1`–`O27` is § *Open after scaffolding*, so the letter after `N` was taken. This file
+has picked a letter around a collision before — § L1's preamble records `L` being chosen because
+`S1`–`S17` already meant the second scaffolding audit round, after an ADR amendment citing *"finding
+S2"* landed on the wrong one. `P` is the first free letter.
+
+**All three are owed work in trees `docs/` does not own, and none of them is fixed here.** That is the
+common shape rather than a coincidence: a schema landing for the first time makes three documents
+about the absence of that schema go false at once, and every one of them lives behind a boundary this
+agent does not cross.
+
+### P1 — `postgresql-patterns` line 52 specifies `bytea` for `content_hash`, and ADR-065 overrules it *(OPEN — owed by the skill's owner)*
+
+```bash
+grep -n 'content_hash' .claude/skills/postgresql-patterns/SKILL.md
+```
+
+The line reads `content_hash bytea NOT NULL, -- 32 raw bytes, not 64 hex chars`, inside the runnable
+DDL that is the authority for every other column on `source_versions`. ADR-065 rejects it in favour of
+`char(64) COLLATE "C"` hex, for four reasons measured in this tree — the Python emits hex
+(`chunker.py:963`), the ingest key composes `content_hash` as a `str` and guards it with an `in`
+test that raises `TypeError` against `bytes`, § **J3** records two silent `BinaryCast` defects on
+`bytea` columns in this repository, and the same `CREATE TABLE` already stores a sha256 as
+`ingest_key char(64) COLLATE "C"` four lines below.
+
+**Why this is a finding and not just an ADR.** The skill is *right by default* here — it is the
+binding source for the other three decisions in the same step — so a reader consulting it for the next
+migration or the next Eloquent cast will write `bytea` and be following the correct procedure. The
+disagreement is therefore live and load-bearing until the skill moves, and the failure it produces is
+the silent kind: a `bin2hex` applied to a value that is already hex returns a valid 128-character
+string that hashes to a well-formed ingest key for an identity that does not exist, so the version
+never dedupes against its own completed run and nothing raises.
+
+**Owner:** whoever owns `postgresql-patterns`. **Not fixed here**, and the boundary is the reason:
+this agent does not edit `.claude/skills/`, because documentation drifting from a skill is bad and
+documentation silently rewriting one is worse. § **J7** is the closed precedent for how an item of
+this shape ends — a skill's worked example refusing what ADR-047 permits, recorded here as a
+divergence and then corrected **by the skill's owner**, not by the document that found it. This is the
+second such divergence in the register and the first one still open, so `postgresql-patterns` and
+`docs/19` disagree in writing until it closes; the migrations follow ADR-065 meanwhile.
+
+### P2 — `app/deletion/relational.py`'s docblock says no migration creates `chunks` or `document_elements` *(OPEN — owed by `deletion-engineer`)*
+
+```bash
+sed -n '188,197p' services/ai-service/app/deletion/relational.py
+```
+
+`RELATIONAL_PURGE_ORDER`'s preamble states that *"**no migration in this repository creates either
+table**, so their column names are unverified against a schema in a way the two sparse entries are
+not."* Both halves went false with C1. The second half is the useful one and is the reason this is
+worth a row: the two entries' column names — `organization_id`, `source_version_id` — can be checked
+against a real migration for the first time, and the docblock currently tells a reader not to bother.
+It is the same claim-shape the 2026-08-17 sweep chased across five trees (§ **M6**): a comment that
+was true when written, describing an absence, with nothing watching for the absence ending.
+
+### P3 — nothing compares the status CHECK constraints to `SourceState` *(CLOSED 2026-08-21 — and the test found a **fourth** definition nobody had listed)*
+
+ADR-064 puts one vocabulary on three columns. The Python half asserts its own membership at import
+(`grep -n '^assert len(SourceState)' services/ai-service/app/ingestion/states.py`); the SQL half
+asserts its own inside each `CHECK`; **the two are joined by nothing.** A state added to the enum and
+to two of the three constraints is a row that saves in one table and fails in another, discovered at
+the ingestion status callback rather than in a suite.
+
+The test is small and crosses both runtimes — read `SourceState`, read the constraint text out of
+`information_schema.check_constraints`, compare as **sets** in both directions — and it is named here
+rather than left implied because ADR-064's revisit condition (`len(SourceState)` changing) is exactly
+the moment it is either written or missed. **This is not a defect today**: the three constraints and
+the enum agree as C1 lands. It is a missing tripwire on an invariant whose violation is silent, which
+is the category this file exists for.
+
+**CLOSED 2026-08-21.** `services/core-api/tests/Contract/SourceStateParityTest.php` exists, is green,
+and is mutation-checked in five directions. **Writing it turned up a fourth definition this row did
+not know about, and it is the one that matters most at query time:**
+
+```bash
+grep -n 'ACTIVE_SOURCE_STATUSES' services/ai-service/app/retrieval/tenancy.py
+```
+
+`ACTIVE_SOURCE_STATUSES` (`app/retrieval/tenancy.py:94`) is **bare string literals with no reference
+to `states.py`**, and it is what the Qdrant `source_status` payload filter actually matches on —
+Non-negotiable 2's third term. So the count of unjoined definitions was four, not three: the
+control-plane enum, the SQL CHECKs, the data-plane `StrEnum`, and the retrieval filter's own tuple.
+The fourth is the only one where a divergence is not a save-time error but a **silent retrieval
+change**: add a searchable state to three definitions and miss this one, and every document in it
+becomes invisible to every bot, with nothing raised anywhere.
+
+**That is a better outcome than the row asked for, and the generalisation is worth more than the
+test.** This row enumerated the definitions it could see and got the number wrong; the enumeration
+was only corrected by someone *writing the join*. The definition that gets missed is systematically
+the one furthest from where the vocabulary is declared — `tenancy.py` is a retrieval module and
+`states.py` is an ingestion one — because distance from the declaration is exactly what made it
+invisible to the person counting. So a row of this shape should be read as *at least* n definitions,
+never n.
+
+## The Phase C storage and seam decisions — ADR-066…068, 2026-08-21
+
+Three decisions from the rest of **Phase C** — the steps after C1, which landed the upload
+transport and intake gate, the lifecycle endpoints, the signed ingestion callback, bot–source
+assignment, three admin screens and the deletion path's follow-through. `git log --oneline
+4a88d03..HEAD` is the range; do not read a step count from this sentence, because the brief that
+commissioned this record already had one and it was low by one (ADR-036). Decision text, rejected
+options, costs and revisit conditions are in [`docs/19`](19-repo-structure-adrs.md); this section
+records what the three have in common, because that is not obvious from reading them apart.
+
+**All three are the same fact seen from three seams.** `2026_08_20_002000_create_source_versions_
+table.php` makes `ingest_key`, all three `*_cfg_version` and `embedding_model_version` `NOT NULL`
+with CHECKs that refuse a placeholder, and **every one of those values is produced by the data
+plane, during and after parsing**. So the control plane cannot mint a version row at the moment it
+holds the bytes. ADR-066 is that fact reaching the object key (a key naming a version cannot be
+built by the request that has the content). ADR-068 is the same fact reaching the idempotency key
+(a fingerprint containing configuration versions cannot be computed by the sender). ADR-067 is a
+different fact of the same kind — a source is org-owned and bot assignment happens *later* — reaching
+the header set. **None of the three is a preference and none had a second viable option**, which is
+why the interesting content in all three is the rejected list rather than the decision line.
+
+**All three contradict an accepted skill, and not one of the corrections has landed.** ADR-066
+overrules `seaweedfs-s3` (and `kb-tenancy-isolation`, which restates the same prefix); ADR-067 and
+ADR-068 both overrule `kb-internal-api-contracts`, in two different rows. With ADR-065's § P1 still
+open and § Q12 found while writing ADR-066, the register now carries **four** open skill divergences
+— § P1, § Q11, § Q12, § Q13 — against one closed precedent, § J7. That ratio is worth watching. The
+convention (*report the divergence, let the owner correct it*) was designed for the occasional case,
+and it is no longer occasional: `grep -n "^### .*owed by the skill" 22-spec-findings-and-decisions.md`
+re-measures it — anchored to the heading on purpose, because an unanchored pattern matches this
+sentence, which is the self-tripping shape ADR-036 exists for. The number that matters is not how
+many there are but how long the oldest has been open.
+
+**ADR-066 is the one owed longest.** Commit `ec58a19` (2026-08-20) shipped the departure, called it
+"a recorded departure", and said an ADR was owed. It was owed for six commits, during which two more
+trees (`deletion/tasks.py`, `deletion/verification.py`) were written against the new layout while
+the skill that specifies the layout still said the old thing. **Nothing went wrong, and that is the
+uncomfortable part**: the correct layout propagated by commit messages and docblocks, which is the
+mechanism this file exists because it does not scale.
+
+## Found while completing Phase C — Q1–Q16, 2026-08-21
+
+**Why `Q`.** `P1`–`P3` is § *Found while landing the source cascade*, and `R1`–`R8` is
+§ *The scope re-baseline — 2026-08-10*, so `Q` is the one letter still free between them. It is
+taken here deliberately rather than skipped, for the reason § L1's preamble records: this file has
+already had one ADR amendment cite a finding letter that meant something else.
+
+**They are ordered by kind rather than by severity**, because the four closed ones share a shape and
+reading them together is the point: Q1–Q4 are closed defects; Q5, Q6 and **Q15** are rules whose only
+remaining enforcement is a sentence; Q7, Q8, Q11–Q13 and **Q16** are obligations owed to trees
+`docs/` does not own; Q9 is an open question; Q10 is a gap accepted with its disclosure on the wire;
+Q14 was written before its answer and **answered on 2026-08-21 in a way neither option allowed for**.
+Each row's own status line is the authority.
+
+**Q14 and Q15 are one episode and should be read in that order.** Q14 is the failing test; Q15 is
+what the investigation of it found underneath — most of an arch preset enforcing nothing while
+reporting nothing. **Q15 is the largest single loss of enforcement recorded in this file**, larger
+than any individual item in § *Removing CI/CD*, and unlike those it was never announced: it arrived
+with a `require-dev` package.
+
+### Q1 — an invalid-UTF-8 filename walked the whole intake gate, and the object it orphaned is one verification certifies clean *(CLOSED — `9cae289`)*
+
+The extension allow-list's docblock argued that no explicit UTF-8 check was needed, *"on the grounds
+that no allow-listed extension survives invalid UTF-8 intact"*. **That holds only when the bad bytes
+land in the extension.** For a name like `\xFF` + `report.pdf` the bytes sit *before* the final dot:
+the length check passes, the separator and control-character check passes, and the
+invisible-formatting check passes **because a `/u` pattern returns `false` rather than `0` on
+invalid input, and the guard compared against `1`**. The extension is pure ASCII and allow-listed, so
+the file is admitted.
+
+**The consequence lands after the object is written**, and it is the ADR-066 defect arriving from the
+other direction. Objects are written before the rows exist; PostgreSQL then refuses the name with
+`22021 invalid byte sequence for encoding "UTF8"`, the transaction aborts, and the object is left at
+`org/{org}/sources/{sourceId}/original/{sha256}` **under a source id that never became a row** — in a
+prefix the phase-2 purge only visits for sources that exist. An object nothing can delete, that
+verification certifies clean over. Reachable by any member with upload permission, ten files a
+request, with no storage quota.
+
+The guard is `mb_check_encoding` placed **first in the name gate, above the length check** rather than
+merely above the extension lookup: every check in that step is Unicode-aware and each fails
+*differently* on invalid bytes, so establishing validity first is what makes the three below it mean
+what they are written to mean. Verified by mutation in both directions — without it the file is
+**admitted**, not merely refused under another reason, which is the distinction a one-directional
+mutation test would have missed.
+
+**What generalizes.** A docblock argued a check was unnecessary, the argument was locally valid, and
+its scope was one clause narrower than the sentence claimed. That is not a review failure of the kind
+more review fixes; it is the shape § *The rulings of 2026-08-12* keeps producing — **an argument
+about why something cannot happen, standing where the thing that checks would have stood.**
+
+### Q2 — `LARAVEL_START` is process-scoped, so every queue worker's ingestion deadline was in the past; and the test that said otherwise could not fail *(CLOSED — `9ff4bf4`)*
+
+`X-KB-Deadline` was `LARAVEL_START + 20 s`. `LARAVEL_START` is defined in `artisan` and
+`public/index.php` and nowhere else, so in an HTTP request it is request start and the arithmetic is
+right — **and in a queue worker it is worker boot.** `SubmitIngestionJob` runs in a worker that is up
+for hours, so the deadline was already past once the worker had been up twenty seconds and drifted
+further behind for the life of the process. The far side clamps remaining budget at zero and treats a
+past deadline as an immediate refusal, so **every ingestion would have been refused before a byte was
+parsed, with Laravel correct in every log.**
+
+**The test asserting the deadline was in the future could not fail.** `phpunit` bootstrapped
+`vendor/autoload.php`, which never defines the constant, so the suite always took the `microtime()`
+fallback — it exercised the safe branch and could not reach the broken one. The docblock beside it
+named the hazard and then mis-resolved it, saying the job sets its own budget through the duration
+argument: true, and irrelevant, because **the argument set the budget and the defect was in the
+epoch.** The fix makes the epoch an explicit parameter with two named call sites and defines the
+constant in the suite bootstrap, so the production branch is now the one under test.
+
+**The third mutation is the one worth copying.** Reverting *both* the fix and the bootstrap leaves the
+old assertion passing — vacuity demonstrated rather than argued. A test that cannot fail is not
+detectable by running it, only by breaking the thing it watches; § H7 and § G12 are the same lesson
+and this is the first time it was checked with the *harness* reverted as well as the code.
+
+### Q3 — a composite foreign key nothing was holding, and a test that asserted a disjunction *(CLOSED — `e94140b`)*
+
+`bot_source_assignments_source_same_org` — the composite key that stops a bot naming another tenant's
+document — was enforced by **no test**. Deleting it from the schema left all forty tests in both
+security suites green, **including the one named for refusing exactly that row.**
+
+The cause: the test wrote a row violating **both** composite keys and asserted a disjunction, defended
+by a comment about PostgreSQL not ordering two simultaneously violated constraints. The comment was
+correct about the row it wrote, **which is why the row was wrong.** The new case writes org A, A's own
+bot, B's source, so only `source_same_org` can fire, and names it. Verified by mutation in both
+directions: dropping `source_same_org` now fails that test alone, dropping `bot_same_org` fails three
+others — so the two keys were never in the same state and the audit caught the only unpinned one.
+
+This is § K2's sibling one layer up: there the composite key could not be *created*, here it could not
+be *observed*. Both were invisible for exactly as long as nothing exercised the row.
+
+### Q4 — `verified` accepted values it then read as false, so a malformed frame published nothing and returned 200 forever *(CLOSED — `9ff4bf4`)*
+
+Laravel's `boolean` rule admits `1`, `0`, `"1"` and `"0"`, and `validated()` does not cast. The
+publication guard read `=== true`. So an ingestion callback frame carrying `verified: 1` **validated
+as a well-formed verification claim and was applied as false**: the version never activated, the
+previous one served forever, and every frame returned 200. The comment defending `=== true` cited
+`"false"` as the value it was guarding against — a value the rule never accepted.
+
+The fix is a literal-boolean rule object accepting exactly `true` and `false`, so a malformed claim is
+a **422 the worker author sees on the first frame** rather than a silent non-publication weeks later.
+The same commit found the adjacent instance: a list-shaped `warning_summary` passed the `array` rule
+and the model's cast `json_encode((object) $value)` turned `["ocr_low"]` into `{"0":"ocr_low"}` — an
+object as far as the CHECK is concerned — so the detail projection published warning codes named `0`,
+`1`, `2`. Since the code vocabulary belongs to the data plane and is correctly **not** enumerated by
+the control plane, nothing on either plane could tell those from real codes.
+
+**Both are the same defect**: a validation rule whose accepted set is wider than the consumer's, on a
+seam where the producer does not exist yet, so the only reader is a future author who will conclude
+the wire is what the FormRequest accepts.
+
+### Q5 — `ALLOWED_TABLES` has no runtime guard at all, and `CLAUDE.md` described it in language that reads as a mechanism *(OPEN — no mechanism exists; the document is corrected)*
+
+```bash
+grep -rn 'ALLOWED_TABLES' services/ --include=*.py --include=*.php | grep -v tests/
+```
+
+Every hit outside `tests/` is **prose**: the tuple's own definition, four docstrings that cite it, two
+Laravel docblocks and a migration comment that say a table is or is not on it, and one `TODO(` naming
+it as a rule for statements not yet written. **There is no `if … in ALLOWED_TABLES` anywhere in the
+data plane.** It is a list a reviewer reads, not a check a statement passes.
+
+This is not new — `.github/workflows/gates.yml` imported the tuple and compared, and went with the
+workflow on 2026-08-17 (§ *Removing CI/CD*). What is new is that ADR-033's admission question is no
+longer the only unguarded one. The gate covered **membership**; nothing ever covered **use**, and
+with the gate gone the two failures are indistinguishable from a green diff: adding a wrong name, and
+writing a statement against a name that is not there.
+
+**What is corrected here.** `CLAUDE.md`'s allow-list paragraph said adding a name *"changes what the
+data plane may write"*, which is a true statement about permission and reads as a statement about
+enforcement — the same register as the *"CI greps for this"* claim shape § M6 chases across five
+trees. It now says what the mechanism is, which is review. `publish.py`'s module docstring already
+says this correctly and is the model for the wording.
+
+**Owner:** whoever restores a mechanism, if one is restored. **Not fixed here** and deliberately not
+proposed as an ADR: choosing between a runtime assertion in a `writes.py` helper, a test that parses
+statements out of the tree, and *nothing* is a data-plane decision, and there is no statement to
+guard yet — the psycopg calls are still a `TODO`. Recording it now is the point, because the moment
+the first statement lands is the moment the choice stops being free.
+
+### Q6 — C1 made `publish.py`'s hypothetical rule reachable, and the one live mechanism is the trap rather than the guard *(OPEN — no enforcement)*
+
+`services/ai-service/app/ingestion/publish.py` opens **"THIS SERVICE NEVER ASSIGNS THE ACTIVE-VERSION
+POINTER."** Before Phase C1 that rule was unenforced *and unreachable*: `source_items.current_version_
+id` did not exist, so a second writer would simply have failed with an undefined column, loudly, in
+the first test that ran.
+
+C1 created the column **and** `source_versions_one_active_per_item`, the partial unique index that
+makes *at most one live version per item* provable by the database. So the rule is now reachable and
+the only mechanism standing at it is a constraint — and **a constraint is the trap, not the guard.** A
+second writer does not fail to find one; it finds one *inside a Celery task*, which raises an
+integrity error, retries, and raises again. Meanwhile the ingest reports success and the bot keeps
+answering from the previous version: the queue burns a worker forever and every dashboard is green.
+That is the failure the ADR-012 split exists to prevent, and it got closer rather than further away.
+
+Three things that would have caught it are all absent: the `gates.yml` grep over `app/` (deleted
+2026-08-17), any test asserting the column's absence from this tree, and a runtime allow-list check
+(§ Q5). `publish.py`'s docstring is currently the whole of the enforcement and says so in as many
+words.
+
+**Owner:** `ingestion-engineer` for the tree, `test-engineer` for the tripwire, which is small — the
+column name is one string and the scan is the same token-level shape
+`services/core-api/tests/Arch/StringLevelDoctrineTest.php` already uses on the PHP side, where five
+string-level doctrines were converted from deleted CI greps into tests for exactly this reason. **Not
+a defect today:** nothing writes the column. It is a rule whose only remaining enforcement is a
+sentence, guarding a failure whose symptom is a green dashboard.
+
+### Q7 — the internal ingestion body has no machine-readable schema on either side, and two divergences are already waiting in it *(OPEN — owed by the ingestion router's author)*
+
+```bash
+sed -n '74,80p' services/core-api/app/Console/Commands/DumpOpenApiCommand.php
+ls services/ai-service/app/contracts/internal/
+```
+
+The control plane's OpenAPI dumper excludes `internal/` on purpose, and states the reason: *"that
+seam is FastAPI's own exported document and lives beside this one, and publishing our view of it
+would create two descriptions of one wire."* **That document does not exist** —
+`app/contracts/internal/` holds `__init__.py` and `.gitkeep`. So the ingestion submission body is
+specified by `IngestionSubmission::toArray()` and by nothing else, on either plane, and the deferral's
+premise is a file nobody has written.
+
+Two divergences are already sitting in it, both of which will be discovered by the router's author as
+a parse failure or, worse, as a silent coercion:
+
+- **Timestamps.** `IngestionSubmission::toArray()` emits `effective_at` and `expires_at` through
+  `Carbon::toIso8601String()`, which renders UTC as **`+00:00`**. `.claude/skills/pydantic-contracts/
+  SKILL.md:91` specifies *"RFC 3339 UTC with a `Z`"*. Both are valid RFC 3339 and every parser
+  accepts both, so this is not a break — it is a **convention** stated in one document and not
+  followed by the only producer, which is how a fixture written from the skill and a fixture written
+  from the wire stop matching. The same call appears in eight published *client-facing* resources, so
+  the divergence is wider than this seam and is stated here because this seam is where a strict
+  consumer will meet it first.
+- **Nullability.** Every nullable column on `knowledge_sources` and `source_items` reaches the body as
+  a nullable field — `origin_url`, `url`, `display_name`, `storage_key`, `content_hash`, `mime`,
+  `byte_size`, `current_version_id`, and `force_nonce` on the envelope — and **nothing on either side
+  says which.** Several are conditionally non-null in SQL rather than absolutely
+  (`storage_key IS NULL OR (content_hash IS NOT NULL AND mime IS NOT NULL AND byte_size IS NOT
+  NULL)`), which a flat `Optional[str]` cannot express and which a model generated from a sample
+  payload will get wrong in the permissive direction.
+
+**Owner:** whoever writes `POST /internal/{v}/ingestion/jobs`. **Not fixed here.** The count above is
+a reading of two migrations at this commit and is written out rather than totalled deliberately
+(ADR-036) — a tenth nullable column is a migration away.
+
+### Q8 — the data-plane object-key twin does not exist *(OPEN — owed by `ingestion-engineer`)*
+
+```bash
+ls services/ai-service/app/storage/
+```
+
+There is no `app/storage/` directory at all. `App\Support\Kb\ObjectKey::versionPrefix()`'s docblock
+says *"`version_prefix()` in `services/ai-service/app/storage/objects.py` is the same string, and it
+is the twin `seaweedfs-s3`:180 asks for"*, and `seaweedfs-s3`'s own client-configuration block is
+headed with that path. The function is quoted in the skill and implemented nowhere.
+
+**Why this is a row rather than a shrug.** It is the § P2 shape — a claim that was true of an intent
+and is being read as a claim about a file — and it lands on the one string ADR-066 just split in
+two. The Laravel side now builds a source-scoped `original/` and a version-scoped `derived/`; when
+the Python twin is written, it will be written against `seaweedfs-s3`'s diagram, which still says
+`original/` is a child of the version prefix. **Two implementations of one layout, one of them
+generated from a document the other has overruled**, is the exact condition ADR-066's trade-off names
+as its cost.
+
+**Owner:** `ingestion-engineer`, with `deletion-engineer` as the reader that breaks first —
+`deletion/tasks.py` already builds both prefixes by hand and documents why.
+
+### Q9 — `delivery_count` is applied only when a version identity exists, so redeliveries during the pre-identity phase are accepted, acknowledged and discarded *(OPEN QUESTION — the answer depends on worker code nobody has written)*
+
+`EloquentKnowledgeSourceRepository::…` applies the counter inside `if ($version !== null)`, and
+`$version` is `null` for exactly the frames that carry no identity — a `fetching` frame arrives before
+the bytes have been hashed, so there is no `ingest_key` and therefore no `source_versions` row for the
+frame to describe. Resolving one by falling back to whatever is *currently live* is a bug the code
+refuses on purpose and explains at length: on the second run over an item it would hand back the
+**published** version and try to walk it backwards from `ready` to `fetching`.
+
+So the rollup onto the source still happens and the frame is acknowledged with 200, and the durable
+redelivery bound **does not move**. A Celery task redelivered four times during the fetch stage
+reports `delivery_count: 4` four times, and the row that would have bounded it does not exist yet.
+
+**Both readings are defensible and neither is chosen here.**
+
+- *By design*: the counter's purpose is to bound redelivery of the **expensive** stages, the worker
+  reads a value above the cap to decide to give up (which is why no `CHECK` at `MAX_DELIVERIES`
+  exists or may be added), and a pre-identity redelivery has re-fetched bytes and burned nothing that
+  cannot be re-burned.
+- *A gap*: a source whose fetch fails in a way that redelivers forever never accumulates a durable
+  count anywhere, so the give-up decision has no memory across worker restarts — the one case a
+  durable counter exists for.
+
+**Which it is depends on where the worker reads the count from**, and `app/ingestion/tasks.py` is a
+stub. Recorded now, unanswered on purpose: this is the kind of question that is cheap to settle while
+the consumer is being written and expensive to reopen afterwards. **Owner:** `ingestion-engineer`,
+with `control-plane-engineer` if the answer is *gap* (the counter would need somewhere pre-identity
+to live, and `source_items` is the only row that exists then).
+
+### Q10 — the published upload-limits shape carries MIME and not extensions, so a picker built from it over-accepts *(ACCEPTED as a disclosed gap)*
+
+`OrgUploadLimits` is `{max_bytes, allowed_mime, max_batch}`. The server admits a file on **two**
+terms — `allowed_mime` is one and the final extension allow-list is the other — so a `.txt` the
+picker offers can still be refused by name. Markdown and CSV both sniff as `text/plain`, which is
+where it bites: the MIME list is *wider* than the extension list in a way that is invisible from the
+published shape.
+
+**Decided: accept the gap and disclose it in the published artifact.** The `allowed_mime` property's
+own OpenAPI description says it is *"Useful as an `accept` hint and never as the check"* and names
+the second term and the 422 that carries it. **The disclosure being in the generated document rather
+than only in a server docblock is the whole of why this is acceptable** — the artifact a client
+author reads is the artifact that says the list is incomplete, and the refusal renders on its own
+file row rather than as a batch failure.
+
+**Rejected: add `allowed_extensions` as a fourth property.** It is the correct fix and it is a
+**shape change** on a component `apps/web`'s schema factory already consumes, in the phase that
+published it. Deferring it costs one 422 on a file a picker offered; landing it mid-phase costs a
+mirrored-shape migration on both planes to close a gap that is stated on the wire. **Revisit when a
+second client consumes the component** — a native file picker or the mobile app cannot render a
+per-row 422 as gracefully as a drag-and-drop list can, and at that point the disclosure stops being
+sufficient.
+
+### Q11 — `seaweedfs-s3` non-negotiable 1 and line 37 specify a layout ADR-066 departs from *(OPEN — owed by the skill's owner)*
+
+```bash
+grep -n 'versions/{source_version_id}\|same prefix string' .claude/skills/seaweedfs-s3/SKILL.md
+grep -n 'sources/{source_id}/versions' .claude/skills/kb-tenancy-isolation/SKILL.md
+```
+
+Line 15 fixes every key as `org/{org_id}/sources/{source_id}/versions/{source_version_id}/` and says
+the layout *"is not ours to change"*; lines 28–37 draw `original/` inside it; line 37 justifies the
+nesting with *"the phase-2 sweep and its verification are the same prefix string"*. ADR-066 hoists
+`original/` to a sibling of `versions/` because the control plane structurally cannot know a version
+id at intake, and line 37's justification splits — true of `derived/`, false of `original/`.
+`kb-tenancy-isolation:97` restates the same prefix and inherits the correction; that skill is cited
+by line 15 as the layout's owner, so the two move together or the divergence just relocates.
+
+**Why this is a finding and not just an ADR.** The skill is right by default and is the file an
+implementer consults before writing a key. Following it correctly now produces the certified-clean
+survivor: an object outside every prefix the purge sweeps, which verification reports as a successful
+deletion. § Q8 is the concrete instance already queued up — the unwritten `version_prefix()` twin
+will be written from this diagram.
+
+**Owner:** whoever owns `seaweedfs-s3` and `kb-tenancy-isolation`. **Not fixed here**, on the § P1 and
+§ J7 precedent: this agent does not edit `.claude/skills/`, because documentation drifting from a
+skill is bad and documentation silently rewriting one is worse.
+
+### Q12 — `derived/snapshot/` is classified irreplaceable and swept unconditionally, by the same skill *(OPEN — owed by the skill's owner and `deletion-engineer`; found by writing ADR-066, not by Phase C)*
+
+```bash
+grep -n 'snapshot' .claude/skills/seaweedfs-s3/SKILL.md
+```
+
+Line 137 names the two things this store holds that *"cannot be recomputed from anything else"* — the
+`original/` upload **and the crawl `snapshot/`** — and puts both in tier 1, which goes offsite, with
+`derived/` as tier 2, *"cheap-to-lose"* and regenerated after a loss. But `snapshot/` lives **under**
+`derived/`, and the same file's line 96 sweeps `[f"{base}derived/"]` unconditionally while gating
+`original/` behind `include_original`, with Definition-of-done line 188 restating it: *"deletes
+`derived/` unconditionally and `original/` only per retention policy"*.
+
+So a *knowledge removed, original retained* disposition retains the upload and destroys the crawl
+snapshot — the other object the same skill says cannot be recomputed. A crawled page's bytes are not
+re-fetchable in the sense that matters here: the remote page has changed or is gone, which is why the
+snapshot exists.
+
+**This is a contract contradiction, not a live data-loss bug.** `app/crawl/` is a deliberate stub and
+nothing writes a snapshot today, so the finding is being recorded at the moment it is cheap. It is
+listed here because ADR-066 has just made the two dispositions explicit and asymmetric, which is what
+made the third case visible: the layout now has one prefix per disposition, and `snapshot/` has the
+wrong disposition for its tier.
+
+**Owner:** `seaweedfs-s3`'s owner for the tier/layout reconciliation, `crawler-engineer` and
+`deletion-engineer` for whichever way it goes. The two obvious shapes — hoist `snapshot/` beside
+`original/`, or give the sweep a third disposition — have different costs and neither is chosen here.
+
+### Q13 — `kb-internal-api-contracts` states two things about ingestion that the shipped seam contradicts *(OPEN — owed by the skill's owner)*
+
+```bash
+sed -n '64p;122p;208p' .claude/skills/kb-internal-api-contracts/SKILL.md
+```
+
+Two rows, one skill, both about ingestion, both wrong in the direction that stops correct code.
+
+- **Line 64 lists ingestion among the `X-KB-Bot-Id` bot-scoped operations**, naming only
+  `provider.test` and health as the exceptions. A source is organization-owned and assigned to zero
+  or many bots, so there is no bot id to send and there is none *at all* at first upload. ADR-067
+  decides it; `app/api/deps.py:132,456-458` and `InternalAiClient::submitIngestion()` already agree
+  with each other and disagree with the table. **A router written from line 64 would 422 every
+  submission**, and because the header is inside the canonical string, neither side can be corrected
+  alone.
+- **Line 122's `ingestion.submit` fingerprint row cites `docs/08` §13.3**, and line 208 repeats
+  §13.3's hazard as if the transport key were the only key. §13.3 is the **ingest** key's component
+  list: it includes configuration versions the sender structurally cannot know, and it names a
+  "source version id" the key itself decides the existence of. ADR-068 separates the two; the shipped
+  transport fingerprint is `source id | (item id, canonical key, content hash)* | force_nonce`, with
+  no configuration version in it and with `force_nonce` covering the reprocess case line 208 is
+  worried about.
+
+**Owner:** whoever owns `kb-internal-api-contracts`. **Not fixed here** — same boundary as § P1 and
+§ Q11. Until both land, the skill and `docs/19` disagree in writing, and `docs/19` is what the two
+shipped implementations follow.
+
+### Q14 — `Tests\Arch\DoctrineTest > preset → laravel`: library crash **and** real violation, both at once *(ANSWERED 2026-08-21 — the failure is unchanged, and the answer is not that it did not matter)*
+
+**This entry was written before the result, deliberately, and the two candidate explanations it set
+up were both right.** That is the finding. The prose above the answer is left as it was written so
+the framing can be judged against what came back; the answer is at the foot and it is not a tick
+against either option.
+
+**The claim.** Phase C's commits all close with a figure line, and all but the first close with
+the identical sentence *"The three Pest failures are the environmental ones that predate Phase C."*
+
+```bash
+git log 4a88d03..HEAD --format=%B | grep -c 'environmental ones that predate Phase C'
+```
+
+**`d858381`, the one commit that does not use that wording, is the only one that says what the three
+are**: *"one is a bug inside `phpunit-architecture-test`, two compare `session.domain` against a
+shipped dev `.env` this host does not have."* Every commit after it carries the conclusion with the
+evidence stripped out, which is the mechanism worth naming here — the short form is not a summary of
+the long one, it is the long one's verdict travelling without its reasoning.
+
+The `session.domain` pair is § H8 and is understood. **The third is not recorded anywhere
+in `docs/`** — this is its first row — and "a bug inside the library" has been carried through the
+whole phase on the strength of one investigation nobody wrote down.
+
+**Why it is worth re-asking now rather than accepting.** At `4a88d03` the assertion may well have been
+right. At `HEAD` the input has changed: Phase C added **two `Throwable` subclasses outside
+`App\Exceptions`** —
+
+```bash
+git grep -n 'final class UploadRejected\|final class IllegalSourceTransition' HEAD -- services/core-api/app
+#   app/Services/Sources/Upload/UploadRejected.php:36
+#   app/Services/Sources/IllegalSourceTransition.php:56
+```
+
+— under `arch()->preset()->laravel()` (`tests/Arch/DoctrineTest.php:45`), a preset that constrains
+where framework-shaped classes live. So the same failing test now has a candidate cause that did not
+exist when it was diagnosed, and **a real arch violation reported badly is indistinguishable from a
+library crash at the level of "the suite prints three failures"**.
+
+**The experiment.** Move both classes into `App\Exceptions` and re-run the arch suite. If the failure
+clears, it was a real violation the whole time and the "library bug" line repeated across the phase is
+a false claim of the § M6 family — a diagnosis that became a fact by repetition. If it persists
+unchanged, the library explanation survives *this* challenge (it is not proved; it is one refutation
+short of it) and the two classes' location was a coincidence. Either way the next step is to capture
+the **actual failure text**, which no commit message quotes and which is the one artifact that would
+have settled this without an experiment.
+
+**The framing above is a false dichotomy, and leaving it visible is the point.** It offers "clears"
+or "persists unchanged" as though the two explanations were exclusive. They are not: the experiment
+returned *persists unchanged* **and** *the violation was real*, because the crash and the violation
+are produced by different mechanisms in the same rule set and one of them masks the other's output.
+A brief that asks "which of these two is it" cannot receive that answer, and this one nearly did not
+— the deciding move was moving Pint's `app/` aside, which neither option contemplated.
+
+**Answer, measured 2026-08-21 — and it is neither (a) nor (b): the crash is a library bug *and* a
+real violation was hiding under it.** The "environmental" label was accurate about the mechanism and
+false as the implication everyone drew from it, which was *therefore nothing of ours is in there*.
+
+**1. The crash's cause, proved in both directions.** `laravel/pint` is a `require-dev` package that
+ships its own Laravel application and maps `"App\\": "app/"` in its own `composer.json`. Composer
+merges that into the **root** autoloader:
+
+```bash
+grep -n 'laravel/pint/app' services/core-api/vendor/composer/autoload_psr4.php
+#   'App\\' => array($baseDir . '/app', $vendorDir . '/laravel/pint/app'),
+```
+
+So an arch rule over `App` walks Pint's classes as well as ours. Those arrive as
+`Pest\Arch\Objects\VendorObjectDescription`, whose `make()` sets only `name` and `uses` and never
+`$path` or `$reflectionClass`. Every **positive** expectation is guarded in the form
+`isset($object->reflectionClass) && …` (`vendor/pestphp/pest/src/Expectation.php`), so on a vendor
+object the whole predicate is **false**, the object is reported as a violation, and
+`Blueprint::targeted()` then reads the uninitialised `$path`. Fatal.
+`mv vendor/laravel/pint/app` aside → `preset → laravel` passes, 8 passed. Restore → crashes again.
+
+**2. The violation was real too.** With Pint's `app/` aside and a throwaway `RuntimeException`
+subclass placed under `App\Services\Sources`, the preset reported it correctly, by name and by line.
+`expect('App')->not->toImplement(Throwable::class)->ignoring('App\Exceptions')` is
+`vendor/pestphp/pest/src/ArchPresets/Laravel.php:46-48`, and `IllegalSourceTransition` and
+`UploadRejected` genuinely violated it for the length of the phase.
+
+**3. Why it hid, which is the part worth carrying forward.** With Pint present **and** a real
+violator present, the failure prints the **crash message** with a **code frame pointing at the real
+violator** — the frame belongs to a genuine `ArchExpectationFailedException` raised by a different
+rule, while the message belongs to the crash. On a clean tree the same failure has no frame at all.
+An earlier agent noticed that the crash "re-points at whichever class exists" and could not
+interpret it. **The re-pointing is real and it does not mean what it looks like it means**: a true
+finding rendered as debris of a library bug, which is about the most effective camouflage a defect
+can have — the one artefact that would have identified it *was on screen*, attached to the wrong
+sentence.
+
+**Both classes were moved into `App\Exceptions`, and the move was kept** — behaviour is identical and
+the placement rule is right on its own merits — **but the move did not fix the failure.** Pest now
+reads 1286 passed, 2 skipped, and the **same three failures**. Anyone reading that figure line and
+concluding the arch rules are clean is making the phase's mistake a second time.
+
+**The consequence is larger than these two classes and has its own row: § Q15.**
+
+**What is now established regardless of the mechanism**: an assertion about a test failure was
+carried forward through a whole phase by copy, was never written into `docs/`, and was re-examined
+only because someone asked — and when it was, it turned out to be *true and misleading at the same
+time*. That is the § M6 claim shape with a commit message as its host, and it adds a variant the
+register did not have: **a claim can be literally correct and still function as a false one, if the
+inference everybody draws from it is the thing nobody checked.** "Environmental" was never a claim
+that nothing else was failing; it was read as one for eight commits.
+
+### Q15 — every **positive** rule in `arch()->preset()->laravel()` enforces nothing, because a `require-dev` package is autoloaded into `App\` *(OPEN — the only real fixes are upstream or a `composer.json` change, deliberately not made)*
+
+**This is the largest rule-with-no-mechanism this phase found**, and it is recorded apart from § Q14
+because Q14 is about *one* failing test while this is about most of a preset that reports green.
+
+```bash
+grep -n 'laravel/pint/app' services/core-api/vendor/composer/autoload_psr4.php
+grep -c '\->not->' services/core-api/vendor/pestphp/pest/src/ArchPresets/Laravel.php   # the ones that still work
+```
+
+**The mechanism, in one line:** `laravel/pint` ships its own Laravel app under its own
+`"App\\": "app/"`, Composer merges that into the root autoloader, and so every `App`-scoped arch rule
+walks Pint's classes. Pint's classes arrive as `VendorObjectDescription`, which sets no
+`reflectionClass`. **Positive** expectations are all guarded `isset($object->reflectionClass) && …`,
+so a vendor object fails the predicate, is reported as a violation, and crashes the run on the
+uninitialised `$path`. **Negative** expectations are guarded the other way round and pass vendor
+objects harmlessly — which is exactly why the one rule the whole phase interacted with
+(`->not->toImplement(Throwable)`) *worked*, and why the crash looked like it belonged to something
+else.
+
+**What this costs.** The `Laravel` preset is mostly positive assertions — `App\Models` extends
+`Model`, `App\Http\Requests` has `rules()`, `App\Jobs` implements `ShouldQueue`, `App\Console\Commands`
+extends `Command` and has `handle()`, and so on down the file. **Read the count out of the preset
+rather than from this sentence** (ADR-036; it moves with the Pest release):
+
+```bash
+f=services/core-api/vendor/pestphp/pest/src/ArchPresets/Laravel.php
+grep -n '\->toExtend(\|\->toImplement(\|\->toHaveMethod(\|\->toBeEnum(\|\->toHaveSuffix(' $f | grep -v '\->not->'
+```
+
+Every one of those is dead while Pint is installed. **They do not report as skipped and they do not
+report as failures** — they are consumed by the crash of the single `preset → laravel` test, which
+this repository has been labelling *environmental* since 2026-08-20. So the tree has been getting the
+reassurance of a framework-conventions preset and none of the enforcement, for the entire period in
+which `services/core-api` grew from one live admin area to four.
+
+**Not fixed here, and the options are all outside `docs/`.**
+
+- **Upstream:** the guard shape in `Expectation.php` treats "cannot reflect" as "violates", which is
+  the wrong default for a vendor object the user never asked to be scanned. That is a Pest issue,
+  not ours.
+- **Install Pint as a separate tool project** (its own directory, or a phar) so it is never
+  autoloaded into `App\`. This is the only fix available inside this repository, and it is a
+  `composer.json` + `composer.lock` change — **deliberately not made**, because `docs/` does not edit
+  dependency manifests and because it is a decision about the toolchain rather than about a test.
+- **Do nothing and rely on review**, which is the current state and is worth naming as a choice
+  rather than leaving as an accident.
+
+**Owner:** `test-engineer` for the diagnosis, whoever owns `composer.json` for the fix. **The
+tripwire that matters more than the fix** is the one this whole episode lacked: a failing test whose
+message nobody has read in full is not an environmental failure, it is an unread failure. Capturing
+the actual output — which no commit message in Phase C quotes — was what settled this, and it was
+available on day one.
+
+**Revisit when** Pest ships a release whose positive expectations tolerate a `VendorObjectDescription`
+(the observable is `preset → laravel` passing with `vendor/laravel/pint/app` in place), or when Pint
+leaves the root `composer.json`.
+
+### Q16 — `writes.py:132` still says `source_versions` "does not exist here", which C1 created *(OPEN — owed by `retrieval-engineer` / `ingestion-engineer`)*
+
+```bash
+sed -n '128,133p' services/ai-service/app/db/writes.py
+```
+
+The inline comment admitting `sparse_version_statistics` to `ALLOWED_TABLES` explains its composite
+key partly on the grounds that *"the column it would otherwise live on belongs to a table that does
+not exist here"*. `source_versions` was created by Phase C1 on 2026-08-20.
+
+**Why it is a row rather than a typo.** The module docstring roughly a hundred lines above the
+comment **already corrects that exact premise** — the file was swept, and this line was missed inside
+the sweep that fixed its neighbours. That is a narrower and more instructive failure than the § P2 /
+§ M6 shape it otherwise resembles: not *nobody looked*, but *somebody looked at this file, on this
+subject, and the correction did not reach every instance*. A file that has been partially corrected
+reads as fully corrected, because the reader who checks one paragraph finds it right.
+
+**The decision the comment defends is unaffected** — the composite key
+`(organization_id, source_version_id, analyzer)` is still correct, for the *other* reason the same
+comment gives (the number is meaningless outside the scope it is summed over). Only the second
+justification is now false, which is the mild version of this defect and the reason it can wait for
+its owner rather than being urgent.
+
+**Owner:** the tree's owner. **Not fixed here** — `docs/` does not edit `services/`.

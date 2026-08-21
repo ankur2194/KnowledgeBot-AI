@@ -29,10 +29,14 @@ Work outside-in: **route → middleware → FormRequest → Policy → Service �
 Resource.** The FormRequest validates shape, the Policy decides permission, the Service decides
 behaviour, the Resource shapes output. An Eloquent model is never returned raw.
 
-`app/Services/Internal/` is empty today and still exists, because two enforcement rules point at it
-on day one: the arch test pins the `Http` facade to that namespace, and the CI grep pins
-`ai-api` / `services.ai.url` to it. Creating the directory is what makes both rules expressible
-before there is anything to break them.
+`app/Services/Internal/` holds `InternalAiClient` and `InternalRequestSigner` — the only classes
+permitted to open a connection to `ai-api`. Two enforcement rules point at that namespace:
+`tests/Arch/DoctrineTest.php` pins the `Http` facade to it, and `tests/Arch/StringLevelDoctrineTest.php`
+pins the literals `ai-api` / `services.ai.url` to it by scanning the token stream.
+
+This paragraph used to say the directory "is empty today" and that the second rule was a **CI grep**.
+Both are false now: the directory has been populated since 2026-08-19, and there is no CI —
+`.github/` was deleted on 2026-08-17 and the greps became the Pest arch tests named above.
 
 ---
 

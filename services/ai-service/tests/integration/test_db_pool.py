@@ -5,8 +5,9 @@ the two failure modes this module exists to prevent — a pool bound to the wron
 a pool whose connections outlive the process that closed it — are both invisible to a double.
 
 There is no ORM and no migration tool anywhere in this service: it writes a small set of
-derived, rebuildable tables into a schema Laravel's migrations define, and CI fails the build on
-the name of one appearing in this tree at all.
+derived, rebuildable tables into a schema Laravel's migrations define. Nothing enforces that —
+the gate that grepped for the name of one was deleted with ``.github/`` on 2026-08-17, and no
+test replaced it, this module included. It holds by review alone.
 """
 
 from __future__ import annotations

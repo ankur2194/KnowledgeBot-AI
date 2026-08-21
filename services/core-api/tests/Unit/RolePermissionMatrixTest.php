@@ -51,6 +51,11 @@ function rolePermissionMatrix(): array
             'providers.manage' => true,
             'bots.view' => true,
             'bots.manage' => true,
+            // §6.2 gives the Owner every source operation the Administrator has and then some.
+            'sources.view' => true,
+            'sources.manage' => true,
+            'sources.upload' => true,
+            'sources.assign' => true,
             'members.view' => true,
             'members.manage' => true,
             'members.manage_owner' => true,
@@ -67,6 +72,13 @@ function rolePermissionMatrix(): array
             // differently fails silently in both directions.
             'bots.view' => true,
             'bots.manage' => true,
+            // §6.3's "Manage bots" sits inside a role the spec describes as managing the
+            // organization's configuration; the source operations §6.4 gives the Knowledge Manager
+            // are a subset of what an Administrator may do, never a set an Administrator lacks.
+            'sources.view' => true,
+            'sources.manage' => true,
+            'sources.upload' => true,
+            'sources.assign' => true,
             'members.view' => true,
             'members.manage' => true,
             'members.manage_owner' => false,
@@ -86,6 +98,16 @@ function rolePermissionMatrix(): array
             'providers.manage' => false,
             'bots.view' => true,
             'bots.manage' => false,
+            // ALL FOUR SOURCE PERMISSIONS, AND UNLIKE `bots.view` THIS IS A READING OF THE SPEC
+            // RATHER THAN AN EXTENSION OF IT. §6.4 is a six-item list and every item is a source
+            // operation: upload documents, add websites, review parsed content, trigger
+            // reprocessing, disable/archive/delete sources, view freshness. `sources.assign` is
+            // C6's, and it is what `bots.view` was granted to this role FOR — the assignment screen
+            // is a list of bots, so the two grants stand or fall together.
+            'sources.view' => true,
+            'sources.manage' => true,
+            'sources.upload' => true,
+            'sources.assign' => true,
             'members.view' => false,
             'members.manage' => false,
             'members.manage_owner' => false,
@@ -104,6 +126,17 @@ function rolePermissionMatrix(): array
             'providers.manage' => false,
             'bots.view' => true,
             'bots.manage' => false,
+            // NO SOURCE PERMISSION, INCLUDING `sources.view`, AND THE TEMPTING ARGUMENT FOR IT IS
+            // REFUSED DELIBERATELY. Phase E has an analyst review conversations, and a transcript
+            // cites sources — but `citations` denormalizes label, display title, location and
+            // excerpt onto the citation row precisely so a transcript survives the source being
+            // purged, so conversation review reads NOTHING from `knowledge_sources`. Granting it
+            // would widen an analyst's reach to every document title, tag and crawl URL in the
+            // organization to serve a screen that does not read them. Silence is not a grant.
+            'sources.view' => false,
+            'sources.manage' => false,
+            'sources.upload' => false,
+            'sources.assign' => false,
             'members.view' => false,
             'members.manage' => false,
             'members.manage_owner' => false,
@@ -197,5 +230,12 @@ it('keeps the role catalog fixed at four, because there is no per-tenant role CR
     // announces itself.
     expect(OrgRole::values())->toBe(['owner', 'admin', 'knowledge_manager', 'analyst']);
 
-    expect(Permission::cases())->toHaveCount(7);
+    // PINNED BY COUNT HERE AND BY NAME EVERYWHERE ELSE, which is the opposite of what
+    // AuditLoggerTest concluded for its own operation set — and the difference is what the
+    // assertion is for. This line is not an inventory of the catalog: the matrix above already
+    // names every case four times over and fails if one is missing. It is a guard on the DATASET
+    // SIZE, so that a permission added with a full set of matrix rows still trips one line that a
+    // human has to look at, because widening the privilege catalog is not a thing that should be
+    // possible to do entirely mechanically. Phase C1 took it from 7 to 11.
+    expect(Permission::cases())->toHaveCount(11);
 });

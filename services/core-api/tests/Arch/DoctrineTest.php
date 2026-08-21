@@ -44,6 +44,64 @@ arch()->preset()->php();        // die, var_dump, debug helpers, deprecated func
 arch()->preset()->security();   // eval, md5/sha1, uniqid, mt_rand, extract — kb-security-baseline
 arch()->preset()->laravel();
 
+/*
+|--------------------------------------------------------------------------
+| `preset → laravel` CRASHES, AND THEREFORE ENFORCES NOTHING
+|--------------------------------------------------------------------------
+|
+| The line above fails on every run with
+|
+|   Typed property PHPUnit\Architecture\Elements\ObjectDescriptionBase::$path
+|   must not be accessed before initialization
+|
+| and the failure is NOT ours. Measured 2026-08-21, by moving `vendor/laravel/pint/app` aside and
+| re-running: with it gone the preset PASSES; restored, it crashes again. The chain:
+|
+|   1. `laravel/pint` is a dev dependency that ships a whole Laravel application, and its own
+|      composer.json maps `"App\\": "app/"`. Composer merges that into the ROOT autoloader:
+|      `vendor/composer/autoload_psr4.php` reads
+|        'App\\' => array($baseDir.'/app', $vendorDir.'/laravel/pint/app')
+|      so the `App` arch layer contains Pint's classes as well as ours.
+|   2. Pest tags anything under `vendor/` with `Pest\Arch\Objects\VendorObjectDescription`, whose
+|      `make()` sets only `name` and `uses` — never `$path`, never `$reflectionClass`.
+|   3. Every POSITIVE arch callback is guarded by `isset($object->reflectionClass)`
+|      (`vendor/pestphp/pest/src/Expectation.php` — `toBeEnum`, `toImplement`, `toExtend`, …), so on
+|      a vendor object the guard is false and the object is reported as a VIOLATION.
+|   4. `Blueprint::targeted()` then renders that violation by reading `$object->path`, which was
+|      never initialized. Fatal Error, no assertion, no file.
+|
+| Three Pint classes trip it: App\Enums\NodePackageManager, App\Exceptions\PrettierException and
+| App\Providers\AppServiceProvider.
+|
+| THE CONSEQUENCE IS THE PART TO CARRY, AND IT IS WORSE THAN "THE RULE IS OFF". The reported
+| MESSAGE is always the crash, so no rule in the preset can ever state its own verdict. But the
+| reported CODE FRAME is not the crash's — when some other rule in the same preset is genuinely
+| violated, the frame points at the real violator's file and line while the message above it is the
+| uninitialized-property Error. Measured 2026-08-21, both ways: with a `RuntimeException` subclass
+| placed under App\Services\Sources, `preset → laravel` failed at that file's `class` line; with the
+| tree clean, the same failure had no frame at all.
+|
+| That combination is how the two Phase C classes stayed broken for a phase. IllegalSourceTransition
+| and UploadRejected DID violate the preset's "no Throwable outside App\Exceptions" rule, the frame
+| moved between them as each was edited, and the message said "library bug" the whole time — so the
+| frame read as an artifact of the crash rather than as a finding. Both have been moved into
+| App\Exceptions, and the rule they broke is restated below in a form that reports itself.
+|
+| Restating a preset rule here is only possible for NEGATIVE ones: `not->toImplement()` passes
+| `! isset($object->reflectionClass) || …`, so a vendor object satisfies it instead of crashing.
+| The positive rules (`App\Models` extends Model, `App\Http\Requests` has `rules()`, …) cannot be
+| restated this way and stay unenforced until the upstream bug is fixed or Pint stops being
+| autoloaded into `App\\`. Do not delete the preset line: when either of those happens it starts
+| working again, and its failure is the only signal that it currently does not.
+*/
+arch('an exception lives in App\Exceptions, where the handler and the reader both look')
+    // The Laravel preset's own rule, restated because the preset cannot report it (see above).
+    // Verified to FAIL rather than pass vacuously: adding a `RuntimeException` subclass under
+    // App\Services\Sources makes this test report that file and line (measured 2026-08-21).
+    ->expect('App')
+    ->not->toImplement(\Throwable::class)
+    ->ignoring('App\Exceptions');
+
 arch('clients never reach FastAPI, so only one class may open a connection to it')
     ->expect('Illuminate\Support\Facades\Http')
     ->toOnlyBeUsedIn('App\Services\Internal');

@@ -31,8 +31,13 @@ use Illuminate\Support\Facades\Schedule;
 | quota windows: all policy over control-plane data. Celery beat schedules DATA-PLANE REPAIR (the
 | Deleting reaper, orphan-version sweep, retired-vector backstop, Qdrant<->PostgreSQL reconciliation,
 | silent-job re-query, abandoned multipart uploads). Nothing appears in both. Two schedulers on one
-| schedule is not a race, it is a guaranteed double tick every period, and a CI check diffs the two
-| entry-name sets.
+| schedule is not a race, it is a guaranteed double tick every period.
+|
+| RETRACTION, SAME SHAPE AS THE ONE THREE PARAGRAPHS UP. That sentence used to end "and a CI check
+| diffs the two entry-name sets". IT DOES NOT AND IT NEVER DID: there is no CI, and no test in
+| either service compares this file's entry names against Celery beat's. tests/Feature/ScheduleTest
+| pins THIS schedule's entry set and its modifiers, which catches an entry added here and says
+| nothing about one added on the other plane. The overlap is checked by review alone.
 |
 | A scheduled task CLAIMS ROWS AND DISPATCHES QUEUED JOBS. It never does the work. `schedule:run` is
 | a single PHP process running due events SEQUENTIALLY, so one 4-minute task delays every task

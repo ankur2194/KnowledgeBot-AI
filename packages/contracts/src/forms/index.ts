@@ -182,5 +182,23 @@ export type {
   ProviderModelEditSource,
 } from './provider-model.js';
 
-export { uploadSchema } from './upload.js';
+/**
+ * The upload form, and it is the one entry here that exports a schema FACTORY rather than a schema:
+ * §8.10 makes the size cap and the MIME allow-list per-organization, so there is no byte constant
+ * and no MIME constant in this package to build a fixed schema out of. Callers instantiate it with
+ * the limits the bootstrap config returned for the organization they are rendering for.
+ *
+ * `uploadDefaults` takes no argument for the same reason its siblings take one — see its docblock.
+ *
+ * `OrgUploadLimits` IS NO LONGER DECLARED IN `./upload.js` AND IS STILL EXPORTED FROM IT, which is
+ * deliberate and is the only entry in this barrel where the two differ. The endpoint that returns it
+ * landed (`GET .../sources/upload-limits`, published as `OrgUploadLimitsResource`), so the shape is
+ * the server's and its one mirror lives in `src/resources/sources.ts` beside every other mirrored
+ * response, under the three pins in test/resource-drift.test.ts. The line below re-exports that
+ * declaration rather than a copy of it: `uploadSchema(limits: OrgUploadLimits)` is public API inside
+ * this monorepo and moving where callers import the parameter type from would be a rename with a
+ * blast radius and no benefit. It stays erased at runtime — `export type`, so the `/forms` bundle is
+ * unchanged and the root entry's <=1 kB budget never sees it.
+ */
+export { uploadDefaults, uploadSchema } from './upload.js';
 export type { OrgUploadLimits, UploadIn, UploadOut, UploadSchema } from './upload.js';

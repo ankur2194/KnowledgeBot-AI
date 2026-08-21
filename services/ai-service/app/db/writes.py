@@ -1,12 +1,18 @@
 """The only module in this service that issues SQL.
 
-This service writes **exactly six** PostgreSQL tables and owns **no** migration. They are
-derived, rebuildable artifacts whose schema lives in Laravel's migrations: we write rows
-into a schema we do not define.
+This service writes the PostgreSQL tables named in ``ALLOWED_TABLES`` below, and owns **no**
+migration. They are derived, rebuildable artifacts whose schema lives in Laravel's
+migrations: we write rows into a schema we do not define. **Read the tuple for the list.**
+This docstring does not restate it, or its length, and neither should anything else
+(ADR-036): a sentence carrying a count goes false without a diff ever touching it. The copies
+in ``infrastructure/docker/env/ai-service.env.example`` and
+``infrastructure/docker/postgres/initdb/00-extensions.sql`` were the worked example — they
+still read "exactly four" long after the tuple had grown, and on 2026-08-20 they were retired
+rather than corrected, because correcting a restated count only resets the clock on it.
 
-A seventh name here is a review stop, not a refactor. **The invariant is not the number** —
-it is the three properties every name on the list has, and the number is only what makes a
-violation visible in a diff:
+*Any* name added here is a review stop, not a refactor, and there is no arithmetic to appeal
+to. **The invariant is the three properties every name on the list has**, each a question
+about that specific table and answerable on its own:
 
 1. **The row is derived and rebuildable** in the ADR-010 sense: a pure function of content
    already held in PostgreSQL and object storage, reproducible exactly by a rebuild, with
@@ -33,9 +39,29 @@ They are **two** names and not one, and the second is not a convenience. The per
 document total is the numerator of the IDF formula and is meaningless outside the scope the
 frequencies carry, so it is keyed identically —
 ``(organization_id, source_version_id, analyzer)`` — rather than stored as a column on
-``source_versions``. Which it could not be in any case: **``source_versions`` does not exist
-in this repository**, no migration creates it, and inventing it to hang a counter on would
-put a table `kb-source-lifecycle` owns into a change about BM25.
+``source_versions``.
+
+The argument this docstring once made from ``source_versions`` **not existing here** is no
+longer available, and it was never the reason. It does exist: Phase C1 landed
+``services/core-api/database/migrations/2026_08_20_002000_create_source_versions_table.php``
+on 2026-08-20. The design is unchanged, because the grounds are the key and the ownership.
+
+* **The analyzer.** ``source_versions`` has one row per version, so a column on it can hold
+  one number per version — while this total is per version *and per analyzer*. A column would
+  either collapse the two analyzers' totals into one or drag ``SPARSE_ANALYZER_VERSION`` into
+  the lifecycle table's key. The collapse is the dangerous half, precisely because the count
+  genuinely does not depend on the analyzer: the two rows carry equal values, so an
+  analyzer-blind read returns twice a plausible-looking number, and no fixture that seeds both
+  analyzers can distinguish a bound read from an unbound one by inspecting a single result.
+  The primary key on ``sparse_version_statistics`` is that argument, made in the migration
+  that creates it.
+* **Whose table it is.** ``source_versions`` is `kb-source-lifecycle`'s and its schema is
+  Laravel's, so hanging the IDF numerator on it would put a lifecycle migration inside a
+  change about BM25 — property 3 above, from the other direction. That migration already
+  refuses a column of this shape on its own account: its "what is not on this table" note
+  declines ``chunk_count`` because a count over rows the data plane writes would be a second
+  number that can disagree with the first while both look authoritative. The IDF numerator is
+  that shape exactly.
 
 Two further rules make the direct write safe:
 
@@ -52,9 +78,26 @@ Two further rules make the direct write safe:
   writers on the one column that decides which version is live turns a lifecycle bug into a
   constraint violation inside a Celery task, retried forever.
 
-There is deliberately no ORM and no migration tool. CI greps this whole package
-case-insensitively for the names of both, so they must not appear here even in prose — see
-``services/ai-service/README.md`` for the list and the reasoning.
+There is deliberately no ORM and no migration tool under ``app/``: schema is Laravel's, and a
+second migration authority against a schema we do not own is what that rules out.
+
+**Nothing in this repository enforces it.** It used to — a ``.github/workflows/gates.yml`` job
+grepped this package case-insensitively for ``create table``/``alter table``/``drop table``
+and for the names of SQLAlchemy, SQLModel, Tortoise and Alembic — but ``.github/`` was deleted
+on 2026-08-17 and nothing replaced it, so the rule now holds by review alone: an ``import
+alembic`` under ``app/`` would land here with nothing objecting. ``scripts/security/rules/``
+does carry a semgrep rule matching those imports, and it is not a backstop — as of 2026-08-20
+no Makefile target, script or workflow in this repository invokes semgrep (finding **F7**), so
+that rule records the intent rather than holding it. Do not trust this paragraph either:
+``ls .github`` and ``git grep -l semgrep`` are the two measurements, and a paragraph
+describing a gate is exactly the kind that goes stale in place.
+
+The gate's other legacy is a writing rule that is no longer real. Its grep had no
+``--include`` filter, so a docstring or a comment naming one of those tools failed the build
+exactly as an import would, and any explanation that needed to name one was pushed out to
+``services/ai-service/README.md``. That constraint is gone — the paragraph above names four of
+them. The README still describes the gate in the present tense, so read its "things CI will
+fail you for" section as reasoning, not as a live enforcement claim.
 """
 
 from __future__ import annotations
@@ -63,8 +106,16 @@ from typing import Final
 
 __all__ = ["ALLOWED_TABLES"]
 
-#: The complete write allow-list. CI reads this module to enforce it, so the tuple is the
-#: single place the list exists — do not restate it in a docstring elsewhere.
+#: The complete write allow-list, and the single place the list exists — do not restate it, or
+#: its length, in a docstring, a comment, a config file or a test (ADR-036).
+#:
+#: **Nothing checks that a statement's target is on it, and nothing checks what joins it.** A
+#: `.github/workflows/gates.yml` job used to import this module and compare; `.github/` was
+#: deleted on 2026-08-17 and nothing replaced it. So adding a name below changes what the data
+#: plane is permitted to write, in a diff that will go green, and the only thing between a wrong
+#: name and production is a reviewer working through the three properties in the module
+#: docstring above. Treat a change to this tuple as the review stop it is — there is no second
+#: chance further down the pipe.
 ALLOWED_TABLES: Final[tuple[str, ...]] = (
     "chunks",
     "document_elements",

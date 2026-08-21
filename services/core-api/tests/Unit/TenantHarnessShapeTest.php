@@ -31,7 +31,12 @@ test('the fixture carries two organizations, and they are not interchangeable', 
 
     // Two organizations, two bots, two actors — as SEPARATE properties, so a test physically
     // cannot read "the" organization. Collapsing any pair into one is the change this catches.
-    expect($properties)->toContain('a', 'b', 'botA', 'botB', 'actorA', 'actorB', 'canary');
+    //
+    // `sourceB` IS THE ONE UNPAIRED MODEL AND IS ASSERTED HERE ANYWAY. Its absence would mean a
+    // §22.5 test had no knowledge-side row to leak, which is the state Phase C1 ended; its
+    // acquiring a `sourceA` sibling is a change TenantPair's docblock argues against, and one that
+    // would show up as a new property this list does not name.
+    expect($properties)->toContain('a', 'b', 'botA', 'botB', 'sourceB', 'actorA', 'actorB', 'canary');
 });
 
 test('there is no singular organization on the fixture to reach for', function (): void {
@@ -44,7 +49,11 @@ test('there is no singular organization on the fixture to reach for', function (
     // naturally at a call site and would each mean the test author never decided WHICH tenant they
     // meant. Ambiguity at the call site is how a negative assertion ends up run against the org that
     // planted the canary.
-    foreach (['org', 'organization', 'tenant', 'bot', 'actor', 'user'] as $singular) {
+    // `source` joined the list with Phase C1. A bare `$t->source` would read perfectly naturally at
+    // a call site asserting that Org A cannot see it — while naming the row that Org A is supposed
+    // NOT to own, which is the ambiguity that makes a negative assertion run as the tenant that
+    // planted the canary.
+    foreach (['org', 'organization', 'tenant', 'bot', 'actor', 'user', 'source'] as $singular) {
         expect($properties)->not->toContain($singular);
     }
 });
@@ -75,6 +84,11 @@ test('every model property is narrowed to its model, and none is left as object'
         'b' => \App\Models\Organization::class,
         'botA' => \App\Models\Bot::class,
         'botB' => \App\Models\Bot::class,
+        // NARROWED THE DAY IT LANDED, not left as `object` while the model settled. The property
+        // this file exists to protect is exactly that: `object` type-checks at level 8, so a test
+        // handing Org B's record to an assertion written for Org A would pass while proving the
+        // opposite of what it claims.
+        'sourceB' => \App\Models\KnowledgeSource::class,
         'actorA' => \App\Models\User::class,
         'actorB' => \App\Models\User::class,
     ];

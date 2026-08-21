@@ -1,0 +1,114 @@
+{
+    "class": "App\\Http\\Requests\\IngestionCallbackRequest",
+    "rules": {
+        "chunk_count": [
+            "bail",
+            "sometimes",
+            "integer",
+            "min:0"
+        ],
+        "delivery_count": [
+            "bail",
+            "sometimes",
+            "integer",
+            "min:0"
+        ],
+        "error_class": [
+            "bail",
+            "sometimes",
+            "nullable",
+            "string",
+            "in:\"validation\",\"authentication\",\"authorization\",\"tenant_quota\",\"rate_limit\",\"provider_auth\",\"provider_rate_limit\",\"provider_billing\",\"provider_temporary\",\"provider_permanent_request\",\"retrieval\",\"parsing\",\"ocr\",\"crawl\",\"vector_indexing\",\"storage\",\"internal_dependency\",\"user_cancellation\""
+        ],
+        "job_id": [
+            "bail",
+            "required",
+            "string",
+            "ulid"
+        ],
+        "sequence": [
+            "bail",
+            "required",
+            "integer",
+            "min:1",
+            "max:10000"
+        ],
+        "source_id": [
+            "bail",
+            "required",
+            "string",
+            "ulid"
+        ],
+        "source_item_id": [
+            "bail",
+            "required",
+            "string",
+            "ulid"
+        ],
+        "stage": [
+            "bail",
+            "required",
+            "string",
+            "max:64"
+        ],
+        "status": [
+            "bail",
+            "required",
+            "string",
+            "in:\"draft\",\"queued\",\"fetching\",\"parsing\",\"normalizing\",\"chunking\",\"embedding\",\"indexing\",\"ready\",\"ready_with_warnings\",\"failed\",\"disabled\",\"deleting\",\"deleted\",\"archived\""
+        ],
+        "verified": [
+            "bail",
+            "sometimes",
+            "App\\Rules\\LiteralBoolean"
+        ],
+        "version": [
+            "bail",
+            "sometimes",
+            "array"
+        ],
+        "version.chunker_cfg_version": [
+            "bail",
+            "required_with:version",
+            "string",
+            "max:200"
+        ],
+        "version.content_hash": [
+            "bail",
+            "required_with:version",
+            "string",
+            "regex:/\\A[0-9a-f]{64}\\z/"
+        ],
+        "version.embedding_model_version": [
+            "bail",
+            "required_with:version",
+            "string",
+            "max:200"
+        ],
+        "version.ingest_key": [
+            "bail",
+            "required_with:version",
+            "string",
+            "regex:/\\A[0-9a-f]{64}\\z/"
+        ],
+        "version.ocr_cfg_version": [
+            "bail",
+            "required_with:version",
+            "string",
+            "max:200"
+        ],
+        "version.parser_cfg_version": [
+            "bail",
+            "required_with:version",
+            "string",
+            "max:200"
+        ],
+        "warning_summary": [
+            "bail",
+            "sometimes",
+            "array",
+            "max:416",
+            "App\\Rules\\JsonObjectMap"
+        ]
+    }
+}

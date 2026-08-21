@@ -121,3 +121,41 @@ export type {
   ProviderModelCollectionResource,
   ProviderModelResource,
 } from './resources/provider-models.js';
+
+/**
+ * The knowledge-source admin surface. Same `export type` discipline, and the same reason this module
+ * holds no runtime value — with one asymmetry against `bots.ts` worth naming here rather than only in
+ * the module: its two closed vocabularies have NO tuple sibling behind `@kb/contracts/forms`, because
+ * no source form ships yet. `SourceStatus` is pinned to the server by the enum comparison in
+ * test/resource-drift.test.ts and by nothing else, which is the correct amount of pinning for a
+ * vocabulary nothing iterates.
+ *
+ * `OrgUploadLimits` IS THE ONE SHAPE HERE THAT IS ALSO REACHABLE THROUGH `@kb/contracts/forms`, and
+ * that is a re-export of this declaration rather than a second one — `src/forms/upload.ts` needs it
+ * as `uploadSchema`'s parameter and its callers already import it from there. Both doors, one
+ * definition; the alternative was an `OrgUploadLimitsResource` interface beside an `OrgUploadLimits`
+ * one, which is the two-spellings-of-a-shape drift this package's suites exist to catch.
+ */
+export type {
+  OrgUploadLimits,
+  SourceActiveVersionResource,
+  SourceCollectionResource,
+  SourceDetailResource,
+  SourceResource,
+  SourceStatus,
+  SourceType,
+  SourceWarningResource,
+} from './resources/sources.js';
+
+/**
+ * The bot↔source grant. Same `export type` discipline, and the module it comes from is the one place
+ * in `src/resources/` that exists for a STRUCTURAL reason rather than a subject one: the shape joins
+ * two surfaces, so putting it in `bots.ts` would have made that module import from `sources.ts` while
+ * `sources.ts` already imports `ListMetaResource` back out of it. The argument is at the head of the
+ * module; the consequence here is that this block is a third source of source-shaped types and the
+ * `SourceResource` it nests is the one declared once in `./resources/sources.js`.
+ */
+export type {
+  BotSourceAssignmentCollectionResource,
+  BotSourceAssignmentResource,
+} from './resources/bot-source-assignments.js';

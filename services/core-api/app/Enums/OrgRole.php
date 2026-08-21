@@ -62,13 +62,37 @@ enum OrgRole: string
             // comparisons: the set is about to keep growing (sources, conversations, evaluation
             // datasets all land on this role in later phases) and a growing `||` chain is where a
             // reviewer stops reading. Strict comparison, so no enum coerces into another.
+            // THE SET GREW BY FOUR IN PHASE C1, AND THOSE FOUR ARE THE ROLE'S ACTUAL JOB. §6.4 is
+            // a six-item list and every item is a source operation — upload documents, add
+            // websites, review parsed content, trigger reprocessing, disable/archive/delete
+            // sources, view freshness. `sources.assign` is C6's, and it is what `bots.view` was
+            // granted to this role FOR: the assignment screen is a list of bots.
+            //
+            // `providers.view` and NOT `providers.manage` is unchanged and is the line §6.4 draws
+            // explicitly: an ingestion operator has to know whether the organization can embed at
+            // all, and may not touch the credential or the embedding designation.
             self::KnowledgeManager => in_array(
                 $permission,
-                [Permission::ProvidersView, Permission::BotsView],
+                [
+                    Permission::ProvidersView,
+                    Permission::BotsView,
+                    Permission::SourcesView,
+                    Permission::SourcesManage,
+                    Permission::SourcesUpload,
+                    Permission::SourcesAssign,
+                ],
                 true,
             ),
-            // NO LONGER A BLANKET FALSE. §6.5 is reporting-only and this is the one permission
-            // reporting needs: Phase E's conversation review is per bot.
+            // STILL EXACTLY ONE PERMISSION. §6.5 is reporting-only and `bots.view` is the one
+            // permission reporting needs: Phase E's conversation review is per bot.
+            //
+            // THE FOUR `sources.*` CASES ARE DELIBERATELY NOT HERE, and the tempting argument for
+            // adding `sources.view` is refused in Permission::SourcesView's docblock: a transcript
+            // renders label, display title, location and excerpt off the CITATION row, which is
+            // denormalized precisely so it survives the source being purged. Conversation review
+            // reads nothing from `knowledge_sources`, so the grant would widen an analyst's reach
+            // to every document title, tag and crawl URL in the organization to serve a screen that
+            // does not read them.
             self::Analyst => $permission === Permission::BotsView,
         };
     }

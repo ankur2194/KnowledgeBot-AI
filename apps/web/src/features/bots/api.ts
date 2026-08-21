@@ -29,6 +29,7 @@ import {
 import { knownPathsFromRules, type FormRulesManifest } from '@/lib/forms/known-paths';
 import { readPaginatedEnvelope, type TablePage } from '@/lib/table/envelope';
 import { MAX_PER_PAGE, type TableParamsConfig } from '@/lib/table/params';
+import { enumFromRule, maxFromRule } from '@/lib/table/rules';
 
 /**
  * THE WHOLE BOT TRANSPORT — the list, the detail, the create and the PATCH — plus the view
@@ -85,27 +86,15 @@ export const botsPath = (orgId: string): string => `${organizationPath(orgId)}/b
  * order — and the create migration declined the `(organization_id, created_at)` index for exactly
  * that reason. The console's "Created" column therefore sorts by `id`; see `bot-columns.tsx`.
  */
-const IN_RULE_PREFIX = 'in:';
-
-/** `in:"id","name","slug","status"` -> the four bare strings. Never throws: a manifest this cannot
- *  read yields an empty set, which `assertTableParamsConfig` then refuses loudly at the call site. */
-function enumFromRule(rules: readonly string[] | undefined): readonly string[] {
-  const rule = rules?.find((entry) => entry.startsWith(IN_RULE_PREFIX));
-  if (rule === undefined) return [];
-  return rule
-    .slice(IN_RULE_PREFIX.length)
-    .split(',')
-    .map((value) => value.trim().replace(/^"(.*)"$/, '$1'))
-    .filter((value) => value !== '');
-}
-
-/** `max:200` -> 200. `null` when the rule carries no numeric bound. */
-function maxFromRule(rules: readonly string[] | undefined): number | null {
-  const rule = rules?.find((entry) => entry.startsWith('max:'));
-  if (rule === undefined) return null;
-  const bound = Number.parseInt(rule.slice('max:'.length), 10);
-  return Number.isSafeInteger(bound) ? bound : null;
-}
+/**
+ * ── THE TWO PARSERS MOVED OUT, AND THAT IS THE SECOND-CONSUMER RULE BEING APPLIED ───────────────
+ * `enumFromRule` and `maxFromRule` were declared HERE while the bot list was the only server-driven
+ * table in the console. The sources list is the second one, and a private copy of a manifest parser
+ * in each feature is two places the manifest's grammar is known — the drift `lib/api/browser.ts`
+ * records itself moving `browserFetchData` to avoid. They now live in `lib/table/rules.ts`, imported
+ * above; nothing about the parse changed, and `tests/unit/bot-list.test.ts` still pins this list's
+ * values through this module.
+ */
 
 const INDEX_BOTS_RULES = (indexBotsRules as FormRulesManifest).rules;
 

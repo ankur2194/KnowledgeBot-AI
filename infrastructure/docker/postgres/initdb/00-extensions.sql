@@ -3,9 +3,11 @@
 -- ===============================================================================================
 -- EXTENSIONS ONLY. NO TABLES, NO INDEXES, NO SEED DATA, EVER.
 -- ===============================================================================================
--- Laravel owns every migration and every table — including the four derived tables the FastAPI
--- data plane WRITES (chunks, document_elements, retrieval_traces, evaluation_results). FastAPI
--- writes rows into a schema it does not define, and it defines no schema of its own.
+-- Laravel owns every migration and every table — including the derived tables the FastAPI data
+-- plane WRITES, which are `ALLOWED_TABLES` in services/ai-service/app/db/writes.py and are knowable
+-- only by reading that tuple: neither the list nor its length is restated here, because a copy kept
+-- away from the thing it copies goes false silently, and this line's did (ADR-036). FastAPI writes
+-- rows into a schema it does not define, and it defines no schema of its own.
 --
 -- A CREATE TABLE in this file would be a second migration authority with no version history, no
 -- rollback, and no relationship to `php artisan migrate:status`. Worse, it would run only ONCE:

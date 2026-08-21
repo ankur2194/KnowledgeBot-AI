@@ -9,18 +9,35 @@ hypothetical here: it is the bug this module was written to close. Two derived t
 version — three files promised the behaviour and nothing implemented it, because the purge named
 its tables in one place and the proof named its stores in another.
 
-**Why an explicit purge, and not a foreign key.** The migration
-(``…_create_sparse_corpus_statistics_tables.php``) declares no cascade that could reach these
-rows. ``organization_id`` references ``organizations (id) ON DELETE RESTRICT`` — RESTRICT is the
-project-wide choice for that edge, so residue *blocks* an organization delete rather than riding
-along with it — and ``source_version_id`` carries **no foreign key at all**, because
-``source_versions`` does not exist in this repository yet. The migration names the composite
-``ON DELETE CASCADE`` it owes once that table lands; when it does, these statements stay, for a
-reason the cascade cannot cover: ``purge_retired_version`` removes a retired version's artifacts
-after a recrawl published its successor, and the retired ``source_versions`` **row survives** that
-purge — it carries ``retired_at`` and the version's identity. No cascade ever fires for it, so a
-purge that leaned on one would clean up after a source deletion and silently accumulate after
-every recrawl, which is the far more frequent path.
+**Why an explicit purge, and not a foreign key — the cascade landed, and the answer did not
+change.** This paragraph used to rest on ``source_version_id`` carrying no foreign key at all,
+because ``source_versions`` did not exist in this repository. Phase C wrote all of it:
+``2026_08_20_002000`` creates ``source_versions``, and
+``2026_08_20_002400_add_source_version_foreign_keys_to_sparse_tables.php`` pays the debt
+``…_create_sparse_corpus_statistics_tables.php`` recorded, giving both sparse tables
+``FOREIGN KEY (organization_id, source_version_id) REFERENCES source_versions (organization_id,
+id) ON DELETE CASCADE``. ``2026_08_20_002100`` and ``2026_08_20_002200`` create
+``document_elements`` and ``chunks`` with the same composite key ``ON DELETE RESTRICT``. On all
+four, ``organization_id`` references ``organizations (id) ON DELETE RESTRICT`` — the project-wide
+choice for that edge, so residue *blocks* an organization delete rather than riding along with it.
+
+These statements stay, for three reasons no cascade covers:
+
+1. ``purge_retired_version`` removes a retired version's artifacts after a recrawl published its
+   successor, and the retired ``source_versions`` **row survives** that purge — it carries
+   ``retired_at`` and the version's identity. No cascade ever fires for it, so a purge that leaned
+   on one would clean up after a source deletion and silently accumulate after every recrawl,
+   which is the far more frequent path.
+2. **A cascade produces no evidence.** Deletion has to be verified (non-negotiable 6), and what
+   is verifiable is a statement this service issued, with a rowcount, counted afterwards by its
+   twin. Rows that vanish inside somebody else's ``DELETE`` are not something this side can
+   attest to. The migration says the same thing from its own side: the cascade is a net for an
+   interrupted purge, not the mechanism.
+3. **For ``chunks`` and ``document_elements`` there is no net to lean on at all.** Their version
+   edge is RESTRICT, not CASCADE, so core-api's delete of the ``source_versions`` row cannot
+   succeed until this step has run. That is the same shape as the ``organizations`` proof below —
+   a foreign key the database enforces, which turns the *next* call's success into evidence about
+   this step rather than a claim about it.
 
 **Why the same statement can be counted.** ``delete`` and ``count`` differ only in their verb and
 bind the identical parameters in the identical order, so the proof asks the question the purge
@@ -50,15 +67,26 @@ they were a substitute for it either.
 ── THE ROWS THE VERSION-SCOPED PREDICATE CANNOT REACH ────────────────────────────────────────
 
 Every statement above names its rows through a **caller-supplied version list**. A row whose
-``source_version_id`` is not in some list is therefore unreachable by every code path in this
-service, and nothing else removes it either: ``source_version_id`` carries no foreign key, so no
-cascade fires, and the version-scoped purge is resolved from ``source_versions`` — which cannot
-resolve a version that is already gone.
+``source_version_id`` is not in some list is unreachable by every code path in this service, and
+the version-scoped purge is resolved from ``source_versions`` — which cannot resolve a version
+that is already gone. That is the residue the second pair of statements exists for.
 
-That residue is not merely untidy. ``organization_id`` is ``ON DELETE RESTRICT``, so the *first*
-place it becomes visible is at the very end of an account erasure, as a foreign-key violation
-raised by a table nobody remembered writing — **account erasure arranged to fail at the database
-rather than to complete**, which is a compliance obligation, not a background inconvenience.
+**Phase C's foreign keys foreclose new residue of that shape, and they also prove none is hiding
+behind them.** With the composite key in place a row cannot name a version that does not exist:
+the two sparse tables cascade from ``source_versions``, and ``chunks`` and ``document_elements``
+restrict it. Nor can residue predate the constraint — ``2026_08_20_002400`` adds both keys with a
+plain ``ADD CONSTRAINT`` rather than ``NOT VALID`` plus ``VALIDATE``, so PostgreSQL scanned the
+child table and one orphan row would have failed the migration. Where these migrations have run,
+the orphan class is closed.
+
+The statements stay anyway, and the reason is worth stating rather than assuming: they run against
+whatever database the worker is pointed at, and a constraint is a property of a *migrated* one. A
+proof that holds only when the schema is the one we expected is not a proof, and the database
+missing these constraints is precisely the database where the residue accumulates. That residue
+was never merely untidy — ``organization_id`` is ``ON DELETE RESTRICT``, so the *first* place it
+becomes visible is at the very end of an account erasure, as a foreign-key violation raised by a
+table nobody remembered writing: **account erasure arranged to fail at the database rather than to
+complete**, which is a compliance obligation, not a background inconvenience.
 
 So each entry carries a second pair of statements: ``org_residue_delete`` and
 ``org_residue_count``, scoped to ``organization_id = %s`` and nothing else. Five things make that
@@ -79,26 +107,36 @@ width safe, and removing any one of them makes it the exact mistake this module 
 4. **Its proof is not its own predicate.** Counting ``organization_id = %s`` after deleting
    ``organization_id = %s`` is a tautology — the two agree on an answer neither measured, which is
    exactly what ``version_scope`` refuses an empty list to prevent. The load-bearing proof is
-   external and belongs to the database: ``organizations`` is ``ON DELETE RESTRICT`` from both
-   these tables, so Laravel's ``DELETE`` of the organization row **succeeds only if nothing
-   remains**. That delete is core-api's — this service owns no schema and writes no row outside
-   ``app/db/writes.py``'s allow-list — and its success is the evidence the sweep is verified by.
-   The tally is recorded as well, because a table with no such foreign key (``chunks``,
-   ``document_elements`` — neither exists in this repository yet) is not covered by it.
+   external and belongs to the database: ``organizations`` is ``ON DELETE RESTRICT`` from every
+   table in this tuple, so Laravel's ``DELETE`` of the organization row **succeeds only if
+   nothing remains**. That delete is core-api's — this service owns no schema and writes no row
+   outside ``app/db/writes.py``'s allow-list — and its success is the evidence the sweep is
+   verified by.
+   The tally is recorded as well. It used to be recorded because two of these four tables had no
+   such foreign key: no migration created ``chunks`` or ``document_elements`` at all, which was
+   finding #79. ``2026_08_20_002100`` and ``2026_08_20_002200`` closed that, and both tables
+   reference ``organizations (id) ON DELETE RESTRICT`` like the sparse pair, so all four are now
+   covered by the delete that proves it. The count is still taken because it is the artifact an
+   operator reads weeks later, because the next table added to this tuple may not carry that edge,
+   and because a foreign key proves only the schema actually deployed under the worker.
 5. **``organization_scope`` refuses a blank tenant**, for the same reason ``version_scope`` does,
    and it is the only guard left once the version term is gone.
 
-**What is still owed, and what it is blocked on.** This closes the *terminal* case — an
-organization being erased. It does not close the **live** one: residue under an organization that
-keeps operating stays unreachable, because the predicate that identifies it is an anti-join
-against ``source_versions`` (``… AND NOT EXISTS (SELECT 1 FROM source_versions …)``) and **no
-migration in this repository creates that table**. Writing that statement now would mean either
-inventing the table — putting a table ``kb-source-lifecycle`` owns into a change about deletion —
-or hard-coding a live-version list supplied by a caller, which is the version-scoped predicate
-again with a worse name. It is reported rather than stubbed. When ``source_versions`` lands, the
-migration also owes both tables a composite ``(organization_id, source_version_id) … ON DELETE
-CASCADE``; that makes *new* orphans impossible but removes neither the anti-join sweep for the
-ones already accumulated nor the terminal sweep, whose job is proof rather than removal.
+**What was owed here, and what paid it.** This section used to close only the *terminal* case —
+an organization being erased — and leave the **live** one open: residue under an organization that
+keeps operating, unreachable because the predicate that identifies it is an anti-join against
+``source_versions`` (``… AND NOT EXISTS (SELECT 1 FROM source_versions …)``) and no migration in
+this repository created that table. Both halves of that have moved. ``2026_08_20_002000`` creates
+``source_versions``, so the anti-join is expressible; ``2026_08_20_002400`` then adds the composite
+``ON DELETE CASCADE`` the earlier migration owed, which makes the anti-join **vacuous** wherever it
+would run — a validated foreign key cannot leave a row naming a version that does not exist.
+
+So it is deliberately still not written, for a different reason than before. A scan whose predicate
+a constraint already guarantees can only ever report zero, and a sweep nobody can make fail is the
+shape this file spends its length warning about. The cascade also does not remove the terminal
+sweep or its tally: their job is proof rather than removal, and they are the measurement that still
+works on a database where the constraint is absent. What stays owed is that narrower thing — a
+deployment question rather than a schema one.
 """
 
 from __future__ import annotations
@@ -190,10 +228,35 @@ class RelationalPurge:
 #: these rows were ever keyed off something derived from ``chunks``, this order would have to
 #: invert — and the proof would have to move with it.
 #:
-#: ``chunks`` and ``document_elements`` are stated from `postgresql-patterns`
-#: (``organization_id NOT NULL`` on every tenant-owned table, ``chunks.source_version_id``);
-#: **no migration in this repository creates either table**, so their column names are
-#: unverified against a schema in a way the two sparse entries are not.
+#: ── FINDING #79, AND WHY THESE TWO ENTRIES ARE NO LONGER THE WEAK ONES ───────────────────────
+#:
+#: ``chunks`` and ``document_elements`` used to be stated from `postgresql-patterns` alone
+#: (``organization_id NOT NULL`` on every tenant-owned table, ``chunks.source_version_id``), with
+#: **no migration in this repository creating either table** — four statements against a schema
+#: that did not exist, which is ADR-033 property 3 violated in the open and was pinned by ruling
+#: on 2026-08-12 because both repairs available then were worse than the finding. Phase C is the
+#: condition that ruling named. ``2026_08_20_002100_create_document_elements_table.php`` and
+#: ``2026_08_20_002200_create_chunks_table.php`` create both, and each names these statements in
+#: its own docblock. The column names are **verified against that schema** now — ``organization_id
+#: char(26) NOT NULL`` and ``source_version_id char(26) NOT NULL`` on both tables, each with an
+#: index leading on exactly the pair the version-scoped statement binds
+#: (``chunks_org_version_seq``, ``document_elements_org_version_seq``) and a tenant-leading index
+#: for the residue sweep. Nothing about these two entries is weaker than the sparse pair any more.
+#:
+#: The schema also promotes the ordering above from convention to constraint, in two ways:
+#:
+#: * ``chunks`` references ``document_elements`` ``ON DELETE RESTRICT``, so emptying the elements
+#:   before the chunks is **refused by the database** rather than silently orphaning a citation.
+#:   ``chunks`` first is not merely the order that happens to be right.
+#: * ``chunks.overlap_of`` is a self-reference, RESTRICT as well, and
+#:   ``2026_08_20_002200``'s comment records — measured on that database, it says — that
+#:   PostgreSQL resolves referential integrity for rows removed by the same command together, so a
+#:   version's mutually-overlapping chunks go as a set. That is a **new constraint on reason 2**:
+#:   if this step is ever batched, a batch boundary may not fall inside such a set. A batch that
+#:   removes a chunk whose overlapping sibling is still waiting in a later batch is refused by the
+#:   foreign key, inside a job whose only purpose is to finish. Batching this table means batches
+#:   closed under ``overlap_of`` — or that constraint becoming NO ACTION first, in a migration, on
+#:   the other side of the seam.
 RELATIONAL_PURGE_ORDER: Final[tuple[RelationalPurge, ...]] = (
     RelationalPurge(
         table="chunks",

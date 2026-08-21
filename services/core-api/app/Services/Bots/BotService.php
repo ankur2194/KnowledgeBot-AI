@@ -7,8 +7,10 @@ namespace App\Services\Bots;
 use App\Enums\BotAnswerMode;
 use App\Enums\BotStatus;
 use App\Models\Bot;
+use App\Models\BotSourceAssignment;
 use App\Models\Organization;
 use App\Repositories\Contracts\BotRepositoryInterface;
+use App\Repositories\Contracts\BotSourceAssignmentRepositoryInterface;
 use App\Repositories\Contracts\ProviderConnectionRepositoryInterface;
 use App\Repositories\Contracts\ProviderModelRepositoryInterface;
 use App\Services\Audit\AuditLogger;
@@ -95,6 +97,28 @@ final readonly class BotService
         .'`allow_general_answers` to true, or set `answer_mode` to `strict`.';
 
     /**
+     * CHECK 5 for a transition into `published` when no ENABLED source is assigned to the bot.
+     *
+     * The third of the three refusals `BotPolicy` names, and the one that carried a `TODO(phase-c)`
+     * until `bot_source_assignments` and its endpoints existed. The message describes BOTH failure
+     * shapes rather than the stricter one, because the two answer modes fail differently and only
+     * one of them is silent: `strict` refuses every question, and `rag_first` — whose escape hatch
+     * the refusal above has already forced open — answers every question from general model
+     * knowledge, with no sources and no citations, from a product whose premise is grounded
+     * answers. Neither is a state an end user should meet, and neither announces itself from the
+     * console.
+     */
+    public const PUBLISH_NEEDS_ASSIGNED_SOURCE = 'This bot cannot be published because no enabled '
+        .'knowledge source is assigned to it. A published bot is reachable by end users, and one '
+        .'with no corpus does not fail at publish time: in `strict` mode it refuses every question, '
+        .'which reads from the console exactly like a broken retrieval pipeline, and in `rag_first` '
+        .'mode it answers every question from general model knowledge with no sources and no '
+        .'citations. Assign a source first, at '
+        .'POST /organizations/{organization}/bots/{bot}/source-assignments, and publish after that. '
+        .'An assignment that exists but is switched off does not count: a disabled grant is what '
+        .'`enabled: false` means.';
+
+    /**
      * CHECK 5 for any write to an ARCHIVED bot, including a status change.
      *
      * `BotStatus::isEditable()` is the rule and `BotStatus` itself is where the reasoning lives:
@@ -117,6 +141,10 @@ final readonly class BotService
         private BotRepositoryInterface $bots,
         private ProviderConnectionRepositoryInterface $connections,
         private ProviderModelRepositoryInterface $models,
+        // THE PUBLISH GUARD'S THIRD REFUSAL, and nothing else on this class reaches it. A count
+        // rather than the assignment service, deliberately: this class has no business being able
+        // to CREATE a grant, and a dependency on the service would give it one.
+        private BotSourceAssignmentRepositoryInterface $assignments,
         private AuditLogger $audit,
     ) {}
 
@@ -382,6 +410,25 @@ final readonly class BotService
      * enumeration above, so the job is written against a complete list rather than against
      * whatever the author remembered.
      *
+     * ── THE GRANTS GET A ROW EACH, AND THAT IS NOT SYMMETRY WITH THE OTHER COLLECTIONS ───────
+     *
+     * `bot_source_assignments` is the FOURTH child collection this delete destroys — it landed with
+     * Phase C1 and nothing wrote to it until C6, so this path was complete for exactly as long as
+     * the table was empty. Adding it to the repository's cascade is what stops the first grant from
+     * turning every delete of that bot into SQLSTATE 23503 rendered as a 500.
+     *
+     * Removing them SILENTLY would be finding L2 with more to lose. `AuditLogger` makes both
+     * `bot.source_assignment.*` operations ON_FAILURE_ABORT on the explicit ground that a
+     * retrieval-scope grant reaching DOCUMENTS is the allow-list's argument with higher stakes, and
+     * the destruction of a grant is exactly as much a change to the retrieval scope as its creation
+     * was. So each one gets its own `bot.source_assignment.deleted` row, inside the same
+     * transaction, before anything is removed — and the two counts on the `bot.deleted` row are the
+     * tripwire that sends a reader looking for them.
+     *
+     * ORDER: THE GRANTS FIRST, THEN THE BOT. Both are inside one transaction so nothing observes a
+     * partial state, and the ordering is what makes a trail read forwards — the grants are
+     * withdrawn and then the bot goes, which is the sequence that actually happened.
+     *
      * DELETE IS NOT IDEMPOTENT HERE, ON PURPOSE. An audit row exists for the first delete, and a
      * 200 for the second would claim this actor performed a deletion the trail does not record.
      *
@@ -398,7 +445,20 @@ final readonly class BotService
         $deleted = $this->bots->delete(
             $organizationId,
             $bot->id,
-            function (Bot $row) use ($organizationId, $actorId, $request): void {
+            /** @param  list<RemovedSourceAssignment>  $assignments */
+            function (Bot $row, array $assignments) use ($organizationId, $actorId, $request): void {
+                foreach ($assignments as $assignment) {
+                    $this->audit->record(
+                        AuditLogger::BOT_SOURCE_ASSIGNMENT_DELETED,
+                        organizationId: $organizationId,
+                        actorId: $actorId,
+                        details: $assignment->toAuditDetails(),
+                        subjectType: BotSourceAssignment::class,
+                        subjectId: $assignment->id,
+                        request: $request,
+                    );
+                }
+
                 $this->record(AuditLogger::BOT_DELETED, $organizationId, $actorId, $row, $request);
             },
         );
@@ -564,17 +624,38 @@ final readonly class BotService
      * while looking correct. So the question is "will this bot be published when this write
      * commits", and the answer is checked against the resulting configuration.
      *
-     * ── WHAT IS DELIBERATELY NOT CHECKED, AND WHY IT IS NAMED RATHER THAN SILENT ──────────────
+     * ── ALL THREE REFUSALS ARE HERE NOW ───────────────────────────────────────────────────────
      *
-     * `BotPolicy`'s docblock names three refusals the publish guard makes: no model, no ASSIGNED
-     * SOURCE, and `allow_general_answers` false in RAG-first mode. Two of the three are here. The
-     * third cannot be: `bot_source_assignments` is Phase C's table and does not exist, so a check
-     * for it would either be a no-op that reads as a check or a query against a table that is not
-     * there.
+     * `BotPolicy`'s docblock names three: no model, no ASSIGNED SOURCE, and `allow_general_answers`
+     * false in RAG-first mode. The middle one carried a `TODO(phase-c)` because
+     * `bot_source_assignments` did not exist, so a check for it would either be a no-op that read
+     * as a check or a query against a table that was not there. The table landed with Phase C1 and
+     * the endpoints that write it landed with C6, so the refusal is implemented and the marker is
+     * gone.
      *
-     * TODO(phase-c): add the assigned-source refusal when `bot_source_assignments` lands. A
-     * published bot with no assigned source answers nothing and refuses every question, which is
-     * indistinguishable from a broken retrieval pipeline from the console.
+     * IT COUNTS **ENABLED** ASSIGNMENTS AND NOT ASSIGNMENTS. A disabled row grants nothing — that
+     * is the whole of what the per-assignment off switch means — so a bot whose every grant is
+     * switched off has exactly as much corpus as one with none, and a check that counted rows would
+     * pass on precisely the configuration it exists to refuse.
+     *
+     * IT IS NOT GATED ON `answer_mode`, AND THE REASON IS WORTH STATING BECAUSE THE OBVIOUS READING
+     * OF THE OLD MARKER WAS NARROWER. That marker said a published bot with no assigned source
+     * *"answers nothing and refuses every question"*, which is exactly true in `strict` mode and NOT
+     * true in `rag_first` — where the escape hatch the refusal above already forces open lets the
+     * model answer from general knowledge. So the two modes fail differently: `strict` refuses
+     * everything, and `rag_first` answers everything ungrounded, with no citations, from a product
+     * whose entire premise is source-grounded answers. Both are configurations an operator reaches
+     * by accident and neither is one an end user should meet, so the guard refuses both and
+     * `PUBLISH_NEEDS_ASSIGNED_SOURCE` describes each outcome rather than claiming the stricter one
+     * for both.
+     *
+     * WHAT IT DOES NOT PROMISE: that the bot can actually retrieve anything. Reachability is the AND
+     * of the organization, the grant's `enabled`, the source's status and the item's active-version
+     * pointer, and this guard sees only the second. A bot published against a source that is still
+     * ingesting is a legitimate state — the operator uploads, assigns and publishes in one sitting —
+     * and the guard runs on the resulting configuration AT WRITE TIME, not continuously: a source
+     * disabled or deleted after publication is not re-checked here, and nothing in this repository
+     * re-checks it anywhere else either.
      *
      * `access_mode` IS ALSO NOT GUARDED, and that too is deliberate — but it is the one omission a
      * later reader is most likely to mistake for a check that exists. `published` + `public` is
@@ -610,6 +691,14 @@ final readonly class BotService
 
         if ($answerMode === BotAnswerMode::RagFirst && $allowGeneral !== true) {
             throw new ConflictHttpException(self::PUBLISH_RAG_FIRST_NEEDS_ESCAPE_HATCH);
+        }
+
+        // THE THIRD REFUSAL. Read from the database rather than from a relation the caller happened
+        // to have loaded, and counted with both tenant predicates as required positional arguments
+        // — the grant is not a property of the `Bot` object in hand, and `Model::shouldBeStrict()`
+        // would refuse the lazy load that pretending otherwise requires.
+        if ($this->assignments->countEnabledForBot($bot->organizationId(), $bot->id) === 0) {
+            throw new ConflictHttpException(self::PUBLISH_NEEDS_ASSIGNED_SOURCE);
         }
     }
 
