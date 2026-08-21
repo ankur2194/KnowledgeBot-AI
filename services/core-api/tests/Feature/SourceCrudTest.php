@@ -440,12 +440,30 @@ it('refuses every transition the table does not have an edge for', function (
     // transition, because no number of attempts makes `deleted -> ready` legal. A 409 would render
     // as `internal_dependency` in this application's envelope and tell a client a DEPENDENCY was
     // unwell when the request was simply wrong about the row.
-    currentTest()->putJson(
+    $response = currentTest()->putJson(
         "/api/v1/organizations/{$f['orgA']->id}/sources/{$source->id}/status",
         ['status' => $requested],
         spaHeaders(),
     )->assertStatus(422)->assertJsonPath('error_class', 'validation')
         ->assertJsonStructure(['errors' => ['status']]);
+
+    // ── THE FIELD MESSAGE IS PRODUCT COPY, BECAUSE THE CLIENT RENDERS IT VERBATIM ─────────────
+    //
+    // `apps/web` renders a `validation` envelope's per-field messages as-is, on the general premise
+    // that a Laravel validation message is end-user copy. This one used to name
+    // `App\Enums\SourceState::transitionTable()` — a PHP class on a customer's console — and the
+    // client grew a special case to discard it. The operator's sentence still exists; it is on the
+    // exception and in the log line `SourceService::illegal()` writes, which is where operators
+    // look. Asserted on the WHOLE BODY rather than on the field, so a leak into the envelope's
+    // `message` (which Laravel summarizes from the first field error) is caught by the same line.
+    expect((string) $response->getContent())->not->toContain('transitionTable');
+    expect((string) $response->getContent())->not->toContain('App\\Enums');
+
+    // POSITIVE CONTROL: the field still says something, and it names both ends so the reader can
+    // see what they asked for. A test asserting only an absence passes against an empty string.
+    expect((string) $response->json('errors.status.0'))
+        ->toContain($from->value)
+        ->toContain($requested);
 
     expect($source->fresh()?->status)->toBe($from);
 })->with([

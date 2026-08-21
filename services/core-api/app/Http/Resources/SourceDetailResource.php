@@ -29,15 +29,21 @@ use RuntimeException;
  * edit, and the two can never disagree about a description — which is the drift a hand-copied
  * property map produces about six months in.
  *
- * ── THE ONE PLACE THIS PROJECTION AND `SourceResource`'s DOCBLOCK RUB ────────────────────────
+ * ── THE ONE PLACE THIS PROJECTION AND `SourceResource` RUB, AND WHERE THAT IS SAID ──────────
  *
- * `SourceResource` says, of itself: *"there is no active-version pointer on this shape and there
- * never will be one: a crawl gives one source hundreds of independently-versioned items, so 'the
- * current version of this source' is a set and a join rather than a value."* That is true and it is
- * not being reversed. `active_version` here is populated ONLY for a source with exactly one item,
- * where the set has one member; for every other source it is null and `active_version_count` is the
- * answer. The sentence that would be false is "this source's current version"; the sentence this
- * publishes is "the single item of this single-item source points at this version".
+ * `SourceResource`'s PUBLISHED description says of itself: *"there is no active-version pointer on
+ * this shape and there never will be one"*. That is true, it is not being reversed, and it is not
+ * reconciled here — it is reconciled THERE, in the same published sentence, which now names
+ * `active_version` and states the condition under which it is populated. That placement is the
+ * whole point: the absolute "never" reaches every generated client, so the qualification has to
+ * reach them too. A reconciliation that lives only in this docblock is a reconciliation no client
+ * author can read, and two reviewers arrived at exactly that confusion before it was moved.
+ *
+ * The narrow condition, stated once more where the field is declared: `active_version` is populated
+ * ONLY for a source with exactly one item, where the set has one member; for every other source it
+ * is null and `active_version_count` is the answer. The sentence that would be false is "this
+ * source's current version"; the sentence this publishes is "the single item of this single-item
+ * source points at this version".
  *
  * The alternative — publishing an array of per-item pointers — was not built, and the reason is
  * that it is a paginated collection wearing a field's clothes: a four-hundred-page crawl would put

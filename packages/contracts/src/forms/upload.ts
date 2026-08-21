@@ -21,23 +21,37 @@
  * The sentence here used to end "until `packages/contracts/rules/StoreSourceRequest.json` lands". It
  * landed — and `uploadSchema` did NOT become a `MIRRORS` entry, because the manifest turned out to
  * describe a THREE-ARM body (`file` / `url` / `text`, discriminated by `type`) of which this schema
- * covers one arm: eleven validated paths against this object's two, a per-file cap the FormRequest
- * states as a platform constant in KILOBYTES against a per-organization cap this factory takes in
- * BYTES, and a `files.*` rule (`file`) no JSON probe can synthesize at all. `StoreSourceRequest` is
- * therefore `NO_CLIENT_FORM`, recorded as OWED with the measurement and with what closes it —
- * the upload intake, the `OrgUploadLimits` endpoint that must publish the server's own constants, and
- * a create form covering all three arms. Read that entry before writing a mirror; the argument is
- * there rather than here because that is the file the assertion lives in.
+ * covers one arm: eleven validated paths against this object's two, size probes the generic sizer
+ * answers with a list of `'a'` strings and a bare number where `z.file()` demands a `File`, and a
+ * `files.*` rule (`file`) no JSON probe can synthesize at all. `StoreSourceRequest` is therefore
+ * `NO_CLIENT_FORM`, recorded as OWED with the measurement and with what closes it — the upload
+ * intake, the `OrgUploadLimits` endpoint that must publish the server's own constants, and a create
+ * form covering all three arms. Read that entry before writing a mirror; the argument is there rather
+ * than here because that is the file the assertion lives in.
  *
  * Until then, drift against the server is a reviewer check on this file. (A CI job used to run over
  * packages/, and only over packages/design-tokens/generated — nothing in it read this file — and it
  * is gone regardless.)
  *
- * ONE OF THOSE THREE CONDITIONS HAS SINCE BEEN MET, and saying which keeps the paragraph above from
- * reading as still-owed in full: the intake landed and `GET .../sources/upload-limits` publishes the
- * server's own constants as `OrgUploadLimitsResource`. `StoreSourceRequest` stays `NO_CLIENT_FORM`
- * as OWED, because the third condition — a create form covering all three arms — is what the
- * eleven-path measurement is actually about, and it does not exist.
+ * TWO OF THOSE THREE CONDITIONS HAVE SINCE BEEN MET, and saying which keeps the paragraph above from
+ * reading as still-owed in full: the intake landed, and `GET .../sources/upload-limits` publishes the
+ * server's own constants as `OrgUploadLimitsResource`. `StoreSourceRequest` stays `NO_CLIENT_FORM` as
+ * OWED, because the third condition — a create form covering all three arms — is what the eleven-path
+ * measurement is actually about, and it does not exist.
+ *
+ * THE SECOND OF THOSE ALSO STRUCK ONE OF THE REGISTER ENTRY'S THREE REASONS, on 2026-08-21, and it is
+ * the one this file is named in. It read that the FormRequest states its per-file cap as a platform
+ * constant in KILOBYTES while this factory takes a per-organization cap in BYTES, so "the two agree
+ * only by coincidence". They agree by construction now: `StoreSourceRequest::MAX_FILE_KILOBYTES` IS
+ * `UploadLimits::MAX_FILE_KILOBYTES` — a definition rather than a second copy —
+ * `OrgUploadLimitsResource` renders `UploadLimits::maxBytes()`, and the kilobyte-to-byte
+ * multiplication happens at exactly one site on the server.
+ *
+ * THIS FACTORY DOES NOT BECOME A CONSTANT AS A RESULT, which is the inference to refuse. §8.10 is
+ * about the SHAPE; the endpoint exists so a per-plan ceiling can arrive without a client change; and
+ * "every number here is a platform constant today" is the resource's own wording about the numbers
+ * rather than about the contract. A byte literal in this package would be wrong for exactly the reason
+ * it always was.
  */
 
 import { z } from 'zod';

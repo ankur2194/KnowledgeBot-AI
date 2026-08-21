@@ -34,6 +34,34 @@ namespace App\Services\Sources;
  */
 final readonly class SourceWarningCount
 {
+    /**
+     * The width of one warning code, in CHARACTERS — the SAME number at both ends of the column.
+     *
+     * ── ONE CONSTANT BECAUSE THE TWO BOUNDS MUST BE ONE NUMBER ───────────────────────────────
+     *
+     * `IngestionCallbackRequest` refuses a longer key at INGRESS and
+     * `EloquentKnowledgeSourceRepository` `mb_substr`s at this width on the way OUT. If the two ever
+     * differed, the read-side cut would fire on a key the write side had just accepted, and an
+     * administrator would read a truncated code that nothing on either plane ever emitted — a code
+     * indistinguishable from a real one, because the vocabulary belongs to the data plane and
+     * `SourceWarningResource` correctly puts no enum on it. Two literals could drift; one cannot,
+     * and that is why this lives here rather than in either of them: this type is what both layers
+     * are already allowed to see, and neither of them may see the other.
+     *
+     * ── WHERE 128 COMES FROM ─────────────────────────────────────────────────────────────────
+     *
+     * Not from the key set, which is the data plane's and unbounded by construction. From the
+     * READER: it is the longest code a console can be handed and still render as a label rather
+     * than as a paragraph. For scale, the longest code the data plane emits today is
+     * `ocr_coverage_unmeasurable`, at 25 characters — so this is five times anything that exists,
+     * which is the room the "the key set is theirs and it grows" property actually needs.
+     *
+     * The read-side cut stays even though ingress now makes it unreachable: rows written before the
+     * ingress bound existed can still be longer, and a projection that assumes otherwise is a
+     * projection that breaks on old data.
+     */
+    public const MAX_CODE_LENGTH = 128;
+
     public function __construct(
         public string $code,
         public int $versions,

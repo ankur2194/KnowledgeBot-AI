@@ -107,6 +107,7 @@
             "bail",
             "sometimes",
             "array",
+            "max:416",
             "App\\Rules\\JsonObjectMap"
         ]
     }

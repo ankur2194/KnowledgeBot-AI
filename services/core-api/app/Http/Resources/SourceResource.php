@@ -86,7 +86,13 @@ final class SourceResource extends JsonResource implements ProvidesOpenApiSchema
                     .'one sitemap, one crawl configuration, one paste. It is NOT the unit of '
                     .'versioning: a crawl gives one source hundreds of independently-versioned '
                     .'items, so there is no active-version pointer on this shape and there never '
-                    .'will be one.',
+                    .'will be one. THE NEAREST THING IS `active_version` ON `SourceDetailResource`, '
+                    .'and it is deliberately narrow: it is populated ONLY when that shape\'s '
+                    .'`item_count` is 1 — the single case where "the current version of this '
+                    .'source" names one row rather than a set — and it is null for every '
+                    .'multi-item upload and every crawl, where `active_version_count` is the '
+                    .'answer. Nothing on either shape is a source-level pointer; activation is a '
+                    .'pointer on the ITEM.',
                 'required' => [
                     'id', 'type', 'name', 'description', 'origin_url', 'status',
                     'status_permits_retrieval', 'status_is_processing', 'tags', 'effective_at',

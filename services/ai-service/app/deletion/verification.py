@@ -145,7 +145,9 @@ def verify_organization_purged(self: Any, *, org_id: str, job_id: str) -> None:
     2. **`organization_residue_remaining` is zero for every table**, through
        `failed_relational_stores`, so an unmeasured table fails like a dirty one.
     3. **Core-api removes the `organizations` row, and that call is the proof.** `ON DELETE
-       RESTRICT` from both sparse tables means the statement cannot succeed while one row remains,
+       RESTRICT` from every table in `RELATIONAL_PURGE_ORDER` — the two sparse ones since
+       `2026_08_07_000600`, `chunks` and `document_elements` since Phase C created them — means
+       the statement cannot succeed while one row remains,
        so a rowcount of 1 is a fact the database asserted rather than one we counted with our own
        predicate. A `RestrictViolation` here is the correct failure and a bad diagnosis: the repair
        is to find what still references the organization, not to widen a delete.
@@ -197,8 +199,17 @@ def chunk_rows_remaining(org_id: str, source_id: str) -> int:
 
     Scoped by `source_id`, and that is what makes it worth keeping alongside
     `version_scoped_rows_remaining`: this one can see a version the purge's own resolver missed,
-    because it does not ask through the resolved version list. The version-scoped tally cannot,
-    and for the two sparse tables there is no alternative — they carry no `source_id` column.
+    because it does not ask through the resolved version list. The version-scoped tally cannot.
+
+    **Only `chunks` carries `source_id` as a column** (`2026_08_20_002200`). `document_elements`
+    does not — its migration is explicit that it holds identity, tenancy, a parent, a sequence and
+    a locator — and neither sparse table does. All three reach a source only through
+    `source_version_id` → `source_versions.source_item_id` → `source_items.source_id`, which is a
+    path that exists to be walked only because Phase C created those two tables; before it, the
+    question could not be asked of them at all. So the by-source check is one direct predicate on
+    `chunks` and a two-join path for the rest. Do not substitute the resolved version list to
+    avoid the joins: that is the list `version_scoped_rows_remaining` already used, and a second
+    check asking the first one's question is not a second check.
     """
     raise NotImplementedError
 
@@ -235,15 +246,20 @@ def organization_residue_remaining(org_id: str) -> Mapping[str, int]:
     `organization_id = %s` immediately after deleting `organization_id = %s` is a tautology: the
     two agree on an answer neither measured, which is precisely what `relational.version_scope`
     refuses an empty version list to prevent. What actually verifies the sweep is external and
-    belongs to the schema — `organizations` is `ON DELETE RESTRICT` from both sparse tables, so
-    core-api's delete of the organization row **cannot succeed while a single row remains**. That
+    belongs to the schema — `organizations` is `ON DELETE RESTRICT` from every table in
+    `RELATIONAL_PURGE_ORDER`, so core-api's delete of the organization row **cannot succeed while
+    a single row remains**. That
     delete is Laravel's, over the signed seam, and its success is what `verify_organization_purged`
     records.
 
-    The tally is still taken, because the foreign key only proves the tables that have one. A
-    table that is tenant-owned but not `RESTRICT`-linked to `organizations` — or one whose schema
-    this repository does not yet contain, which is `chunks` and `document_elements` today — is
-    covered by this count and by nothing else.
+    The tally is still taken, because the foreign key only proves the tables that have one. That
+    used to leave two of the four uncovered — no migration in this repository created `chunks` or
+    `document_elements`, which was finding #79 — and `2026_08_20_002100` and `2026_08_20_002200`
+    closed it: both now reference `organizations (id) ON DELETE RESTRICT` like the sparse pair, so
+    this count is no longer the sole cover for any entry in the tuple. It stays because a table
+    added to `RELATIONAL_PURGE_ORDER` later may not carry that edge, because the foreign key
+    proves only the schema actually deployed under the worker, and because the count is the
+    artifact an operator reads weeks later when the question is how much residue there was.
 
     A non-zero value here **before** the sweep is the finding the sweep exists to surface: rows the
     per-source fan-out could not name, because the version that named them is already gone. Record
@@ -309,21 +325,53 @@ def active_assignments_remaining(org_id: str, source_id: str) -> int:
 
 
 def object_versions_remaining(org_id: str, source_id: str, prefix: str) -> int:
-    """Objects under the version-scoped prefix — enumerated as object *versions*, and only
-    after asserting the bucket is unversioned.
+    """Objects still under the asserted prefix — enumerated as object *versions*, and only after
+    asserting the bucket is unversioned.
 
-    Both halves are load-bearing. Versioning silently defeats the entire deletion contract:
-    every delete becomes a delete marker, a key listing keeps reporting the prefix clean, and
-    the bytes keep billing. Enumerating versions is the only call that sees the delete markers
-    and the noncurrent versions a key listing hides, so the day someone changes the posture
-    this check fails loudly instead of certifying an empty prefix full of data.
+    **The asserted prefix for a full purge is the source prefix**,
+    `org/{org_id}/sources/{source_id}/`, and that is a change from what this docstring used to
+    say. `original/` is no longer a child of a version prefix; it is a sibling of `versions/`
+    (`tasks._purge_objects` carries the shape and the reason, `ObjectKey::originalPrefix()` in
+    core-api carries the ruling). Enumerating `…/versions/{id}/` for each version therefore proves
+    nothing whatever about the original — it walks past the bytes and certifies the source clean.
+    One enumeration of the source prefix covers both families in one call, and covers a version
+    the purge's own resolver never named as well.
+
+    **When the original is retained, the asserted prefix narrows to
+    `org/{org_id}/sources/{source_id}/versions/`** — every derived artifact of every version,
+    still one enumeration, still no per-version loop. The retained object under `original/` is
+    enumerated separately and *reported*, with its release date, rather than counted as remaining.
+    That narrowing is not the widening this file warns about and not its mirror image either: the
+    prefix stays inside the source, and what it covers is the whole of what a purge that kept the
+    original was asked to remove. This is where the layout change makes the check simpler rather
+    than harder — under the old shape `original/` sat inside the prefix being asserted, and no
+    listing call can exclude a sub-prefix from an enumeration.
+
+    **Retained and missed are not told apart by what is found.** Which of the two assertions
+    applies is read from the disposition `original_disposition` recorded *before* the sweep ran,
+    never inferred from whether objects turned up. An object under `original/` when the recorded
+    disposition was *remove* is a failed purge; an empty `original/` when the disposition was
+    *retain* is a different failure — a retention or hold obligation destroyed, with the admin
+    view about to report an object that is gone. Both are findings, they are opposite findings,
+    and only the recorded decision separates them. That is why the decision is recorded either
+    way, and why this check reads it rather than reconstructing it.
+
+    `org_id` and `source_id` are not redundant beside `prefix`; they are what makes the prefix
+    checkable. A prefix that does not begin `org/{org_id}/sources/{source_id}/` is refused rather
+    than enumerated, so a proof cannot be run against a string that is wider than — or simply
+    elsewhere than — the identity it claims to be about. A verification pointed at the wrong
+    prefix passes, quietly, forever.
+
+    Both halves of the store call are load-bearing. Versioning silently defeats the entire
+    deletion contract: every delete becomes a delete marker, a key listing keeps reporting the
+    prefix clean, and the bytes keep billing. Enumerating versions is the only call that sees the
+    delete markers and the noncurrent versions a key listing hides, so the day someone changes the
+    posture this check fails loudly instead of certifying an empty prefix full of data. The
+    versioning status is asserted for the bucket, once, whichever prefix is being enumerated.
 
     It still cannot see abandoned multipart uploads — no listing of keys or versions can. Those
     are reclaimed by the daily multipart sweep, and a prefix that verifies empty while volumes
     grow is that, not a failure of this check.
-
-    A retained original is not a failure: `original/` is excluded from the asserted prefix
-    when retention or a hold keeps it, and the retained key is reported instead.
     """
     raise NotImplementedError
 

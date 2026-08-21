@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use App\Enums\OrgRole;
 use App\Enums\SourceState;
+use App\Http\Requests\IngestionCallbackRequest;
 use App\Models\AuditLog;
 use App\Models\KnowledgeSource;
 use App\Models\Organization;
@@ -685,4 +686,78 @@ it('refuses a list-shaped warning_summary instead of storing it as numeric keys'
         'version' => ingestionIdentity(),
         'warning_summary' => [],
     ])->assertOk();
+});
+
+it('bounds warning_summary in both dimensions, and accepts the last legal frame', function (): void {
+    // ── THE KEY SET IS THE DATA PLANE'S, WHICH IS EXACTLY WHY IT NEEDS A CEILING ──────────────
+    //
+    // `JsonObjectMap` closed the SHAPE last batch — an object keyed by name, never a list — and
+    // left both SIZES open: a frame with ten thousand keys, or one key of four kilobytes, was
+    // accepted and published verbatim as `warnings[].code` on the detail projection. This is a
+    // signed service-to-service seam, so the caller is a worker of ours rather than an attacker;
+    // the refusal is sized to be unreachable by correct code and to stop a runaway loop, not to be
+    // tight. See `IngestionCallbackRequest::MAX_WARNING_CODES` for where 416 comes from.
+    $f = ingestionRunFixture();
+
+    $frame = fn (int $sequence, SourceState $status, array $extra): TestResponse => postIngestionFrame(
+        $f['org']->id,
+        [
+            'job_id' => $f['item']->current_job_id,
+            'source_id' => $f['source']->id,
+            'source_item_id' => $f['item']->id,
+            'sequence' => $sequence,
+            'stage' => $status->value,
+            'status' => $status->value,
+        ] + $extra,
+    );
+
+    $frame(1, SourceState::Fetching, [])->assertOk();
+
+    // A REFUSED FRAME DOES NOT ADVANCE `progress_sequence`, so every attempt below is sequence 2.
+    $send = fn (array $summary): TestResponse => $frame(
+        2,
+        SourceState::Parsing,
+        ['version' => ingestionIdentity(), 'warning_summary' => $summary],
+    );
+
+    $codes = fn (int $count): array => array_fill_keys(
+        array_map(static fn (int $i): string => 'ocr_low_coverage:'.$i, range(1, $count)),
+        1,
+    );
+
+    $send($codes(IngestionCallbackRequest::MAX_WARNING_CODES + 1))
+        ->assertStatus(422)
+        ->assertJsonPath('error_class', 'validation')
+        // THE FIELD IS NAMED. A 422 with no `errors` map is a different refusal shape entirely, and
+        // a worker author reading this response has to be told which key was wrong.
+        ->assertJsonStructure(['errors' => ['warning_summary']]);
+
+    // THE LENGTH BOUND IS A SEPARATE DIMENSION AND A SEPARATE PROBE. One long key inside a legal
+    // count passes the `max:` rule and is caught by the rule object, which is the half that cannot
+    // appear in the published manifest — so it is the half most likely to be assumed rather than
+    // checked.
+    $send([str_repeat('a', IngestionCallbackRequest::MAX_WARNING_CODE_LENGTH + 1) => 1])
+        ->assertStatus(422)
+        ->assertJsonPath('error_class', 'validation')
+        ->assertJsonStructure(['errors' => ['warning_summary']]);
+
+    // NOTHING WAS WRITTEN BY EITHER REFUSAL. The bound has to be at the boundary rather than
+    // downstream of the version insert, or the frame has already landed before being rejected.
+    expect(SourceVersion::query()->withoutGlobalScopes()->count())->toBe(0);
+
+    // ── THE POSITIVE CONTROL, AT THE BOUNDARY RATHER THAN NEAR IT ────────────────────────────
+    //
+    // Exactly `MAX_WARNING_CODES` keys, one of them exactly `MAX_WARNING_CODE_LENGTH` characters.
+    // An off-by-one in either bound refuses this frame, and a suite that only probed the refusals
+    // would go green over a rule that rejects every legitimate frame as well.
+    $atTheLimit = $codes(IngestionCallbackRequest::MAX_WARNING_CODES - 1)
+        + [str_repeat('a', IngestionCallbackRequest::MAX_WARNING_CODE_LENGTH) => 1];
+
+    expect($atTheLimit)->toHaveCount(IngestionCallbackRequest::MAX_WARNING_CODES);
+
+    $send($atTheLimit)->assertOk();
+
+    $version = SourceVersion::query()->withoutGlobalScopes()->sole();
+
+    expect($version->warning_summary)->toHaveCount(IngestionCallbackRequest::MAX_WARNING_CODES);
 });

@@ -8,6 +8,7 @@ use App\Enums\SourceState;
 use App\Rules\JsonObjectMap;
 use App\Rules\LiteralBoolean;
 use App\Services\Sources\IngestionProgress;
+use App\Services\Sources\SourceWarningCount;
 use App\Services\Sources\VersionIdentity;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
@@ -56,6 +57,55 @@ final class IngestionCallbackRequest extends FormRequest
      * short of anything unrecoverable.
      */
     public const MAX_SEQUENCE = 10_000;
+
+    /**
+     * The ceiling on how many distinct warning CODES one frame may carry.
+     *
+     * ── WHERE 416 COMES FROM, AND WHY IT IS NOT A ROUND NUMBER ──────────────────────────────
+     *
+     * The key set of `warning_summary` belongs to the data plane and is enumerated nowhere on this
+     * side, so the only honest way to size a bound is to count what that side can actually emit.
+     * Today exactly one warning vocabulary is written down — `assess()` in
+     * `services/ai-service/app/ingestion/ocr/guarded.py` — and it is not the four fixed strings it
+     * looks like, because two of the four INTERPOLATE A FLOAT:
+     *
+     *   `ocr_low_confidence:{mass:.2f}`   fires above `LOW_CONF_MASS_WARN = 0.30`, so at two
+     *                                     decimals it spans `0.30`…`1.00` — 71 distinct keys
+     *   `ocr_low_coverage:{coverage:.2f}` fires below `COVERAGE_WARN = 0.30`, so it spans
+     *                                     `0.00`…`0.30` — 31 distinct keys
+     *   `ocr_coverage_unmeasurable`       1
+     *   `ocr_text_unplaced`               1
+     *
+     * 104 for one version, reachable by any document with enough pages — and the WHOLE STRING is
+     * what the producer keeps: `_confidence_record()` in
+     * `services/ai-service/app/ingestion/parsing/converter.py` rolls the per-page lists up as
+     * `sorted(set(rolled))`, deduplicating the interpolated strings rather than stripping their
+     * suffixes. So the high-cardinality reading is the measured one, not the pessimistic one.
+     *
+     * Nothing yet turns that roll into THIS field — no caller of this endpoint exists on the data
+     * plane at all — so the last step is unwritten and the bound is sized for what the step before
+     * it produces.
+     *
+     * 416 is that 104 once per ingestion stage that could grow a family of the same shape: parse,
+     * OCR, chunk, embed. It is a bound on a BUGGY WORKER rather than on an attacker — this seam is
+     * HMAC-signed, so nothing unsigned reaches it — which is why it is sized to be unreachable by
+     * correct code rather than tight. What it refuses is the 10,000-key frame: a runaway loop on
+     * the far side would otherwise put 10,000 rows in a jsonb column and 25 arbitrary ones on an
+     * administrator's page, with `warnings_truncated: true` implying the other 9,975 are real.
+     */
+    public const MAX_WARNING_CODES = 416;
+
+    /**
+     * The ceiling on one warning code's length, in CHARACTERS.
+     *
+     * NOT CHOSEN HERE, AND NOT COPIED HERE EITHER. It is `SourceWarningCount::MAX_CODE_LENGTH`, the
+     * same constant `EloquentKnowledgeSourceRepository` truncates a published code at — so the
+     * ingress refusal and the read-side cut are one number by construction rather than two numbers
+     * a test has to keep equal. What that buys: a code that is stored is a code that is published
+     * WHOLE, so nobody reads a cut code that neither plane emitted. See that constant for where
+     * 128 comes from.
+     */
+    public const MAX_WARNING_CODE_LENGTH = SourceWarningCount::MAX_CODE_LENGTH;
 
     /**
      * Authorization on this surface is the SIGNATURE, verified by middleware before this request is
@@ -144,7 +194,18 @@ final class IngestionCallbackRequest extends FormRequest
             // nothing on either plane can distinguish from real ones because the vocabulary is the
             // data plane's. `JsonObjectCast`'s own docblock states the list-to-numeric-keys
             // behaviour; it simply had never been carried across to the request that admits lists.
-            'warning_summary' => ['bail', 'sometimes', 'array', new JsonObjectMap],
+            //
+            // BOUNDED IN BOTH DIMENSIONS, AND THE TWO BOUNDS ARE EXPRESSED DIFFERENTLY ON PURPOSE.
+            // The key COUNT is Laravel's own `max:`, which counts an array's elements and is
+            // therefore visible in `packages/contracts/rules/IngestionCallbackRequest.json`; the
+            // key LENGTH is the rule object's argument, and is NOT visible there, because
+            // `kb:dump-form-rules` writes a rule object out as its class name and nothing else.
+            // That asymmetry is stated rather than hidden: a client generated from the manifest can
+            // see the count refusal coming and cannot see the length one.
+            'warning_summary' => [
+                'bail', 'sometimes', 'array', 'max:'.self::MAX_WARNING_CODES,
+                new JsonObjectMap(self::MAX_WARNING_CODE_LENGTH),
+            ],
 
             'error_class' => [
                 'bail', 'sometimes', 'nullable', 'string',

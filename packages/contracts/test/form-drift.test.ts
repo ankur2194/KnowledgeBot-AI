@@ -758,9 +758,14 @@ const NO_CLIENT_FORM: Readonly<Record<string, string>> = {
 
   // ── THE FIVE SOURCE-LIFECYCLE MANIFESTS, AND NOT ONE OF THEM IS MIRRORED ─────────────────────
   //
-  // Two are exempt ON THE MERITS and three are OWED, and every entry says which it is in its first
+  // Three are exempt ON THE MERITS and two are OWED, and every entry says which it is in its first
   // clause — because a list where a decision and a to-do read alike is a list whose to-dos are never
-  // done. The response side of the same feature went the OTHER way in the same change:
+  // done. One of the three MOVED here from OWED, which is that shape working rather than an erratum:
+  // `UpdateSourceStatusRequest` was a to-do naming the screen that would close it, the screen shipped,
+  // and the control on it turned out not to be a form at all. A to-do gets re-read when its claimant
+  // arrives; a decision does not.
+  //
+  // The response side of the same feature went the OTHER way in the same change:
   // `SourceResource` and `SourceCollectionResource` are MIRRORED in test/resource-drift.test.ts. The
   // asymmetry is `rhf-zod-forms` NN3 and is deliberate — a RESPONSE type is correct the moment the
   // server publishes it and is wrong the moment a client re-declares it locally, while a REQUEST
@@ -828,30 +833,57 @@ const NO_CLIENT_FORM: Readonly<Record<string, string>> = {
   //      25600. Both measured, not reasoned. A `sized` generator could synthesize real `File`s — and
   //      then it would be comparing the wrong quantity, which is (3).
   //
-  //   3. THE TWO NUMBERS ARE NOT THE SAME NUMBER. `max:25600` is KILOBYTES, because that is the unit
-  //      Laravel's `max:` speaks for an uploaded file, and it is a CONSTANT on the FormRequest
-  //      (`StoreSourceRequest::MAX_FILE_KILOBYTES`). `uploadSchema` caps `max_bytes`, in BYTES, from
-  //      a per-organization `OrgUploadLimits` the bootstrap config returns — §8.10 makes the cap
-  //      configurable, which is why no byte constant may exist in this package at all. A probe would
-  //      have to pick one organization's limits and assert the server's platform constant against
-  //      them, and the two agree only by coincidence. The server's own docblock names the closure:
-  //      the limits endpoint "belongs with the intake" and "must publish THESE constants rather than
-  //      a second copy of the numbers". Until it does, there is nothing here to compare.
+  //   3. STRUCK ON 2026-08-21, AND STRUCK RATHER THAN DELETED, because a reason that was measured
+  //      goes false by measurement too and a silently shorter list is a list nobody re-reads. It read:
+  //      `max:25600` is KILOBYTES and a CONSTANT on the FormRequest
+  //      (`StoreSourceRequest::MAX_FILE_KILOBYTES`) while `uploadSchema` caps `max_bytes` in BYTES
+  //      from a per-organization `OrgUploadLimits`, so a probe "would have to pick one organization's
+  //      limits and assert the server's platform constant against them, and the two agree only by
+  //      coincidence" — and it named its own removal condition, the limits endpoint the server's
+  //      docblock said "must publish THESE constants rather than a second copy of the numbers".
   //
-  // WHAT CLOSES IT, in the order it has to happen: the upload intake and its `OrgUploadLimits`
-  // endpoint land; the console gets a create form covering all three arms (or the manifest is split);
-  // the schema declares the eleven paths with the discriminated union spelled as a `superRefine`, like
-  // every other cross-field rule in this file; and a `sized` generator for `files.*` synthesizes real
-  // `File`s at an exact byte length against limits derived from the server's own constants. Then this
-  // entry becomes a MIRRORS entry and the hand-written cases in `the upload form: the limits are the
-  // organization's, not this package's` keep only what a probe cannot express.
+  //      THE ENDPOINT LANDED AND THE TWO NUMBERS NOW AGREE BY CONSTRUCTION. Verified in
+  //      services/core-api rather than inferred from the fact that an endpoint exists:
+  //      `StoreSourceRequest` declares `public const MAX_FILE_KILOBYTES = UploadLimits::
+  //      MAX_FILE_KILOBYTES;` — a definition, not a second copy; `OrgUploadLimitsResource::toArray()`
+  //      renders `UploadLimits::maxBytes()`, which is that same constant times `BYTES_PER_KILOBYTE`
+  //      at the ONE conversion site in the tree; and the resource states in its own docblock that
+  //      there is "no per-organization variation at all: every number here is a platform constant
+  //      today", with `UploadLimitsEndpointTest` asserting the rendered values EQUAL the FormRequest's
+  //      constants so a hardcoded 26214400 fails a suite on the server side. A probe built from the
+  //      served DTO would be comparing the number with itself. (The unit direction is right too, and
+  //      it is the half that could have been wrong in silence: Laravel's file `max:` counts KiB —
+  //      `ValidatesAttributes::getSize()` divides by 1024 — and the conversion multiplies by 1024.)
+  //
+  //      §8.10 STILL FORBIDS A BYTE CONSTANT IN THIS PACKAGE, and the strike does not touch that:
+  //      "platform constant today" is a statement about this deployment's numbers, not about the
+  //      shape, and the endpoint exists precisely so a per-plan ceiling can arrive without a client
+  //      change. The factory stays a factory. What is no longer true is only the narrow claim that
+  //      the two quantities are incomparable.
+  //
+  //      WHAT THE STRIKE DOES NOT DO IS CLOSE THE ENTRY, and conflating the two is the mistake this
+  //      paragraph exists to prevent. Reasons 1 and 2 are untouched and either alone is sufficient:
+  //      the manifest is still an eleven-path three-arm body against a two-path file schema, and the
+  //      generic sizer still answers this request's two size rules with ten `'a'` strings and the
+  //      number 25600, where `z.file()` demands a `File`.
+  //
+  // WHAT CLOSES IT, in the order it has to happen — and the first condition this list used to carry is
+  // DONE: the upload intake and `GET .../sources/upload-limits` shipped, which is what struck reason 3
+  // above. What remains: the console gets a create form covering all three arms (or the manifest is
+  // split); the schema declares the eleven paths with the discriminated union spelled as a
+  // `superRefine`, like every other cross-field rule in this file; and a `sized` generator for
+  // `files.*` synthesizes real `File`s at an exact byte length from `OrgUploadLimits` — which is a
+  // PUBLISHED shape carrying the server's own constants now, rather than a number this file would have
+  // had to pick. Then this entry becomes a MIRRORS entry and the hand-written cases in `the upload
+  // form: the limits are the organization's, not this package's` keep only what a probe cannot
+  // express.
   //
   // A FALSE MIRROR CLAIM WOULD BE WORSE THAN THIS DEFERRAL, which is the whole reason the register has
   // an OWED shape at all: `StoreInvitationRequest` and the two model-catalogue requests all sat here
   // as OWED and all graduated, because holding a to-do inside the assertion is what got them closed
   // rather than forgotten.
   'App\\Http\\Requests\\StoreSourceRequest':
-    'OWED, not exempt: `uploadSchema` covers the FILE arm of a three-arm body and declares 2 of the 11 validated paths, and its per-organization byte cap is not comparable to the FormRequest\'s platform constant in kilobytes — measured, see the comment above. It graduates with the upload intake, the OrgUploadLimits endpoint and a create form that renders all three arms',
+    'OWED, not exempt: `uploadSchema` covers the FILE arm of a three-arm body and declares 2 of the 11 validated paths, and the generic sizer answers both of its size rules with a string list and a bare number where `z.file()` demands a File — both measured, see the comment above. The third reason, the kilobyte/byte mismatch, was STRUCK when the limits endpoint landed: `StoreSourceRequest::MAX_FILE_KILOBYTES` IS `UploadLimits::MAX_FILE_KILOBYTES` and the resource renders `UploadLimits::maxBytes()` through one conversion site, so the two numbers agree by construction. It graduates with a create form that renders all three arms',
 
   // OWED, NOT EXEMPT. This is the bots precedent's mirror image and the difference is the SCREEN:
   // `UpdateBotRequest` is a MIRRORS entry because apps/web renders the bot settings form, and
@@ -868,25 +900,67 @@ const NO_CLIENT_FORM: Readonly<Record<string, string>> = {
   'App\\Http\\Requests\\UpdateSourceRequest':
     'OWED, not exempt: the metadata PATCH is an ordinary `sometimes` field form with no credential and no security grammar, and nothing about it resists mirroring — there is simply no form yet. The sources detail screen (apps/web/src/features/sources) is the next batch\'s; the schema ships with it, per rhf-zod-forms NN3',
 
-  // OWED, NOT EXEMPT, and it is the entry where the bots precedent most nearly forces the other
-  // answer — so the difference is worth stating rather than assuming.
+  // EXEMPT ON THE MERITS, AND IT SAT HERE AS OWED UNTIL THE CONTROL IT WAS WAITING FOR SHIPPED AND
+  // TURNED OUT NOT TO BE A FORM. The old entry read "OWED, not exempt: the enable/disable control on
+  // the sources detail screen is the next batch's and the schema ships with it, per rhf-zod-forms
+  // NN3". The batch happened; the control exists; NN3's condition was never met, because NN3 is about
+  // a schema shipping beside the RESOLVER that reads it and no resolver was ever going to attach.
   //
-  // `UpdateBotStatusRequest` is MIRRORED because after `status` left `botSettingsSchema` its `in:`
-  // probes became THE ONLY comparison between `BOT_STATUSES` and the server: a five-member tuple that
-  // every status pill iterates, pinned nowhere else. That argument does not reach here, because this
-  // package declares no source tuple at all. `SourceStatus` is a UNION in src/resources/sources.ts and
-  // it is pinned — member for member, against the document's inlined enum, in
-  // test/resource-drift.test.ts — so nothing about the vocabulary is unwatched by this exemption.
+  // WHAT THE CONTROL ACTUALLY IS. `apps/web/src/features/sources/source-row-actions.tsx` — a
+  // `DropdownMenuItem` whose verb is `source.status_permits_retrieval ? 'Disable' : 'Enable'`, calling
+  // `setSourceStatus(orgId, source.id, …)` with one of two module constants. No user-editable field,
+  // no `useForm`, no resolver, no per-field error to key a message to; the sibling Delete item opens a
+  // typed confirm dialog and the two other mutations on the row are the same shape.
+  // `rg 'useForm|zodResolver' apps/web/src/features/sources` answers `upload-screen.tsx` and nothing
+  // else, which is that claim at file granularity.
   //
-  // AND THE TWO SETS ARE NOT THE SAME SET, which is why mirroring the wrong one would be worse than
-  // waiting: the resource publishes FIFTEEN lifecycle states and this request accepts TWO
-  // (`disabled`, `ready`). Every other move belongs to the ingestion pipeline, and a `<Select>` built
-  // over the union rather than over the transition set would offer to publish a version nothing
-  // verified. That relationship is asserted today — the source-types suite in resource-drift reads
-  // this manifest's `in:` members and requires each to be a member of the union — so the transition
-  // vocabulary is not unwatched either; it simply has no client spelling to drift against yet.
+  // THE DETAIL SCREEN DID NOT GROW A SECOND CONTROL, and checking rather than assuming was the point:
+  // `/sources/{sourceId}` exists now, and `source-detail-screen.tsx` renders `<SourceRowActions>`
+  // WHOLE rather than re-implementing it — the one thing it adds is a `consequence` node for the
+  // delete dialog, where `SourceDetailResource`'s counts finally make the numbers sayable. So the
+  // transition has exactly one consumer in the console and the list and the detail screen share it.
+  //
+  // THAT IS THE SHAPE THE EXEMPTIONS ABOVE ALREADY REST ON, which is why this is a reclassification
+  // and not a new kind of argument. `SwitchOrganizationRequest` is "a select, not a typed field, so
+  // there is no per-field error to render and nothing for a resolver to do"; the three mail-link
+  // `token` requests are "no user-editable input, so no form and no resolver". A menu item plus a
+  // confirm dialog is the same claim with a different control: the only value the body can carry is
+  // chosen by the code from a set the server published, so there is no input to validate.
+  //
+  // AND THE 422 IS RENDERED AS A SENTENCE, so there is nothing for `applyServerErrors` to do either.
+  // `status` is this request's only field, so a `validation` envelope can key to nothing else — and
+  // the row deliberately does NOT render the server's message, because an illegal transition comes
+  // back as `IllegalSourceTransition`'s text, which names `App\Enums\SourceState::transitionTable()`
+  // to a tenant administrator. The row maps the class to its own sentence and re-reads the list. A
+  // schema here would add a resolver to a control with no input and would not change that path by a
+  // line. (The server-side copy is reported upstream in that file rather than papered over.)
+  //
+  // NOTHING GOES UNWATCHED BY THE EXEMPTION, which is what separates it from a skip — and this entry
+  // now pins MORE than it did as a to-do, in two places on opposite sides of the wire. The two-member
+  // transition set is READ FROM THIS MANIFEST rather than restated: the source-types suite in
+  // test/resource-drift.test.ts requires each `in:` member to be a member of the `SourceStatus` union
+  // (which is itself pinned against the document's inlined enum), and
+  // `apps/web/src/features/sources/api.ts` derives `SOURCE_STATUS_TARGETS` through
+  // `enumFromRule(UPDATE_SOURCE_STATUS_RULES['status'])`, with its two named constants pinned against
+  // that parse by `tests/unit/source-list.test.ts` and `satisfies SourceStatus` tying each to the
+  // published union. A server that renames a target fails a test on both sides instead of 422ing a
+  // menu item in production.
+  //
+  // AND THE TWO SETS ARE STILL NOT THE SAME SET, which is why a `<Select>` over the union would have
+  // been the wrong mirror even if a form had appeared: the resource publishes FIFTEEN lifecycle states
+  // and this request accepts TWO (`disabled`, `ready`). Every other move belongs to the ingestion
+  // pipeline. The `UpdateBotStatusRequest` comparison that used to sit here still does not reach —
+  // that one is MIRRORED because its `in:` probes are the only comparison between `BOT_STATUSES` and
+  // the server, and this package declares no source tuple at all.
+  //
+  // WHAT THE EXEMPTION DOES NOT COVER, said out loud because an entry here is silent forever: WHICH
+  // member means "enable". A rule list is a set of legal strings and carries no semantics, so
+  // `SOURCE_ENABLE_TARGET = 'ready'` is a declaration no manifest can check, and the server may answer
+  // with `ready_with_warnings` instead — `SourceService::readyFlavourFor()` reads the source's live
+  // versions and decides, which is a fact about the document rather than an option. No client schema
+  // of any shape would have seen either, and the response body says which flavour it chose.
   'App\\Http\\Requests\\UpdateSourceStatusRequest':
-    'OWED, not exempt: the enable/disable control on the sources detail screen (apps/web/src/features/sources) is the next batch\'s and the schema ships with it. Unlike UpdateBotStatusRequest this exemption pins nothing loose — `SourceStatus` is a union pinned against the document in test/resource-drift.test.ts, and this manifest\'s two-member transition set is read from the manifest there rather than restated in TypeScript',
+    'EXEMPT: the transition is a list-row menu item plus a confirm dialog (apps/web/src/features/sources/source-row-actions.tsx, reused WHOLE by the detail screen), not a form — no user-editable field, no resolver, no per-field error, and the only value the body carries is picked by the code from this manifest\'s own `in:` set. Same shape as SwitchOrganizationRequest and the three mail-link token requests. RECLASSIFIED FROM OWED once that control shipped; the two-member set is pinned twice anyway — against the SourceStatus union in test/resource-drift.test.ts, and through `enumFromRule` in apps/web',
 
   // ── THE TWO BOT↔SOURCE ASSIGNMENT MANIFESTS: ONE EXEMPT, ONE OWED ───────────────────────────
   //
@@ -934,9 +1008,11 @@ const NO_CLIENT_FORM: Readonly<Record<string, string>> = {
   // `rhf-zod-forms` NN3 is the rule — a schema ships WITH the form that renders it — and the
   // alternative was measured rather than waved away: a schema written now would be an unread
   // declaration, and an unread declaration is one whose drift nobody notices, because the only thing
-  // that reads a form schema is a resolver. `UpdateSourceRequest` and `UpdateSourceStatusRequest`
-  // above are the same call made twice this phase, and both times the form arrived later than the
-  // batch that would have written the schema.
+  // that reads a form schema is a resolver. `UpdateSourceRequest` above is the same call, still open.
+  // `UpdateSourceStatusRequest` was the third and is EXEMPT now: its control shipped as a menu item
+  // with no field in it, so the schema an earlier batch would have written would have been an unread
+  // declaration permanently rather than temporarily. Waiting produced the right answer there, not
+  // merely a later one — which is the argument for holding this entry rather than against it.
   //
   // THE ONE ARGUMENT FOR EXEMPTING IT INSTEAD, CONSIDERED AND REJECTED. `source_id` is PICKED from a
   // list rather than typed, which is the shape `SwitchOrganizationRequest`'s exemption rests on — an
@@ -1573,7 +1649,76 @@ function probesFor(path: string, rules: readonly string[], mirror: Mirror): Prob
         probes.push(probe(value, 'a string where an array is required', 'not-an-array', false));
         break;
 
+      /**
+       * TAUGHT IN BOTH DIRECTIONS AS OF 2026-08-21, AND THE ACCEPTANCE HALF CLAIMS TWO SPELLINGS OUT
+       * OF SIX — which is the whole content of this note, because the four it declines are ones the
+       * server really does accept and no probe here says so.
+       *
+       * `Illuminate\Validation\Concerns\ValidatesAttributes::validateBoolean` accepts exactly
+       * `true`, `false`, `1`, `0`, `'1'` and `'0'`. Four mirrored fields spell the rule
+       * `z.boolean()` — `allow_general_answers` and `collect_end_user_data` on both bot schemas,
+       * `enabled` on both provider-model schemas — so the client is STRICTER THAN THE SERVER on the
+       * last four, which is the direction `rhf-zod-forms` NN3 calls invisible: a form LOOSER than the
+       * server produces a 422 somebody sees, a form STRICTER removes functionality nobody reports.
+       * That asymmetry was neither probed nor recorded here until this branch was written; recording
+       * it is the point, and the rejection probe alone was doing neither.
+       *
+       * ── WHY THE TWO ACCEPTANCES ARE HONEST, AND WHAT THEY CATCH ────────────────────────────────
+       * `true` and `false` are accepted under every co-declaration these manifests carry
+       * (`bail|sometimes|boolean`, `bail|sometimes|required|boolean`, `bail|required|boolean`).
+       * `false` in particular survives a co-declared `required`, because `validateRequired` calls
+       * only null, `''`, an empty array and an empty `Countable` absent — measured for
+       * `App\Rules\LiteralBoolean` below, and it is the same function.
+       *
+       * They reach mirrors the rejection probe cannot. `z.literal(true)` — the flag a form can only
+       * switch ON, which is what a "confirm" or "acknowledge" control drifts into — refuses
+       * `'yes-ish'` and agrees silently. So does `z.number()`, which is the mirror somebody writes
+       * BECAUSE the server takes `1`; its baseline is honest (`{enabled: 1}` really is accepted) and
+       * every existing probe passes on it. Both are caught only by an acceptance probe, and the block
+       * `the \`boolean\` branch of the rule classifier` proves it by running them.
+       *
+       * ── THE FOUR DECLINED SPELLINGS ARE A NAMED RESIDUAL, NOT AN OVERSIGHT ─────────────────────
+       * The shape `date` uses for its acceptance edge and `ReadableThemeColor` for its grammar: state
+       * the gap, state the consequence, do not let it be rediscovered as a bug.
+       *
+       * THE REASON IS NOT THAT NO HONEST VALUE EXISTS, which is what separates this declination from
+       * `date`'s and `JsonObjectMap`'s. There is no format to guess and nothing to invent — the
+       * accepted set is closed and literal, exactly the property that earned `LiteralBoolean` its
+       * acceptance probes one branch below — so `probe(value, 'the integer 1', 1, true)` would be a
+       * TRUE claim about Laravel and would turn all four mirrors red. It is declined on the
+       * CONSEQUENCE instead, in three parts:
+       *
+       *   - NOTHING IN THIS PRODUCT SUBMITS THEM. Every mutation in apps/web is a JSON body built
+       *     from `handleSubmit`'s parsed OUTPUT, and each of these four fields is rendered by a Radix
+       *     `Switch` whose `onCheckedChange` hands over a real boolean — `bot-model-panel.tsx` and
+       *     `bot-publishing-panel.tsx` for the two bot flags, `models/model-form.tsx` for the model
+       *     form and `models/model-list.tsx` for the table's inline toggle, which posts
+       *     `{...providerModelEditDefaults(row), enabled: next}` and so carries the same boolean
+       *     through the same schema. There is no form-encoded POST anywhere in the app. So the
+       *     functionality the strict mirror removes is a payload no control can produce.
+       *   - THE REPAIR THE RED WOULD INVITE IS WORSE THAN THE GAP. Satisfying `1` means either a
+       *     literal union — whose output type is `boolean | 0 | 1 | '0' | '1'`, pushed onto every
+       *     consumer of `BotSettingsOut` and `ProviderModelEditOut` — or a `z.preprocess` that folds
+       *     the server's six spellings, which is a second, client-side copy of `validateBoolean`
+       *     written to admit values nothing sends and kept in step with PHP by nobody.
+       *     `z.coerce.boolean()`, the shape that suggests itself first, satisfies neither direction:
+       *     it takes `'yes-ish'` too, so it fails the rejection probe below.
+       *   - THE SERVER IS MOVING THE OTHER WAY ON EXACTLY THESE VALUES. `App\Rules\LiteralBoolean`
+       *     exists because `1` was accepted, stored and then read `=== true` (finding B2), and its
+       *     branch probes `1` as a REJECTION. A client that refuses `1` today is already where a
+       *     generic-rule field lands if it is ever tightened; a client widened to take it would have
+       *     to be narrowed again, and the widening would have been recorded nowhere.
+       *
+       * WHAT THE RESIDUAL COSTS, stated so it is not rediscovered: a caller that hand-builds a body —
+       * a fixture, a script, a future non-browser client importing this package — and writes
+       * `{enabled: 1}` is refused locally by a schema the server would have accepted. That surfaces
+       * as a Zod issue at the call site rather than as a 422 in production, which is the direction
+       * NN3's asymmetry says to prefer. If a client ever legitimately needs a spelling from the other
+       * four, the answer is to say so here and teach the probe, not to loosen one schema quietly.
+       */
       case 'boolean':
+        probes.push(probe(value, 'a JSON true', true, true));
+        probes.push(probe(value, 'a JSON false', false, true));
         probes.push(probe(value, 'a string where a boolean is required', 'yes-ish', false));
         break;
 
@@ -3014,6 +3159,138 @@ describe('the rule-object branches of the classifier: LiteralBoolean and JsonObj
 });
 
 /**
+ * The GENERIC `boolean` branch — the one Laravel rule in this file whose accepted set is closed,
+ * literal and DELIBERATELY not fully claimed. `probesFor`'s `case 'boolean'` carries the argument;
+ * this block is the part of it that executes.
+ *
+ * UNLIKE `date`, `distinct` AND THE TWO RULE OBJECTS, THIS BRANCH RUNS IN THE REAL SUITE — six fields
+ * across four mirrored manifests carry it — so the acceptance probes are exercised whether or not
+ * anything here runs. What this block adds is the two things the real suite cannot show: that the
+ * acceptance half catches mirrors the rejection half is silent on, and that the four spellings the
+ * branch declines are declined ON PURPOSE rather than forgotten.
+ *
+ * THE DECLINED FOUR ARE ASSERTED AS AN ABSENCE, which is the same move `generates NO acceptance probe
+ * for \`date\`` makes and for the same reason: "no probe" is the thing a future reader is most likely
+ * to mistake for an oversight, and a comment is not a test.
+ */
+describe('the `boolean` branch of the rule classifier', () => {
+  /** `bail|required|boolean`, which is `UpdateProviderModelRequest.enabled` verbatim — the strictest
+   *  co-declaration any mirrored manifest puts on the rule, so `false` passing `required` is under
+   *  test rather than assumed. Kept out of `rules/` for the reason the other fixtures are: a file
+   *  there would make `every manifest is mirrored or exempt` assert against a FormRequest that does
+   *  not exist. */
+  const FLAG_FIXTURE: Manifest = {
+    class: 'App\\Http\\Requests\\Fixture\\UpdateProviderModelRequest',
+    rules: { enabled: ['bail', 'required', 'boolean'] },
+  };
+
+  const faithful: Mirror = {
+    schema: z.strictObject({ enabled: z.boolean() }),
+    baseline: () => ({ enabled: true }),
+  };
+
+  it('accepts the faithful mirror — a bare z.boolean() is the right spelling of this rule', () => {
+    // The positive control. Without it every "…is caught" below also passes on a harness that reports
+    // everything, which is the failure a teeth test is supposed to exclude rather than share.
+    expect(driftFailures(FLAG_FIXTURE, faithful)).toEqual([]);
+  });
+
+  it('generates two acceptance probes and no more, on the real manifest rather than a fixture', () => {
+    // Read off `rules/` so this is a statement about what the suite really runs. If the server ever
+    // drops `required` or adds `sometimes` to this field, the presence pair changes and this goes red
+    // naming the field — which is the correct amount of noise for a rule change nobody dumped.
+    const real = manifests.find(
+      ([, manifest]) => manifest.class === 'App\\Http\\Requests\\UpdateProviderModelRequest',
+    );
+    expect(real, 'UpdateProviderModelRequest must be in rules/').toBeDefined();
+
+    const [, manifest] = real as readonly [string, Manifest];
+    const mirror = MIRRORS[manifest.class] as Mirror;
+    const generated = probesFor('enabled', manifest.rules['enabled'] as string[], mirror);
+
+    expect(generated.map((one) => one.label)).toEqual([
+      'omitted',
+      'null',
+      'a JSON true',
+      'a JSON false',
+      'a string where a boolean is required',
+    ]);
+    expect(generated.map((one) => one.serverAccepts)).toEqual([false, false, true, true, false]);
+
+    // THE DECLINED FOUR, NAMED. `validateBoolean` accepts all of them and this branch claims none:
+    // see the `case 'boolean'` note for why the consequence rather than the honesty is what decided
+    // it. A future author who teaches them will delete this assertion, which is the moment to re-read
+    // the argument rather than to widen four schemas.
+    const claimed = generated.filter((one) => one.serverAccepts).map((one) => one.label);
+    expect(claimed).toEqual(['a JSON true', 'a JSON false']);
+    for (const spelling of ['1', '0', "'1'", "'0'"]) {
+      expect(
+        generated.some((one) => one.label.includes(spelling)),
+        `${spelling} is a spelling the server accepts and this branch deliberately does not claim`,
+      ).toBe(false);
+    }
+  });
+
+  it('catches the flag a form can only switch ON, which the rejection probe cannot see', () => {
+    // `z.literal(true)` is what an "acknowledge"/"confirm" control drifts into, and it is exactly the
+    // NN3 direction: the server takes `false`, the form refuses it, nobody gets a 422 and the row can
+    // never be turned back off.
+    const onlyOn: Mirror = {
+      schema: z.strictObject({ enabled: z.literal(true) }),
+      baseline: () => ({ enabled: true }),
+    };
+
+    expect(driftFailures(FLAG_FIXTURE, onlyOn)).toEqual([
+      'form blocks input the server accepts: enabled — a JSON false',
+    ]);
+
+    // …AND THE PROBE THAT EXISTED BEFORE THIS BRANCH WAS TAUGHT AGREES WITH THIS MIRROR. Asserted
+    // rather than argued, because it is the whole justification for the acceptance half: the single
+    // rejection probe was silent on a schema that has lost a legal value.
+    expect(
+      onlyOn.schema.safeParse({ enabled: 'yes-ish' }).success,
+      'the rejection probe cannot report this mirror — only the acceptance half can',
+    ).toBe(false);
+  });
+
+  it('catches the flag mirrored as a NUMBER, whose baseline the server really does accept', () => {
+    // The mirror somebody writes BECAUSE Laravel takes `1` — and the one case where the four declined
+    // spellings would have mattered, so it is worth showing they are not needed to catch it. The
+    // baseline is honest: `{enabled: 1}` passes `bail|required|boolean` on the server.
+    const asNumber: Mirror = {
+      schema: z.strictObject({ enabled: z.number() }),
+      baseline: () => ({ enabled: 1 }),
+    };
+
+    expect(driftFailures(FLAG_FIXTURE, asNumber)).toEqual([
+      'form blocks input the server accepts: enabled — a JSON true',
+      'form blocks input the server accepts: enabled — a JSON false',
+    ]);
+    expect(asNumber.schema.safeParse({ enabled: 'yes-ish' }).success).toBe(false);
+  });
+
+  it('still catches the coercing mirror, which is the half that was already covered', () => {
+    // `z.coerce.boolean()` is the repair an acceptance probe for `1` would invite, and it is refused
+    // from the other direction: it takes `'yes-ish'` as well. Both halves of the branch are therefore
+    // unsatisfiable together by coercion, which is the argument in the `case 'boolean'` note made as
+    // an assertion.
+    const coercing: Mirror = {
+      schema: z.strictObject({ enabled: z.coerce.boolean() }),
+      baseline: () => ({ enabled: true }),
+    };
+
+    // TWO failures, not one, and the second is the presence branch rather than this one:
+    // `z.coerce.boolean()` is `Boolean(v)`, so an explicit `null` parses to `false` on a field the
+    // server rules `required`. Written out rather than filtered away, because a coercion that eats
+    // `null` is the same defect one layer up and the harness saw it without being asked.
+    expect(driftFailures(FLAG_FIXTURE, coercing)).toEqual([
+      'form accepts input the server rejects: enabled — null',
+      'form accepts input the server rejects: enabled — a string where a boolean is required',
+    ]);
+  });
+});
+
+/**
  * The cases `probesFor` declares itself unable to generate: `present` and `required_with` are about
  * the SHAPE of the payload and the relationship between two fields, not about one field's value.
  * Written by hand so the intended semantics are legible rather than inferred.
@@ -4150,11 +4427,23 @@ describe('the starter questions: the rules a single-field probe cannot express',
  * THE MANIFEST FOR THIS ENDPOINT HAS LANDED AND THIS SCHEMA STILL MIRRORS NOTHING, which is the
  * opposite of what this paragraph used to predict. It read "when `StoreSourceRequest.json` lands it
  * becomes a `MIRRORS` entry like every other schema" — and when it landed it described a THREE-ARM
- * body of which `uploadSchema` covers one arm: two of eleven validated paths, a per-file cap the
- * server states in KILOBYTES as a platform constant against a per-organization cap this factory takes
- * in BYTES, and a `file` rule no JSON probe can reach. So the request sits in `NO_CLIENT_FORM` as
- * OWED, with the measurement, and every case below is still the only thing standing between this
- * schema and the server.
+ * body of which `uploadSchema` covers one arm: two of eleven validated paths, size probes the generic
+ * sizer answers with a list of `'a'` strings and a bare number where `z.file()` demands a `File`, and
+ * a `file` rule no JSON probe can reach. So the request sits in `NO_CLIENT_FORM` as OWED, with the
+ * measurement, and every case below is still the only thing standing between this schema and the
+ * server.
+ *
+ * THAT ENTRY CARRIED A THIRD REASON AND IT WAS STRUCK ON 2026-08-21, which is worth knowing HERE
+ * because the struck reason was about these limits specifically. It read that the server's cap is a
+ * platform constant in KILOBYTES while this factory's is per-organization BYTES, so "the two agree
+ * only by coincidence". The limits endpoint landed: `OrgUploadLimitsResource` renders
+ * `UploadLimits::maxBytes()`, `StoreSourceRequest::MAX_FILE_KILOBYTES` IS
+ * `UploadLimits::MAX_FILE_KILOBYTES`, and there is exactly one conversion site — so the two numbers
+ * agree by construction and a probe would compare the number with itself. NOTHING IN THIS BLOCK
+ * CHANGES AS A RESULT, and that is the distinction to hold on to: these cases are about the schema
+ * being a FUNCTION of whatever DTO it is handed, which is a property of the factory and is untouched
+ * by today's numbers being platform-wide. The day a per-plan ceiling arrives, they are the only thing
+ * that notices.
  *
  * WHAT THAT CHANGES ABOUT THIS BLOCK: nothing to remove, and one thing to stop expecting. These cases
  * were written as the residue a probe cannot express, and they are currently the WHOLE check rather

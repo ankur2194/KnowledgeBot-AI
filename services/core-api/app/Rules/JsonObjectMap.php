@@ -45,11 +45,27 @@ use Illuminate\Contracts\Validation\ValidationRule;
  * neither a list nor a name-keyed map and would slip past a list check into exactly the mangled
  * shape above. Refusing every integer key refuses both spellings of the same defect.
  *
+ * ── AND EVERY KEY IS BOUNDED IN LENGTH, BY AN ARGUMENT THE CALLER MUST SUPPLY ────────────────
+ *
+ * `$maxKeyLength` has no default on purpose. A name-keyed map whose keys are somebody else's
+ * vocabulary is unbounded in two dimensions, not one — how many keys, and how long each is — and
+ * the second is the one a shape rule silently leaves open. Requiring the argument means a second
+ * caller has to decide the number rather than inherit one chosen for a different field.
+ *
+ * THE COUNT IS NOT THIS RULE'S JOB and is deliberately left to Laravel's own `max:` on the array,
+ * which counts elements. That is not tidiness: a rule OBJECT is written into
+ * `packages/contracts/rules/*.json` as nothing but its CLASS NAME, so a bound expressed as a
+ * constructor argument is invisible in the published manifest, while a `max:` is written into it
+ * verbatim. Whatever can be a string rule should be; what cannot — this one, because no Laravel
+ * rule constrains a KEY — says so where the number is chosen.
+ *
  * A rule OBJECT and not a closure, for the reason `ExactWidgetOrigin` records: `kb:dump-form-rules`
  * writes a closure out as the literal string `Closure`, which no client can be generated from.
  */
 final class JsonObjectMap implements ValidationRule
 {
+    public function __construct(private readonly int $maxKeyLength) {}
+
     /**
      * @param  Closure(string, ?string=): \Illuminate\Translation\PotentiallyTranslatedString  $fail
      */
@@ -64,18 +80,31 @@ final class JsonObjectMap implements ValidationRule
         }
 
         foreach (array_keys($value) as $key) {
-            if (is_string($key) && $key !== '') {
-                continue;
+            if (! is_string($key) || $key === '') {
+                $fail(
+                    'The :attribute field must be a JSON object keyed by name, not a list. A list '
+                    .'is not refused by the column\'s CHECK constraint — it is stored as an object '
+                    .'with numeric keys (`["a","b"]` becomes `{"0":"a","1":"b"}`), which then reads '
+                    .'back as warning codes `0` and `1` that nothing can tell from real ones.',
+                );
+
+                return;
             }
 
-            $fail(
-                'The :attribute field must be a JSON object keyed by name, not a list. A list is '
-                .'not refused by the column\'s CHECK constraint — it is stored as an object with '
-                .'numeric keys (`["a","b"]` becomes `{"0":"a","1":"b"}`), which then reads back as '
-                .'warning codes `0` and `1` that nothing can tell from real ones.',
-            );
+            // CHARACTERS, not bytes, and `mb_strlen` because the reader that publishes these keys
+            // truncates with `mb_substr`. Measuring one in bytes and cutting the other in
+            // characters is how a bound that looks equal admits a key the projection still cuts.
+            if (mb_strlen($key) > $this->maxKeyLength) {
+                $fail(
+                    'Each key of the :attribute field must be at most '.$this->maxKeyLength
+                    .' characters. These keys are published verbatim to administrators, and the '
+                    .'projection that publishes them truncates at exactly this width — so a longer '
+                    .'key would be stored whole and read back cut, which is a code nothing on '
+                    .'either plane emitted.',
+                );
 
-            return;
+                return;
+            }
         }
     }
 }

@@ -14,6 +14,7 @@ use App\Models\Organization;
 use App\Models\SourceItem;
 use App\Models\SourceVersion;
 use App\Models\User;
+use App\Services\Sources\SourceWarningCount;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Str;
 use Tests\Support\SpaSession;
@@ -447,6 +448,40 @@ it('bounds the preview, in the number of elements and in characters', function (
     expect(mb_strlen($shortPreview))->toBeLessThan(500);
     $shortResponse->assertJsonPath('data.content_preview_truncated', true);
     $shortResponse->assertJsonPath('data.element_count', 40);
+});
+
+it('publishes a maximum-length warning code whole, because ingress refuses anything longer', function (): void {
+    // ── THE READ-SIDE CUT AND THE WRITE-SIDE REFUSAL ARE ONE NUMBER ─────────────────────────────
+    //
+    // `EloquentKnowledgeSourceRepository` `mb_substr`s a published code, and
+    // `IngestionCallbackRequest` refuses a longer key at ingress; both read
+    // `SourceWarningCount::MAX_CODE_LENGTH`. If the ingress bound were ever the larger of the two,
+    // a code would be stored whole and read back CUT — and a cut code is indistinguishable from a
+    // real one, because the vocabulary belongs to the data plane and `SourceWarningResource`
+    // correctly puts no enum on `code`.
+    //
+    // ASSERTED THROUGH THE ENDPOINT rather than by comparing the two constants, which would be a
+    // test that `X === X` now that both alias one name. What is worth pinning is the BEHAVIOUR:
+    // the longest code that can ever be stored comes back untouched.
+    $fixture = detailFixture();
+    $org = $fixture['org'];
+
+    $code = str_repeat('a', SourceWarningCount::MAX_CODE_LENGTH);
+
+    $source = KnowledgeSource::factory()->recycle($org)
+        ->status(SourceState::ReadyWithWarnings)->create(['name' => 'ALPHA long warning']);
+
+    $item = detailItem($org, $source, 'upload:long-warning.pdf');
+    detailVersion($org, $item, 1, activate: true, warnings: [$code => 1]);
+
+    SpaSession::establish(currentTest(), $fixture['owner']);
+
+    currentTest()->getJson(
+        "/api/v1/organizations/{$org->id}/sources/{$source->id}",
+        spaHeaders(),
+    )->assertOk()
+        ->assertJsonPath('data.warnings.0.code', $code)
+        ->assertJsonPath('data.warnings_truncated', false);
 });
 
 it('leaves the source LIST untouched, so a page of sources is not a hundred queries', function (): void {

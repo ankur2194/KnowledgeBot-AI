@@ -22,6 +22,7 @@ use Illuminate\Contracts\Filesystem\Filesystem;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Http\Request;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
@@ -957,6 +958,32 @@ final class SourceService
      * `organization_id` with a `||` concatenation, so a key built for another tenant is refused by
      * the INSERT. That check is unaffected by the new shape — it constrains the first two segments
      * and nothing after them — which is why this correction needed no migration.
+     *
+     * ── THE WHOLE-STRING `put()` IS THE EXCEPTION `seaweedfs-s3` NAMES, AND IT IS CORRECT HERE ──
+     *
+     * `seaweedfs-s3`'s Definition of done bans `Storage::put($key, $contents)` on a source object,
+     * and `tests/Arch/StringLevelDoctrineTest.php` rule 6 enforces the ban over
+     * `app/Services/Sources/Upload/` only. This line is outside that scope on purpose, and the
+     * scope comment on the rule names this method so the exclusion reads as a decision rather than
+     * as a gap. THE REASONING, so that a future reader can overturn it on its merits:
+     *
+     *   THERE IS NO STREAM TO STREAM FROM. The rule's hazard is an object whose size PHP does not
+     *   know until it has read it — an uploaded file, arriving as a path. `$content` is a request
+     *   FIELD: by the time this method exists the bytes are already a PHP string, already counted
+     *   against `memory_limit`, already inside the parsed request body. `MultipartUploader` needs a
+     *   stream, so using it here means `fopen('php://temp')` and writing the string into it —
+     *   a COPY, which raises peak memory instead of lowering it. Streaming a value that is already
+     *   resident is not streaming; it is buffering twice.
+     *
+     *   AND IT IS BOUNDED BEFORE IT GETS HERE. `StoreSourceRequest::MAX_TEXT_LENGTH` is 500,000
+     *   CHARACTERS, applied by Laravel's `max:` — which measures a string with `mb_strlen`, so the
+     *   byte ceiling is four times that at most, under 2 MB, for text that is entirely 4-byte
+     *   UTF-8. An upload has no comparable bound at this layer: the per-file cap is 25 MB and ten
+     *   of them can arrive at one FPM worker, which is the arithmetic the rule exists for.
+     *
+     * WHAT WOULD REOPEN IT: `MAX_TEXT_LENGTH` growing to a size where a copy matters, or a pasted
+     * body ever arriving as anything other than a request field — a `text` source ingested from a
+     * stream, say. Either one makes this a genuine buffering site and moves it inside the rule.
      */
     private function storeText(
         string $organizationId,
@@ -1088,11 +1115,42 @@ final class SourceService
      * legal. It also carries a per-field `errors` map, and there IS a field to key this on. A 409
      * renders as `internal_dependency` in this application's envelope, which would tell a client
      * that a DEPENDENCY was unwell when the request was simply wrong about the row's state.
+     *
+     * ── THE FIELD MESSAGE IS THE CLIENT'S, AND THE OPERATOR'S GOES TO THE LOG ─────────────────
+     *
+     * `errors.status` is rendered VERBATIM by `apps/web`, on the general premise that a Laravel
+     * validation message is end-user copy. It carried `getMessage()` until now, which names
+     * `App\Enums\SourceState::transitionTable()` — a PHP class shown to a tenant administrator.
+     * `clientMessage()` is that same refusal written for the reader; the operator's sentence is
+     * emitted here instead, where operators look.
+     *
+     * IT CANNOT RIDE ALONG AS A CHAINED EXCEPTION, which is the first thing to reach for.
+     * `ValidationException::withMessages()` constructs through `new static($validator)` and that
+     * constructor takes no `$previous`, so `$refused` cannot be attached to the exception that
+     * replaces it. Nor does the envelope carry it some other way: `ValidationException::getMessage()`
+     * is `summarize($validator)`, the FIRST field message, so the envelope's operator-facing
+     * `message` is the client sentence too. Without this line the operator half exists nowhere.
+     *
+     * `notice` AND NOT `warning`, DELIBERATELY. Two callers reach this: an administrator acting on a
+     * row that moved after their page rendered, which is ordinary traffic, and the data plane
+     * sending a status a row cannot reach, which is a contract violation. Only the second deserves a
+     * warning, and this method cannot tell them apart — nothing it is handed says who called. A
+     * WARNING on every misclick is a line operators learn to filter, which costs more than the
+     * severity buys. `NOTICE` maps to `Info2(10)` — "normal but significant" — through
+     * `KbJsonFormatter::SEVERITY`, which is the honest reading of that pair.
+     *
+     * NO CONTEXT FIELDS. `request_id` and `operation` are on every line already (`LogContext`), and
+     * `KbJsonFormatter::ALLOWED_EXTRA_FIELDS` holds no key meaning "the two ends of a refused
+     * transition": `reason` belongs to the metric label allow-list, whose values are bounded by
+     * construction, and a 225-combination string there would be borrowing a name that means
+     * something else. The two states are in the message, which is where a free-form fact belongs.
      */
     private function illegal(IllegalSourceTransition $refused): ValidationException
     {
+        Log::notice($refused->getMessage());
+
         return ValidationException::withMessages([
-            'status' => $refused->getMessage(),
+            'status' => $refused->clientMessage(),
         ]);
     }
 }

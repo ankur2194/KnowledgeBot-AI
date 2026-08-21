@@ -202,8 +202,16 @@ return new class extends Migration
         // WHAT WOULD REOPEN IT: a version-keyed access path that legitimately arrives without a
         // tenant — a global orphan sweep over `source_versions`, say. That is not a free choice.
         // kb-tenancy-isolation requires such a query to carry an inline `// tenancy-exempt:
-        // <reason>` marker so the CI grep allow-lists it deliberately, and the index would then be
-        // added in the same change as the query, with that query named here.
+        // <reason>` marker, and the index would then be added in the same change as the query, with
+        // that query named here.
+        //
+        // THAT MARKER IS READ BY REVIEWERS AND BY NOTHING ELSE. This comment used to end "so the CI
+        // grep allow-lists it deliberately", which was true when it was written and is not true
+        // now: `.github/` was deleted on 2026-08-17 and nothing replaced it, so no grep allow-lists
+        // anything and no build fails on a missing marker. The marker is still required — it is how
+        // the next reader learns the omission was deliberate — but it is a convention held up by
+        // review, and a comment claiming a mechanism that does not exist is worse than one claiming
+        // none, because it tells a reader the case is already covered.
     }
 
     public function down(): void

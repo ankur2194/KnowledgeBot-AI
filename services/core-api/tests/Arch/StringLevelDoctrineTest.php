@@ -498,6 +498,18 @@ test('the control plane runs no vector search of its own', function (): void {
 | call elsewhere — this very file makes five of them — and a repository-wide ban would be an
 | allow-list within a week. What is banned is buffering an UNTRUSTED UPLOAD, in the four files that
 | are the only ones holding one.
+|
+| THE SCOPE EXCLUDES ONE WRITE THAT LOOKS LIKE A VIOLATION AND IS NOT, AND NAMING IT IS THE POINT.
+| `SourceService::storeText()` calls `Storage::disk('s3')->put($key, $content)` — the whole-string
+| form `seaweedfs-s3`'s Definition of done names — and it stays that way deliberately. `$content` is
+| a REQUEST FIELD, so the bytes are already a resident PHP string before that line runs; handing
+| them to `MultipartUploader` would mean writing them into a `php://temp` stream first, which is a
+| COPY and raises peak memory rather than lowering it. It is also bounded before it arrives, at
+| `StoreSourceRequest::MAX_TEXT_LENGTH` (500,000 characters, so under 2 MB of UTF-8), where an
+| upload's only bound is 25 MB per file times ten files at one FPM worker. The full argument and the
+| two conditions that would reopen it are on `storeText()`'s own docblock. An unexplained exclusion
+| reads as an oversight to the next person, who removes it or widens the rule to catch it; this
+| paragraph is what makes it a decision instead.
 */
 test('the upload path streams its object rather than buffering it', function (): void {
     $violations = [];

@@ -96,8 +96,14 @@ final class EloquentKnowledgeSourceRepository implements KnowledgeSourceReposito
      * `services/ai-service` and not by a tenant — and it is here because "the key set is the data
      * plane's" cuts both ways: nothing on this side constrains what it may write, so nothing on
      * this side may assume a length.
+     *
+     * THE NUMBER IS NO LONGER CHOSEN HERE. `IngestionCallbackRequest` refuses a longer key at
+     * ingress against `SourceWarningCount::MAX_CODE_LENGTH`, and a write bound that did not equal
+     * this read bound would cut a code the write side had just accepted whole. Deriving both from
+     * one constant is what makes that impossible rather than merely unlikely; the cut below stays
+     * because rows written before the ingress bound existed may still be longer than it.
      */
-    private const MAX_WARNING_CODE_LENGTH = 128;
+    private const MAX_WARNING_CODE_LENGTH = SourceWarningCount::MAX_CODE_LENGTH;
 
     /**
      * @return LengthAwarePaginator<int, KnowledgeSource>
