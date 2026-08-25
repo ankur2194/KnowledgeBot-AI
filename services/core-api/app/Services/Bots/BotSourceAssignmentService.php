@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Bots;
 
 use App\Enums\SourceState;
+use App\Jobs\SyncBotAccessJob;
 use App\Models\Bot;
 use App\Models\BotSourceAssignment;
 use App\Models\KnowledgeSource;
@@ -16,8 +17,10 @@ use App\Support\Http\ListQuery;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
+use Throwable;
 
 /**
  * Which knowledge sources one bot may answer from: list, grant, withdraw.
@@ -218,7 +221,7 @@ final readonly class BotSourceAssignmentService
         }
 
         try {
-            return $this->assignments->create(
+            $assignment = $this->assignments->create(
                 $organizationId,
                 $bot->id,
                 $source->id,
@@ -257,6 +260,65 @@ final readonly class BotSourceAssignmentService
             }
 
             throw $conflict;
+        }
+
+        // ── THE GRANT HAS TO REACH THE POINTS THAT ARE ALREADY INDEXED ──────────────────────
+        //
+        // `bot_ids` is written at UPSERT time from the assignment set as it stood then, so a bot
+        // assigned to an already-indexed source satisfies no `bot_ids` term and retrieves nothing
+        // — from a source its operator can see listed as assigned, at HTTP 200, with nothing
+        // raised. `SyncBotAccessJob` adds the id to the list on every point of this source.
+        //
+        // ONLY WHEN THE GRANT IS ENABLED. A disabled assignment grants nothing — that is the whole
+        // of what the per-assignment off switch means, and the indexer agrees: it writes only
+        // ENABLED assignments into `bot_ids`. Putting the id in the payload for a disabled grant
+        // would make the filter match for a bot whose operator has switched it off.
+        //
+        // AFTER the create's transaction has committed, for the reason the `valkey` connection
+        // sets `after_commit => true`: a worker that popped the job first would rewrite a payload
+        // for a grant that then rolled back.
+        if ($assignment->enabled) {
+            $this->dispatchAccessSync($organizationId, $bot->id, $source->id, grant: true, actorId: $actorId);
+        }
+
+        return $assignment;
+    }
+
+    /**
+     * Hand a `bot_ids` rewrite to a queued job. Best-effort by design, and loud when it is not.
+     *
+     * ── WHY THIS ONE SWALLOWS AND `SourceService::dispatchStatusSync()` RETHROWS ─────────────
+     *
+     * There is nothing to compensate WITH. The assignment row is already committed with its own
+     * `bot.source_assignment.*` audit row, and `AuditLogger` marks both of those operations
+     * ON_FAILURE_ABORT precisely because a change to retrieval scope must never be silently
+     * unwound — so rolling the grant back to "compensate" for an unreachable broker would destroy
+     * the thing the audit row says happened. Rethrowing instead would 500 an admin action that
+     * SUCCEEDED, and the operator's repair — pressing the button again — is a 409 duplicate.
+     *
+     * So the failure is recorded and the request succeeds, because that is what actually happened:
+     * the grant exists and the index has not been told yet. The residue is stale rather than
+     * dangerous — a bot id missing from a payload under-retrieves, and a leftover one cannot be
+     * inherited because ULIDs are never reused — and re-running the assignment change re-dispatches
+     * a convergent job.
+     */
+    private function dispatchAccessSync(
+        string $organizationId,
+        string $botId,
+        string $sourceId,
+        bool $grant,
+        ?string $actorId,
+    ): void {
+        try {
+            SyncBotAccessJob::dispatch($organizationId, $botId, $grant, [$sourceId], $actorId);
+        } catch (Throwable $exception) {
+            Log::error('bot access sync could not be enqueued', [
+                'org_id' => $organizationId,
+                'bot_id' => $botId,
+                'reason' => $grant ? 'grant' : 'revoke',
+                'outcome' => 'not-enqueued',
+            ]);
+            report($exception);
         }
     }
 
@@ -309,6 +371,24 @@ final readonly class BotSourceAssignmentService
         if (! $deleted) {
             throw new NotFoundHttpException;
         }
+
+        // THE MIRROR, AND IT IS THE DIRECTION WITH THE TRAP. Removing this bot's id from the list
+        // on every point of the source is a read-modify-write; a delete-by-filter on `bot_ids`
+        // would destroy the chunks the OTHER bots assigned to this source still answer from.
+        // `SyncBotAccessJob` can only ask for the safe operation.
+        //
+        // DISPATCHED UNCONDITIONALLY, unlike the grant. A grant that was never enabled put nothing
+        // in the payload, so there is nothing to add; a revoke has to run even for a disabled
+        // assignment, because "disabled" is what the row said at DELETE time and says nothing about
+        // what it said at INDEX time — a grant enabled, indexed, then disabled leaves the id in the
+        // payload, and skipping the revoke would strand it there.
+        $this->dispatchAccessSync(
+            $organizationId,
+            $bot->id,
+            $assignment->source_id,
+            grant: false,
+            actorId: $actorId,
+        );
     }
 
     /**

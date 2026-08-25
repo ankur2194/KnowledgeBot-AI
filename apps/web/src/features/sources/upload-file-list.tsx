@@ -1,6 +1,7 @@
 'use client';
 
 import { FilePlusIcon } from 'lucide-react';
+import { useEffect, useRef } from 'react';
 
 import { EmptyState } from '@/components/states';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -56,6 +57,66 @@ export function UploadFileList({
 }) {
   const { items, succeeded, failed, isPending } = uploads;
 
+  /**
+   * ── REMOVING A ROW MUST NOT DROP FOCUS TO `<body>` (WCAG 2.4.3, 3.2.1) ────────────────────────
+   *
+   * The Remove control lives INSIDE the row it removes, so activating it destroys the focused
+   * element. The browser's fallback is `<body>`, and for a keyboard user that is not a small
+   * annoyance: the next Tab restarts from the top of the document, so removing the fourth of five
+   * files costs a walk back through the whole shell — sidebar, org badge, sign-out, theme toggle,
+   * dropzone — to reach the fifth. A screen reader announces nothing at all, because focus did not
+   * land on anything.
+   *
+   * `tests/e2e/admin/source-upload.spec.ts` predicted this in writing before it had ever run
+   * ("the fix is in the app: move focus to the next row or to the drop zone before removing") and
+   * the first real Playwright run, on 2026-08-24, failed on exactly that assertion.
+   *
+   * WHY AN EFFECT AND NOT A `.focus()` IN THE HANDLER. The successor row's control is the same DOM
+   * node it already was, but React has not re-rendered when the click handler returns — and the
+   * fallback case (the last row removed) unmounts this component entirely. Focusing after the
+   * commit is the only ordering that works for both.
+   *
+   * `''` IS A THIRD STATE, NOT AN EMPTY ID. `null` means "no removal is pending"; `''` means "a
+   * removal happened and there is no surviving row", which sends focus to the picker. Collapsing
+   * the two would make the last removal leave focus on `<body>` — the bug this exists to fix,
+   * surviving in the one case it is most visible.
+   */
+  const listRef = useRef<HTMLUListElement>(null);
+  const focusAfterRemoval = useRef<string | null>(null);
+
+  useEffect(() => {
+    const target = focusAfterRemoval.current;
+    if (target === null) return;
+    focusAfterRemoval.current = null;
+
+    const successor =
+      target === ''
+        ? null
+        : (listRef.current?.querySelector<HTMLElement>(`[data-row-action="${target}"]`) ?? null);
+
+    // THE PICKER IS THE FALLBACK, AND IT IS FOUND BY QUERY RATHER THAN BY A THREADED REF. The
+    // dropzone generates its input id with `useId()`, so there is no stable id to pass down, and
+    // there is exactly one `input[type="file"]` on this screen. A list mounted with no dropzone
+    // above it — which `tests/components/upload-dropzone.test.tsx` does deliberately — finds
+    // nothing and focuses nothing, which is correct rather than a silent failure: there is no
+    // control to move to.
+    (successor ?? document.querySelector<HTMLElement>('input[type="file"]'))?.focus();
+  }, [items]);
+
+  /**
+   * Remove, having first written down where focus should land.
+   *
+   * The successor is the NEXT row, falling back to the PREVIOUS one — the ordering a list widget
+   * uses everywhere, and the one that keeps a user deleting several files in a row deleting from
+   * the same spot instead of walking backwards.
+   */
+  const removeAndKeepFocus = (id: string): void => {
+    const index = items.findIndex((item) => item.id === id);
+    const successor = items[index + 1] ?? items[index - 1];
+    focusAfterRemoval.current = successor?.id ?? '';
+    uploads.remove(id);
+  };
+
   if (items.length === 0) {
     return (
       <EmptyState
@@ -104,7 +165,7 @@ export function UploadFileList({
 
       {/* `<ul>`, so the count is announced and the rows are navigable as a list. A stack of divs
           reads as one run-on paragraph. */}
-      <ul className="rounded-xl bg-card shadow-hairline">
+      <ul ref={listRef} className="rounded-xl bg-card shadow-hairline">
         {items.map((item, index) => (
           <UploadFileRow
             key={item.id}
@@ -115,7 +176,7 @@ export function UploadFileList({
             // renumbers every row after it.
             issue={issues?.get(index)}
             onCancel={uploads.cancel}
-            onRemove={uploads.remove}
+            onRemove={removeAndKeepFocus}
             onRetry={uploads.requeue}
           />
         ))}

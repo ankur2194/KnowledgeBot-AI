@@ -299,6 +299,70 @@ interface KnowledgeSourceRepositoryInterface
     public function itemsFor(string $organizationId, string $sourceId): array;
 
     /**
+     * The DISTINCT `embedding_model_version` strings of every version of one source.
+     *
+     * ── IT IS THE COLLECTION SET, AND IT IS WHY THE MAINTENANCE OPS TAKE A LIST ───────────────
+     *
+     * `EmbeddingSpace` derives the Qdrant collection name from (provider, model, width, distance,
+     * schema version, sparse analyzer), and every one of those but the last three is inside this
+     * string. So one identity is one collection, and a source that was re-indexed after its
+     * organization changed embedding model HAS POINTS IN TWO OF THEM. A payload rewrite sent to
+     * only the active version's collection leaves the other half of the corpus carrying the old
+     * `source_status` — it keeps answering after a disable, and the rewrite that missed it reports
+     * a passing verification count for the collection it did address.
+     *
+     * EVERY VERSION AND NOT ONLY THE ACTIVE ONES. A retired version's points survive until the
+     * purge job removes them, and until then they are real points carrying a real `source_status`.
+     * Filtering to the active pointer here would be the same partial rewrite one level down.
+     *
+     * @return list<string> distinct, ordered, possibly empty for a source that never indexed
+     */
+    public function embeddingIdentitiesFor(string $organizationId, string $sourceId): array;
+
+    /**
+     * The DISTINCT `embedding_model_version` strings of every version this ORGANIZATION owns.
+     *
+     * The org-wide form, and it exists for exactly one caller: revoking a deleted bot's access.
+     * Its `bot_source_assignments` rows are gone by then — that is what deleting it did — so
+     * nothing can enumerate the sources it could see, and the rewrite has to be able to address
+     * every collection the tenant has ever written into.
+     *
+     * @return list<string>
+     */
+    public function embeddingIdentitiesForOrganization(string $organizationId): array;
+
+    /**
+     * Does any `source_items` row in $organizationId already name $storageKey?
+     *
+     * ── THE ONE QUESTION THE ORPHAN SWEEP MUST NOT GET WRONG ──────────────────────────────────
+     *
+     * `kb:sweep-orphan-objects` is about to DELETE the object at that key. It may only do so if
+     * nothing points at it, and this is that check. The failure direction is asymmetric and only
+     * one side is recoverable: a false `true` leaves an orphan for the next sweep, while a false
+     * `false` destroys the bytes of a source that exists — an ingestion that fails forever with
+     * `error_class: storage`, on a source whose row looks perfectly healthy.
+     *
+     * WHICH IS WHY THE CALLER BINDS A REAL `TenantContext` FIRST. `SourceItem` carries
+     * `#[ScopedBy(OrganizationScope::class)]` and that scope FAILS CLOSED: called from a console
+     * command with no context bound, this method would return `false` for every key in the
+     * database and the sweep would delete every live object it had a reservation for. The
+     * organization argument is not the only thing keeping that from happening — the scope has to
+     * be satisfied too — and the sweep's own docblock states the ordering.
+     *
+     * `@phpstan-impure` IS LOAD-BEARING HERE AND IS NOT A LINT APPEASEMENT. The sweep asks this
+     * question TWICE about the same key — once before the object delete and once after, to detect a
+     * create transaction that committed inside the check-then-act window. Without the tag the
+     * analyser remembers the first `false` and reports the second call's `if` as always false,
+     * which is the analyser correctly describing a pure function and incorrectly describing this
+     * one: the answer is a row in a table another process is writing.
+     *
+     * @return bool true if the key is claimed, false if nothing in this organization names it
+     *
+     * @phpstan-impure
+     */
+    public function storageKeyIsClaimed(string $organizationId, string $storageKey): bool;
+
+    /**
      * Apply one ingestion progress frame, guarded, in ONE transaction.
      *
      * ── THE GUARD IS THE WHOLE METHOD ─────────────────────────────────────────────────────────

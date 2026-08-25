@@ -100,7 +100,16 @@ VERIFY_EXACT: Final[bool] = True
 #: so the tenant filter correctly excludes everything and every bot in every organization
 #: retrieves nothing — HTTP 200, normal latency, no exception, no log line. The tempting fix
 #: is to widen the filter, which converts an outage into a cross-tenant leak.
-ULID_PATTERN: Final[str] = r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+#: BOTH CASES, AND THE LOWERCASE HALF IS NOT COSMETIC. Crockford's alphabet is defined
+#: case-insensitively and Laravel uses BOTH spellings on the same request: `HasUlids::newUniqueId()`
+#: lowercases, so every model key crossing the seam is lowercase
+#: (`01m0swft82zf81qx2d032qepb7`), while an id minted with `Str::ulid()` is uppercase — the
+#: submission that proved it carried a lowercase `source.id` and an uppercase `job_id` in one body.
+#: This pattern was uppercase-only in four modules at once, so the first real submission from the
+#: first real tenant was refused 422 on `source.id` and `items.0.id` (2026-08-24, `docs/22` § R6).
+#: Nothing is lowered or upper-cased on the way through: an id is compared byte-for-byte in Qdrant
+#: filters and in the `chunks` table, so normalising here would be a second identity for one row.
+ULID_PATTERN: Final[str] = r"^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$"
 
 #: The named-vector contract, imported rather than restated. A collection with named vectors
 #: has no default branch, so these names travel on every write and every query; renaming one is

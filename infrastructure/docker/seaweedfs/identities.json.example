@@ -87,10 +87,10 @@
         }
       ],
       "actions": [
-        "Read:kb",
-        "Write:kb",
-        "List:kb",
-        "Tagging:kb"
+        "Read:kb-objects",
+        "Write:kb-objects",
+        "List:kb-objects",
+        "Tagging:kb-objects"
       ]
     }
   ],

@@ -46,16 +46,23 @@ use Illuminate\Support\Facades\Gate;
  * that direction matters — a `match` condition is not satisfied by a point that lacks the value, so
  * a positive filter fails closed while a `must_not` would fail open.
  *
- * WHAT THIS DOCBLOCK USED TO SAY, AND WHY IT NO LONGER SAYS IT: "the source leaves retrieval on the
- * next query" is not true of anything in this repository. `source_status` is a Qdrant PAYLOAD field
- * written at upsert time (`services/ai-service/app/ingestion/indexing/upserter.py`), and no path
- * here rewrites it or resolves the active-version set that would make the change immediate without
- * a rewrite. `SourceService::disable()` and `::enable()` carry the `TODO(phase-c)` markers naming
- * both obligations and their owners. It is latent rather than live — there is no chat path to read
- * a stale payload — and the same qualification applies to the CACHED ANSWER: `valkey-keyspaces`
- * keys `ans:` on a fingerprint of the RESOLVED retrieval scope, so a disable changes the key rather
- * than requiring a purge somebody has to remember, but that fingerprint is the same unresolved set
- * and there is no answer cache here yet.
+ * THE PAYLOAD REWRITE IS NOW ISSUED, AND THIS DOCBLOCK HAS SAID THREE DIFFERENT THINGS. It first
+ * claimed "the source leaves retrieval on the next query"; that was false, because `source_status`
+ * is a Qdrant PAYLOAD field written at upsert time
+ * (`services/ai-service/app/ingestion/indexing/upserter.py`) and nothing rewrote it. It then said
+ * no path here rewrites it and pointed at two `TODO(phase-c)` markers. BOTH MARKERS ARE
+ * DISCHARGED: `SourceService::disable()` and `::enable()` dispatch `SyncSourceStatusJob`, which
+ * calls the `source.status.sync` internal operation (ADR-069) and rewrites `source_status` on every
+ * point of every collection the source has ever indexed into, returning the verified count as its
+ * proof. The dispatch is queued and compensating — a failed ENABLE reverts the row — so the column
+ * and the index converge rather than the column simply being written.
+ *
+ * WHAT IS STILL NOT BUILT is the OTHER mechanism, and it is a different obligation: the resolved
+ * active-version set that would make a disable immediate WITHOUT touching any payload. That belongs
+ * to the config snapshot on the chat path and is Phase D. The same qualification applies to the
+ * CACHED ANSWER: `valkey-keyspaces` keys `ans:` on a fingerprint of the RESOLVED retrieval scope,
+ * so a disable changes the key rather than requiring a purge somebody has to remember — but that
+ * fingerprint is the same unresolved set, and there is no answer cache here yet.
  *
  * `Disabled` IS NOT `Deleting`. Disabling is not a way to reclaim storage and deleting is not a way
  * to hide something for a week.
@@ -99,15 +106,14 @@ final class SourceStatusController extends Controller
         status: 200,
         properties: ['data' => SourceResource::class],
         description: 'The source after the move, wrapped in `data`. A DISABLE writes one column and '
-            .'retains every vector, so re-enabling is a metadata write rather than a re-ingest — '
-            .'but NOTHING IN THIS DEPLOYMENT YET PERFORMS THE RETRIEVAL EXCLUSION, and this '
-            .'description used to claim it took effect on the next query. `source_status` is a '
-            .'Qdrant payload field written at upsert time, this path issues no payload write and '
-            .'dispatches no job that would, and the resolved active-version set that would make a '
-            .'disable immediate without touching any payload is not built on this side either. The '
-            .'column is the durable record of the intent and the exclusion lands with the chat '
-            .'path; see the `TODO(phase-c)` markers on `SourceService::disable()` and `::enable()` '
-            .'for which owner owes which half. An ENABLE is sent as `ready` whatever the source '
+            .'retains every vector, so re-enabling is a metadata write rather than a re-ingest. THE '
+            .'RETRIEVAL EXCLUSION IS ASYNCHRONOUS AND THIS RESPONSE DOES NOT PROVE IT: the column '
+            .'is written in the request, and the Qdrant `source_status` payload — written at upsert '
+            .'time and not otherwise reachable from a query — is rewritten by a queued '
+            .'`source.status.sync` operation that verifies its own row count. A 200 here therefore '
+            .'means the intent is durable, not that the index already agrees; the two converge '
+            .'within the queue\'s latency, and a failed ENABLE reverts the column so the console '
+            .'never claims more than the index does. An ENABLE is sent as `ready` whatever the source '
             .'published as: which of the '
             .'two ready states it lands in is READ FROM ITS LIVE VERSIONS, because "did this '
             .'document parse cleanly" is a fact about the content rather than a choice, and '

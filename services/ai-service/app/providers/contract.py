@@ -121,7 +121,10 @@ __all__ = [
 ]
 
 #: ULIDs, not UUIDs (`kb-internal-api-contracts`, `kb-observability-conventions`).
-Ulid = Annotated[str, StringConstraints(pattern=r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$")]
+# Both cases: Laravel lowercases model keys via `HasUlids` and upper-cases `Str::ulid()` ids,
+# and one request body carries both. See `app/ingestion/indexing/upserter.py` for the full
+# note and `docs/22` § R6 for how it was found.
+Ulid = Annotated[str, StringConstraints(pattern=r"^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$")]
 
 
 # ── capabilities ──────────────────────────────────────────────────────────────

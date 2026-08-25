@@ -54,13 +54,14 @@ their schema is a Laravel migration; see ``CorpusStatisticsStore`` for the read 
 
 WHAT IS AND IS NOT IMPLEMENTED HERE
 -----------------------------------
-The arithmetic is implemented, because it is small and because two of its lines carry traps
-that a later reader would not see (the IDF sign, and the document-side vector's independence
-from the corpus). ``analyze`` is not: choosing a tokenizer is a per-language decision with a
-real consequence — whitespace segmentation makes an entire CJK sentence one term, and the
+All of it, and the tokenizer was the last piece. The arithmetic carries two traps a later
+reader would not see (the IDF sign, and the document-side vector's independence from the
+corpus); ``tokenize`` carries a third, which is that the *segmentation* decision is a
+per-language one — whitespace segmentation makes an entire CJK sentence one term, and the
 sparse arm is then worth nothing for those languages while looking healthy in every metric.
-That decision is the remaining work and it is deliberately left as a stated gap rather than
-filled with a plausible default.
+It was held open by dated ruling (``docs/22`` § G6) precisely so it would not be filled with a
+plausible default; **ADR-069 decided it** and ``tokenize``'s own docstring is the record of
+what was chosen and why the analyzer version did not have to move for it.
 
 THE FOUR FILTERS APPLY TO THIS BRANCH IDENTICALLY
 -------------------------------------------------
@@ -74,9 +75,11 @@ from __future__ import annotations
 
 import hashlib
 import math
+import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Final, Protocol
 
 from qdrant_client import models
@@ -221,32 +224,132 @@ def term_id(term: str) -> int:
     return int.from_bytes(digest.digest(), "big")
 
 
+#: The Unicode general categories that make a character part of a term. Letters and numbers are
+#: obvious; ``Mn`` and ``Mc`` are the ones a reader deletes by accident. A combining mark is not
+#: decoration — dropping it splits a Devanagari or Arabic word into pieces that hash to ids no
+#: query will ever produce, and the symptom is a language whose lexical arm quietly returns
+#: nothing while every metric stays green.
+_WORD_CATEGORIES: Final[frozenset[str]] = frozenset(
+    {"Lu", "Ll", "Lt", "Lm", "Lo", "Nd", "Nl", "No", "Mn", "Mc"}
+)
+
+#: Codepoint ranges written without word separators, which therefore get character bigrams
+#: rather than whitespace runs. **Hangul is deliberately absent**: Korean is space-segmented, so
+#: bigramming it would shred words that segment correctly on their own.
+#:
+#: Inclusive on both ends. Kept as ranges rather than a script-property lookup because
+#: ``unicodedata`` exposes no script property and the alternative is a dependency
+#: (``regex``/PyICU) whose version would become part of the analyzer identity — an upgrade in a
+#: lockfile would then silently be a reindex.
+_UNSEGMENTED_RANGES: Final[tuple[tuple[int, int], ...]] = (
+    (0x0E00, 0x0E7F),  # Thai
+    (0x0E80, 0x0EFF),  # Lao
+    (0x1000, 0x109F),  # Myanmar
+    (0x1780, 0x17FF),  # Khmer
+    (0x2E80, 0x2EFF),  # CJK radicals supplement
+    (0x3040, 0x30FF),  # Hiragana + Katakana
+    (0x31F0, 0x31FF),  # Katakana phonetic extensions
+    (0x3400, 0x4DBF),  # CJK unified ideographs extension A
+    (0x4E00, 0x9FFF),  # CJK unified ideographs
+    (0xF900, 0xFAFF),  # CJK compatibility ideographs
+    (0x20000, 0x2FA1F),  # CJK unified ideographs extensions B-F + compatibility supplement
+)
+
+
+def _is_unsegmented(char: str) -> bool:
+    """Whether this character belongs to a script that carries no word separators."""
+    code = ord(char)
+    return any(low <= code <= high for low, high in _UNSEGMENTED_RANGES)
+
+
 def tokenize(text: str) -> Sequence[str]:
     """Text to analyzed terms: segmentation, case folding, Unicode normalization.
 
-    **Unimplemented, and it is the whole remaining decision.** Whitespace segmentation is the
-    default everyone reaches for and it makes an entire Chinese, Japanese or Thai sentence one
-    term — the sparse arm then contributes nothing for those languages while every metric in
-    the pipeline stays green, because a branch that matches nothing is indistinguishable from a
-    corpus that contains nothing. Character bigrams are the usual answer for unsegmented
-    scripts; the choice, and whether it varies by the chunk's ``lang``, belongs in an evaluation
-    run over the golden corpus.
+    **Implemented, and this docstring is the record of what was chosen** (ADR-069, closing
+    ``docs/22`` § G6). The two rules that constrained the choice are identity rather than
+    tuning, and both are satisfied by construction here:
 
-    Two rules that survive whichever tokenizer wins, because they are identity, not tuning:
+    * The same function analyzes passages and queries. ``encode_passage`` and ``encode_query``
+      both call it and neither pre-processes its input, so a term that reaches the index and
+      the same term in a question hash to one id. A query analyzed differently from the
+      passages hashes elsewhere and matches nothing, at HTTP 200, with no error.
+    * Any change to it is a ``SPARSE_ANALYZER_VERSION`` bump, and therefore a reindex — and
+      because the analyzer version is inside the collection name (ADR-034), that reindex
+      re-embeds the **dense** vectors too, at a provider's per-token price.
 
-    * The same function analyzes passages and queries. A query analyzed differently from the
-      passages hashes elsewhere and matches nothing.
-    * Any change to it is a ``SPARSE_ANALYZER_VERSION`` bump, and therefore a reindex.
+    WHY THIS LANDED NOW, AND WHY THE VERSION DID NOT MOVE
+    -----------------------------------------------------
+    ``SPARSE_ANALYZER_VERSION`` stays ``bm25/v1``. Not an oversight and not a shortcut: **no
+    corpus has ever been written under it.** ``run_version`` raised ``NotImplementedError``
+    until this function existed, so nothing has ever been indexed, so there is nothing this
+    choice invalidates. That is the whole argument for deciding it at this moment rather than
+    later — the same decision after the first tenant indexes is a full re-embed of every
+    organization, and the cost is charged to whoever happens to be holding it.
+
+    THE SEGMENTATION, IN THREE RULES
+    --------------------------------
+    1. **NFKC, then casefold, then NFKC again.** The second pass is not redundant: full case
+       folding can emit sequences that are not NFKC-normalized, so a single pass is not
+       idempotent and ``tokenize(tokenize_input)`` could disagree with itself across a
+       round trip through storage. Compatibility folding is what makes a fullwidth ``ＡＢＣ``
+       and an ``ABC`` one term, which is the common shape in CJK documents that mix scripts.
+    2. **Unsegmented scripts get character bigrams.** Whitespace segmentation is the default
+       everyone reaches for and it makes an entire Chinese, Japanese or Thai sentence one
+       term — the sparse arm then contributes nothing for those languages while every metric
+       in the pipeline stays green, because a branch that matches nothing is indistinguishable
+       from a corpus that contains nothing. A run of one such character emits that character,
+       because a one-character run has no bigram and dropping it would silently lose every
+       single-ideograph term.
+    3. **Everything else is a run of word characters** — letters, digits and combining marks,
+       the last of which are load-bearing: dropping ``Mn``/``Mc`` decomposes Devanagari and
+       Arabic words into pieces that match nothing. Punctuation separates. ``abc-123`` is
+       therefore ``abc`` and ``123`` rather than one term, which costs a little precision on
+       part numbers and costs **no recall**, because a query containing ``abc-123`` splits the
+       same way. Symmetry beats cleverness here: every rule that keeps a joiner has to keep it
+       identically on both sides forever, and rule 1's whole job is to make that impossible to
+       get wrong.
 
     What this does *not* change: term overlap across scripts is zero either way, so
     cross-lingual retrieval rides on the dense branch exactly as it did under BGE-M3's learned
     lexical weights. The lexical arm is for exact tokens — part numbers, error codes, surnames,
     API symbols — in the language they were written in.
+
+    Returns an empty sequence when nothing survives. It never raises: the two callers decide
+    what an empty analysis means, and they decide it differently — ``EmptySparsePassage`` is a
+    legitimate chunk, ``EmptySparseQuery`` is a dense-only run.
     """
-    raise NotImplementedError(
-        "the tokenizer is the open half of C2: pick segmentation and normalization per script, "
-        "then bump SPARSE_ANALYZER_VERSION"
-    )
+    folded = unicodedata.normalize("NFKC", unicodedata.normalize("NFKC", text).casefold())
+
+    terms: list[str] = []
+    run: list[str] = []
+    run_is_unsegmented = False
+
+    def flush() -> None:
+        if not run:
+            return
+        if run_is_unsegmented:
+            # Bigrams, and the single character when the run is one long — see rule 2.
+            terms.extend(["".join(run)] if len(run) == 1 else [a + b for a, b in pairwise(run)])
+        else:
+            terms.append("".join(run))
+        run.clear()
+
+    for char in folded:
+        unsegmented = _is_unsegmented(char)
+        if unicodedata.category(char) in _WORD_CATEGORIES:
+            # A script boundary ends a run even with no punctuation between: `漢字abc` is two
+            # runs, analyzed by two different rules, and gluing them would produce a term that
+            # neither a CJK query nor a Latin one can ever hash to.
+            if run and unsegmented is not run_is_unsegmented:
+                flush()
+            run_is_unsegmented = unsegmented
+            run.append(char)
+        else:
+            flush()
+
+    flush()
+
+    return terms
 
 
 def term_frequencies(terms: Iterable[str]) -> dict[int, int]:

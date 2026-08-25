@@ -124,21 +124,14 @@ def _short(text: str) -> int:
     return 10
 
 
-@pytest.fixture(autouse=True)
-def _whitespace_analyzer(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`app/retrieval/sparse.py:tokenize` is still `NotImplementedError` — it belongs to
-    `retrieval-engineer` and the choice of analyzer is an open evaluation question.
-
-    Patching it here rather than stubbing the sparse call means the *real* encoder runs: term
-    ids, BM25 passage weights, the sorted `SparseVector`, and the `EmptySparsePassage` raise all
-    execute exactly as they will in production. What is faked is one segmentation decision that
-    is deliberately not ours to make.
-    """
-    monkeypatch.setattr(
-        sparse_module,
-        "tokenize",
-        lambda text: [word.lower() for word in text.split() if word.strip(".,;:-")],
-    )
+# THE `_whitespace_analyzer` AUTOUSE FIXTURE IS GONE.
+#
+# It patched `app/retrieval/sparse.py:tokenize` because that function raised
+# `NotImplementedError` — the analyzer was an open evaluation question and the fixture's own
+# docstring said so. ADR-069 decided it, so the real analyzer runs here now and one fewer thing
+# in this file is a fake. Nothing else about the fixture's argument changes: the point was
+# always that the *real* encoder should execute — term ids, BM25 passage weights, the sorted
+# `SparseVector` and the `EmptySparsePassage` raise — and now the segmentation is real too.
 
 
 # ── plan_batches ─────────────────────────────────────────────────────────────

@@ -28,6 +28,8 @@
   --color-primary-active: var(--primary-active);
   --color-primary-soft: var(--primary-soft);
   --color-primary-soft-foreground: var(--primary-soft-foreground);
+  --color-link: var(--link);
+  --color-link-active: var(--link-active);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-success: var(--success);

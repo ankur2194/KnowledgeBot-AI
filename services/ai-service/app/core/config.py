@@ -299,7 +299,12 @@ class Settings(BaseSettings):
     #: ONE bucket, forever; tenancy is the key prefix, enforced in code. Laravel's `AWS_BUCKET`
     #: names the same one — this default used to read `kb-objects` while both templates said
     #: `kb`.
-    s3_bucket: str = "kb"
+    #: `kb-objects`, not `kb`: S3 bucket names are 3–63 characters and SeaweedFS enforces it in
+    #: the filer on every write, so a two-character name cannot hold one object. See
+    #: `services/core-api/config/filesystems.php` for the measurement and `docs/22` § R5 for the
+    #: record. The two planes must agree on this string or Laravel writes an original the data
+    #: plane cannot find, which surfaces as a 404 per object rather than as a configuration error.
+    s3_bucket: str = "kb-objects"
     #: SeaweedFS IGNORES the region and SigV4 SIGNS it, so this string must be byte-identical to
     #: Laravel's `AWS_DEFAULT_REGION`. A drift is a `SignatureDoesNotMatch` that reads like a
     #: credential problem, which is why the deployment states it on both sides rather than
@@ -314,6 +319,27 @@ class Settings(BaseSettings):
     #: A PATH, not the key. `s3_secret_key()` reads it where the boto3 client is built. `None`
     #: stays valid for the containers that hold no object-storage mount.
     s3_secret_key_path: Path | None = None
+
+    # ── document processing ───────────────────────────────────────────────────
+    #: Which OCR engine this deployment runs, and in which languages. **Both are inside
+    #: `ocr_cfg_version`** and therefore inside the ingest key: changing either re-versions
+    #: every scanned document, which is the intended behaviour and is why they are named
+    #: settings rather than constants read at the call site.
+    #:
+    #: THEY ARE DEPLOYMENT-WIDE HERE AND THE SPEC WANTS THEM NARROWER. `ocr_cfg_version`'s own
+    #: docstring says the engine is admin-selectable and the language list is per-corpus — a
+    #: single-script tenant routes to RapidOCR, a mixed-script one to tesserocr. Neither has a
+    #: column on any table yet, so a deployment default is what exists; it is recorded here as
+    #: the gap it is rather than hidden behind a constant, because the day a per-source column
+    #: lands, THIS is the value it has to supersede.
+    #:
+    #: The engine string must be a key of `OCR_ENGINE_CLASSES`, which the worker asserts at
+    #: startup — not imported here, because reaching into `app.ingestion.ocr.guarded` from
+    #: settings would pull Docling and torch into every process that reads configuration.
+    ocr_engine: str = "rapidocr"
+    #: Never empty. An empty list lets the engine's own default win silently, which is a
+    #: different model reading the page than the one recorded — `ocr_cfg_version` refuses it.
+    ocr_languages: tuple[str, ...] = ("en",)
 
     # ── internal transport ────────────────────────────────────────────────────
     # Read from a mounted secret path, never from an environment variable: `docker compose

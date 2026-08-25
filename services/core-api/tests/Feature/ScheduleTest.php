@@ -59,9 +59,11 @@ function scheduledEntryNames(): array
 }
 
 it('schedules exactly the expected entry set', function (): void {
-    // FOUR LIVE ENTRIES. Everything still commented out in routes/console.php is missing its command
-    // class, its table, or — in `sanctum:prune-expired`'s case — a producer for the rows it would
-    // prune; each is listed there with what it is waiting for.
+    // SIX LIVE ENTRIES. Everything still commented out in routes/console.php is missing its command
+    // class or — in `sanctum:prune-expired`'s case — a producer for the rows it would prune; each is
+    // listed there with what it is waiting for. NOTHING IS WAITING ON A TABLE ANY MORE:
+    // `queue:prune-failed` was the last such entry, and 2026_08_24_002700 created `failed_jobs`
+    // after a real upload failure proved the table was missing (finding R8).
     //
     // Adding, renaming or deleting an entry is expected to fail this test. That is the point — update
     // this list in the same commit, and only after checking the entry can actually succeed.
@@ -78,6 +80,8 @@ it('schedules exactly the expected entry set', function (): void {
         'horizon:snapshot',
         'kb:create-audit-partitions',
         'kb:prune-auth-tokens',
+        'kb:sweep-orphan-objects',
+        'queue:prune-failed',
     ]);
 });
 

@@ -113,6 +113,30 @@ return [
          * jittered backoff rung, so the job's own ceiling is never the thing that fires first.
          */
         'ingestion' => 20,
+
+        /*
+         * PAYLOAD MAINTENANCE (Laravel -> FastAPI), seconds — `source.status.sync` and
+         * `bot.access.sync`.
+         *
+         * ITS OWN ROW BECAUSE THIS CALL WAITS FOR THE WORK, unlike every other row above. A
+         * submission gets a 202 before a byte is read; these two run the rewrite and the filtered
+         * count that proves it, and return the counts, because a filtered count is the only
+         * evidence any of it happened and an accepted-and-report-later shape would hand the caller
+         * the acknowledgement `set_payload` already returns whether it rewrote everything or
+         * nothing.
+         *
+         * 45 s is sized for the expensive half — `bot.access.sync` scrolls the points of a source
+         * and rewrites `bot_ids` per point, so its cost scales with the corpus rather than being
+         * constant like the status rewrite's single filtered `set_payload`. It sits inside
+         * `SyncBotAccessJob`'s 90 s `#[Timeout]` with room for the 3 s connect, so the job's
+         * ceiling is never what fires first — the same arrangement `ingestion` has with
+         * `SubmitIngestionJob`.
+         *
+         * A TIMEOUT HERE IS AN UNKNOWN AND NOT A FAILURE, and it is safe to retry into: both
+         * operations are convergent on the far side, which selects the points still NEEDING the
+         * change, so a redelivery after a lost response rewrites nothing and re-counts the proof.
+         */
+        'maintenance' => 45,
     ],
 
     /*
@@ -238,6 +262,38 @@ return [
      * connects as, else the least-privileged name.
      */
     'db_app_role' => (string) env('DB_APP_USERNAME', env('DB_USERNAME', 'kb_app')),
+
+    /*
+     * THE ORPHAN-SWEEP GRACE WINDOW, IN MINUTES, and it is generous on purpose.
+     *
+     * `kb:sweep-orphan-objects` deletes an object that no `source_items` row names. A reservation
+     * younger than this window is SKIPPED, because the request that made it may still be running —
+     * its object written, its rows not yet committed — and in that instant the sweep's own check
+     * legitimately says "nothing claims this key". Deleting then produces the failure the whole
+     * write-before-row ordering was chosen to avoid: a committed row pointing at nothing, which
+     * fails ingestion on every attempt with `error_class: storage` and needs an operator.
+     *
+     * SO THE TWO DIRECTIONS ARE NOT SYMMETRIC AND THE DEFAULT REFLECTS THAT. Too long and an
+     * orphan sits on disk for a few more hours, costing storage. Too short and live bytes are
+     * destroyed. Six hours is roughly two orders of magnitude above any request this application
+     * can serve — PHP-FPM's `request_terminate_timeout` and the 25 MB per-file cap bound an upload
+     * request to minutes — and the cost of that margin is measured in megabytes.
+     *
+     * LOWER IT ONLY WITH A MEASUREMENT OF THE LONGEST CREATE REQUEST, not with an intuition about
+     * how long uploads take.
+     */
+    'upload_orphan_grace_minutes' => (int) env('KB_UPLOAD_ORPHAN_GRACE_MINUTES', 360),
+
+    /*
+     * HOW MANY RESERVATIONS ONE SWEEP TICK MAY PROCESS.
+     *
+     * The scheduler runs due events SEQUENTIALLY in one process, so a task with no ceiling delays
+     * every task defined after it (routes/console.php's header states the budget as seconds). Each
+     * collected row costs one indexed SELECT and one object DELETE against SeaweedFS; 500 is a
+     * few seconds of work in the worst case, and a backlog larger than that drains over successive
+     * hourly ticks in `created_at` order rather than in one long tick.
+     */
+    'upload_orphan_sweep_limit' => (int) env('KB_UPLOAD_ORPHAN_SWEEP_LIMIT', 500),
 
     'invitation_ttl_hours' => (int) env('KB_INVITATION_TTL_HOURS', 168),
     'email_verification_ttl_hours' => (int) env('KB_EMAIL_VERIFICATION_TTL_HOURS', 24),

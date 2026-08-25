@@ -45,7 +45,7 @@ const buttonVariants = cva(
         // The recessed strip inside a card, used where a neutral button sits ON a card already.
         secondary: 'bg-card-inset text-foreground hover:bg-accent active:bg-accent',
         ghost: 'hover:bg-accent hover:text-accent-foreground active:bg-accent',
-        link: 'text-primary underline-offset-4 hover:underline active:text-primary-active',
+        link: 'text-link underline-offset-4 hover:underline active:text-link-active',
       },
       size: {
         // The control-height scale: 2rem small, 2.25rem default, 2.5rem large — and 2.75rem (44px)

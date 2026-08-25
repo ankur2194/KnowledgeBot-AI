@@ -259,7 +259,7 @@ export function ModelSelectionCard({
                           This connection has no catalogue rows yet.{' '}
                           <Link
                             href={`/settings/providers/${connectionId}`}
-                            className="text-primary underline-offset-4 hover:underline"
+                            className="text-link underline-offset-4 hover:underline"
                           >
                             Register a model
                           </Link>{' '}

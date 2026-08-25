@@ -308,7 +308,7 @@ function BotEditorForOrganization({
       <p>
         <Link
           href="/bots"
-          className="inline-flex items-center gap-2 text-base text-primary underline-offset-4 hover:underline"
+          className="inline-flex items-center gap-2 text-base text-link underline-offset-4 hover:underline"
         >
           <ArrowLeftIcon aria-hidden className="size-4" />
           All bots

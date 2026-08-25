@@ -102,37 +102,46 @@ final class SourceObjectWriter
      * whose ingestion fails on every attempt with `error_class: storage` and needs an operator,
      * which is worse than an orphan.
      *
-     * ── BUT THE ORPHAN HAS NO RECOVERY PATH, AND BOTH HALVES OF THE ONE THIS USED TO CLAIM ARE
-     *    FALSE ─────────────────────────────────────────────────────────────────────────────────
+     * ── THE ORPHAN NOW HAS A RECOVERY PATH, AND IT IS OPTION (b) ────────────────────────────
      *
-     * The claim was that the orphan is "a byte-for-byte-identical object at a content-addressed key
-     * that the next attempt overwrites and a sweep can collect". Neither half survives contact:
+     * This paragraph used to carry a `TODO(phase-c)` and a claim that was false in both halves —
+     * that the orphan was "a byte-for-byte-identical object at a content-addressed key that the
+     * next attempt overwrites and a sweep can collect". Neither half survived contact:
      *
-     *   NOTHING OVERWRITES IT. The key is SOURCE-scoped, not globally content-addressed
+     *   NOTHING OVERWROTE IT. The key is SOURCE-scoped, not globally content-addressed
      *   (`ObjectKey::originalUpload()` → `org/{org}/sources/{sourceId}/original/{sha256}`), and
      *   `SourceService::create()` mints `$sourceId` PER REQUEST. A retry of the identical upload
-     *   therefore produces a DIFFERENT key. Orphans accumulate, one per failed attempt.
+     *   therefore produced a DIFFERENT key, and orphans accumulated one per failed attempt.
      *
-     *   NO SWEEP EXISTS. `kb.maintenance.sweep_orphan_objects` is a line in a docstring —
-     *   `services/ai-service/app/maintenance/tasks.py` declares `__all__: list[str] = []` and
-     *   carries a `TODO(unassigned)` saying these tasks have no owner. Nothing collects anything.
+     *   NO SWEEP EXISTED. `kb.maintenance.sweep_orphan_objects` was a line in a docstring —
+     *   `services/ai-service/app/maintenance/tasks.py` declares an empty `__all__` and carries a
+     *   `TODO(unassigned)` saying those tasks have no owner. Nothing collected anything.
      *
-     * So an orphan here is permanent, and it is permanent in the shape `ObjectKey`'s class docblock
-     * calls defect 1: outside every prefix the phase-2 purge visits (it visits prefixes for sources
-     * that EXIST), which means deletion verification certifies it clean while the bytes survive.
+     * So an orphan here was permanent, in the shape `ObjectKey`'s class docblock calls defect 1:
+     * outside every prefix the phase-2 purge visits (it visits prefixes for sources that EXIST),
+     * which means deletion verification CERTIFIES IT CLEAN WHILE IT SURVIVES.
      *
-     * TODO(phase-c): give the write-before-row ordering an actual recovery path. The two real
-     * options, neither of which is a docblock edit: (a) ROWS FIRST — insert `source_items` with the
-     * storage key and a not-yet-written marker, write the object, then clear the marker, so a crash
-     * leaves a row a reaper can find and either complete or purge; or (b) A PENDING-KEY RECORD —
-     * write the intended key to a small table before the object and delete the record after the
-     * commit, so an unmatched record IS the sweep's input. (a) changes the failure mode of the whole
-     * create path and is a design decision with its own review; (b) is additive but needs a sweeper,
-     * and THE SWEEPER HAS NO OWNER — that is the blocking half, not the schema. Reported as security
-     * finding S3. The reachable trigger that made this urgent (an invalid-UTF-8 `display_name` that
-     * walked the intake gate and was refused by PostgreSQL after the write) is closed at
-     * `UploadIntake::assertExtensionIsAllowed()`; what remains is any other database failure between
-     * the write and the commit, which is latent rather than absent.
+     * OPTION (b) IS BUILT. `SourceService::uploadedItems()` calls
+     * `PendingSourceObjectRepositoryInterface::reserve()` immediately before this method, and
+     * `create()` calls `release()` after the transaction commits; an unmatched reservation is the
+     * input to `kb:sweep-orphan-objects`, scheduled hourly, which re-asks `source_items` before it
+     * deletes anything and skips any reservation younger than
+     * `config('kb.upload_orphan_grace_minutes')`. The pasted-text path (`storeText()`) reserves the
+     * same way, because its object is the same kind of orphan.
+     *
+     * OPTION (a) — rows first, with a not-yet-written marker — WAS REJECTED AND STAYS REJECTED. It
+     * changes the failure mode of the whole create path: every reader of `source_items` acquires a
+     * state in which the object may not be there, and `source_items_stored_object_is_complete`
+     * would have to be weakened to let the half-written row exist at all. (b) is purely additive.
+     *
+     * NOTHING ABOUT THE ORDERING BELOW CHANGED, and that is the point of recording it here: the
+     * bytes are still written before the rows, the reservation is not a transaction, and the orphan
+     * is still produced. What changed is that it is now NAMED, and therefore collectable.
+     *
+     * WHAT THIS WRITER STILL DOES NOT DO is reserve anything itself. The reservation is the
+     * CALLER's, because the caller is what knows the source id and what will (or will not) commit
+     * the row; a writer that reserved its own key would reserve one for `storeText()` too, which
+     * does not go through this class.
      */
     public function write(string $key, AcceptedUpload $upload): void
     {

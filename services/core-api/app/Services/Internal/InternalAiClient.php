@@ -276,6 +276,221 @@ final class InternalAiClient
     }
 
     /**
+     * Carry a source's disable or enable into the retrieval index, and read back the proof.
+     *
+     * ── WHAT THE DATA PLANE ACTUALLY DOES WITH THIS ───────────────────────────────────────────
+     *
+     * One filtered `set_payload` per collection, rewriting `source_status` on every point of this
+     * source, followed by a filtered count of the points now carrying the new value. That count is
+     * the RESPONSE, and it is the reason this call is synchronous while `submitIngestion()` is a
+     * 202: `set_payload` returns the same acknowledgement whether it rewrote ten thousand points
+     * or none, so an accepted-and-report-later shape would hand this caller the one thing that
+     * proves nothing (`kb-deletion-and-verification`).
+     *
+     * ── THE IDENTITY LIST IS OURS TO RESOLVE AND MUST NOT BE ABBREVIATED ─────────────────────
+     *
+     * `$embeddingIdentities` is every DISTINCT `source_versions.embedding_model_version` of this
+     * source, which is the set of Qdrant collections its points live in. We own that table, so we
+     * resolve it; the data plane opens no database connection for this call and could not. Sending
+     * only the active version's identity is the silent half-rewrite: the collection that was
+     * addressed verifies, and the one that was not keeps answering.
+     *
+     * ── NO RETRY HERE. `SyncSourceStatusJob` OWNS IT ────────────────────────────────────────
+     *
+     * Same rule as `submitIngestion()`: one retrying tier per hop, and for a queued call it is the
+     * job. A `->retry()` here would multiply with `#[Tries]` and turn one admin click into fifteen
+     * rewrites of the same payload.
+     *
+     * @param  list<string>  $embeddingIdentities
+     * @return array{passed: bool, rewritten: int, verified: int}
+     *
+     * @throws KbException when the far side refuses, is unreachable, or does not verify
+     */
+    public function syncSourceStatus(
+        string $organizationId,
+        string $sourceId,
+        string $sourceStatus,
+        array $embeddingIdentities,
+        ?string $actorId = null,
+    ): array {
+        return $this->syncPayload(
+            $organizationId,
+            'source-status',
+            'source.status.sync',
+            [
+                'source_id' => $sourceId,
+                'source_status' => $sourceStatus,
+                'embedding_model_versions' => array_values($embeddingIdentities),
+            ],
+            $sourceId."\x1f".$sourceStatus,
+            $actorId,
+        );
+    }
+
+    /**
+     * Add or remove one bot id in the `bot_ids` LIST on the points in scope, and read back the proof.
+     *
+     * ── `bot_ids` IS A LIST ON EACH POINT AND THAT IS THE WHOLE HAZARD ───────────────────────
+     *
+     * Every bot the source is assigned to is in it, so the far side does a scroll and a
+     * read-modify-write rather than a delete-by-filter. A delete-by-filter on `bot_ids` destroys
+     * the chunks the OTHER bots still answer from, at HTTP 200, and `BotService::delete()` names
+     * that trap at its call site. Nothing on this side can prevent it; what this side can do is
+     * never ask for a delete, which is why there is no shape of this request that expresses one.
+     *
+     * ── `$sourceIds === null` MEANS EVERY POINT IN THE ORGANIZATION, AND ONLY FOR A REVOKE ───
+     *
+     * It is the deleted-bot case: the `bot_source_assignments` rows are gone, so we cannot
+     * enumerate what the bot could see. The far side refuses the same shape for a grant with a 422
+     * — granting a bot access to every source a tenant owns is not an operation the contract
+     * offers — and this method refuses it here as well, so the mistake is caught before a signed
+     * request is built rather than as a relayed validation error.
+     *
+     * @param  list<string>|null  $sourceIds
+     * @param  list<string>  $embeddingIdentities
+     * @return array{passed: bool, rewritten: int, verified: int}
+     *
+     * @throws KbException
+     */
+    public function syncBotAccess(
+        string $organizationId,
+        string $botId,
+        bool $grant,
+        ?array $sourceIds,
+        array $embeddingIdentities,
+        ?string $actorId = null,
+    ): array {
+        if ($grant && $sourceIds === null) {
+            throw KbException::aiServiceUnavailable(
+                'An organization-wide grant is not an operation this contract offers.',
+            );
+        }
+
+        return $this->syncPayload(
+            $organizationId,
+            'bot-access',
+            'bot.access.sync',
+            [
+                'bot_id' => $botId,
+                'grant' => $grant,
+                'source_ids' => $sourceIds === null ? null : array_values($sourceIds),
+                'embedding_model_versions' => array_values($embeddingIdentities),
+            ],
+            $botId."\x1f".($grant ? 'grant' : 'revoke')."\x1f"
+                .($sourceIds === null ? 'all' : implode(',', $sourceIds)),
+            $actorId,
+        );
+    }
+
+    /**
+     * The shared half of the two maintenance operations: sign, send, verify the shape, return.
+     *
+     * ONE METHOD BECAUSE THE TWO REQUESTS DIFFER ONLY IN THEIR PATH AND THEIR BODY. Everything
+     * that is easy to get subtly wrong — serializing once and signing those exact bytes, the
+     * queued-caller epoch, the required idempotency key, the connection-exception blackout — is
+     * identical, and two copies of it would drift on the half that is exercised less.
+     *
+     * `X-KB-Idempotency-Key` IS REQUIRED AND IS DERIVED FROM THE INSTRUCTION, not from a random
+     * value: two deliveries of the same instruction must carry the same key. The far side stores
+     * no replay record for it (both operations are convergent — it selects the points still
+     * NEEDING the change), so the key is a contract obligation and a correlation handle rather
+     * than a deduplication mechanism, and its `_idempotency_key` dependency says why at length.
+     *
+     * `X-KB-Actor-Type` is `system` for a queued sweep and `user` when an administrator pressed a
+     * button, exactly as on `submitIngestion()` — never defaulted to the flattering value.
+     *
+     * @param  array<string, mixed>  $body
+     * @return array{passed: bool, rewritten: int, verified: int}
+     *
+     * @throws KbException
+     */
+    private function syncPayload(
+        string $organizationId,
+        string $route,
+        string $operation,
+        array $body,
+        string $instruction,
+        ?string $actorId,
+    ): array {
+        // Serialize ONCE and sign those exact bytes. Re-encoding to hash is not byte-stable.
+        $payload = json_encode($body, JSON_THROW_ON_ERROR);
+
+        $path = '/internal/'.config('kb.contract_version').'/maintenance/'.$route;
+
+        $headers = [
+            'X-KB-Org-Id' => $organizationId,
+            'X-KB-Actor-Type' => $actorId === null ? 'system' : 'user',
+            'X-KB-Operation' => $operation,
+            'X-KB-Request-Id' => (string) Str::ulid(),
+            'X-KB-Config-Version' => (string) $this->snapshotVersion($payload),
+            'X-KB-Contract-Version' => (string) config('kb.contract_version'),
+            // `callEpoch()` AND NOT `LARAVEL_START` — finding B1/Q2. Both callers are queued jobs
+            // in a worker that is up for hours, so the constant is that worker's BOOT and the
+            // deadline it produces is already in the past.
+            'X-KB-Deadline' => (string) $this->deadlineMs(
+                (float) config('kb.timeouts.maintenance'),
+                self::callEpoch(),
+            ),
+            'X-KB-Idempotency-Key' => hash(
+                'sha256',
+                $organizationId."\x1f".$operation."\x1f".$instruction,
+            ),
+            'X-KB-Timestamp' => (string) time(),
+        ];
+
+        if ($actorId !== null) {
+            $headers['X-KB-Actor-Id'] = $actorId;
+        }
+
+        $signature = $this->signer->sign('POST', $path, $payload, $headers);
+
+        try {
+            $response = Http::baseUrl((string) config('services.ai.url'))
+                ->withBody($payload, 'application/json')
+                ->withHeaders($headers + [
+                    'Accept' => 'application/json',
+                    'X-KB-Signature' => $signature,   // redacted from every log line
+                ])
+                ->connectTimeout((int) config('kb.timeouts.connect'))
+                ->timeout((int) config('kb.timeouts.maintenance'))
+                ->post($path);
+        } catch (ConnectionException) {
+            // NOT CHAINED: the message carries the resolved internal host and port.
+            throw KbException::aiServiceUnavailable(
+                'The AI service could not be reached to update the retrieval index.',
+            );
+        }
+
+        if ($response->failed()) {
+            throw $this->relay($response->status(), $response->json());
+        }
+
+        $report = $response->json();
+
+        // A 200 WHOSE BODY CANNOT BE READ IS NOT A SUCCESS. The counts ARE the proof, so a
+        // response without them is indistinguishable from a rewrite that did not happen — and
+        // treating it as a pass is exactly the acknowledged-but-not-applied failure the far side
+        // spends a filtered count to rule out.
+        if (! is_array($report) || ! isset($report['passed'], $report['rewritten'], $report['verified'])) {
+            throw KbException::aiServiceUnavailable(
+                'The AI service answered the index update in a shape this service cannot read.',
+            );
+        }
+
+        if ($report['passed'] !== true) {
+            throw KbException::aiServiceUnavailable(
+                'The AI service could not confirm that the retrieval index was updated.',
+            );
+        }
+
+        return [
+            'passed' => true,
+            'rewritten' => (int) $report['rewritten'],
+            'verified' => (int) $report['verified'],
+        ];
+    }
+
+    /**
      * Relay the class the data plane assigned, verbatim, and never re-derive one from the status.
      *
      * FOUR FIELDS CROSS, NOT TWO. The envelope is

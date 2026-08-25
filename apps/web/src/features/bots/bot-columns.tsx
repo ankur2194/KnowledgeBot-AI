@@ -73,7 +73,7 @@ export const BOT_COLUMNS = helper.columns([
     cell: ({ getValue, row }) => (
       <Link
         href={`/bots/${row.original.id}`}
-        className="font-mono text-primary underline-offset-4 hover:underline"
+        className="font-mono text-link underline-offset-4 hover:underline"
       >
         {getValue()}
       </Link>

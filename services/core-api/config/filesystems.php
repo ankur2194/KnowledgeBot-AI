@@ -34,7 +34,16 @@ return [
             // SeaweedFS ignores the region; SigV4 signs it. It must be the IDENTICAL string on the
             // boto3 side in services/ai-service or the signatures disagree.
             'region' => env('AWS_DEFAULT_REGION', 'us-east-1'),
-            'bucket' => env('AWS_BUCKET', 'kb'),
+            // `kb-objects`, and the THREE CHARACTER MINIMUM IS THE WHOLE REASON IT IS NOT `kb`.
+            // S3 bucket names are 3–63 characters, and SeaweedFS enforces it in the filer on every
+            // write: `CreateEntry: invalid bucket name kb: bucket name must between [3, 63]
+            // characters`. A two-character name therefore cannot hold ONE object — `weed shell`
+            // refuses to create it, and creating the directory by hand only moves the refusal from
+            // CreateMultipartUpload to the mkdir underneath it. Measured against seaweedfs:4.40 on
+            // 2026-08-24 (`docs/22` § R5); the whole ingestion path was unreachable in every
+            // deployment configured from the shipped examples, and no suite could see it because
+            // every one of them fakes this disk.
+            'bucket' => env('AWS_BUCKET', 'kb-objects'),
 
             // Reached directly on the internal network, never through Traefik: SeaweedFS mistakes
             // HTTP chunked transfer framing for Content-Encoding: aws-chunked and stores the

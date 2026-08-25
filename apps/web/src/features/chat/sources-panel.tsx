@@ -60,7 +60,7 @@ export function SourcesPanel({ citations }: { readonly citations: readonly Citat
                 href={citation.url}
                 target="_blank"
                 rel="noopener noreferrer nofollow ugc"
-                className="flex min-w-0 items-start gap-1.5 text-primary underline-offset-4 hover:underline"
+                className="flex min-w-0 items-start gap-1.5 text-link underline-offset-4 hover:underline"
               >
                 <ExternalLinkIcon aria-hidden className="mt-0.5 size-3.5 shrink-0" />
                 <span className="break-words">

@@ -90,6 +90,7 @@ __all__ = [
     "DENSE_VECTOR_NAME",
     "HNSW_M",
     "HNSW_PAYLOAD_M",
+    "IDENTITY_SCHEME",
     "MAX_DIMENSIONS",
     "PAYLOAD_INDEXES",
     "QUANTIZATION_ALWAYS_RAM",
@@ -107,6 +108,7 @@ __all__ = [
     "assert_dimensions",
     "ensure_collection",
     "ensure_payload_indexes",
+    "space_from_identity",
 ]
 
 #: Bumped when the payload contract, the vector names, or the index list change in a way
@@ -231,6 +233,20 @@ class AnalyzerMismatch(Exception):
     """
 
 
+#: The scheme prefix of ``embedding_model_version`` — ``emb/v1:provider:model:dNNNN:digest``.
+#: Bump to force every existing vector to be re-identified: it changes every chunk's embedding
+#: model id and therefore every ingest key at once, so it exists to let the *composition* of the
+#: identity string be corrected without the correction being mistaken for drift.
+#:
+#: It lives HERE, with ``EmbeddingSpace`` and ``space_from_identity``, rather than beside the
+#: function that composes it. The producer is ``app/ingestion/embedding/embedder.py`` and the
+#: consumers are ``space_from_identity``'s two callers, which are in ingestion and in
+#: maintenance; a constant defined at the producer forces the schema module to import the
+#: pipeline, which is backwards, and a second literal in this file is the drift that makes a
+#: composed string unparseable by the only function that parses it.
+IDENTITY_SCHEME: Final[str] = "emb/v1"
+
+
 @dataclass(frozen=True, slots=True)
 class EmbeddingSpace:
     """The identity of one embedding space — everything that makes vectors comparable.
@@ -310,6 +326,53 @@ class EmbeddingSpace:
 def _slug(value: str) -> str:
     """Lowercase, alphanumerics and underscores only. Lossy on purpose — see ``collection``."""
     return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+
+
+def space_from_identity(embedding_model_version: str) -> EmbeddingSpace:
+    """``emb/v1:provider:model:dNNNN:digest`` back into the space it names.
+
+    The inverse of what ``app/ingestion/embedding/embedder.py`` *measures*, and the one place
+    that inversion is written down. It lives here rather than at either call site because the
+    two callers are on opposite sides of the system and must not disagree: ``run_version``
+    parses it to decide which collection to index a version INTO, and the payload maintenance
+    ops parse it to decide which collection to rewrite a payload IN. A second copy that
+    tolerated one more shape would send a status rewrite to a collection the indexer never
+    wrote, which reports zero points updated and passes its own verification.
+
+    ``ValueError`` and not ``KbError``: this module is the schema and imports no error
+    taxonomy. ``app/ingestion/runner.ctx_space`` wraps it into the class the pipeline expects
+    and keeps the sentence, because the sentence is the useful half.
+
+    The digest is deliberately **not** validated beyond being present. It is the ADR-035 canary
+    digest, its length is that function's business, and a stricter check here would reject a
+    version this service itself wrote the moment the probe changed shape.
+    """
+    parts = embedding_model_version.split(":")
+    if len(parts) < 5 or parts[0] != IDENTITY_SCHEME or not parts[3].startswith("d"):
+        raise ValueError(
+            f"embedding_model_version={embedding_model_version!r} is not "
+            "`emb/v1:provider:model:dNNNN:digest`. The collection name is derived from it, so "
+            "an unparseable value cannot be defaulted — a default would name a real collection "
+            "and act on someone else's vector space"
+        )
+    try:
+        dimensions = int(parts[3][1:])
+    except ValueError:
+        raise ValueError(
+            f"embedding_model_version={embedding_model_version!r} carries a non-numeric width "
+            f"{parts[3]!r}; the width is part of the space identity and cannot be defaulted"
+        ) from None
+    return EmbeddingSpace(
+        provider=parts[1],
+        model=parts[2],
+        dimensions=dimensions,
+        # NOT taken from the identity string, because it is not in it. The analyzer version is
+        # this build's constant and it is inside the collection name (ADR-034): a bump is a
+        # reindex, so a maintenance op run after a bump legitimately addresses a collection
+        # that no longer receives writes, and reading the analyzer from the identity would
+        # invent a value the identity never carried.
+        sparse_analyzer=SPARSE_ANALYZER_VERSION,
+    )
 
 
 @dataclass(frozen=True, slots=True)

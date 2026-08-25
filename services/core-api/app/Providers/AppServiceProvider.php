@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Providers;
 
 use App\Enums\Surface;
+use App\Models\User;
 use App\Repositories\Contracts\BotDomainRepositoryInterface;
 use App\Repositories\Contracts\BotRepositoryInterface;
 use App\Repositories\Contracts\BotSourceAssignmentRepositoryInterface;
@@ -13,6 +14,7 @@ use App\Repositories\Contracts\EmbeddingCandidateRepositoryInterface;
 use App\Repositories\Contracts\KnowledgeSourceRepositoryInterface;
 use App\Repositories\Contracts\MembershipRepositoryInterface;
 use App\Repositories\Contracts\OrganizationRepositoryInterface;
+use App\Repositories\Contracts\PendingSourceObjectRepositoryInterface;
 use App\Repositories\Contracts\ProviderConnectionRepositoryInterface;
 use App\Repositories\Contracts\ProviderModelRepositoryInterface;
 use App\Repositories\Contracts\SparseCorpusStatisticsRepositoryInterface;
@@ -24,6 +26,7 @@ use App\Repositories\Eloquent\EloquentEmbeddingCandidateRepository;
 use App\Repositories\Eloquent\EloquentKnowledgeSourceRepository;
 use App\Repositories\Eloquent\EloquentMembershipRepository;
 use App\Repositories\Eloquent\EloquentOrganizationRepository;
+use App\Repositories\Eloquent\EloquentPendingSourceObjectRepository;
 use App\Repositories\Eloquent\EloquentProviderConnectionRepository;
 use App\Repositories\Eloquent\EloquentProviderModelRepository;
 use App\Repositories\Eloquent\EloquentSparseCorpusStatisticsRepository;
@@ -151,6 +154,17 @@ final class AppServiceProvider extends ServiceProvider
         $this->app->bind(
             OrganizationRepositoryInterface::class,
             EloquentOrganizationRepository::class,
+        );
+
+        // The write-ahead ledger of object-storage keys (security finding S3). It is bound like
+        // every other repository, but its MODEL is the one exception to the tenant-scope rule —
+        // `PendingSourceObject` carries no `#[ScopedBy]`, because its only significant reader is a
+        // cross-tenant console sweep and `OrganizationScope` fails closed. The model's docblock
+        // carries the full reasoning; it is noted here because this list is where a reader counts
+        // the repositories and would otherwise have no reason to look.
+        $this->app->bind(
+            PendingSourceObjectRepositoryInterface::class,
+            EloquentPendingSourceObjectRepository::class,
         );
 
         $this->app->bind(
@@ -490,10 +504,19 @@ final class AppServiceProvider extends ServiceProvider
          * default in production is a lockout; replacing it with `true` is the breach. This is the
          * third option, and it is the only correct one.
          *
-         * TODO(rbac): replace data_get() with $user->isPlatformOwner() once App\Models\User exists.
+         * THE PARAMETER STAYS `Authenticatable` AND THE READ STAYS DEFENSIVE, WHICH IS WHY THIS IS
+         * NOT `$user->isPlatformOwner()`. `App\Models\User` exists now and carries that method
+         * (User.php), so the old `TODO(rbac)` deferring to its existence is discharged — but Gate
+         * callbacks are invoked with whatever the resolved guard returns, and typing this against
+         * the concrete model would turn a guard misconfiguration into a TypeError on the Horizon
+         * route instead of a denial. `data_get()` on an absent attribute yields the default, so an
+         * authenticatable that is not our `User` FAILS CLOSED, which is the only direction this
+         * gate may fail in.
          */
         Gate::define('viewHorizon', static function (Authenticatable $user): bool {
-            return (bool) data_get($user, 'is_platform_owner', false);
+            return $user instanceof User
+                ? $user->isPlatformOwner()
+                : (bool) data_get($user, 'is_platform_owner', false);
         });
     }
 

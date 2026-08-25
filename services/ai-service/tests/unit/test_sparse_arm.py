@@ -93,15 +93,14 @@ def stats_for(
     )
 
 
-def whitespace_tokenize(text: str) -> list[str]:
-    """A stand-in for the analyzer, and **not** a proposal for one.
-
-    ``tokenize`` is unimplemented on purpose: segmentation is a per-script decision and
-    whitespace splitting makes an entire Chinese or Japanese sentence one term. This exists only
-    so the composition around it can be exercised — the seam is testable end to end with the one
-    genuinely open decision faked.
-    """
-    return [token for token in text.casefold().split() if token]
+# THE `whitespace_tokenize` STAND-IN IS GONE, AND ITS REMOVAL IS THE POINT.
+#
+# It existed because `tokenize` raised, and every composition test below monkeypatched it in.
+# ADR-069 implemented the real analyzer, so these tests now exercise the analyzer that ships —
+# the only version of them that can fail for a real reason. A stand-in that splits on whitespace
+# agrees with the real analyzer on ASCII prose and disagrees with it on every case the real one
+# exists to handle, so keeping it would have meant a green suite proving the composition around
+# a function nothing called.
 
 
 # ── term identity ─────────────────────────────────────────────────────────────
@@ -345,20 +344,80 @@ def test_a_term_id_outside_the_index_space_is_refused() -> None:
         as_sparse_vector({TERM_ID_MODULUS: 1.0})
 
 
-# ── the tokenizer is the stated gap, and the composition around it is not ─────
+# ── the analyzer: ADR-069, and the four ways it fails silently ────────────────
 
 
-def test_the_tokenizer_is_the_one_thing_left_open() -> None:
-    """It is unimplemented deliberately. Filling it with whitespace splitting would make the
-    lexical arm worthless for unsegmented scripts while every metric stayed green."""
-    with pytest.raises(NotImplementedError, match="C2"):
-        tokenize("does the XR-400B cover accidental damage")
+def test_the_same_function_analyzes_passages_and_queries() -> None:
+    """The first of the analyzer's two identity rules, and the one with no symptom.
+
+    A query analyzed differently from the passages hashes to different term ids, matches no
+    posting, and returns an empty lexical branch at HTTP 200. There is no exception and no log
+    line, and the run reads as "the corpus has no exact-term hit for this question". Both
+    encoders call ``tokenize`` and neither pre-processes its input, so the property is
+    structural — this test is what notices if either one grows a private normalization step.
+    """
+    text = "Warranty coverage for the XR400B"
+    assert list(tokenize(text)) == list(tokenize(text.casefold()))
+    assert term_id("xr400b") in encode_passage(text).indices
 
 
-def test_encode_passage_composes_to_a_deterministic_vector(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(sparse, "tokenize", whitespace_tokenize)
+def test_case_folding_and_compatibility_normalization_are_idempotent() -> None:
+    """NFKC → casefold → NFKC, and the second pass is not redundant.
+
+    Full case folding can emit sequences that are not NFKC-normalized, so a single pass is not
+    idempotent: text that had been through the analyzer once could analyze differently the
+    second time, and the two sides of the seam do not run the same number of times. Fullwidth
+    forms are the case that matters in practice — a CJK document that writes an ASCII part
+    number as ``ＸＲ４００Ｂ`` must reach the same posting as the query that types it plainly.
+    """
+    # The suppression below is deliberate: RUF001 flags exactly the confusable this asserts on.
+    assert list(tokenize("ＸＲ４００Ｂ")) == list(tokenize("xr400b")) == ["xr400b"]  # noqa: RUF001
+    assert list(tokenize("Straße")) == list(tokenize("STRASSE"))
+
+
+def test_unsegmented_scripts_are_bigrammed_rather_than_swallowed_whole() -> None:
+    """The defect the whitespace default produces, and the reason this decision was blocking.
+
+    Whitespace segmentation makes an entire Chinese, Japanese or Thai sentence **one** term.
+    The sparse arm then contributes nothing for those languages while every metric in the
+    pipeline stays green, because a branch that matches nothing is indistinguishable from a
+    corpus that contains nothing. A one-character run has no bigram and must still emit a term,
+    or every single-ideograph word is lost the same way.
+    """
+    assert list(tokenize("漢字テスト")) == ["漢字", "字テ", "テス", "スト"]
+    assert list(tokenize("中")) == ["中"]
+    assert len(list(tokenize("สวัสดีครับ"))) > 1
+
+    # A script boundary ends a run even with no punctuation between it: gluing the two would
+    # produce a term neither a CJK query nor a Latin one can ever hash to.
+    assert list(tokenize("漢字abc")) == ["漢字", "abc"]
+
+
+def test_combining_marks_stay_inside_their_word() -> None:
+    """Dropping ``Mn``/``Mc`` decomposes Devanagari and Arabic words into pieces that hash to
+    ids no query produces — a whole language whose lexical arm returns nothing, silently."""
+    assert list(tokenize("हिन्दी शब्द")) == ["हिन्दी", "शब्द"]
+    assert list(tokenize("naïve café")) == ["naïve", "café"]
+
+
+def test_a_joiner_splits_the_same_way_on_both_sides() -> None:
+    """``abc-123`` is two terms, which costs precision on part numbers and costs no recall.
+
+    The property that matters is not how it splits but that it splits **identically** for a
+    passage and for a query. Every rule that keeps a joiner has to keep it identically on both
+    sides forever; this one cannot drift because there is only one rule.
+    """
+    assert list(tokenize("ABC-123")) == list(tokenize("abc 123")) == ["abc", "123"]
+
+
+def test_the_analyzer_never_raises_because_its_two_callers_disagree_about_empty() -> None:
+    """``tokenize`` returns an empty sequence rather than raising, because an empty analysis
+    means two different things: a legitimate chunk with no lexical content, and a question that
+    makes the run dense-only. The callers raise the two distinct exceptions."""
+    assert list(tokenize("   ...   ")) == []
+
+
+def test_encode_passage_composes_to_a_deterministic_vector() -> None:
     text = "Warranty coverage for the XR-400B warranty claim"
     first, second = encode_passage(text), encode_passage(text)
     assert first.indices == second.indices
@@ -366,9 +425,7 @@ def test_encode_passage_composes_to_a_deterministic_vector(
     assert term_id("warranty") in first.indices
 
 
-def test_a_chunk_that_analyzes_to_nothing_is_a_decision_for_ingestion_not_an_empty_vector(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_chunk_that_analyzes_to_nothing_is_a_decision_for_ingestion_not_an_empty_vector() -> None:
     """An image-only chunk, or a table of bare numerals under a tokenizer that drops digits.
 
     The upserter's rule is what this protects: a point may be written with **no** sparse vector,
@@ -376,38 +433,30 @@ def test_a_chunk_that_analyzes_to_nothing_is_a_decision_for_ingestion_not_an_emp
     accepted at upsert, matches nothing forever, and halves the hybrid branch for that chunk.
     A distinct exception is what stops the two states sharing a code path.
     """
-    monkeypatch.setattr(sparse, "tokenize", whitespace_tokenize)
     with pytest.raises(EmptySparsePassage, match="without a sparse vector"):
         encode_passage("   ")
 
 
-def test_encode_query_checks_the_statistics_scope_before_weighting_anything(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_encode_query_checks_the_statistics_scope_before_weighting_anything() -> None:
     """The tenancy check is inside the encoder, not beside it: a caller that forgets it cannot
     produce a vector at all, because the scope arguments are positional and required."""
-    monkeypatch.setattr(sparse, "tokenize", whitespace_tokenize)
     foreign = stats_for(ORG_B, {term_id("warranty"): 3}, 100)
     with pytest.raises(SparseStatisticsUnavailable, match="organization"):
         encode_query("warranty", ORG_A, VERSIONS, foreign)
 
 
-def test_a_query_that_analyzes_to_no_terms_is_a_dense_only_run_not_an_empty_vector(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_query_that_analyzes_to_no_terms_is_a_dense_only_run_not_an_empty_vector() -> None:
     """An empty sparse vector would go out, match nothing, and read as "the lexical branch found
     nothing" — which the degraded path treats as strong disagreement. It is no signal at all,
     and the caller has to be able to tell the difference."""
-    monkeypatch.setattr(sparse, "tokenize", whitespace_tokenize)
     with pytest.raises(EmptySparseQuery, match="dense-only run"):
         encode_query("   ", ORG_A, VERSIONS, stats_for(ORG_A, {}, 100))
 
 
-def test_encode_query_produces_idf_weighted_terms(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sparse, "tokenize", whitespace_tokenize)
-    rare, common = term_id("xr-400b"), term_id("the")
+def test_encode_query_produces_idf_weighted_terms() -> None:
+    rare, common = term_id("xr400b"), term_id("the")
     stats = stats_for(ORG_A, {rare: 2, common: 4900}, 5000)
-    vector = encode_query("the xr-400b", ORG_A, VERSIONS, stats)
+    vector = encode_query("the xr400b", ORG_A, VERSIONS, stats)
     weights = dict(zip(vector.indices, vector.values, strict=True))
     assert weights[rare] > weights[common]
 

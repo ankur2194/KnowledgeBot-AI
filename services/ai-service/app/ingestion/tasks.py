@@ -45,9 +45,19 @@ inherit these limits — see the TODO at the bottom.
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any, Final
 
+from celery.exceptions import Ignore
+
+from app.core.errors import ErrorClass, KbError
+from app.ingestion import deliveries as deliveries_counter
+from app.ingestion import intake, runner
 from app.worker import celery_app
+from app.worker.process import run_in_worker, worker_clients
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "DEADLINE_RESERVE_SECONDS",
@@ -56,9 +66,12 @@ __all__ = [
     "LOCK_TTL_SECONDS",
     "MAX_DELIVERIES",
     "OCR_PAGES_PER_TASK",
+    "PREPARE_HARD_TIME_LIMIT",
+    "PREPARE_SOFT_TIME_LIMIT",
     "RETRY_BACKOFF_MAX_SECONDS",
     "SOFT_TIME_LIMIT",
     "ocr_page_batch",
+    "prepare_item",
     "run_version",
 ]
 
@@ -89,10 +102,31 @@ DEADLINE_RESERVE_SECONDS: Final[int] = 30
 #: timeout re-executes forever — the ETA loop the Celery docs warn about.
 RETRY_BACKOFF_MAX_SECONDS: Final[int] = 600
 
-#: Durable, counted in PostgreSQL per version — not `request.retries`, which a requeue does
-#: not increment. Past the cap the version fails as `internal_dependency` and the task raises
+#: Durable, counted in VALKEY per unit of work — not `request.retries`, which a requeue does not
+#: increment. Past the cap the version fails as `internal_dependency` and the task raises
 #: `Ignore()`; re-raising would re-enter the retry path it is trying to leave.
+#:
+#: THE STORE MOVED, AND THE SENTENCE ABOVE USED TO SAY "IN PostgreSQL". It was counted by an
+#: `UPDATE source_versions` — a write to a Laravel-owned table this service is not permitted to
+#: write and which `IngestionProgress` says it must never be permitted to write.
+#: `app/ingestion/deliveries.py` carries the whole account. The cap and its behaviour are
+#: unchanged; only the writer is.
+#:
+#: IT NOW BOUNDS THE PRE-IDENTITY PHASE TOO (`docs/22` § Q9). `prepare_item` runs before any
+#: version row exists, with `max_retries=None`, so its redeliveries had nowhere durable to be
+#: counted and the give-up decision had no memory across worker restarts. A Valkey key does not
+#: need the row, so both phases are bounded by this one number.
 MAX_DELIVERIES: Final[int] = 3
+
+#: The prepare phase's own budget. It reads configuration, makes ONE five-string probe call and
+#: posts ONE frame — no page is opened and no chunk is embedded — so the 900 s document budget
+#: would only ever mean a wedged provider call holding an `ingest` slot for fifteen minutes.
+#: 90 s is generous for a single embedding round trip against a cold vendor.
+PREPARE_SOFT_TIME_LIMIT: Final[int] = 90
+
+#: Soft + 60 s, the same relationship every other pair in this module has, and for the same
+#: reason: that minute is the task's only window to re-raise before SIGKILL.
+PREPARE_HARD_TIME_LIMIT: Final[int] = PREPARE_SOFT_TIME_LIMIT + 60
 
 #: 30 s/page x 10 pages = the 300 s document budget exactly. Beyond ten pages a scan fans out
 #: rather than growing the task, because a task sized past its budget returns partial content
@@ -116,6 +150,7 @@ def run_version(
     self: Any,
     *,
     org_id: str,
+    job_id: str,
     source_version_id: str,
     ingest_key: str,
     traceparent: str | None = None,
@@ -135,6 +170,10 @@ def run_version(
 
     The shape, in order, none of it optional:
 
+    0. `job_id` is the SUBMISSION's, threaded from `prepare_item` and never re-read from
+       `source_items.current_job_id`. Laravel compares the two and answers a mismatch with
+       `stale_job` — a 200 with `applied: false` — so a run that reported under the current
+       job id would have its frames applied as if it were the reprocess that superseded it.
     1. New root span, linked to `traceparent` from the payload. Attributes: `kb.org_id`,
        `kb.operation`, `kb.job_id`, `messaging.redelivered`.
     2. Bump the durable delivery counter; past `MAX_DELIVERIES`, fail the version and
@@ -163,7 +202,236 @@ def run_version(
     Returns nothing, and the return value is discarded: there is no result backend, and job
     state lives in PostgreSQL and the Laravel callbacks.
     """
-    raise NotImplementedError
+    clients = worker_clients()
+    started = time.monotonic()
+
+    with runner.root_span(
+        "kb.ingest.run_version",
+        traceparent=traceparent,
+        attributes={
+            "kb.org_id": org_id,
+            "kb.operation": "ingestion.run",
+            "kb.job_id": source_version_id,
+            "messaging.redelivered": bool(getattr(self.request, "delivery_info", {}) or {}),
+        },
+    ) as span:
+        try:
+            run_in_worker(
+                runner.run_one_version(
+                    clients=clients,
+                    org_id=org_id,
+                    job_id=job_id,
+                    source_version_id=source_version_id,
+                    ingest_key=ingest_key,
+                    deadline=lambda: SOFT_TIME_LIMIT
+                    - DEADLINE_RESERVE_SECONDS
+                    - (time.monotonic() - started),
+                    max_deliveries=MAX_DELIVERIES,
+                    lock_ttl_seconds=LOCK_TTL_SECONDS,
+                    claim_ttl_seconds=IDEMPOTENCY_TTL_SECONDS,
+                )
+            )
+        except Ignore:
+            # Already terminal: the version was failed and reported inside the runner. Re-raising
+            # anything else here would re-enter the retry path the runner just left.
+            raise
+        except BaseException as exc:
+            failure = runner.classify(exc)
+            span.set_attribute("kb.error_class", failure.error_class.value)
+
+            if not failure.retryable:
+                # A non-retryable class fails the version — reviewable, prior version still
+                # serving — and raises `Ignore()` rather than propagating: propagating puts the
+                # task back on the ladder it is trying to leave.
+                run_in_worker(
+                    runner.fail_version(
+                        clients=clients,
+                        org_id=org_id,
+                        job_id=job_id,
+                        source_version_id=source_version_id,
+                        error_class=failure.error_class,
+                    )
+                )
+                raise Ignore from exc
+
+            # RELEASE THE CLAIM BEFORE RETRYING, and this ordering is the whole of it: the retry
+            # must be able to RECLAIM the key, and a claim held across the countdown makes every
+            # retry a no-op that looks like a successful replay.
+            run_in_worker(
+                runner.release_claim(clients=clients, org_id=org_id, ingest_key=ingest_key)
+            )
+            raise self.retry(
+                exc=exc,
+                countdown=runner.backoff(
+                    attempt=self.request.retries, cap=RETRY_BACKOFF_MAX_SECONDS
+                ),
+            ) from exc
+
+
+@celery_app.task(  # type: ignore[misc]
+    bind=True,
+    name="kb.ingest.prepare_item",
+    queue="ingest",
+    soft_time_limit=PREPARE_SOFT_TIME_LIMIT,
+    time_limit=PREPARE_HARD_TIME_LIMIT,
+    max_retries=None,
+)
+def prepare_item(
+    self: Any,
+    *,
+    org_id: str,
+    job_id: str,
+    source_id: str,
+    item: dict[str, Any],
+    force_nonce: str | None = None,
+    traceparent: str | None = None,
+) -> None:
+    """Establish one item's version identity, then dispatch the run that does the work.
+
+    **The seam's step 0.** `app/ingestion/intake.py` explains at length why this phase exists
+    and why it is short; the summary is that Laravel creates `source_versions` from a callback
+    carrying six components only this service can compute, so nothing can be written against a
+    version until one round trip has happened.
+
+    ITS OWN TIME LIMITS, MUCH SHORTER THAN THE RUN'S. This task reads configuration, makes one
+    five-string probe call and posts one frame. Nothing here is per-page or per-chunk, so
+    inheriting the 900 s document budget would mean a wedged provider call holds an `ingest`
+    slot for fifteen minutes while doing none of the work that budget was sized for.
+
+    A DURABLE REDELIVERY BOUND, AND IT IS NOT AN IDEMPOTENCY CLAIM. The two are easy to confuse
+    and do opposite things: a claim stops a SECOND copy running concurrently, and the counter
+    stops an ENDLESS SERIES of copies running one after another. This task takes the second and
+    refuses the first, for the reason in the next paragraph. `docs/22` § Q9 is the entry that
+    asked whether the pre-identity phase should have the counter at all; it should, and the
+    reason it did not was that the counter used to live on a row this phase has not created yet.
+
+    NO IDEMPOTENCY CLAIM, DELIBERATELY. The claim belongs to the run and is keyed on the ingest
+    key, which does not exist until this task has finished computing it. A claim taken here
+    would have to be released before `run_version` could take its own, and a redelivery landing
+    in that window would find a prepared item and do nothing with it — the version would sit at
+    `parsing` forever with no worker attached. Repetition is safe instead: the identity is a
+    pure function of content and configuration, so a second delivery resolves to the same row.
+
+    A DUPLICATE DISPATCH IS ALSO SAFE, and that is what makes the previous paragraph affordable:
+    two `run_version` messages for one version race for the claim `run_one_version` takes, and
+    the loser returns without doing anything.
+    """
+    clients = worker_clients()
+
+    with runner.root_span(
+        "kb.ingest.prepare_item",
+        traceparent=traceparent,
+        attributes={
+            "kb.org_id": org_id,
+            "kb.operation": "ingestion.prepare",
+            "kb.job_id": job_id,
+            "messaging.redelivered": bool(getattr(self.request, "delivery_info", {}) or {}),
+        },
+    ) as span:
+        # ── THE PRE-IDENTITY REDELIVERY BOUND (`docs/22` § Q9) ────────────────────────────────
+        #
+        # This task carries `max_retries=None` and there is no version row to hold a counter, so
+        # a payload that fails retryably on every delivery retried forever with no durable memory
+        # of having done so — the exact case a durable counter exists for, in the one phase that
+        # did not have one. The counter is keyed on the JOB and the ITEM rather than on a version,
+        # because that is the unit being redelivered here; `app/ingestion/deliveries.py` explains
+        # why the store is Valkey and why that is what made this bound possible at all.
+        #
+        # PAST THE CAP THERE IS STILL NOTHING TO REPORT, and that asymmetry with `run_version` is
+        # deliberate rather than an omission: no `source_versions` row exists, so there is no
+        # `fail_version` to call and no frame to send. The item stays at `queued` — an admin sees
+        # a source that did not start — and the log line below is the whole of the operator's
+        # signal, for the same reason § R7 gave.
+        deliveries = run_in_worker(
+            deliveries_counter.bump(
+                clients.cache,
+                org_id=org_id,
+                scope=deliveries_counter.prepare_scope(job_id=job_id, item_id=str(item.get("id"))),
+            )
+        )
+        span.set_attribute("kb.ingest.delivery_count", deliveries)
+        if deliveries > MAX_DELIVERIES:
+            logger.error(
+                "ingestion prepare abandoned",
+                extra={
+                    "org_id": org_id,
+                    "job_id": job_id,
+                    "source_id": source_id,
+                    "delivery_count": deliveries,
+                    "max_deliveries": MAX_DELIVERIES,
+                },
+            )
+            span.set_attribute("kb.ingest.prepare_outcome", "abandoned")
+            raise Ignore
+
+        try:
+            prepared = run_in_worker(
+                intake.prepare_item(
+                    clients=clients,
+                    org_id=org_id,
+                    job_id=job_id,
+                    source_id=source_id,
+                    item=intake.SubmittedItem(**item),
+                    force_nonce=force_nonce,
+                )
+            )
+        except BaseException as exc:
+            failure = runner.classify(exc)
+            span.set_attribute("kb.error_class", failure.error_class.value)
+            if not failure.retryable:
+                # NO `fail_version` CALL, AND ITS ABSENCE IS THE WHOLE DIFFERENCE FROM
+                # `run_version`. There is no version row yet — that is what this task exists to
+                # create — so there is nothing to mark failed and no `source_version_id` to name
+                # in a frame. The item stays at whatever status it held, which is `queued`, and
+                # an admin sees a source that did not start rather than one that half-ran.
+                #
+                # THE LOG LINE IS THE ONLY THING AN OPERATOR GETS, AND IT WAS MISSING. Because
+                # this branch reports nothing to the control plane, the span attribute above was
+                # the sole record — and a span goes to a collector, which is exactly what is not
+                # running when somebody is trying to work out why a source sits at `queued`. The
+                # first real submission on this stack died here and left `Task ... ignored` from
+                # Celery and nothing else in any log, in either plane (`docs/22` § R7). The
+                # decision to leave the item at `queued` is unchanged; only its visibility is.
+                logger.error(
+                    "ingestion prepare refused",
+                    extra={
+                        "org_id": org_id,
+                        "job_id": job_id,
+                        "source_id": source_id,
+                        "error_class": failure.error_class.value,
+                        # A `KbError`'s message is OURS — written in this repository, and the
+                        # ingestion refusals are sentences meant to be read by an operator. Any
+                        # other exception contributes its TYPE only: `str()` on an arbitrary
+                        # third-party exception can carry a credential, a connection string or
+                        # raw upstream provider text, and Non-negotiable 9 has no ingestion
+                        # exemption.
+                        "reason": str(exc) if isinstance(exc, KbError) else type(exc).__name__,
+                    },
+                )
+                raise Ignore from exc
+            raise self.retry(
+                exc=exc,
+                countdown=runner.backoff(
+                    attempt=self.request.retries, cap=RETRY_BACKOFF_MAX_SECONDS
+                ),
+            ) from exc
+
+        if prepared.source_version_id is None:
+            # `live_version_unchanged`, or a frame the control plane refused. Either way there
+            # is no work and dispatching would be the expensive mistake — see `intake`.
+            span.set_attribute("kb.ingest.prepare_outcome", prepared.reason or "not_applied")
+            return
+
+        span.set_attribute("kb.ingest.prepare_outcome", "dispatched")
+        run_version.apply_async(
+            kwargs={
+                "org_id": org_id,
+                "job_id": job_id,
+                "source_version_id": prepared.source_version_id,
+                "ingest_key": prepared.ingest_key,
+                "traceparent": traceparent,
+            },
+        )
 
 
 @celery_app.task(  # type: ignore[misc]
@@ -201,7 +469,38 @@ def ocr_page_batch(
     per-page result is `disposition="partial"`, which is deliberately not one of the four
     shared `outcome` values because a partial page must not read as a failed job.
     """
-    raise NotImplementedError
+    if len(page_numbers) > OCR_PAGES_PER_TASK:
+        # Refused rather than trimmed. A task sized past its budget returns partial content and
+        # publishes as a minor warning — which is the failure this cap exists to prevent, so
+        # silently taking the first ten would reproduce it while looking like a guard.
+        raise KbError(
+            ErrorClass.VALIDATION,
+            f"{len(page_numbers)} pages exceeds OCR_PAGES_PER_TASK={OCR_PAGES_PER_TASK}. "
+            "The fan-out is the caller's to size; trimming here would drop pages silently and "
+            "the version would publish missing exactly the text OCR was run for",
+            retryable=False,
+        )
+
+    clients = worker_clients()
+    with runner.root_span(
+        "kb.ingest.ocr_page_batch",
+        traceparent=traceparent,
+        attributes={
+            "kb.org_id": org_id,
+            "kb.operation": "ingestion.ocr",
+            "kb.job_id": source_version_id,
+            "kb.page_count": len(page_numbers),
+        },
+    ):
+        run_in_worker(
+            runner.ocr_pages(
+                clients=clients,
+                org_id=org_id,
+                source_version_id=source_version_id,
+                page_numbers=tuple(page_numbers),
+                ocr_cfg_version=ocr_cfg_version,
+            )
+        )
 
 
 # TODO(ingestion-engineer): the `kb.embed.*` half of the pipeline — embed a chunk batch, upsert

@@ -2,6 +2,27 @@ import { defineConfig, devices } from '@playwright/test';
 
 const baseURL = process.env.KB_WEB_BASE_URL ?? 'http://localhost:3000';
 
+/**
+ * The origin the BROWSER calls Laravel on, inlined into the bundle by `webServer` below.
+ *
+ * `http://api.invalid` is the default and stays the default: `.invalid` is reserved by RFC 2606 and
+ * never resolves, so a spec that reaches the network fails on DNS instead of quietly talking to a
+ * host that happens to exist. That property is the reason this value was a literal.
+ *
+ * IT COULD NOT STAY A LITERAL, and the reason is the `setup` project three blocks down. `auth.setup.ts`
+ * drives the REAL `/login` form, and `src/lib/api/browser.ts` posts it to `NEXT_PUBLIC_API_ORIGIN`
+ * from the browser — there is no server-side proxy on that path (`proxy.ts` is routing and CSP, and
+ * is explicitly not the gate). Pinned to `api.invalid`, every sign-in fails on DNS, `admin.json` is
+ * never written, and all 51 `[admin]` specs skip on the guard they were given. The whole authenticated
+ * half of this config was unreachable by construction, and it read as "no admin credential is set".
+ *
+ * Same-site is a hard requirement, not a preference. Sanctum's SPA flow is cookie-based, so this
+ * origin and `baseURL` must share a registrable domain — `app.<domain>` and `api.<domain>` — or the
+ * browser will not attach `kb_session` to a single XHR and every request answers 401 with nothing
+ * in any log to explain it. `localhost:3000` against `api.example.test:8080` is cross-site.
+ */
+const apiOrigin = process.env.KB_E2E_API_ORIGIN ?? 'http://api.invalid';
+
 export default defineConfig({
   testDir: './tests/e2e',
   // Without fullyParallel, --shard assigns whole FILES and the shards imbalance badly.
@@ -69,9 +90,8 @@ export default defineConfig({
     reuseExistingServer: !process.env.CI,
     timeout: 180_000,
     // `src/lib/env.ts` validates this at MODULE LOAD, so `next build` dies on a zod error before a
-    // single spec runs without it. `.invalid` is reserved by RFC 2606 and never resolves, ON PURPOSE
-    // — the same choice vitest.config.ts makes: a spec that reaches the network fails on DNS rather
-    // than quietly talking to a host that happens to exist.
-    env: { NEXT_PUBLIC_API_ORIGIN: 'http://api.invalid' },
+    // single spec runs without it. See `apiOrigin` at the top of this file for why the default is
+    // `http://api.invalid` and what has to be true of the value that replaces it.
+    env: { NEXT_PUBLIC_API_ORIGIN: apiOrigin },
   },
 });

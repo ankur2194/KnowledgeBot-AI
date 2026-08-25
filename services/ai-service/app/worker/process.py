@@ -74,6 +74,12 @@ logger = logging.getLogger(__name__)
 _loop: asyncio.AbstractEventLoop | None = None
 _clients: RuntimeClients | None = None
 
+#: This child's outbound callback transport, installed beside the clients and closed with them.
+#: Held here rather than on `RuntimeClients` because it is the WORKER's alone: the API process
+#: opens the same pools and never signs a callback, and putting an `httpx.Client` on the shared
+#: record would give it one it must not use.
+_callback_emitter: Any = None
+
 #: The queue whose worker parses documents, and therefore the only one where the OCR engine
 #: assertion applies. Named here rather than inferred: ``app/worker/config.py`` routes
 #: ``kb.ingest.*`` to it.
@@ -243,7 +249,7 @@ class OcrEngineAssertionStep(bootsteps.Step):  # type: ignore[misc]
 
 def _on_process_init(**kwargs: Any) -> None:
     """Build everything this prefork child owns. See the module docstring for the ordering."""
-    global _loop, _clients
+    global _loop, _clients, _callback_emitter
 
     # Telemetry first, so that anything the client construction below logs already carries a
     # trace id, and so a failure while opening a pool is itself a span.
@@ -256,7 +262,18 @@ def _on_process_init(**kwargs: Any) -> None:
     # `asyncio.get_event_loop()` must find the same loop the clients were opened on, or it
     # creates a second one and the pool's connections belong to neither.
     asyncio.set_event_loop(_loop)
-    _clients = _loop.run_until_complete(open_runtime_clients(get_settings()))
+    settings = get_settings()
+    _clients = _loop.run_until_complete(open_runtime_clients(settings))
+
+    # THE CALLBACK TRANSPORT, AND IT IS NOT OPTIONAL FOR AN INGEST WORKER. Without it every
+    # run reaches the end of the pipeline and raises at the last statement: `report_readiness`
+    # refuses to no-op, because a verified point set that was never reported is invisible to
+    # retrieval AND to deletion, forever. Installed here rather than lazily at first use so a
+    # misconfigured ring fails the child at startup, next to the key-ring error that explains
+    # it, rather than fifteen minutes into a document.
+    from app.ingestion.callback import install_emitters
+
+    _callback_emitter = install_emitters(settings=settings, key_ring=_clients.key_ring)
 
 
 def _on_process_shutdown(**kwargs: Any) -> None:
@@ -266,7 +283,14 @@ def _on_process_shutdown(**kwargs: Any) -> None:
     meant to carry. ``otel.shutdown()`` is required here and optional in the API — see its
     docstring for the ``os._exit`` reason.
     """
-    global _loop, _clients
+    global _loop, _clients, _callback_emitter
+
+    if _callback_emitter is not None:
+        try:
+            _callback_emitter.close()
+        except Exception:
+            logger.warning("the callback emitter did not close cleanly", exc_info=True)
+        _callback_emitter = None
 
     if _clients is not None and _loop is not None:
         try:

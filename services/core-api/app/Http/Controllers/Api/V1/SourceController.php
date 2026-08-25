@@ -388,10 +388,13 @@ final class SourceController extends Controller
         description: 'The source after phase 1, wrapped in `data`: `status` is `deleting`, '
             .'`deleted_at` is set, and `purged_at` is still null because nothing has been PROVEN '
             .'removed yet. PostgreSQL records the removal immediately and no job has to succeed for '
-            .'that to be true — but NOTHING IN THIS DEPLOYMENT YET PERFORMS THE RETRIEVAL '
-            .'EXCLUSION: `source_status` is a Qdrant payload field written at upsert, and the '
-            .'resolved active-version set that would make the exclusion immediate is not built on '
-            .'this side either. See the `TODO(phase-c)` markers on `SourceService::disable()`. '
+            .'that to be true. THE RETRIEVAL EXCLUSION FOR A DELETE BELONGS TO THE PURGE, NOT TO A '
+            .'PAYLOAD REWRITE: `source_status` is a Qdrant payload field written at upsert, and '
+            .'the queued `source.status.sync` operation that rewrites it on disable and enable is '
+            .'deliberately NOT dispatched here — a deleted source\'s points are removed outright by '
+            .'phase 2 rather than relabelled, and rewriting a payload on points that are about to '
+            .'be deleted would race the purge for no benefit. Until phase 2 runs and is verified, '
+            .'exclusion rests on the active-version resolution the chat path will carry. '
             .'409 when the organization is not active; 422 when the source has no legal edge to '
             .'`deleting`, which includes a second delete of the same row.',
         errors: [401, 403, 404, 409, 422, 429, 500, 503],

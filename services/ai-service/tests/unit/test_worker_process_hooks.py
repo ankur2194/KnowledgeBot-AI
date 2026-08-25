@@ -17,6 +17,11 @@ from celery import signals
 
 from app.worker import process
 
+#: A STAND-IN WITH A `key_ring`, not the bare string it used to be. `_on_process_init` reads
+#: that attribute to build the callback transport, so a stub without one fails on the attribute
+#: rather than on anything this file is about.
+STUB_CLIENTS = SimpleNamespace(key_ring="key-ring")
+
 # ─────────────────────────────────────────────────────────────────────────────
 # The three signals
 # ─────────────────────────────────────────────────────────────────────────────
@@ -136,7 +141,7 @@ def child(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         def run_until_complete(self, coro: Any) -> Any:
             coro.close()
             order.append("ran-on-the-child-loop")
-            return "clients"
+            return STUB_CLIENTS
 
         def close(self) -> None:
             order.append("loop-closed")
@@ -156,25 +161,48 @@ def child(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     monkeypatch.setattr(process, "get_settings", lambda: "settings")
 
     async def _open(settings: Any) -> Any:
-        return "clients"
+        return STUB_CLIENTS
 
     async def _close(clients: Any) -> None:
         order.append("clients-closed")
 
     monkeypatch.setattr(process, "open_runtime_clients", _open)
     monkeypatch.setattr(process, "close_runtime_clients", _close)
+
+    # THE CALLBACK TRANSPORT IS PART OF THE CHECKLIST NOW. It is patched on its own module
+    # because `_on_process_init` imports it locally — deferring the import keeps `app.ingestion`
+    # out of every process that reads worker configuration — so patching `process` would miss it
+    # and the hook would build a real `httpx.Client` against a fake key ring.
+    from app.ingestion import callback as callback_module
+
+    class _Emitter:
+        def close(self) -> None:
+            order.append("emitter-closed")
+
+    def _install(*, settings: Any, key_ring: Any) -> Any:
+        order.append("emitters-installed")
+        return _Emitter()
+
+    monkeypatch.setattr(callback_module, "install_emitters", _install)
     monkeypatch.setattr(process, "_loop", None)
     monkeypatch.setattr(process, "_clients", None)
+    monkeypatch.setattr(process, "_callback_emitter", None)
     return order
 
 
-def test_process_init_does_all_four_things_and_in_this_order(child: list[str]) -> None:
+def test_process_init_does_all_five_things_and_in_this_order(child: list[str]) -> None:
     """A function that exists and is called by nothing is the shape of finding #54.
 
     Telemetry FIRST, so anything the rest logs already carries a trace id and a failure while
     opening a pool is itself a span. Everything else after ``fork()``, because that is the only
     correct point: a ``BatchSpanProcessor`` thread does not survive a fork and a pool opened
     before one hands two processes the same sockets.
+
+    THE FIFTH STEP IS THE CALLBACK TRANSPORT, and it is asserted here rather than trusted
+    because forgetting it is silent until the very end of a run: `publish.report_readiness`
+    refuses to no-op, so a worker with no emitter parses, chunks, embeds, indexes and verifies a
+    whole document and then raises at the last statement — every time, on every document, with a
+    complete and correct point set on disk that nothing will ever activate.
     """
     process._on_process_init()
 
@@ -182,8 +210,9 @@ def test_process_init_does_all_four_things_and_in_this_order(child: list[str]) -
         "configure:{'in_worker': True}",
         "bomb-promoted",
         "ran-on-the-child-loop",
+        "emitters-installed",
     ]
-    assert process.worker_clients() == "clients"
+    assert process.worker_clients() is STUB_CLIENTS
 
 
 def test_process_shutdown_closes_the_clients_and_then_flushes_telemetry(
@@ -200,7 +229,14 @@ def test_process_shutdown_closes_the_clients_and_then_flushes_telemetry(
 
     process._on_process_shutdown()
 
-    assert child == ["ran-on-the-child-loop", "loop-closed", "otel-shutdown"]
+    # The emitter's HTTP client goes FIRST, before the loop it never ran on is closed, and
+    # telemetry LAST because closing the clients emits the lines this flush is meant to carry.
+    assert child == [
+        "emitter-closed",
+        "ran-on-the-child-loop",
+        "loop-closed",
+        "otel-shutdown",
+    ]
 
 
 def test_a_task_in_a_process_that_never_ran_process_init_gets_a_message_naming_the_cause(

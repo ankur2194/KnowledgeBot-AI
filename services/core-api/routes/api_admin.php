@@ -362,9 +362,11 @@ Route::middleware(['auth:sanctum', 'surface:admin', 'org.member', 'verified', 't
          * publish guard, the row lock and the audit row are the same code on both paths. The guard
          * evaluates the RESULTING state rather than the transition, which is what makes "clear the
          * model on an already-published bot" refuse by the same check that refuses "publish a
-         * model-less draft" — and its third refusal, "no assigned source", is still missing because
-         * `bot_source_assignments` is Phase C's table. The `TODO(phase-c)` in
-         * `BotService::assertPublishable()` stays.
+         * model-less draft" — and all THREE of its refusals are live. The third, "no assigned
+         * source", was missing while `bot_source_assignments` did not exist; Phase C landed that
+         * table, the marker came out with it, and the refusal is
+         * `BotService::PUBLISH_NEEDS_ASSIGNED_SOURCE`. It counts ENABLED assignments rather than
+         * assignments, because a grant switched off grants nothing.
          *
          * A SINGLE-ACTION CONTROLLER because `arch()->preset()->laravel()` limits a controller's
          * public methods to the seven resource verbs plus `__construct`, `__invoke` and

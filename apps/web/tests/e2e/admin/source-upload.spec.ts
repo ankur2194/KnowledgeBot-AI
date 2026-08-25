@@ -1,29 +1,35 @@
-import { existsSync } from 'node:fs';
-
-import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
+
+import { scan, skipWithoutAdminSession, summarize } from './harness';
 
 /**
  * `@axe-core/playwright` on `/sources/upload`, plus the keyboard-only walk a scanner cannot make.
  *
- * ══════════════════════════════════════════════════════════════════════════════════════════════
- * THIS FILE HAS NEVER BEEN EXECUTED. NOT ONCE, NOT PARTIALLY.
- * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * ── FIRST EXECUTED 2026-08-24 ──────────────────────────────────────────────────────────────────
  *
- * Same standing as `sources.spec.ts` and `bots.spec.ts` beside it, and for the same reason: there is
- * no browser session and no Laravel in the environment that wrote it, so every selector below was
- * read out of the components rather than observed. Treat a first red run as "the spec is wrong" at
- * least as readily as "the page is wrong". Nothing here may be cited as evidence that this route is
- * accessible; what it is, is the walk written down so the first person with a stack RUNS it instead
- * of designing it.
+ * The banner here used to read "THIS FILE HAS NEVER BEEN EXECUTED. NOT ONCE, NOT PARTIALLY", and
+ * that stopped being true on 2026-08-24. `./harness.ts` carries the account of that run — the
+ * stack, the browser, and the four different reasons thirteen specs went red on it.
  *
- * ── WHY IT IS COMMITTED ANYWAY, AND WHY IT SKIPS ITSELF ──────────────────────────────────────────
- * The `admin` Playwright project has a `storageState` and a `setup` dependency, and no `*.setup.ts`
- * exists to write `playwright/.auth/admin.json`. A project whose `storageState` file is missing does
- * not skip — it ERRORS at context creation, once per test — so an unguarded file turns `pnpm
- * web:e2e` from "runs the public project" into a wall of errors. `test.skip(condition, reason)` at
- * file scope is evaluated at DECLARATION time, before any fixture is requested, so no context is
- * created and no storageState is read.
+ * Same origin as `sources.spec.ts` and `bots.spec.ts` beside it: written with no browser session and
+ * no Laravel, so every selector below was read out of the components rather than observed. This is
+ * the file the first run was hardest on — five of its tests failed on the harness and one on a real
+ * focus bug in the app — and all of them pass now.
+ *
+ * ── THE SETUP EXISTS NOW, AND THIS FILE SKIPS WHEN NO SESSION WAS MINTED ───────────────────────
+ *
+ * This paragraph used to say NO `*.setup.ts` existed to write `playwright/.auth/admin.json` and that
+ * writing one was the control plane's call rather than a test file's. `tests/e2e/auth.setup.ts` is
+ * that file, and it decides nothing: the credential is `KB_E2E_ADMIN_EMAIL` /
+ * `KB_E2E_ADMIN_PASSWORD` from the environment, set by a human who ran `kb:bootstrap-organization`
+ * and completed the ordinary password-reset flow.
+ *
+ * THE FILE-SCOPE GUARD STAYS AND IS NOW EXACT. A Playwright project whose `storageState` path is
+ * missing does not skip — it ERRORS at context creation, once per test — so an unguarded file turns
+ * `pnpm web:e2e` from "runs the public project" into a wall of errors.
+ * `skipWithoutAdminSession()` is evaluated at DECLARATION time, before any fixture is requested, so
+ * no browser context is created and no storageState is read; and the setup DELETES a stale state
+ * file when it skips, so the predicate is true if and only if this run authenticated.
  *
  * ── WHAT THIS ROUTE HAS THAT NO OTHER ADMIN SCREEN DOES ─────────────────────────────────────────
  *
@@ -50,26 +56,7 @@ import { expect, test, type Page } from '@playwright/test';
  * mouse unplugged and a human with a screen reader, and neither has happened for this screen.
  */
 
-/** Relative to `apps/web`, matching `playwright.config.ts`'s `storageState` for the admin project. */
-const ADMIN_STORAGE_STATE = 'playwright/.auth/admin.json';
-
-test.skip(
-  !existsSync(ADMIN_STORAGE_STATE),
-  `${ADMIN_STORAGE_STATE} does not exist, so no admin session can be restored. It is written by the ` +
-    "`setup` project, whose `*.setup.ts` has not been written — see this file's header. Running " +
-    'these without it is an error per test, not a skip, which is why the whole file opts out here.',
-);
-
-/** `disableRules` is EMPTY and stays that way. A rule turned off to make a run green is a violation
- *  that has been renamed; a genuine false positive is excluded by SELECTOR, with a comment. */
-const scan = (page: Page) =>
-  new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa']);
-
-const summarize = (violations: Awaited<ReturnType<AxeBuilder['analyze']>>['violations']) =>
-  violations.map(
-    (violation) =>
-      `${violation.id} (${violation.impact}): ${violation.help}\n    ${violation.nodes[0]?.target.join(' ')}`,
-  );
+skipWithoutAdminSession();
 
 /** Two files whose names share no substring, because role and text matching are both substring
  *  matches and a nesting pair makes every row locator ambiguous. */
@@ -310,8 +297,14 @@ test.describe('the keyboard-only walk, which a scanner cannot make', () => {
     test.skip((await picker(page).count()) === 0, 'no form for this account');
 
     // Nothing chosen: `.min(1)` is the batch rule that always exists.
-    await page.getByRole('button', { name: 'Upload files' }).click();
-
+    //
+    // THERE IS NO CLICK HERE, AND THERE USED TO BE ONE. It read
+    //     await page.getByRole('button', { name: 'Upload files' }).click();
+    // on the line above the assertion that the same button is DISABLED — and Playwright's click
+    // waits for actionability, so it spent the full timeout waiting for a control this test exists
+    // to prove stays disabled, then failed. The two lines contradicted each other and the comment
+    // below already said which one was right: the disabled state IS the affordance.
+    //
     // The submit is disabled with nothing chosen, so this asserts what the SCREEN does rather than
     // what the resolver would say — the disabled state is the affordance, and the message below is
     // what a keyboard user gets if they reach the control anyway.

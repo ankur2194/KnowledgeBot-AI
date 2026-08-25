@@ -6941,7 +6941,7 @@ common shape rather than a coincidence: a schema landing for the first time make
 about the absence of that schema go false at once, and every one of them lives behind a boundary this
 agent does not cross.
 
-### P1 — `postgresql-patterns` line 52 specifies `bytea` for `content_hash`, and ADR-065 overrules it *(OPEN — owed by the skill's owner)*
+### P1 — `postgresql-patterns` line 52 specifies `bytea` for `content_hash`, and ADR-065 overrules it *(CLOSED 2026-08-25 — the skill was corrected)*
 
 ```bash
 grep -n 'content_hash' .claude/skills/postgresql-patterns/SKILL.md
@@ -6971,7 +6971,15 @@ divergence and then corrected **by the skill's owner**, not by the document that
 second such divergence in the register and the first one still open, so `postgresql-patterns` and
 `docs/19` disagree in writing until it closes; the migrations follow ADR-065 meanwhile.
 
-### P2 — `app/deletion/relational.py`'s docblock says no migration creates `chunks` or `document_elements` *(OPEN — owed by `deletion-engineer`)*
+
+**Closed 2026-08-25.** `postgresql-patterns`' runnable DDL now reads `content_hash char(64) COLLATE
+"C" NOT NULL` and carries `source_versions_content_hash_is_hex` beside it, so the skill's example and
+the shipped migration are the same text. A paragraph after the block states the rule the disagreement
+was really about — **who reads the column** — because "use `bytea` for binary" was not wrong, it was
+being applied to the one class of value that crosses two runtimes and a storage path. Credential
+ciphertext is still `bytea` and the gotcha saying so is untouched.
+
+### P2 — `app/deletion/relational.py`'s docblock says no migration creates `chunks` or `document_elements` *(CLOSED 2026-08-25 — the docblock was swept)*
 
 ```bash
 sed -n '188,197p' services/ai-service/app/deletion/relational.py
@@ -6984,6 +6992,11 @@ worth a row: the two entries' column names — `organization_id`, `source_versio
 against a real migration for the first time, and the docblock currently tells a reader not to bother.
 It is the same claim-shape the 2026-08-17 sweep chased across five trees (§ **M6**): a comment that
 was true when written, describing an absence, with nothing watching for the absence ending.
+
+
+**Closed 2026-08-25.** The preamble no longer claims no migration creates either table, and the
+column names in the two entries are now checkable against a real schema — which is the half of this
+finding that was worth something. Same sweep as § **Q16**.
 
 ### P3 — nothing compares the status CHECK constraints to `SourceState` *(CLOSED 2026-08-21 — and the test found a **fourth** definition nobody had listed)*
 
@@ -7045,11 +7058,20 @@ different fact of the same kind — a source is org-owned and bot assignment hap
 the header set. **None of the three is a preference and none had a second viable option**, which is
 why the interesting content in all three is the rejected list rather than the decision line.
 
-**All three contradict an accepted skill, and not one of the corrections has landed.** ADR-066
-overrules `seaweedfs-s3` (and `kb-tenancy-isolation`, which restates the same prefix); ADR-067 and
-ADR-068 both overrule `kb-internal-api-contracts`, in two different rows. With ADR-065's § P1 still
-open and § Q12 found while writing ADR-066, the register now carries **four** open skill divergences
-— § P1, § Q11, § Q12, § Q13 — against one closed precedent, § J7. That ratio is worth watching. The
+**All three contradict an accepted skill, and when this was written not one of the corrections had
+landed.** ADR-066 overrules `seaweedfs-s3` (and `kb-tenancy-isolation`, which restates the same
+prefix); ADR-067 and ADR-068 both overrule `kb-internal-api-contracts`, in two different rows. With
+ADR-065's § P1 also open and § Q12 found while writing ADR-066, the register carried **four** open
+skill divergences — § P1, § Q11, § Q12, § Q13 — against one closed precedent, § J7.
+
+**All four were corrected on 2026-08-25, and the backlog is what the correction pass justified.**
+Doing them together rather than one at a time is what surfaced the two sites no finding had listed —
+`kb-security-baseline/references/file-upload-safety.md` telling an implementer to hand-build a key
+with a `versions/` segment in it, and `kb-internal-api-contracts`' own non-negotiable and gotcha
+repeating the wrong-key error the entry had found only in a table row. Neither was reachable from the
+entry that named the file; both were reachable from the *rule*. **That is the argument against
+draining this queue one row at a time**, and it is worth more than the ratio. Do not read the count
+from this paragraph either — the measuring grep is below and it is the authority. The
 convention (*report the divergence, let the owner correct it*) was designed for the occasional case,
 and it is no longer occasional: `grep -n "^### .*owed by the skill" 22-spec-findings-and-decisions.md`
 re-measures it — anchored to the heading on purpose, because an unanchored pattern matches this
@@ -7071,17 +7093,27 @@ taken here deliberately rather than skipped, for the reason § L1's preamble rec
 already had one ADR amendment cite a finding letter that meant something else.
 
 **They are ordered by kind rather than by severity**, because the four closed ones share a shape and
-reading them together is the point: Q1–Q4 are closed defects; Q5, Q6 and **Q15** are rules whose only
-remaining enforcement is a sentence; Q7, Q8, Q11–Q13 and **Q16** are obligations owed to trees
+reading them together is the point: Q1–Q4 are closed defects; Q5, Q6 and **Q15** were rules whose only
+remaining enforcement was a sentence; Q7, Q8, Q11–Q13 and **Q16** are obligations owed to trees
 `docs/` does not own; Q9 is an open question; Q10 is a gap accepted with its disclosure on the wire;
 Q14 was written before its answer and **answered on 2026-08-21 in a way neither option allowed for**.
 Each row's own status line is the authority.
 
+**Every row in this section except Q10 was closed or answered on 2026-08-25, and two of them turned
+out to be describing live defects rather than missing mechanisms** — § Q5's second failure mode was
+happening (§ **S1**) and § Q8's predicted divergence had already landed (§ **S2**). Read those two
+closing notes before the rest: they are the evidence for this file's recurring claim that *a rule
+whose only enforcement is a sentence is not weakly enforced, it is unenforced*.
+
 **Q14 and Q15 are one episode and should be read in that order.** Q14 is the failing test; Q15 is
 what the investigation of it found underneath — most of an arch preset enforcing nothing while
-reporting nothing. **Q15 is the largest single loss of enforcement recorded in this file**, larger
+reporting nothing. **Q15 was the largest single loss of enforcement recorded in this file**, larger
 than any individual item in § *Removing CI/CD*, and unlike those it was never announced: it arrived
-with a `require-dev` package.
+with a `require-dev` package. It also *left* without being announced — see its closing note, where
+re-measurement on 2026-08-25 found the preset enforcing again because of a Composer setting nobody
+connected to it. An enforcement gap that can open and close silently is worse than one that stays
+open, and the tripwire now in `tests/Arch/AutoloaderIntegrityTest.php` exists to make it audible in
+both directions.
 
 ### Q1 — an invalid-UTF-8 filename walked the whole intake gate, and the object it orphaned is one verification certifies clean *(CLOSED — `9cae289`)*
 
@@ -7172,7 +7204,7 @@ the control plane, nothing on either plane could tell those from real codes.
 seam where the producer does not exist yet, so the only reader is a future author who will conclude
 the wire is what the FormRequest accepts.
 
-### Q5 — `ALLOWED_TABLES` has no runtime guard at all, and `CLAUDE.md` described it in language that reads as a mechanism *(OPEN — no mechanism exists; the document is corrected)*
+### Q5 — `ALLOWED_TABLES` has no runtime guard at all, and `CLAUDE.md` described it in language that reads as a mechanism *(CLOSED 2026-08-25 — both halves now have one, and the second half had already been violated)*
 
 ```bash
 grep -rn 'ALLOWED_TABLES' services/ --include=*.py --include=*.php | grep -v tests/
@@ -7201,7 +7233,25 @@ statements out of the tree, and *nothing* is a data-plane decision, and there is
 guard yet — the psycopg calls are still a `TODO`. Recording it now is the point, because the moment
 the first statement lands is the moment the choice stops being free.
 
-### Q6 — C1 made `publish.py`'s hypothetical rule reachable, and the one live mechanism is the trap rather than the guard *(OPEN — no enforcement)*
+
+**Closed 2026-08-25, and the closing found the violation.** This entry named two indistinguishable
+failures: admitting a wrong name, and writing a statement against a name that was never admitted.
+`assert_writable` in `writes.py` covers uses inside that module. **The second was live** — see § **S1**,
+the data plane's `UPDATE source_versions`, in the tree for days through a green suite.
+
+`tests/unit/test_write_allow_list_scan.py` covers it now by reading the whole data plane as an AST:
+every `INSERT INTO` / `DELETE FROM` / `UPDATE … SET` target must be in `ALLOWED_TABLES`, with the
+gate resolved **per function** so `assert_writable` in one function cannot launder the same name in
+another. Docstrings are excluded structurally and comments never enter an AST, so prose describing an
+illegal statement is not a finding — this register would otherwise trip it. Four positive controls,
+because a scan that can only pass is this entry's own complaint in a test's clothing.
+
+The first failure — admitting a wrong name to the tuple — is **still a review decision with no
+mechanical backstop**, and that is unchanged and deliberate: no test can know whether a new name
+satisfies ADR-033's three properties. What is new is that the tuple is now load-bearing rather than
+advisory, so getting it wrong is at least a decision someone made.
+
+### Q6 — C1 made `publish.py`'s hypothetical rule reachable, and the one live mechanism is the trap rather than the guard *(CLOSED 2026-08-25 — the tripwire rides on § Q5's scan)*
 
 `services/ai-service/app/ingestion/publish.py` opens **"THIS SERVICE NEVER ASSIGNS THE ACTIVE-VERSION
 POINTER."** Before Phase C1 that rule was unenforced *and unreachable*: `source_items.current_version_
@@ -7228,7 +7278,15 @@ string-level doctrines were converted from deleted CI greps into tests for exact
 a defect today:** nothing writes the column. It is a rule whose only remaining enforcement is a
 sentence, guarding a failure whose symptom is a green dashboard.
 
-### Q7 — the internal ingestion body has no machine-readable schema on either side, and two divergences are already waiting in it *(OPEN — owed by the ingestion router's author)*
+
+**Closed 2026-08-25.** The same AST walk carries a parametrized rule: no statement anywhere in the
+data plane may name `current_version_id`, `activated_at` or `retired_at`. That is narrower than
+"never assign the active-version pointer" and deliberately so — it is the part a scanner can decide,
+and it is the part the trap could not report, because the integrity error fires *inside a retrying
+Celery task while every dashboard stays green*. The database constraint remains the backstop; this is
+the thing that speaks first, in a suite, with the file and line.
+
+### Q7 — the internal ingestion body has no machine-readable schema on either side, and two divergences are already waiting in it *(CLOSED 2026-08-25 — the document exists and is diffed)*
 
 ```bash
 sed -n '74,80p' services/core-api/app/Console/Commands/DumpOpenApiCommand.php
@@ -7265,7 +7323,26 @@ a parse failure or, worse, as a silent coercion:
 a reading of two migrations at this commit and is written out rather than totalled deliberately
 (ADR-036) — a tenth nullable column is a migration away.
 
-### Q8 — the data-plane object-key twin does not exist *(OPEN — owed by `ingestion-engineer`)*
+
+**Closed 2026-08-25.** `app/contracts/internal/spec.py` exports the seam from the live routers and
+`openapi.json` is committed beside it; `--check` regenerates and exits 1 on drift, and
+`tests/contract/test_internal_contract_document.py` runs that check as a test — there is no CI to run
+it as a job, so a generate-and-diff contract in this repository is enforced by a suite or by nobody.
+Seven tests: the drift gate, **a control proving the gate can fail** (a `--check` that always returns
+0 is worse than no check), a refusal for any path outside `/internal/`, `additionalProperties: false`
+reaching the document, and the required-field sets stated per model rather than inferred from a
+sample.
+
+**Both divergences this entry named landed where it predicted.** The timestamp one is resolved by
+making the seam *tolerant* and pinning that tolerance — `Z` and `+00:00` are both valid RFC 3339 and
+the schema is now the fixture source rather than either document; changing the producer was rejected
+because the same `Carbon` call appears in eight **client-facing** resources, so it would be a public
+wire change made to satisfy an internal convention. The nullability one is *recorded as unresolvable
+in this format*: `storage_key IS NULL OR (content_hash IS NOT NULL AND …)` cannot be expressed in a
+flat `Optional[str]`, so the document makes the flat shape explicit and reviewable and says plainly
+that a consumer must not read "nullable" as "independently optional".
+
+### Q8 — the data-plane object-key twin does not exist *(CLOSED 2026-08-25 — written, and it had already broken: § S2)*
 
 ```bash
 ls services/ai-service/app/storage/
@@ -7287,7 +7364,21 @@ as its cost.
 **Owner:** `ingestion-engineer`, with `deletion-engineer` as the reader that breaks first —
 `deletion/tasks.py` already builds both prefixes by hand and documents why.
 
-### Q9 — `delivery_count` is applied only when a version identity exists, so redeliveries during the pre-identity phase are accepted, acknowledged and discarded *(OPEN QUESTION — the answer depends on worker code nobody has written)*
+
+**Closed 2026-08-25, and this entry understated itself.** It recorded an absence. The absence had
+already produced a defect: every pasted-text source was unreadable, because the Python side composed
+only `originalUpload()`'s spelling while `SourceService::storeText()` writes at `originalText()`'s.
+Full record in § **S2** — including why it was invisible, which is that the error message was
+*accurate about the wrong key*.
+
+`app/storage/objects.py` now exists and `tests/contract/test_object_key_cross_language.py` runs the
+PHP class in a container and compares all six methods string-for-string, plus both guards' accept
+**and** refuse matrices. The accept direction is the half this entry did not anticipate and the half
+that strands an object: a Python guard *stricter* than PHP's does not fail safe — Laravel writes the
+key, the row's CHECK accepts it, and this service cannot compose the string to read it back, so the
+bytes are unreachable and the purge never names them either.
+
+### Q9 — `delivery_count` is applied only when a version identity exists, so redeliveries during the pre-identity phase are accepted, acknowledged and discarded *(ANSWERED 2026-08-25 — it was a gap, and the gap was an artifact of where the counter lived)*
 
 `EloquentKnowledgeSourceRepository::…` applies the counter inside `if ($version !== null)`, and
 `$version` is `null` for exactly the frames that carry no identity — a `fetching` frame arrives before
@@ -7316,6 +7407,20 @@ the consumer is being written and expensive to reopen afterwards. **Owner:** `in
 with `control-plane-engineer` if the answer is *gap* (the counter would need somewhere pre-identity
 to live, and `source_items` is the only row that exists then).
 
+
+**Answered 2026-08-25, by the question dissolving rather than by a ruling.** Both readings in this
+entry were defensible *because the counter was tied to a row*, and a `fetching` frame carries no
+identity. Once the counter moved to Valkey — forced by § **S1**, which found the data plane writing a
+Laravel-owned column to maintain it — the constraint disappears: a key does not need the version to
+exist, it needs a **name for the unit of work being redelivered**, and `prepare_item` has one in the
+job and the item.
+
+So the pre-identity phase now carries the same bound as the run
+(`deliveries:{org_id}:prepare:{job_id}:{item_id}`), and it is the phase that needed it most:
+`prepare_item` runs with `max_retries=None` and had no durable memory of anything across worker
+restarts. The two scopes are deliberately different shapes and must not be merged — merging them
+un-bounds the pre-identity phase again, which is what this entry found.
+
 ### Q10 — the published upload-limits shape carries MIME and not extensions, so a picker built from it over-accepts *(ACCEPTED as a disclosed gap)*
 
 `OrgUploadLimits` is `{max_bytes, allowed_mime, max_batch}`. The server admits a file on **two**
@@ -7339,7 +7444,7 @@ second client consumes the component** — a native file picker or the mobile ap
 per-row 422 as gracefully as a drag-and-drop list can, and at that point the disclosure stops being
 sufficient.
 
-### Q11 — `seaweedfs-s3` non-negotiable 1 and line 37 specify a layout ADR-066 departs from *(OPEN — owed by the skill's owner)*
+### Q11 — `seaweedfs-s3` non-negotiable 1 and line 37 specify a layout ADR-066 departs from *(CLOSED 2026-08-25 — corrected in three skills, not the two this entry named)*
 
 ```bash
 grep -n 'versions/{source_version_id}\|same prefix string' .claude/skills/seaweedfs-s3/SKILL.md
@@ -7364,7 +7469,23 @@ will be written from this diagram.
 § J7 precedent: this agent does not edit `.claude/skills/`, because documentation drifting from a
 skill is bad and documentation silently rewriting one is worse.
 
-### Q12 — `derived/snapshot/` is classified irreplaceable and swept unconditionally, by the same skill *(OPEN — owed by the skill's owner and `deletion-engineer`; found by writing ADR-066, not by Phase C)*
+
+**Closed 2026-08-25.** `seaweedfs-s3` non-negotiable 1, its layout diagram, the split justification
+at old line 37, the key helpers, the purge signature and two Definition-of-done lines are all rewritten
+to ADR-066; `kb-tenancy-isolation`'s namespace line follows, keeping only the part that skill owns
+(**the org segment is first and no key may omit it**).
+
+**A third site was found that this entry did not list**, and it is the one that would have done the
+damage: `kb-security-baseline/references/file-upload-safety.md` told an implementer to build
+`org/{org_id}/sources/{source_id}/versions/{source_version_id}/original/` **by hand** and called the
+`versions/` segment load-bearing — in the file a reader consults precisely when writing the upload
+path. It now points at the two composers and states the no-suffix rule, which belongs there anyway:
+"do not put a sniffed type in a path" is that document's own doctrine.
+
+Both `original/` spellings are now stated wherever the layout is, because a reader who composes only
+`originalUpload()`'s is the § **S2** defect returning.
+
+### Q12 — `derived/snapshot/` is classified irreplaceable and swept unconditionally, by the same skill *(CLOSED 2026-08-25 — the snapshot IS an original)*
 
 ```bash
 grep -n 'snapshot' .claude/skills/seaweedfs-s3/SKILL.md
@@ -7392,7 +7513,25 @@ wrong disposition for its tier.
 `deletion-engineer` for whichever way it goes. The two obvious shapes — hoist `snapshot/` beside
 `original/`, or give the sweep a third disposition — have different costs and neither is chosen here.
 
-### Q13 — `kb-internal-api-contracts` states two things about ingestion that the shipped seam contradicts *(OPEN — owed by the skill's owner)*
+
+**Closed 2026-08-25, and the choice this entry declined to make is made here.** Of the two shapes it
+listed, hoisting wins, and it turns out not to need a new prefix: **a crawl snapshot is the original
+for a crawled source.** It is the irreplaceable input every derived artifact is computed from, it is
+content-addressed by the same `content_hash`, and a recrawl that changes nothing produces the same
+hash and therefore the same object — a dedupe that a per-version snapshot prefix would have thrown
+away.
+
+So it lands at `original/{content_hash}` like any other and the disposition set stays two-valued:
+tier 1 is `original/`, tier 2 is `derived/`, and the sweep needs no third case. **The third
+disposition was rejected on the cost of honouring it**, not on taste: it would have to be respected
+independently by the sweep, the verification, the retention policy and the restore drill, and § **Q1**
+is this repository's own worked example of what one missed site out of four costs.
+
+Recorded on both sides: `seaweedfs-s3`'s backup section carries the reasoning, and
+`app/storage/objects.py`'s `derived_prefix()` docstring carries the rule at the place a snapshot key
+would be written. Still free — `app/crawl/` is a stub and nothing writes a snapshot today.
+
+### Q13 — `kb-internal-api-contracts` states two things about ingestion that the shipped seam contradicts *(CLOSED 2026-08-25 — five sites, not the three this entry named)*
 
 ```bash
 sed -n '64p;122p;208p' .claude/skills/kb-internal-api-contracts/SKILL.md
@@ -7419,7 +7558,22 @@ Two rows, one skill, both about ingestion, both wrong in the direction that stop
 § Q11. Until both land, the skill and `docs/19` disagree in writing, and `docs/19` is what the two
 shipped implementations follow.
 
-### Q14 — `Tests\Arch\DoctrineTest > preset → laravel`: library crash **and** real violation, both at once *(ANSWERED 2026-08-21 — the failure is unchanged, and the answer is not that it did not matter)*
+
+**Closed 2026-08-25.** The `X-KB-Bot-Id` row no longer lists ingestion, crawl or source deletion, and
+an ADR-067 paragraph under the table says why — plus the rule underneath it, which is the part worth
+more than the row: **bot access is a query-time payload filter, never an index-time scope**, so
+reassigning a bot must never require re-indexing, and a submission scoped to a bot at index time *is*
+that requirement arriving silently.
+
+The `ingestion.submit` fingerprint row now states the shipped components, and a **Two keys, not one**
+table sets the transport key against the ingest key on four axes. Two further sites repeated the same
+error and this entry had not found them: non-negotiable 17 stated the config-version rule without the
+ingestion exception, and the gotcha on retried submissions told an auditor to *"include every component
+in docs/08 §13.3"* — which sends them looking for a `parser_cfg_version` in a fingerprint that
+structurally cannot hold one, finding a defect that is not there and missing the two that are (a
+missing force nonce, and an `INGEST_KEY_PARTS` fallen behind a newly added `*_cfg_version`).
+
+### Q14 — `Tests\Arch\DoctrineTest > preset → laravel`: library crash **and** real violation, both at once *(ANSWERED 2026-08-21 — and the failure is GONE as of 2026-08-25, for a reason nobody chose; see the closing note)*
 
 **This entry was written before the result, deliberately, and the two candidate explanations it set
 up were both right.** That is the finding. The prose above the answer is left as it was written so
@@ -7525,7 +7679,19 @@ register did not have: **a claim can be literally correct and still function as 
 inference everybody draws from it is the thing nobody checked.** "Environmental" was never a claim
 that nothing else was failing; it was read as one for eight commits.
 
-### Q15 — every **positive** rule in `arch()->preset()->laravel()` enforces nothing, because a `require-dev` package is autoloaded into `App\` *(OPEN — the only real fixes are upstream or a `composer.json` change, deliberately not made)*
+
+**The failure is gone, re-measured 2026-08-25 — and reading that as vindication would be the mistake
+this entry exists to prevent.** Both halves of the answer above were right and both remain true of the
+code: the crash was a library bug, and a real arch violation was hiding underneath it. What changed is
+neither. `arch()->preset()->laravel()` now passes because `laravel/pint` installs from **dist** and its
+archive export-ignores the `app/` directory the autoloader points at, so there is nothing to walk. See
+§ **Q15**'s closing note for the measurement and for the tripwire that now guards it.
+
+The reason this is worth appending here rather than only there: **the crash's disappearance is not
+evidence that the rules are clean.** The rules are clean because they were separately verified with a
+positive control. Those are different claims, and this entry is the record of a phase spent conflating
+them.
+### Q15 — every **positive** rule in `arch()->preset()->laravel()` enforces nothing, because a `require-dev` package is autoloaded into `App\` *(CLOSED 2026-08-25 — re-measured, and the premise had changed under it)*
 
 **This is the largest rule-with-no-mechanism this phase found**, and it is recorded apart from § Q14
 because Q14 is about *one* failing test while this is about most of a preset that reports green.
@@ -7583,7 +7749,40 @@ available on day one.
 (the observable is `preset → laravel` passing with `vendor/laravel/pint/app` in place), or when Pint
 leaves the root `composer.json`.
 
-### Q16 — `writes.py:132` still says `source_versions` "does not exist here", which C1 created *(OPEN — owed by `retrieval-engineer` / `ingestion-engineer`)*
+
+**Re-measured 2026-08-25, and the finding does not reproduce.** `arch()->preset()->laravel()`
+**passes**, and it is not passing vacuously — verified with a positive control rather than by reading
+the output: a class under `App\Jobs` that does not implement `ShouldQueue` fails it with that rule's
+own message at that file's own line, and the failure disappears with the class. The positive rules
+this entry called permanently inert are live.
+
+**The cause is unchanged, which is the actual finding.** `App\` is still registered against
+`vendor/laravel/pint/app` — the mechanism in this entry is exactly right. What stops it is that
+`laravel/pint` v1.30.4 installs from **dist**, and its dist archive export-ignores `app/`, so the
+directory the autoloader points at does not exist and Pest finds nothing to walk. Nobody fixed
+anything; `config.preferred-install: dist` was doing it, silently, while reading like a download-speed
+preference.
+
+That is worse than a bug, because it is a bug with an invisible dependency. It returns through
+`--prefer-source`, a `composer.json` edit, a vendor tree restored from a source install, or a Pint
+release that stops export-ignoring — and it returns *as a crash that prints its own message over
+another rule's code frame*, which is the § **Q14** failure mode that cost a phase.
+
+Fixed as the latent hazard it is. `tests/Arch/AutoloaderIntegrityTest.php` asserts the `App\` layer
+resolves to exactly **one directory on disk** and it is ours (the assertion is about what *exists*, not
+what is registered — a directory Pest cannot open contributes nothing, so the registration is the
+hazard and the materialization is the failure); pins the registered-but-absent inventory **in both
+directions**, so pint's `app/` appearing fails loudly; and asserts `preferred-install: dist`.
+`->ignoring()` was considered and refused for a reason worth keeping: Pint's tree contains
+`App\Enums`, `App\Exceptions` and `App\Providers`, which are our namespaces too, so any exclusion
+broad enough to hide Pint's classes also blinds the rule to ours.
+
+`DoctrineTest.php`'s header block — which told every reader the preset "ENFORCES NOTHING" — is
+rewritten. The restated `Throwable` rule below it is **kept** even though the preset works: it costs
+one `arch()` call, it is the one rule with direct evidence of having been missed, and negative rules
+survive the crash while positive ones do not.
+
+### Q16 — `writes.py:132` still says `source_versions` "does not exist here", which C1 created *(CLOSED 2026-08-25 — swept)*
 
 ```bash
 sed -n '128,133p' services/ai-service/app/db/writes.py
@@ -7607,3 +7806,457 @@ justification is now false, which is the mild version of this defect and the rea
 its owner rather than being urgent.
 
 **Owner:** the tree's owner. **Not fixed here** — `docs/` does not edit `services/`.
+
+---
+
+
+**Closed 2026-08-25.** `writes.py`'s comment no longer says `source_versions` "does not exist here",
+and it now says which half of its old warning went false and which half did not — the runtime check
+covers writing against an unadmitted name, and nothing covers admitting a wrong one. Same sweep as
+§ **P2**.
+
+## Found by the first execution of the Playwright suite — R1–R4, 2026-08-24
+
+Every `apps/web/tests/e2e/admin/*.spec.ts` opened with a banner reading **"THIS FILE HAS NEVER BEEN
+EXECUTED. NOT ONCE, NOT PARTIALLY"**, and every one of them was telling the truth: the `admin` project
+depends on a `setup` project whose `testMatch` matched no file, so `playwright/.auth/admin.json` was
+never written and each spec skipped itself on a file-scope guard. W7 wrote `auth.setup.ts`; W8 ran it.
+
+The harness is ADR-072. **The result worth carrying forward is the split**, because it is the
+empirical answer to the question every one of those banners asked — *is a first red run the spec's
+fault or the page's?* Thirteen specs failed on the first run:
+
+| Cause | Count | Rows |
+| --- | --- | --- |
+| The spec was wrong | 2 | R2, R3 |
+| The harness was wrong | 5 | R4 |
+| The app was wrong | 1 | R3 |
+| The design tokens are wrong | 1 | **R1**, still open |
+| Downstream of another failure | 4 | the four that shared R2's helper |
+
+So the banners' advice — *treat a red run as "the spec is wrong" at least as readily as "the page is
+wrong"* — was well calibrated, and its converse mattered just as much: two of the thirteen were real
+product defects that no unit test, no component test and no scan of a static page could have found.
+
+### R1 — `--primary` cannot be both a fill under white text and a link colour on the canvas, and in dark mode it is neither *(CLOSED 2026-08-25 — the decision was made, and it is a second token)*
+
+**The failure.** `@axe-core/playwright` reports `color-contrast (serious)` on `.text-primary` in dark
+mode, and only in dark mode, on `/settings/providers`, `/settings/embedding` and `/sources` — the
+third only once the organization had rows, which is worth noting because it is how a defect in a
+LIST scales: the two settings screens each carry one such link, and the sources table carries one
+per row. Measured with the
+same sRGB relative-luminance arithmetic `apps/web/tests/unit/design-system.test.ts` uses:
+
+| Foreground | Surface | Ratio | Floor |
+| --- | --- | --- | --- |
+| `--primary` dark `oklch(0.568 0.215 264)` | `--canvas` dark | **3.95:1** | 4.5:1 |
+| `--primary` dark | `--card` dark | **3.54:1** | 4.5:1 |
+| `--primary` dark | `--card-inset` dark | **3.15:1** | 4.5:1 |
+| `--primary` light `oklch(0.525 0.235 264)` | `--canvas` light | 4.89:1 | 4.5:1 ✓ |
+
+Light mode passes, which is why nobody saw it.
+
+**It is not a tuning error, and that is the finding.** `--primary` carries two floors that pull in
+opposite directions, and in dark mode **their feasible windows do not overlap**. Sweeping lightness at
+the token's own chroma and hue (C 0.215, H 264):
+
+| L | on `--canvas` | on `--card` | `--primary-foreground` on it |
+| --- | --- | --- | --- |
+| 0.568 *(today)* | 3.95 ✗ | 3.54 ✗ | **4.52 ✓** |
+| 0.585 | 4.25 ✗ | 3.80 ✗ | 4.20 ✗ |
+| 0.600 | **4.53 ✓** | 4.05 ✗ | 3.95 ✗ |
+| 0.640 | 5.18 ✓ | **4.63 ✓** | 3.45 ✗ |
+
+There is no row where both columns clear. One token cannot be a solid fill under near-white text *and*
+body-sized text on the page behind it.
+
+**How it got here, and this is the part that generalises.** `references/tokens.md` records that the
+contrast checker's first run moved six values, one of them being `--primary` dark from `0.585` to
+`0.568` — *"4.202:1 under `--primary-foreground`, floor 4.5:1"*. That fix was correct for the
+direction it checked and made the unchecked direction **worse**: the token got darker, and the link
+text sitting on the canvas lost 0.30 of its ratio. The matrix has a row for *text on `--primary`* and
+no row for *`--primary` as text*, so the regression was invisible to the mechanism built to catch
+exactly this.
+
+**Why it is a real defect and not a stylistic quibble.** `kb-design-language` rule 3 puts links on the
+accent, and the tree does: `text-primary` is the link treatment at **fourteen** call sites plus the
+`link` variant of `<Button>` (`components/ui/button.tsx:48`). So this is every link in the admin
+console in dark mode, not two screens.
+
+**What is NOT done here, and why.** Picking the replacement is a design decision with product-wide
+reach, and `CLAUDE.md` routes colour to `kb-design-language` and `admin-web-engineer`. Two candidates,
+both measured:
+
+1. **A `--link` token.** `--primary-soft-foreground` already measures 9.76 / 8.73 / 7.77 dark and
+   7.06 / 8.29 / 7.74 light against canvas / card / card-inset — it clears every surface in both
+   modes with room to spare, at the same hue. Its current name says "text on `--primary-soft`", so
+   this is a rename plus a second consumer, not a new colour.
+2. **Leave `--primary` alone and stop using it as text.** Same fourteen call sites either way.
+
+Both are one migration; neither is a token value nobody has agreed. **Three e2e tests are therefore
+red on purpose** — the dark-mode scan in `providers.spec.ts`, `embedding.spec.ts` and
+`sources.spec.ts` — and a green suite here would mean somebody had loosened the scan.
+
+**Owner:** `admin-web-engineer`, with `kb-design-language`'s owner. **Also owed:** a row in
+`design-system.test.ts` for *accent-as-text on every surface it lands on*, without which the next
+correction can re-break this the same way.
+
+
+**Closed 2026-08-25.** The decision this entry declined to make is the one it argued was the only
+available one: **a second token, not a tuning.** `--link` and `--link-active` are the accent *as
+text*; `--primary` keeps its job as a fill under white text and is no longer allowed to be a link
+colour. Thirteen files lost their bare `text-primary`, `button.tsx`'s `link` variant is
+`text-link … active:text-link-active`, and prose links in `globals.css` follow — that last one axe
+had never reported, because no e2e route renders prose.
+
+**The token is derived, not picked**, which is what keeps a tenant's brand from reopening this:
+both resolve one hop to the tenant's own accent ramp inside `bot-theme-scope`, exactly as `--ring`
+already did. Neither may become tenant-overridable; `tokens.json` carries the impossibility proof
+and that rule beside the values.
+
+**Verified, and the two halves of "verified" are worth separating.** The arithmetic:
+`design-system.test.ts` gained a matrix asserting `link` and `link-active` clear 4.5:1 on every
+surface they land on — canvas, card, card-inset, popover, primary-soft — in both modes, and pins the
+reason the second token had to exist by asserting that in dark mode `--primary` **fails** as text on
+the canvas while white-on-`--primary` **passes**. Those two assertions together are the impossibility;
+a future "simplification" back to one token fails on one of them whichever way it moves.
+
+The browser: the same Playwright harness (ADR-072), re-run 2026-08-25. **58 passed, 24 skipped, 0
+failed**, against 55/24/3 on 2026-08-24 — the same 24 skips, exactly +3, and the three are these.
+`/sources` matters most: the organization had **2** knowledge sources, so the per-row link — the
+instance this entry singled out because a list scales one defect by its row count — actually rendered
+and was scanned rather than passing on an empty table. On `/settings/providers` and
+`/settings/embedding` the accent-as-text element sits in an unconditional block, so those hold
+regardless of data.
+
+**One instance is still unscanned and this entry should not be read as covering it:**
+`connection-list.tsx`'s `ConnectionRow` link needs at least one provider connection to render, and
+the organization had none. Same token, same proven ratio, no browser evidence.
+### R2 — an `.or()` of four "outcomes" that are not mutually exclusive is a strict-mode violation, and it read as "the screen never loaded" *(CLOSED)*
+
+`embedding.spec.ts`'s helper waited on `Can embed` **or** `Ingestion blocked` **or** `No candidates
+were examined` **or** `Embedding readiness could not be loaded`, on the stated premise that a stack is
+in exactly one of four states. It is not: an organization with no provider connections renders the
+`Ingestion blocked` **pill** *and* the `No candidates were examined` **empty state**, because the pill
+states the verdict and the empty state describes the candidate list. Playwright's strict mode then
+fails the locator, in the shared helper, so **all five tests in the file died with the message "element
+not found"** — the diagnosis that is furthest from the truth, since two matching elements were on
+screen. Fixed with `.first()`.
+
+**The instructive half is what it hid.** Before the `.first()` fix the same five tests failed for a
+*second*, genuinely different reason: `ai-api` was not up, `GET …/embedding-configuration` answered
+`503 internal_dependency`, and because that class is `retryable: true` TanStack Query kept the read
+pending past the assertion's timeout — so the ErrorState the spec explicitly waits for never rendered
+either. A four-way wait that admits the error state still needs the error state to be *reached*.
+
+### R3 — removing an upload row dropped focus to `<body>`, and the spec had said so in writing before it ever ran *(CLOSED — the app was fixed)*
+
+`source-upload.spec.ts` ended its Remove walk with
+
+> FOCUS IS NOT LOST TO `<body>` when the focused element is removed. This is the assertion most likely
+> to fail on a first run, and if it does **the fix is in the app**: move focus to the next row or to
+> the drop zone before removing.
+
+It failed on the first run, and the fix was in the app. The Remove control lives inside the row it
+destroys, so the browser's fallback is `<body>`: the next Tab restarts at the top of the document, and
+a screen reader announces nothing because focus landed on nothing. `upload-file-list.tsx` now records
+the successor row before removing and restores focus after the commit, falling back to the picker when
+the last row goes; `upload-file-row.tsx` carries a `data-row-action={item.id}` on whichever single
+action the row renders, because the accessible name is built from a filename and a filename is not a
+safe thing to paste into a selector.
+
+The same run also found a **spec** defect in the same file, which is why R2 and R3 share a row in the
+table above: `a batch-level message is bound to the control it is about` clicked the `Upload files`
+button on the line *above* the assertion that the button is disabled. Playwright's click waits for
+actionability, so it spent its whole timeout waiting for a control the test exists to prove stays
+disabled. The click is gone; the assertions are unchanged.
+
+### R4 — `crypto.randomUUID` is gated on a secure context, not on a browser version, and a comment said otherwise *(CLOSED — comment corrected; the harness moved)*
+
+Five `source-upload` specs failed because chosen files never became rows. Measured in the browser:
+`window.isSecureContext === false`, `typeof crypto.randomUUID === 'undefined'`, and one page error —
+`TypeError: crypto.randomUUID is not a function` — thrown inside `use-file-uploads.ts`'s `add()`. The
+picker looked like it had done nothing.
+
+`use-file-uploads.ts:194` said *"available on every browser this app supports and in Node >= 19"*.
+Browser version is not the gate: Web Crypto exposes `randomUUID` only where the context is
+**potentially trustworthy** — https, `localhost`, or `127.0.0.1`. The first harness served the app on
+`http://app.knowledgebot.example:3000`, which is none of those.
+
+**Not reachable in the shipped topology** — Traefik has one entrypoint and it is `websecure` — so this
+is a harness finding and not a product defect. It is recorded because the *comment* was wrong in a way
+that would have sent the next reader looking at browser support tables, and because the fix constrains
+the harness permanently: the e2e origin must be `localhost`, which then forces the API origin onto
+`localhost` too for same-site cookies (ADR-072).
+
+---
+
+## Found by the first end-to-end upload — R5–R8, 2026-08-24
+
+The plan's proof was *"upload a real file through `/sources/upload`, watch it walk `queued → parsing →
+chunking → indexing → ready`"*. It got as far as the embedding boundary and found four defects on the
+way, three of which **no suite in this repository could have caught**, for one reason each:
+
+* Pest fakes the S3 disk, so nothing had ever written a byte to a real SeaweedFS (**R5**).
+* pytest's ULID fixture emits one spelling, so 1,740 tests agreed with a pattern that refuses every
+  real Laravel identifier (**R6**).
+* Neither suite runs a Celery worker against a real broker, so a silent task path stayed silent
+  (**R7**).
+* Nothing exercises the failed-job recorder (**R8**).
+
+**Where the walk actually stopped, and why that is the correct place.** `prepare_item` refused with
+`validation`: *"This organization has no embedding-capable provider connection, so it cannot ingest
+any document."* That is ADR-030 and ADR-031 working — embedding goes out through the provider adapter
+layer, this organization has no connection, and there is no degraded mode. Reaching it required the
+browser, Laravel's six-check intake gate, the object write, the pending-key ledger, the signed
+internal seam, the FastAPI router, Celery, and embedding selection — every one of which is therefore
+proven on real infrastructure. What is **not** proven, and cannot be here, is anything downstream of a
+real vendor API key: parse, chunk, embed, index, verify, publish.
+
+Two things confirmed in passing, both worth having: the ledger from **ADR-070** reserved a key on each
+of three failed attempts, released it on the successful one, and `kb:sweep-orphan-objects` then
+collected exactly the three orphans and left both live objects alone. And the refusal sentence the
+operator reads on `/settings/embedding` is **byte-identical** to the one in the ingestion log, which
+is the property `readiness-panel.tsx`'s docblock claims and nothing had checked.
+
+### R5 — `AWS_BUCKET=kb` is two characters, so the shipped bucket cannot hold one object *(CLOSED — renamed to `kb-objects`)*
+
+S3 bucket names are 3–63 characters. SeaweedFS enforces it, and not only at the API edge — the check
+is in the **filer**, on the write path:
+
+```
+CreateEntry: invalid bucket name kb: bucket name must between [3, 63] characters
+```
+
+`weed shell` refuses to create it at all (`s3.bucket.create -name kb` → *"bucket name must between
+[3, 63] characters"*), and creating `/buckets/kb` by hand only moves the refusal from
+`CreateMultipartUpload` to the `mkdir` underneath it — measured, both ways, against `seaweedfs:4.40`.
+
+**So every upload in every deployment configured from the shipped files failed with a 500, and the
+whole ingestion path was unreachable.** Three of the four example files said `kb`; the fourth,
+`services/ai-service/.env.example`, already said `kb-objects` — so the two planes' own examples
+disagreed, and the valid spelling was the one nobody had propagated.
+
+Renamed to `kb-objects` in `config/filesystems.php`, `core/config.py`, all four `.env.example` files,
+`seaweedfs/identities.json.example` and `seaweedfs/circuit_breaker.json`. **A deployment that has
+already bootstrapped must re-render `identities.json`** — the grants are per bucket (`Read:kb` →
+`Read:kb-objects`), and a stale grants file answers 403 on every object rather than 400.
+
+**Why no test saw it.** Every Pest test uses `Storage::fake('s3')`, which is an in-memory filesystem
+with no bucket-name rule; every pytest object test uses a stub store. The name only means anything to
+a real S3 implementation, and nothing in this repository had ever talked to one.
+
+### R6 — the data plane's ULID pattern was uppercase-only, so it refused every identifier Laravel mints *(CLOSED)*
+
+`ULID_PATTERN` was `^[0-7][0-9A-HJKMNP-TV-Z]{25}$` in **four** modules — the ingestion router, the
+maintenance router, `providers/contract.py`, and `indexing/upserter.py`, which asserts it on every
+point before a write. Crockford's base32 is defined case-insensitively; that pattern is not.
+
+Laravel emits **both** spellings, in one body:
+
+| Field | Minted by | Spelling |
+| --- | --- | --- |
+| `source.id`, `items[].id`, `current_version_id` | `HasUlids::newUniqueId()` | **lowercase** — `01m0swft82zf81qx2d032qepb7` |
+| `job_id` (`source_items.current_job_id`) | `Str::ulid()` | **uppercase** — `01M0SWFTKSNR0MJ0WHQ39MBMVW` |
+
+The first real submission was therefore refused `422` on `source.id` and `items.0.id` while `job_id`
+passed. `SubmitIngestionJob` logged a failed submission, the queue stayed empty, and the source sat at
+`queued` — which is exactly the failure mode `tests/contract/test_ingestion_submission.py`'s own
+docstring describes and could not detect.
+
+**Why 1,740 green tests missed it.** `tests/support/signing.ulid_like()` emits uppercase. Every
+fixture in the repository calls it, so every test agreed with the bug. That is the generalisable part:
+*a shared helper that produces one spelling makes a case-sensitivity defect invisible across every
+test that uses it, however many there are.*
+
+Widened to `^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$` in all four places. It costs the assertion
+nothing — its stated purpose is catching a **UUID**, and a UUID has hyphens and uses `i`/`l`/`o`/`u`,
+none of which Crockford's alphabet contains. **Nothing is normalised**: an id is compared byte-for-byte
+in a Qdrant filter and in `chunks`, so lowering at the boundary would give one row two identities.
+`tests/contract/test_identifier_case_at_the_seam.py` pins both spellings using the literal strings
+Laravel produced, plus five negative controls; narrowing the pattern again fails two of its tests.
+
+### R7 — a non-retryable failure in `prepare_item` was completely silent in both planes *(CLOSED — the log line was added; the state machine is unchanged)*
+
+`prepare_item`'s non-retryable branch deliberately does **not** call `fail_version`: there is no
+version row yet, so there is nothing to mark failed, and the item stays at `queued` so an admin sees a
+source that did not start rather than one that half-ran. That decision is correct and is unchanged.
+
+What it had no business doing is saying nothing. The classified error reached exactly one place — a
+**span attribute** — and a span goes to a collector, which is precisely what is not running when
+somebody is trying to work out why a source is stuck. The whole record of the first real refusal was
+Celery's own `Task kb.ingest.prepare_item[…] ignored`, in one plane, with no reason in it.
+
+A `logger.error("ingestion prepare refused", …)` now carries the org, job, source and error class. The
+`reason` is `str(exc)` only for a `KbError` — those messages are written in this repository and meant
+for an operator — and the **type name** for anything else, because `str()` on a third-party exception
+can carry a credential or a connection string and Non-negotiable 9 has no ingestion exemption.
+
+### R8 — `config/queue.php` records failed jobs in a table no migration creates *(CLOSED 2026-08-25 — the migration landed)*
+
+`'failed' => ['driver' => env('QUEUE_FAILED_DRIVER', 'database-uuids'), 'table' => 'failed_jobs']`,
+and `ls database/migrations | grep -c failed_jobs` is **0**. Observed live: `SubmitIngestionJob`
+failed, and the attempt to record it threw
+
+```
+SQLSTATE[42P01]: Undefined table: 7 ERROR:  relation "failed_jobs" does not exist
+```
+
+**Two consequences, and the second is the one that costs time.** Permanently-failed jobs are not
+recorded at all, so Horizon's failed list is empty and `queue:retry` has nothing to retry. And the
+recorder's own exception is what surfaces in the log — so the operator reads a missing-table error
+*instead of* the exception that actually killed the job. R6 took longer to find for exactly this
+reason: the useful stack trace was inside the payload of an INSERT that failed.
+
+This is finding **F7's shape a second time** — `sanctum:prune-expired` is scheduled against a table 0
+migrations create — which is worth noting because it means the pattern is not a one-off: *a
+framework-default table name in config, with no migration behind it, fails only on the path nobody
+exercises.*
+
+**Not fixed here, because the fix is a choice rather than a repair.** Either the migration lands, or
+`QUEUE_FAILED_DRIVER=null` is set deliberately and the config stops promising a table. Both are
+control-plane decisions with a schema or a deployment consequence.
+
+
+**Closed 2026-08-25**, taking the first of the two options this entry named: the migration lands and
+`config/queue.php` keeps its promise. `2026_08_24_002700_create_failed_jobs_table.php` creates the
+table with a unique index on `uuid` and an index on `failed_at`;
+`queue:prune-failed --hours=336` is promoted out of the scheduler's PENDING block, which now contains
+nothing waiting on a table.
+
+**One column choice is argued in the migration and pinned by a test**, because it is the kind that
+gets "corrected" later: `uuid` is `char(36) COLLATE "C"`, not native `uuid`. Against a native column
+`queue:retry <typo>` is `SQLSTATE 22P02` — a database error about a malformed literal — instead of
+"no such failed job", and the operator reading it is already having a bad day.
+
+`tests/Feature/FailedJobRecordingTest.php` drives the real `queue.failer` rather than a job, because
+the worker loop is not what Pest runs: log, find, forget, prune at the boundary, the unique index, and
+the column set.
+
+## Found while closing the register — S1–S2, 2026-08-25
+
+**Both of these were found by fixing something else, and neither had a row here.** The brief was
+"fix all findings" — close the entries already written down. Two of those entries (§ **Q5**, § **Q8**)
+turned out to describe *live defects* rather than missing mechanisms, and in both cases the defect had
+been in the tree for days, through a green suite, with a comment in the same file saying it could not
+happen.
+
+**The generalisable part is what made each one invisible, and it is the same shape twice: a rule
+stated in prose beside code that violates it.** § Q5 says `ALLOWED_TABLES` "is a list a reviewer reads,
+not a check a statement passes" — S1 is what that costs. § Q8 says two transcriptions of one layout
+"can each agree with their own documentation and disagree on a string" — S2 is that, already landed.
+Recording the pair together because the lesson is not about either subsystem: **a rule whose only
+enforcement is a sentence is not weakly enforced, it is unenforced, and the sentence makes the
+violation harder to see rather than easier.**
+
+### S1 — the data plane was writing `source_versions`, a Laravel-owned table *(CLOSED 2026-08-25 — the statement is gone and the tree is now scanned)*
+
+```bash
+git log -S 'delivery_count = delivery_count + 1' -- services/ai-service/app/ingestion/runner.py
+```
+
+`run_one_version` opened with
+
+```sql
+UPDATE source_versions SET delivery_count = delivery_count + 1 WHERE id = %s
+```
+
+**Three independent rules forbade it, and each would have caught it alone.**
+
+1. `source_versions` is not in `app/db/writes.py`'s `ALLOWED_TABLES`, and `App\Services\Sources\IngestionProgress`'s
+   own docblock says it **"must never be"** — ADR-033 property 2 fails the instant Laravel serves the row,
+   which it does on the source detail screen.
+2. `IngestionProgress` states the design in the opposite direction: the worker *"cannot write the column
+   it depends on"*, so the count **rides on the callback** and Laravel applies it as a ceiling under the
+   same sequence guard and row lock as every other field on the frame. There were two writers.
+3. `runner.py`'s own neighbouring docstring said this service reads these tables and *"never writes one
+   of them, which is why this function has no companion that does"*. **The companion was twenty lines
+   above it, in the same file.**
+
+**Why it survived 1,749 passing tests.** It bypassed `assert_writable` by not being in `writes.py` at
+all — which is precisely the second of the two failures § Q5 describes, *"writing a statement against a
+name that was never admitted"*, the one no gate ever covered. Nothing in this repository read SQL
+statements; the allow-list was a tuple that a function had to opt into consulting.
+
+**Fixed in the direction that answered § Q9 as well.** The counter moved to Valkey
+(`app/ingestion/deliveries.py`, `deliveries:{org_id}:{scope}`), which is the data plane's own store, so
+the number is derived, rebuildable and owned here — the same test `ALLOWED_TABLES` applies to a table.
+The value still rides the callback, so `source_versions.delivery_count` shows an operator the same
+number as a **mirror with exactly one writer**. The move also gave `prepare_item` — which runs
+`max_retries=None` and had no durable memory of anything — its first redelivery bound.
+
+**The mechanism, and it is the finding's real payload.** `tests/unit/test_write_allow_list_scan.py`
+walks every `.py` file in the data plane, extracts `INSERT INTO` / `DELETE FROM` / `UPDATE … SET`
+targets, and refuses any name outside the tuple. It resolves an interpolated table position through
+`assert_writable` **per function**, so a gate in one function cannot launder the same name in another;
+it identifies docstrings structurally through the AST and comments are absent from the AST entirely, so
+prose describing an illegal statement is not itself a finding — the register recording a defect must
+not become one; and it carries four positive controls, because a scanner that can only pass is § Q5's
+own complaint wearing a test's clothes.
+
+### S2 — the two planes composed different names for the same object, and every pasted-text source was unreadable *(CLOSED 2026-08-25 — § Q8's predicted defect, found already landed)*
+
+§ Q8 recorded that `app/storage/objects.py` did not exist while two files quoted `version_prefix()`
+from it as though it did, and it predicted the seam would break here first. It had already broken, and
+the finding is worth its own row because **the symptom was not a mismatch anywhere.**
+
+`ObjectKey::originalUpload()` appends **no suffix** — an upload's type is a sniff, and a value derived
+from attacker-influenced text must not enter a path. `ObjectKey::originalText()` appends **`.txt`**,
+honestly, because those bytes were generated from a validated UTF-8 string. `app/db/objects.py`
+composed only the first, for every source. So every pasted-text source resolved to a key nothing had
+written, `fetch_original` raised `ObjectNotFound`, and the version failed as `storage` with a message
+saying the object was missing.
+
+**It was not missing.** That is the whole finding: an accurate error message about the wrong key. There
+is no diff to review, no exception with two names in it, and no test either runtime can write alone —
+each side agreed with its own documentation. `db/objects.py`'s docstring even described a `storage_key`
+comparison, which nothing performed.
+
+**Fixed on both halves.** `app/storage/objects.py` now exists as the twin `ObjectKey::versionPrefix()`
+names by path — pure string algebra with a guard, no client, so deletion can share the algebra without
+importing a reader. `fetch_original` composes **both** legal spellings and uses the row's `storage_key`
+to *select* between them, never to supply one; a supplied string is a value the caller controls, and
+the point of a composer is that it is the only source of a key.
+`tests/contract/test_object_key_cross_language.py` runs the PHP class in a container and compares all
+six methods character for character, plus both guards' **accept** and **refuse** matrices — the accept
+direction being the half a "reject bad input" test never covers, and the half that strands an object
+this service cannot address and the purge cannot name.
+
+**One departure from parity is deliberate and is documented at both sites.** `segment()` mirrors PHP's
+guard exactly, including permitting spaces, because parity is what stops one plane writing a key the
+other cannot address. The narrower bare-identifier check lives one level up, inside
+`legal_original_keys`, where it belongs — the two guards are not redundant and neither may be deleted
+in favour of the other.
+
+### R9 — ADR-072's harness is missing `CORS_ALLOWED_ORIGINS`, and the omission is invisible in every log *(CLOSED 2026-08-25 — recorded in the ADR and in `harness.ts`; found by re-running R1)*
+
+ADR-072 names three environment overrides that make the Playwright harness work — `SESSION_DOMAIN`
+empty, `SESSION_SECURE_COOKIE=false`, `SANCTUM_STATEFUL_DOMAINS=localhost:3000,localhost:8080` — and
+stops there. **A fourth is required and is not listed.** `config/cors.php` builds `allowed_origins`
+from `CORS_ALLOWED_ORIGINS`, which the shipped env file sets to
+`https://app.knowledgebot.example`; with `supports_credentials => true` the list is exact and cannot
+be widened by a pattern, so `http://localhost:3000` is refused.
+
+**Why it is worth a row rather than a one-line correction: the diagnosis leads away from the cause
+at every step.**
+
+1. The browser reports a network failure with no body, so the login page renders *"That did not go
+   through, and the reason was not reported"* — a message about an unreported reason, which reads as
+   a server fault.
+2. **Nothing reaches any Laravel log, because the request never arrives.** Checking the API's logs is
+   the obvious next move and it finds an empty window, which reads as "the front end never sent it".
+3. `curl` does not enforce CORS. A curl reproduction of the identical login against the identical
+   container returns **200 with a full user payload**, which is affirmative evidence that the API,
+   the credential, the session driver and Sanctum's stateful check are all fine — and therefore that
+   the fault is in the browser code, which it is not.
+
+That sequence is why this is recorded with the *reproduction that misleads* stated explicitly, not
+just the fix. It is the same shape as § Q14: a true observation whose obvious inference is wrong.
+
+**Two smaller harness facts found in the same run**, both recorded in `harness.ts` rather than here:
+`ai-api` must be up or `embedding.spec.ts`'s `openEmbedding()` gate fails — the readiness verdict is
+resolved through `InternalAiClient`, and without FastAPI the panel holds a retrying query and renders
+no verdict at all, which reads as five broken specs rather than one missing container. And the
+`admin` project's evidence value depends on the organization having rows: an axe scan is evidence
+only about elements that were on screen, so a green `/sources` scan against an empty table would have
+proved nothing about the per-row link that is § R1's whole point.

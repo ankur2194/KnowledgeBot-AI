@@ -193,8 +193,20 @@ export function useFileUploads(options: UseFileUploadsOptions): FileUploads {
       commit([
         ...itemsRef.current,
         ...files.map((file) => ({
-          // `crypto.randomUUID` is available on every browser this app supports and in Node >= 19,
-          // so it is safe in both Vitest projects. It is an identity, never a security token.
+          // `crypto.randomUUID` is an identity here, never a security token.
+          //
+          // ITS AVAILABILITY IS GATED ON A SECURE CONTEXT, NOT ON A BROWSER VERSION, and this
+          // comment used to say the opposite ("available on every browser this app supports"). Web
+          // Crypto exposes `crypto.randomUUID` only where `window.isSecureContext` is true — https,
+          // `localhost` or `127.0.0.1` — so on `http://app.example:3000` it is `undefined`, this
+          // line throws `TypeError`, and the files the user just chose never become rows. Nothing
+          // catches it and nothing on screen changes: the picker looks like it did nothing.
+          //
+          // That is not reachable in the shipped topology — Traefik has one entrypoint and it is
+          // `websecure`, so every origin this app is served from is https. It IS reachable in a
+          // harness, and it cost the first Playwright run five specs on 2026-08-24 before the run
+          // was moved onto `http://localhost:3000`, which is potentially-trustworthy by spec.
+          // Node >= 19 has it unconditionally, so both Vitest projects are unaffected.
           id: crypto.randomUUID(),
           file,
           phase: 'queued' as const,

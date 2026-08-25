@@ -802,6 +802,80 @@ final class EloquentKnowledgeSourceRepository implements KnowledgeSourceReposito
     }
 
     /**
+     * @return list<string>
+     */
+    public function embeddingIdentitiesFor(string $organizationId, string $sourceId): array
+    {
+        return $this->identities(
+            SourceVersion::query()
+                ->where('source_versions.organization_id', '=', $organizationId)
+                // JOINED THROUGH `source_items`, because `source_versions` has no source column.
+                // A version belongs to an ITEM and the item belongs to the source; the join
+                // carries the organization on BOTH sides so a mis-scoped item cannot widen the
+                // read — the composite foreign key makes that impossible in the database, and
+                // repeating it here is `kb-tenancy-isolation`'s explicit-predicate rule rather
+                // than a second belief about the constraint.
+                ->join('source_items', function ($join): void {
+                    $join->on('source_items.id', '=', 'source_versions.source_item_id')
+                        ->on('source_items.organization_id', '=', 'source_versions.organization_id');
+                })
+                ->where('source_items.source_id', '=', $sourceId)
+        );
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function embeddingIdentitiesForOrganization(string $organizationId): array
+    {
+        return $this->identities(
+            SourceVersion::query()->where('source_versions.organization_id', '=', $organizationId)
+        );
+    }
+
+    /**
+     * THE ORPHAN SWEEP'S GUARD. See the interface for the asymmetry that makes it load-bearing.
+     *
+     * `SourceItem` is scoped, so this query carries the organization TWICE — once explicitly here
+     * and once from `OrganizationScope` reading the bound `TenantContext`. That redundancy is the
+     * point rather than an oversight: the explicit term is what makes the predicate readable and
+     * correct on a queue worker whose context is stale, and the scope is what refuses to run at all
+     * when no context is bound. `kb:sweep-orphan-objects` binds one per row precisely so BOTH terms
+     * name the same organization; if it ever stops doing so, this returns nothing and the scope's
+     * fail-closed direction turns the sweep into a no-op rather than into a deletion.
+     */
+    public function storageKeyIsClaimed(string $organizationId, string $storageKey): bool
+    {
+        return SourceItem::query()
+            ->where('organization_id', '=', $organizationId)
+            ->where('storage_key', '=', $storageKey)
+            ->exists();
+    }
+
+    /**
+     * `SELECT DISTINCT embedding_model_version` off a scoped builder, ordered.
+     *
+     * ORDERED so two calls for the same source produce the same list, which is what makes the
+     * job payload — and therefore its unique lock key — stable across a redelivery. `distinct()`
+     * rather than de-duplicating in PHP: a source with two hundred versions under one identity
+     * would otherwise pull two hundred rows to keep one string.
+     *
+     * @param  Builder<SourceVersion>  $query
+     * @return list<string>
+     */
+    private function identities(Builder $query): array
+    {
+        /** @var list<string> $values */
+        $values = $query
+            ->distinct()
+            ->orderBy('source_versions.embedding_model_version')
+            ->pluck('source_versions.embedding_model_version')
+            ->all();
+
+        return $values;
+    }
+
+    /**
      * @param  Closure(IngestionApplication): void  $audit
      */
     public function applyIngestionProgress(

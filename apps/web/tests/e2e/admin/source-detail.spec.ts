@@ -1,33 +1,35 @@
-import { existsSync } from 'node:fs';
-
-import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
+
+import { scan, skipWithoutAdminSession, summarize } from './harness';
 
 /**
  * `@axe-core/playwright` on `/sources/{sourceId}`, plus the operability checks a scanner cannot make.
  *
- * ══════════════════════════════════════════════════════════════════════════════════════════════
- * THIS FILE HAS NEVER BEEN EXECUTED. NOT ONCE, NOT PARTIALLY.
- * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * ── FIRST EXECUTED 2026-08-24 ──────────────────────────────────────────────────────────────────
  *
- * Same standing as `bots.spec.ts` and `sources.spec.ts`, and for the same reason: there is no
- * browser session and no Laravel in the environment that wrote it, so every selector below was read
- * out of the components rather than observed. Treat a first red run as "the spec is wrong" at least
- * as readily as "the page is wrong". Nothing here may be cited as evidence that this route is
- * accessible; what it is, is the check list written down so the first person with a stack RUNS it
- * instead of designing it.
+ * The banner here used to read "THIS FILE HAS NEVER BEEN EXECUTED. NOT ONCE, NOT PARTIALLY", and
+ * that stopped being true on 2026-08-24. `./harness.ts` carries the account of that run — the
+ * stack, the browser, and the four different reasons thirteen specs went red on it.
  *
- * ── WHY IT IS COMMITTED ANYWAY, AND WHY IT SKIPS ITSELF ──────────────────────────────────────────
+ * Same origin as `bots.spec.ts` and `sources.spec.ts`: written with no browser session and no
+ * Laravel, so every selector below was read out of the components rather than observed. Its tests
+ * either passed or skipped on the run above — this organization has no source to open — so what it
+ * proves about the detail route is still bounded by whether a source existed.
  *
- * The `admin` Playwright project has a `storageState` and a `setup` dependency, and NO `*.setup.ts`
- * exists to write `playwright/.auth/admin.json`. A Playwright project whose `storageState` file is
- * missing does not skip — it ERRORS at context creation, once per test — so committing these
- * unguarded would turn `pnpm web:e2e` from "runs the public project" into a wall of errors.
+ * ── THE SETUP EXISTS NOW, AND THIS FILE SKIPS WHEN NO SESSION WAS MINTED ───────────────────────
  *
- * `test.skip(condition, reason)` at file scope is evaluated at DECLARATION time, before any fixture
- * is requested, so no browser context is created and no storageState is read. When the setup lands,
- * these run. Writing that setup means inventing a credential and a seed contract, which is the
- * control plane's call rather than a test file's.
+ * This paragraph used to say NO `*.setup.ts` existed to write `playwright/.auth/admin.json` and that
+ * writing one was the control plane's call rather than a test file's. `tests/e2e/auth.setup.ts` is
+ * that file, and it decides nothing: the credential is `KB_E2E_ADMIN_EMAIL` /
+ * `KB_E2E_ADMIN_PASSWORD` from the environment, set by a human who ran `kb:bootstrap-organization`
+ * and completed the ordinary password-reset flow.
+ *
+ * THE FILE-SCOPE GUARD STAYS AND IS NOW EXACT. A Playwright project whose `storageState` path is
+ * missing does not skip — it ERRORS at context creation, once per test — so an unguarded file turns
+ * `pnpm web:e2e` from "runs the public project" into a wall of errors.
+ * `skipWithoutAdminSession()` is evaluated at DECLARATION time, before any fixture is requested, so
+ * no browser context is created and no storageState is read; and the setup DELETES a stale state
+ * file when it skips, so the predicate is true if and only if this run authenticated.
  *
  * ── WHAT THIS ROUTE HAS THAT `/sources` DOES NOT, AND WHY EACH ONE IS HERE ──────────────────────
  *
@@ -57,30 +59,7 @@ import { expect, test, type Page } from '@playwright/test';
  * pass stays a human step — the one written out in `the keyboard-only walk` below.
  */
 
-/** Relative to `apps/web`, matching `playwright.config.ts`'s `storageState` for the admin project. */
-const ADMIN_STORAGE_STATE = 'playwright/.auth/admin.json';
-
-test.skip(
-  !existsSync(ADMIN_STORAGE_STATE),
-  `${ADMIN_STORAGE_STATE} does not exist, so no admin session can be restored. It is written by the ` +
-    '`setup` project, whose `*.setup.ts` has not been written — see this file\'s header. Running ' +
-    'these without it is an error per test, not a skip, which is why the whole file opts out here.',
-);
-
-/**
- * `disableRules` is EMPTY and stays that way, exactly as in the public, bots and sources specs. A
- * rule turned off to make a run green is a violation that has been renamed; a genuine false positive
- * is excluded by SELECTOR, with a comment naming why.
- */
-const scan = (page: Page) =>
-  new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa']);
-
-/** The public spec's failure formatter: the rule, its impact and the first offending node. */
-const summarize = (violations: Awaited<ReturnType<AxeBuilder['analyze']>>['violations']) =>
-  violations.map(
-    (violation) =>
-      `${violation.id} (${violation.impact}): ${violation.help}\n    ${violation.nodes[0]?.target.join(' ')}`,
-  );
+skipWithoutAdminSession();
 
 /**
  * Reach the detail screen THE WAY A USER DOES — from the list, by clicking a document's name.

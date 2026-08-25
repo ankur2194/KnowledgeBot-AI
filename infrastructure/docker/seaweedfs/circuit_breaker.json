@@ -43,7 +43,7 @@
   },
 
   "buckets": {
-    "kb": {
+    "kb-objects": {
       "enabled": true,
       "actions": {
         "__comment": [

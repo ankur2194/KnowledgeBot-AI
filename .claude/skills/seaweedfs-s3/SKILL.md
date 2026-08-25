@@ -12,8 +12,8 @@ SeaweedFS has no semver, no LTS, and ships roughly every 5.5 days; 4.16→4.40 i
 
 ## Non-negotiables
 
-1. **Every key starts `org/{org_id}/sources/{source_id}/versions/{source_version_id}/`** (`kb-tenancy-isolation`). The layout is fixed there and is not ours to change; we only extend the tail — `original/` and `derived/{parse,ocr,images,snapshot}/`. A key without the org segment is a cross-tenant leak with no exception, no log line, and no failing test. Never content-address at the root (`objects/{sha256}`): that dedupes one org's price list onto another's and turns a delete into someone else's outage.
-2. **Nothing authoritative lives here** (`kb-architecture-map`, §9.9). PostgreSQL is truth. Every object except the *original upload* and the *crawl snapshot* must be recomputable from the original plus `chunks`/`source_versions`. If losing a derived artifact changes what the bot answers rather than what it costs to rebuild, the artifact has become authoritative and the ADR is already broken.
+1. **Every key starts `org/{org_id}/sources/{source_id}/`** (`kb-tenancy-isolation`), and below it there are exactly **two** tails, which are siblings and not nested: `original/` (source-scoped, irreplaceable) and `versions/{source_version_id}/derived/{parse,ocr,images}/` (version-scoped, rebuildable). ADR-066 — this line used to require the version segment on *every* key, and the control plane structurally cannot obey that: `source_versions` has NOT NULL `ingest_key` and three `*_cfg_version` columns with CHECKs that reject a placeholder, and every one of those values is produced by the data plane *during parsing*, so the request holding the uploaded bytes has no version id and cannot acquire one. A key without the org segment is a cross-tenant leak with no exception, no log line, and no failing test. Never content-address at the root (`objects/{sha256}`): that dedupes one org's price list onto another's and turns a delete into someone else's outage.
+2. **Nothing authoritative lives here** (`kb-architecture-map`, §9.9). PostgreSQL is truth. Every object outside `original/` must be recomputable from an original plus `chunks`/`source_versions` — and `original/` holds *both* irreplaceable kinds, the uploaded or pasted body and the crawl snapshot (see the backup section for why the snapshot moved there). If losing a derived artifact changes what the bot answers rather than what it costs to rebuild, the artifact has become authoritative and the ADR is already broken.
 3. **Only the portable S3 subset** (§9.9 requires the store be swappable without touching business logic). Application code may call exactly: `PutObject`, `GetObject` (incl. `Range`), `HeadObject`, `CopyObject`, `DeleteObject`, `DeleteObjects`, `ListObjectsV2`, `ListObjectVersions`, and the seven multipart operations. Nothing else — see *Replaceability* below for the concrete ban list.
 4. **No browser ever reaches object storage, and no presigned URL leaves the internal network.** The S3 gateway is not a Traefik router (`traefik-routing` publishes four hostnames; this is not one). Resolved in full below.
 5. **Integrity is our SHA-256 in PostgreSQL, never the ETag.** §13.2 stage 4 hashes before stage 5 stores, and §13.3 keys idempotency on that hash. Every read that feeds a parser re-verifies it. ETag semantics differ between SeaweedFS, AWS, and MinIO, and differ *within* SeaweedFS by write path.
@@ -26,15 +26,22 @@ SeaweedFS has no semver, no LTS, and ships roughly every 5.5 days; 4.16→4.40 i
 **One bucket, `kb`, forever.** Tenancy is the key prefix, enforced in our code — not a bucket per organization. A SeaweedFS bucket is a filer collection, so bucket-per-tenant multiplies collections without bound, and it does not port: every managed store caps buckets per account, and bucket creation is a slow, quota-governed control-plane operation everywhere — the wrong thing to put on the signup path. Prefix isolation ports everywhere and is the only form `kb-tenancy-isolation` recognises.
 
 ```
-org/{org_id}/sources/{source_id}/versions/{source_version_id}/
-    original/{content_hash}            ← irreplaceable; retention policy decides its fate
-    derived/parse/document.json        ← Docling output, feeds the §25.3 Qdrant rebuild
-    derived/ocr/page-{n}.txt
-    derived/images/{element_id}.png
-    derived/snapshot/page.html         ← crawl snapshot when enabled; also irreplaceable
+org/{org_id}/sources/{source_id}/
+    original/{content_hash}                          ← irreplaceable; retention decides its fate
+    original/{content_hash}.txt                      ← a pasted-text body; SAME prefix, `.txt` suffix
+    versions/{source_version_id}/derived/parse/document.json   ← Docling output, feeds §25.3
+    versions/{source_version_id}/derived/ocr/page-{n}.txt
+    versions/{source_version_id}/derived/images/{element_id}.png
 ```
 
-`original/` and `derived/` are siblings so that the phase-2 sweep and its verification are the **same prefix string**, and a legitimately retained original never has to be filtered out of an enumeration.
+**`original/` is a sibling of `versions/`, not a child of one** (ADR-066), and the two consequences are what a reader is here for:
+
+- **One object serves every version of a source.** Never assume the original you fetched belongs to the version you are processing — it belongs to the *source*, and the version's `content_hash` is what says which bytes those are. And **`purge_retired_version` must never be given `include_original`**: that destroys the bytes the *successor* version was built from, silently, until the next reprocess fails.
+- **The two spellings are both real and a reader must compose both.** `ObjectKey::originalUpload()` appends no suffix — an upload's type is a *sniff*, and putting a value derived from attacker-influenced text into a path is how a key stops being addressable — while `ObjectKey::originalText()` appends `.txt`, honestly, because *we* generated those bytes from a validated UTF-8 string. A reader that composes only the first cannot address any pasted-text source, and the symptom is not a mismatch: it is `NoSuchKey`, reported accurately as a missing object, about an object that is present under the other name. **This is not hypothetical — it shipped**, and `docs/22` § Q8 is the record.
+
+This paragraph used to say `original/` and `derived/` are siblings *"so that the phase-2 sweep and its verification are the same prefix string"*. That justification **splits** under ADR-066 and only half of it survives: `derived/` is swept by one version prefix, and `original/` is swept by the *source* prefix once no version references it. The property that actually matters is unchanged — a legitimately retained original is never filtered out of an enumeration, because it has its own prefix.
+
+**Both key spellings and every prefix are composed in exactly one place per runtime** — `App\Support\Kb\ObjectKey` and `services/ai-service/app/storage/objects.py` — and `tests/contract/test_object_key_cross_language.py` runs the PHP class in a container and compares the strings character for character, in both the accept and the refuse direction. Two transcriptions of one layout, each agreeing with its own documentation and disagreeing on bytes, is a failure neither runtime's own suite can see.
 
 ### Client configuration and the operations we allow
 
@@ -64,9 +71,27 @@ _s3 = boto3.client(
 )
 
 
+# Illustrative only. The real ones live in app/storage/objects.py, which is pure string
+# algebra with a guard and no client, so deletion can share the algebra without importing a
+# reader — and every segment goes through a guard that refuses `/`, `\`, a control character,
+# `.` and `..`. Such a segment does not produce a BROKEN key, it produces a WELL-FORMED KEY IN
+# THE WRONG PLACE: S3 does not normalize, so `..` is a literal sequence naming a real object,
+# potentially outside the org prefix, where nothing at all guards a read.
+
+def source_prefix(org_id: str, source_id: str) -> str:
+    """The narrowest prefix a source delete may sweep, and the widest a version delete may not.
+    The org segment IS the tenant boundary (kb-tenancy-isolation)."""
+    return f"org/{org_id}/sources/{source_id}/"
+
+
+def original_upload(org_id: str, source_id: str, content_hash: str) -> str:
+    """Source-scoped, NOT under versions/ (ADR-066). No suffix — see the layout note."""
+    return f"{source_prefix(org_id, source_id)}original/{content_hash}"
+
+
 def version_prefix(org_id: str, source_id: str, version_id: str) -> str:
-    """Fixed by kb-tenancy-isolation. The org segment IS the tenant boundary."""
-    return f"org/{org_id}/sources/{source_id}/versions/{version_id}/"
+    """Everything scoped to one version. NOTE WHAT IS NOT UNDER HERE: `original/`."""
+    return f"{source_prefix(org_id, source_id)}versions/{version_id}/"
 
 
 def put_derived(org_id, source_id, version_id, name: str, body: bytes, content_type: str) -> tuple[str, str]:
@@ -90,10 +115,16 @@ def get_verified(key: str, expected_sha256: str) -> bytes:
     return data
 
 
-def purge_version_prefix(org_id, source_id, version_id, *, include_original: bool) -> None:
-    """Phase-2 step 9 of kb-deletion-and-verification. Idempotent; safe to re-run after a kill."""
-    base = version_prefix(org_id, source_id, version_id)
-    prefixes = [f"{base}derived/"] + ([f"{base}original/"] if include_original else [])
+def purge_retired_version(org_id, source_id, version_id) -> None:
+    """Phase-2 step 9 of kb-deletion-and-verification. Idempotent; safe to re-run after a kill.
+
+    THERE IS NO `include_original` PARAMETER AND THERE MUST NEVER BE ONE. Under ADR-066 the
+    original is source-scoped, so one object serves every version — passing the flag here would
+    destroy the bytes the SUCCESSOR version was built from, and it would fail silently until the
+    next reprocess. Retiring a version deletes derived output and nothing else; the original's
+    fate is decided once, when the SOURCE is deleted, by purge_source_originals() below.
+    """
+    prefixes = [f"{version_prefix(org_id, source_id, version_id)}derived/"]
     for prefix in prefixes:
         for page in _s3.get_paginator("list_objects_v2").paginate(Bucket=BUCKET, Prefix=prefix):
             keys = [{"Key": o["Key"]} for o in page.get("Contents", [])]   # absent, not [], when empty
@@ -101,6 +132,18 @@ def purge_version_prefix(org_id, source_id, version_id, *, include_original: boo
                 r = _s3.delete_objects(Bucket=BUCKET, Delete={"Objects": keys[i:i + 1000], "Quiet": True})
                 if r.get("Errors"):
                     raise ObjectDeleteFailed(r["Errors"])   # HTTP 200 with per-key failures in the body
+
+
+def purge_source_originals(org_id, source_id) -> None:
+    """The other half, run ONCE per source and only when retention says the bytes may go.
+
+    Source-scoped because the object is. A *knowledge removed, original retained* disposition
+    calls purge_retired_version() for every version and never calls this — and that disposition
+    is exactly why `original/` has its own prefix: the retained object is enumerable and
+    reportable rather than something a listing has to filter out.
+    """
+    prefixes = [f"{source_prefix(org_id, source_id)}original/"]
+    ...   # same paginate → delete_objects → inspect Errors loop as above
 
 
 def assert_prefix_empty(prefix: str) -> None:
@@ -134,7 +177,13 @@ What replaces it: uploads are `multipart/form-data` to Laravel, which streams to
 
 ### Backup — §25.4, and why it inverts the usual priority
 
-Qdrant is rebuildable (§25.3) and PostgreSQL has PITR (§25.2). **This store is the only one holding bytes that cannot be recomputed from anything else**: the `original/` upload and the crawl `snapshot/`. Everything under `derived/` is recomputable from an original, so it is *cheap-to-lose*, not *safe-to-lose* — §25.3's "rebuild vectors from PostgreSQL metadata and stored normalized content" is the proof that Qdrant is derived, and it reads `derived/parse/`. Two tiers: tier 1 (`original/`, `snapshot/`) goes offsite; tier 2 (`derived/`) is replicated locally and regenerated after a loss.
+Qdrant is rebuildable (§25.3) and PostgreSQL has PITR (§25.2). **This store is the only one holding bytes that cannot be recomputed from anything else**, and there is exactly one prefix of them: `original/`. Everything under `derived/` is recomputable from an original, so it is *cheap-to-lose*, not *safe-to-lose* — §25.3's "rebuild vectors from PostgreSQL metadata and stored normalized content" is the proof that Qdrant is derived, and it reads `derived/parse/`. Two tiers: tier 1 (`original/`) goes offsite; tier 2 (`derived/`) is replicated locally and regenerated after a loss.
+
+**A crawl snapshot is an `original/`, not a `derived/snapshot/`** — this is the resolution of `docs/22` § Q12, and the contradiction it resolves was in this file. Line 137 used to name *"the `original/` upload **and the crawl `snapshot/`**"* as the two irreplaceable things and put both in tier 1, while the sweep above deleted all of `derived/` unconditionally and `snapshot/` lived under it. So a *knowledge removed, original retained* disposition retained the upload and destroyed the snapshot — the other object this same file said could not be recomputed. A crawled page is not re-fetchable in the sense that matters: the remote page has changed or is gone, which is the entire reason the snapshot exists.
+
+Of the two available shapes — hoist `snapshot/` out, or give the sweep a third disposition — hoisting wins, and it turns out not to need a new prefix at all. **The snapshot *is* the original for a crawled source**: it is the irreplaceable input every derived artifact is computed from, it is content-addressed by the same `content_hash`, and a recrawl that changes nothing produces the same hash and therefore the same object, which is the dedupe a per-version snapshot prefix would have thrown away. So it lands at `original/{content_hash}` like any other, and the disposition set stays two-valued: tier 1 is `original/`, tier 2 is `derived/`, and the sweep needs no third case. A third disposition would have to be honoured by the sweep, the verification, the retention policy and the restore drill independently, and `docs/22` § Q1 is what happens when one of four such places is missed.
+
+Nothing writes a snapshot today — `app/crawl/` is a deliberate stub — so this was recorded and fixed while it was still free. `app/storage/objects.py`'s `derived_prefix()` docstring carries the same rule on the code side.
 
 - `weed filer.backup` runs continuously to a second cluster, **with `-initialSnapshot` on the first run** — without it you get changes from subscription time forward and the existing tree is silently absent. Offsets checkpoint on the source filer every ~3 s, so a restart resumes.
 - **There is no consistent online snapshot.** Upstream guidance is to pause the cluster. Our restore procedure is therefore: restore filer metadata, restore volumes, run `volume.fsck` and `fs.verify`, then **reconcile against PostgreSQL** — for every `source_items` row, `HeadObject` its original key. PostgreSQL is the manifest, and the missing-key list is the true restore gap. Document that as the §25.5 object-storage restore procedure.
@@ -177,7 +226,8 @@ Forbidden in `services/core-api/` and `services/ai-service/`: the filer HTTP API
 
 ## Definition of done
 
-- [ ] Every key produced in the change set is built by `version_prefix()` (or its Laravel twin) and begins `org/{org_id}/`; `grep -rn "Bucket=\|->putObject(\|Storage::" services/ --include=*.py --include=*.php` shows no hand-built key.
+- [ ] Every key produced in the change set is built by `app/storage/objects.py` or `App\Support\Kb\ObjectKey` — never both spellings hand-written, never one of them — and begins `org/{org_id}/`; `grep -rn "Bucket=\|->putObject(\|Storage::" services/ --include=*.py --include=*.php` shows no hand-built key.
+- [ ] If either side gained or renamed a key method, `PAIRS` in `services/ai-service/tests/contract/test_object_key_cross_language.py` gained the row too. That list is the wire: a method missing from it halves the comparison silently, which is the only way this file's guarantee fails.
 - [ ] Both clients are configured path-style, SigV4, same `region_name`, and `when_required` checksums.
 - [ ] The S3 gateway has identities configured; an anonymous `ListBuckets` returns 403, asserted by a test, not by inspection.
 - [ ] No presigned URL is generated anywhere: `grep -rn "presign\|createPresignedRequest\|generate_presigned" services/ apps/` is empty, and CI keeps it empty.
@@ -185,7 +235,7 @@ Forbidden in `services/core-api/` and `services/ai-service/`: the filer HTTP API
 - [ ] The `sweep-abandoned-multipart-uploads` beat entry exists in `beat_schedule` (daily, `maintenance`), aborts multipart uploads older than 24 h, and its run is observable (`kb-observability-conventions`).
 - [ ] Every read feeding a parser goes through `get_verified()` against `content_hash` from PostgreSQL; a byte-flipped object fails with `ObjectIntegrityError`, not a parser exception.
 - [ ] Only the operations listed in Non-negotiable 3 appear in application code; no filer HTTP call, no `weed` invocation, no lifecycle/versioning/tagging/object-lock call.
-- [ ] Phase-2 sweep deletes `derived/` unconditionally and `original/` only per retention policy, inspects `Errors` on every batch, and is idempotent across a mid-run kill.
+- [ ] Retiring a version sweeps **only** that version's `derived/` prefix and takes no `include_original` flag; `original/` is swept separately, source-scoped, once retention says so and no surviving version references the bytes. Both inspect `Errors` on every batch and are idempotent across a mid-run kill.
 - [ ] Deletion verification calls `assert_prefix_empty()` — bucket versioning asserted disabled, `ListObjectVersions` paginated, `Versions` and `DeleteMarkers` both empty.
 - [ ] Cross-tenant test: purging org A's source leaves org B's byte-identical object at its own prefix intact.
 - [ ] `filer.backup` runs with `-initialSnapshot` on first start; a restore drill restores tier-1 objects and reconciles every `source_items.content_hash` by `HeadObject`, with the missing-key list recorded as the §25.5 evidence.

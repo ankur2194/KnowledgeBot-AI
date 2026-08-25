@@ -159,3 +159,52 @@ EXPOSE 3000
 # The standalone server, not `next start`. `next start` needs the full next package, which
 # standalone deliberately does not ship.
 CMD ["node", "apps/web/server.js"]
+
+# ================================================================================================
+# STAGE: browsers — the ONLY image in this repository that can run a browser
+# ================================================================================================
+# Nothing in the production path targets this stage, and `runtime` above does not descend from it,
+# so adding it changed the size of exactly zero shipped images. BuildKit builds a stage only when
+# it is an ancestor of the requested target.
+#
+# WHY IT HAD TO EXIST. Two suites in this repository need a real Chromium and neither could run:
+#
+#   * `vitest --project components` — 22 spec files that mount components in Vitest's browser mode
+#     (`vitest.config.ts` → `browser.instances: [{ browser: 'chromium' }]`). Vitest resolves that
+#     browser through `playwright-core`, so "chromium is installed" means "the exact build number
+#     `playwright-core@1.62.1` asks for is under PLAYWRIGHT_BROWSERS_PATH", not "some chromium is
+#     on PATH".
+#   * `playwright test` — the `setup`, `admin` and `public` projects in `playwright.config.ts`.
+#
+# `knowledgebot/web:dev` is `node:22-bookworm-slim` plus the workspace install. It carries no
+# browser and none of the shared libraries one needs — measured: zero of libnss3, libnspr4,
+# libatk-1.0, libcups2, libgbm1 and libasound2 are present. So the failure was not "the browser is
+# missing", which is a one-line fix; it was that `playwright install chromium` alone would land a
+# binary that cannot dynamically link, and the error for THAT is a spawn failure with no mention of
+# a library. `--with-deps` is the part that matters, and it needs root and apt, which is why this
+# is a build stage rather than something a test command does at runtime.
+#
+# THE VERSION IS NOT WRITTEN DOWN HERE, AND THAT IS DELIBERATE. The CLI invoked below is the one
+# `pnpm install` put in the workspace, so the browser revision is whatever `@playwright/test` in
+# apps/web/package.json resolves to. Pinning a build number in this file would create a second
+# place to update, and the failure mode of the two disagreeing is the message this stage exists to
+# prevent someone seeing again:
+#     Executable doesn't exist at /ms-playwright/chromium_headless_shell-<n>/...
+#
+# CHROMIUM ONLY. `playwright.config.ts` declares chromium projects and nothing else; firefox and
+# webkit would roughly triple the download for browsers no suite names.
+FROM deps AS browsers
+
+# OUTSIDE /app ON PURPOSE. Every way this image is used bind-mounts the repo over /app, and a
+# browser installed under the workspace would be hidden by that mount at the moment it is needed.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+# `--with-deps` shells out to apt-get; the lists it leaves behind are ~40 MB of files no test reads.
+RUN apps/web/node_modules/.bin/playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/* \
+    && chmod -R a+rX /ms-playwright
+
+# Runs as root by default like every other stage here; callers pass `--user` to keep the artefacts
+# they write into the mounted workspace owned by the developer rather than by root. That is not a
+# hardening claim — this image exists to drive a browser against a development stack and has no
+# place in a deployment.

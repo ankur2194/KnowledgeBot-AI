@@ -74,7 +74,7 @@ export default function SettingsPage() {
                 403 whether or not the link was rendered. */}
             <Link
               href="/settings/members"
-              className="inline-flex items-center gap-2 text-base text-primary underline-offset-4 hover:underline"
+              className="inline-flex items-center gap-2 text-base text-link underline-offset-4 hover:underline"
             >
               <UsersIcon aria-hidden className="size-4" />
               Members and invitations
@@ -106,28 +106,27 @@ export default function SettingsPage() {
                 skeleton that never resolves is a loading state for nothing. */}
             <Link
               href="/settings/providers"
-              className="inline-flex items-center gap-2 text-base text-primary underline-offset-4 hover:underline"
+              className="inline-flex items-center gap-2 text-base text-link underline-offset-4 hover:underline"
             >
               <KeyRoundIcon aria-hidden className="size-4" />
               Provider connections
             </Link>
-            {/* ── LINKED BEFORE IT EXISTS, DELIBERATELY, AND SAID SO ──────────────────────────────
-                `/settings/embedding` is the designation screen and lands next batch. Rendering the
-                link now keeps the agent that builds it from having to edit this file to be reachable —
-                and the same link is on the providers screen, next to the connection whose designation
-                it governs. A link that 404s for one batch is the lesser cost, and the sentence below
-                is what makes the affordance honest: it says the screen is coming, so a 404 reads as
-                "not yet" rather than as a broken console. */}
+            {/* THE "NOT AVAILABLE YET" SENTENCE THAT USED TO SIT UNDER THIS LINK IS GONE, AND ITS
+                REMOVAL IS THE POINT RATHER THAN A TIDY-UP. The link was rendered a batch before
+                `(admin)/settings/embedding/page.tsx` existed, deliberately, so that the agent
+                building the screen would not have to edit this file to be reachable — and the
+                sentence was what made a 404 read as "not yet" instead of as a broken console. The
+                route exists now, so the sentence had become a product-visible false statement:
+                telling an administrator that a working screen is unavailable is worse than the 404
+                it was written to explain. The same sentence sat on `/settings/providers` and went
+                with it. */}
             <Link
               href="/settings/embedding"
-              className="inline-flex items-center gap-2 text-base text-primary underline-offset-4 hover:underline"
+              className="inline-flex items-center gap-2 text-base text-link underline-offset-4 hover:underline"
             >
               <SlidersHorizontalIcon aria-hidden className="size-4" />
               Embedding designation
             </Link>
-            <p className="text-sm text-muted-foreground">
-              The embedding screen is being built and is not available yet.
-            </p>
           </CardContent>
         </Card>
       </div>

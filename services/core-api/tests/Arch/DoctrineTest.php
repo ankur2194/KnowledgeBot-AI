@@ -46,53 +46,51 @@ arch()->preset()->laravel();
 
 /*
 |--------------------------------------------------------------------------
-| `preset → laravel` CRASHES, AND THEREFORE ENFORCES NOTHING
+| `preset → laravel` ENFORCES — RE-MEASURED 2026-08-25, AND IT USED TO NOT
 |--------------------------------------------------------------------------
 |
-| The line above fails on every run with
+| This block used to be headed "CRASHES, AND THEREFORE ENFORCES NOTHING" and to describe every run
+| failing with
 |
 |   Typed property PHPUnit\Architecture\Elements\ObjectDescriptionBase::$path
 |   must not be accessed before initialization
 |
-| and the failure is NOT ours. Measured 2026-08-21, by moving `vendor/laravel/pint/app` aside and
-| re-running: with it gone the preset PASSES; restored, it crashes again. The chain:
+| It does not fail in this tree, and it is not passing vacuously either. Verified with a positive
+| control rather than by reading the output: a class placed under App\Jobs that does not implement
+| ShouldQueue makes `preset → laravel` fail with that rule's own message at that file's own line,
+| and the failure goes away with the class. The positive rules are live.
 |
-|   1. `laravel/pint` is a dev dependency that ships a whole Laravel application, and its own
-|      composer.json maps `"App\\": "app/"`. Composer merges that into the ROOT autoloader:
-|      `vendor/composer/autoload_psr4.php` reads
-|        'App\\' => array($baseDir.'/app', $vendorDir.'/laravel/pint/app')
-|      so the `App` arch layer contains Pint's classes as well as ours.
-|   2. Pest tags anything under `vendor/` with `Pest\Arch\Objects\VendorObjectDescription`, whose
-|      `make()` sets only `name` and `uses` — never `$path`, never `$reflectionClass`.
-|   3. Every POSITIVE arch callback is guarded by `isset($object->reflectionClass)`
-|      (`vendor/pestphp/pest/src/Expectation.php` — `toBeEnum`, `toImplement`, `toExtend`, …), so on
-|      a vendor object the guard is false and the object is reported as a VIOLATION.
-|   4. `Blueprint::targeted()` then renders that violation by reading `$object->path`, which was
-|      never initialized. Fatal Error, no assertion, no file.
+| THE CAUSE IS UNCHANGED, WHICH IS WHY THE HISTORY STAYS HERE. `laravel/pint` is a dev dependency
+| that ships a whole Laravel application and maps `"App\\": "app/"` in its own composer.json, so
+| Composer merges it into the ROOT autoloader and `App\` is registered against two directories:
 |
-| Three Pint classes trip it: App\Enums\NodePackageManager, App\Exceptions\PrettierException and
-| App\Providers\AppServiceProvider.
+|     'App\\' => array($baseDir.'/app', $vendorDir.'/laravel/pint/app')
 |
-| THE CONSEQUENCE IS THE PART TO CARRY, AND IT IS WORSE THAN "THE RULE IS OFF". The reported
-| MESSAGE is always the crash, so no rule in the preset can ever state its own verdict. But the
-| reported CODE FRAME is not the crash's — when some other rule in the same preset is genuinely
-| violated, the frame points at the real violator's file and line while the message above it is the
-| uninitialized-property Error. Measured 2026-08-21, both ways: with a `RuntimeException` subclass
-| placed under App\Services\Sources, `preset → laravel` failed at that file's `class` line; with the
-| tree clean, the same failure had no frame at all.
+| Pest tags anything under `vendor/` with `VendorObjectDescription`, whose `make()` sets neither
+| `$path` nor `$reflectionClass`; every POSITIVE arch callback is guarded by
+| `isset($object->reflectionClass)`, so a vendor object is reported as a violation; and
+| `Blueprint::targeted()` renders it by reading `$object->path`, which was never initialized.
 |
-| That combination is how the two Phase C classes stayed broken for a phase. IllegalSourceTransition
-| and UploadRejected DID violate the preset's "no Throwable outside App\Exceptions" rule, the frame
-| moved between them as each was edited, and the message said "library bug" the whole time — so the
-| frame read as an artifact of the crash rather than as a finding. Both have been moved into
-| App\Exceptions, and the rule they broke is restated below in a form that reports itself.
+| What stops that here is not a fix: pint v1.30.4 installs from **dist**, and its dist archive
+| export-ignores `app/`, so the second directory does not exist and there is nothing to walk. That
+| makes `config.preferred-install: dist` load-bearing for this file while reading like a
+| download-speed preference — which is exactly the kind of dependency that gets edited away.
+| `tests/Arch/AutoloaderIntegrityTest.php` is the tripwire; read its header before changing
+| anything about how vendor is installed.
 |
-| Restating a preset rule here is only possible for NEGATIVE ones: `not->toImplement()` passes
-| `! isset($object->reflectionClass) || …`, so a vendor object satisfies it instead of crashing.
-| The positive rules (`App\Models` extends Model, `App\Http\Requests` has `rules()`, …) cannot be
-| restated this way and stay unenforced until the upstream bug is fixed or Pint stops being
-| autoloaded into `App\\`. Do not delete the preset line: when either of those happens it starts
-| working again, and its failure is the only signal that it currently does not.
+| THE FAILURE MODE IS THE PART TO CARRY, because it is what cost a phase and it will look the same
+| if it returns. The reported MESSAGE is always the crash, so no rule in the preset can state its
+| own verdict — but the reported CODE FRAME is the real violator's. So a genuine violation appears
+| as a library-bug message pointing at a real file, and the frame reads as an artifact of the
+| crash. IllegalSourceTransition and UploadRejected DID violate the preset's "no Throwable outside
+| App\Exceptions" rule for a whole phase that way, with the finding on screen the entire time.
+| Both now live in App\Exceptions.
+|
+| The restated rule below is KEPT even though the preset works again. It costs one arch() call, it
+| is the one rule this file has direct evidence can be missed, and it reports itself by name if the
+| crash ever comes back — negative rules survive the bug (`not->toImplement()` short-circuits on
+| `! isset($object->reflectionClass)`, so a vendor object satisfies it) while positive ones do not.
+| Do not delete the preset line either.
 */
 arch('an exception lives in App\Exceptions, where the handler and the reader both look')
     // The Laravel preset's own rule, restated because the preset cannot report it (see above).

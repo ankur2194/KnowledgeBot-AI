@@ -148,15 +148,18 @@ function ProvidersForOrganization({
         canManage={canManage}
       />
 
-      {/* ── THE TWO ROUTES THAT DO NOT EXIST YET, LINKED ANYWAY, AND SAID SO OUT LOUD ─────────────
-          `/settings/embedding` is A4b's designation screen and it lands next batch. The link is here
-          now so that agent does not have to edit this screen to be reachable, which is the same
-          argument the model-catalogue link in the table makes.
+      {/* ── THE LINK OUTLIVED ITS DISCLAIMER, WHICH IS WHAT WAS SUPPOSED TO HAPPEN ────────────────
+          `/settings/embedding` was linked from here a batch before A4b built it, so that agent did
+          not have to edit this screen to be reachable — the same argument the model-catalogue link
+          in the table makes. A sentence underneath said the screen was coming, which is what made a
+          404 read as "not yet" rather than as a broken console.
 
-          THE AFFORDANCE IS HONEST RATHER THAN HIDDEN: the sentence says the screen is coming, so a
-          404 reads as "not yet" instead of as a broken console. Gating it behind a feature flag was
-          the alternative and was rejected — a flag with one consumer and a one-batch life is a second
-          thing to remove, and forgetting to remove it hides a finished screen. */}
+          THE ROUTE EXISTS NOW AND THE SENTENCE HAS BEEN REMOVED. It had stopped being an honest
+          affordance and become a product-visible false statement — an administrator told that a
+          working screen is unavailable does not click it. Gating the link behind a feature flag was
+          the rejected alternative at the time, and this is why: a flag with one consumer and a
+          one-batch life is a second thing to remove, and forgetting to remove it hides a finished
+          screen. Exactly one sentence had to be deleted instead, here and on `/settings`. */}
       <Card>
         <CardHeader>
           <CardTitle as="h2">Embedding</CardTitle>
@@ -168,14 +171,11 @@ function ProvidersForOrganization({
         <CardContent className="flex flex-col gap-2">
           <Link
             href="/settings/embedding"
-            className="inline-flex items-center gap-2 text-base text-primary underline-offset-4 hover:underline"
+            className="inline-flex items-center gap-2 text-base text-link underline-offset-4 hover:underline"
           >
             <SlidersHorizontalIcon aria-hidden className="size-4" />
             Embedding designation
           </Link>
-          <p className="text-sm text-muted-foreground">
-            This screen is being built and is not available yet.
-          </p>
         </CardContent>
       </Card>
 

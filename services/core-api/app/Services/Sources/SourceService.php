@@ -8,11 +8,13 @@ use App\Enums\SourceState;
 use App\Enums\SourceType;
 use App\Exceptions\IllegalSourceTransition;
 use App\Jobs\SubmitIngestionJob;
+use App\Jobs\SyncSourceStatusJob;
 use App\Models\KnowledgeSource;
 use App\Models\Organization;
 use App\Models\SourceItem;
 use App\Models\SourceVersion;
 use App\Repositories\Contracts\KnowledgeSourceRepositoryInterface;
+use App\Repositories\Contracts\PendingSourceObjectRepositoryInterface;
 use App\Services\Audit\AuditLogger;
 use App\Services\Sources\Upload\SourceObjectWriter;
 use App\Services\Sources\Upload\UploadIntake;
@@ -52,24 +54,29 @@ use Throwable;
  * PostgreSQL is the source of truth and it now records the intent; NOTHING IS DELETED and no job
  * has to succeed first, so every vector is retained and re-enabling stays a metadata write.
  *
- * THE RETRIEVAL-SCOPE HALF IS OWED. `source_status` matched positively against
- * `['ready','ready_with_warnings']` is the right mechanism, and `kb-tenancy-isolation` NN5 is why
- * that direction matters — a `match` condition is not satisfied by a point that lacks the value,
- * so a positive filter fails closed. But `source_status` is a QDRANT PAYLOAD FIELD WRITTEN AT
- * UPSERT TIME (`services/ai-service/app/ingestion/indexing/upserter.py`, which says so itself and
- * adds that "re-enabling is a payload write rather than a re-ingest"), and this path issues no
- * payload write and dispatches no job that would. The other mechanism that could carry a disable —
- * the resolved `allowed_version_ids` set Laravel is meant to compute from `bot_source_assignments`
- * joined to `knowledge_sources` and `source_versions` and ship in the config snapshot, which is
- * what makes a disable take effect AT ONCE without touching any payload — does not exist in this
- * service either. The only thing here that takes that set,
- * `SparseCorpusStatisticsRepositoryInterface`, receives it as an argument from a caller nobody has
- * written.
+ * THE RETRIEVAL-SCOPE HALF IS HALF BUILT, AND THIS PARAGRAPH SAYS WHICH HALF. `source_status`
+ * matched positively against `['ready','ready_with_warnings']` is the right mechanism, and
+ * `kb-tenancy-isolation` NN5 is why that direction matters — a `match` condition is not satisfied
+ * by a point that lacks the value, so a positive filter fails closed. `source_status` is a QDRANT
+ * PAYLOAD FIELD WRITTEN AT UPSERT TIME (`services/ai-service/app/ingestion/indexing/upserter.py`,
+ * which says so itself and adds that "re-enabling is a payload write rather than a re-ingest"),
+ * and `disable()` and `enable()` now DISPATCH that write: `SyncSourceStatusJob` calls
+ * `source.status.sync` on the data plane, which rewrites the term on every point of the source in
+ * every collection its versions live in and returns the filtered count that proves it.
  *
- * IT IS LATENT AND NOT LIVE, which is why `disable()` and `enable()` carry a TODO rather than this
- * class carrying a defect: there is no chat path in this repository, so nothing can read a stale
- * payload today. It goes live with the first one, and the failure shape is the silent one — a
- * disabled source answering at normal latency with a well-formed citation and an HTTP 200.
+ * THE OTHER MECHANISM IS STILL OWED AND IS PHASE D'S. The resolved `allowed_version_ids` set
+ * Laravel is meant to compute from `bot_source_assignments` joined to `knowledge_sources` and
+ * `source_versions` and ship in the config snapshot — the thing that makes a disable take effect
+ * AT ONCE without touching any payload — does not exist in this service. The only thing here that
+ * takes that set, `SparseCorpusStatisticsRepositoryInterface`, receives it as an argument from a
+ * caller nobody has written. The two are complementary rather than alternatives: the snapshot is
+ * what makes a disable instant, and the payload rewrite is what makes it durable and is what makes
+ * a re-enable put the source back without a re-ingest.
+ *
+ * NOTHING READS EITHER TODAY, because there is no chat path in this repository. What changed is
+ * that the disable is now carried rather than deferred, so the failure shape to watch for is no
+ * longer "the index was never told" but "the index was told and did not verify" — which is loud,
+ * lands in `failed_jobs`, and is what `SyncSourceStatusJob::failed()` is about.
  *
  * THE CACHED ANSWER CARRIES THE SAME QUALIFICATION. `valkey-keyspaces` keys `ans:` on a fingerprint
  * of the RESOLVED retrieval scope — the set of source versions this bot may search right now — so
@@ -120,6 +127,12 @@ final class SourceService
         // the whole wiring.
         private UploadIntake $intake,
         private SourceObjectWriter $objectWriter,
+        // THE WRITE-AHEAD LEDGER (security finding S3). Every key this service is about to write is
+        // recorded here first and released after the transaction commits, so a failure in between
+        // leaves a row `kb:sweep-orphan-objects` can find. Without it an object written for a
+        // source that never committed is permanent AND invisible — it sits under a prefix the
+        // phase-2 purge only visits for sources that exist, so verification certifies it clean.
+        private PendingSourceObjectRepositoryInterface $pendingObjects,
     ) {}
 
     /**
@@ -183,19 +196,23 @@ final class SourceService
      * WRITTEN BEFORE THE TRANSACTION, DELIBERATELY. Object storage does not participate in a
      * PostgreSQL transaction, so the only two orderings are "orphan object, no row" and "row
      * pointing at nothing". The second is a source whose ingestion fails on every attempt with
-     * `error_class: storage` and needs an operator, so the orphan is chosen — but ON THE STRENGTH OF
-     * THAT COMPARISON ALONE, AND NOT ON THE RECOVERY PATH THIS PARAGRAPH USED TO CLAIM. It said the
-     * orphan was "a byte-for-byte-identical object at a content-addressed key that the next attempt
-     * overwrites and a sweep can collect", and both halves are false: the key is SOURCE-scoped and
+     * `error_class: storage` and needs an operator, so the orphan is chosen — and the orphan is now
+     * RECOVERABLE, which it was not when this paragraph was written. It used to claim the orphan
+     * was "a byte-for-byte-identical object at a content-addressed key that the next attempt
+     * overwrites and a sweep can collect", and both halves were false: the key is SOURCE-scoped and
      * `$sourceId` is minted per request twenty lines below, so a retry writes a DIFFERENT key and
-     * overwrites nothing, and `kb.maintenance.sweep_orphan_objects` is a docstring line in
-     * `services/ai-service/app/maintenance/tasks.py`, whose `__all__` is empty and whose
-     * `TODO(unassigned)` says these tasks have no owner. An orphan on this path is permanent, and it
-     * is permanent in the shape `ObjectKey`'s docblock calls defect 1 — outside every prefix the
-     * phase-2 purge visits, so verification certifies it clean while the bytes survive.
-     * `SourceObjectWriter::write()` carries the same correction and the `TODO(phase-c)` naming the
-     * two real fixes; it is stated once there rather than twice, because the ordering decision is
-     * one decision made in two places.
+     * overwrites nothing, and `kb.maintenance.sweep_orphan_objects` was a docstring line in
+     * `services/ai-service/app/maintenance/tasks.py`, whose `__all__` is empty. An orphan was
+     * therefore permanent, in the shape `ObjectKey`'s docblock calls defect 1 — outside every
+     * prefix the phase-2 purge visits, so verification certified it clean while the bytes survived.
+     *
+     * WHAT CLOSED IT IS THE WRITE-AHEAD LEDGER, not a change to the ordering. Every key this method
+     * is about to write is reserved in `pending_source_objects` first and released after the
+     * transaction commits, so a failure in between leaves a row naming the object;
+     * `kb:sweep-orphan-objects` collects it once the grace window passes, after re-asking
+     * `source_items` whether anything claims the key. `SourceObjectWriter::write()` carries the
+     * argument in full, including why "rows first" was rejected; it is stated once there rather
+     * than twice, because the ordering decision is one decision made in two places.
      *
      * ── THE UPLOADED FILES GO THROUGH THE GATE BEFORE ANY BYTE IS STORED ─────────────────────
      *
@@ -337,9 +354,50 @@ final class SourceService
             },
         );
 
+        // RELEASED AFTER THE COMMIT, NEVER INSIDE IT (security finding S3). `$this->sources->create()`
+        // has returned, so every object this request wrote is now named by a `source_items` row and
+        // the ledger entries are stale. Releasing inside the transaction would be the one arrangement
+        // that cannot work: a rollback would take the release with it (leaving rows for objects that
+        // were never written is harmless) — but a commit that then failed on a later statement would
+        // have discarded the ledger entry for an object nothing points at, which is the orphan
+        // returning with its only witness deleted.
+        $this->releaseReservations($organizationId, $sourceId);
+
         $this->dispatchSubmission($organizationId, $source->id, $jobId, null, $actorId);
 
         return $source;
+    }
+
+    /**
+     * Drop this source's write-ahead ledger entries, and NEVER fail the request over it.
+     *
+     * ── THE ASYMMETRY WITH `reserve()` IS THE POINT ────────────────────────────────────────────
+     *
+     * A failed reservation fails the request, because nothing has happened yet and proceeding would
+     * write an untracked object. A failed RELEASE is the opposite: the source exists, its rows are
+     * committed, the caller's work succeeded, and the only thing left undone is deleting rows that
+     * describe intentions which have since become facts. Throwing here would turn a healthy 201
+     * into a 500 for a source that was created — and the retry it invites would create a SECOND
+     * source with a second set of objects.
+     *
+     * AND THE LEFTOVER ROWS ARE HARMLESS, WHICH IS WHY SWALLOWING IS SAFE RATHER THAN LAZY.
+     * `kb:sweep-orphan-objects` re-asks `source_items` before it deletes anything: it will find
+     * these keys CLAIMED, leave the objects alone, and retire the rows. The sweep's claimed-count
+     * going up is exactly what a lost release looks like from the outside.
+     */
+    private function releaseReservations(string $organizationId, string $sourceId): void
+    {
+        try {
+            $this->pendingObjects->release($organizationId, $sourceId);
+        } catch (Throwable $failure) {
+            Log::warning('kb.source.pending_objects.release_failed', [
+                'organization_id' => $organizationId,
+                'source_id' => $sourceId,
+                'exception' => $failure::class,
+            ]);
+
+            report($failure);
+        }
     }
 
     /**
@@ -405,17 +463,20 @@ final class SourceService
      * disabling is not a way to reclaim storage, and deleting is not a way to hide something for a
      * week.
      *
-     * TODO(phase-c): NOTHING A RETRIEVAL QUERY CAN SEE IS CHANGED BY THIS METHOD, and neither piece
-     * that would change one belongs to this service to build. (1) The data plane owes the
-     * `set_payload` that rewrites `source_status` on this source's points — the field is written at
-     * upsert in `services/ai-service/app/ingestion/indexing/upserter.py`, so the rewrite is
-     * `ingestion-engineer`'s — together with the internal operation Laravel would call to ask for
-     * it, which is an addition to `kb-internal-api-contracts` and is absent from
-     * `InternalAiClient`. (2) The config snapshot owes the resolved active-version set that
-     * `tenant_filter()` takes as a required argument and that `retrieval-engineer` consumes; that
-     * resolver is Laravel's own and lands with the chat path, and it is the mechanism that makes a
-     * disable immediate WITHOUT any payload rewrite. Latent while no chat path exists; live the day
-     * one does.
+     * ── THE PAYLOAD REWRITE IS DISPATCHED, AND THE SNAPSHOT RESOLVER IS STILL PHASE D ────────
+     *
+     * (1) IS BUILT. `SyncSourceStatusJob` carries `source_status = disabled` to
+     * `POST /internal/v1/maintenance/source-status`, which rewrites the payload term on every
+     * point of this source in every collection its versions live in and returns the filtered count
+     * that proves it. The dispatch is after the commit and has a compensation, below; the job's
+     * own docblock explains why a failed DISABLE is deliberately not reverted.
+     *
+     * (2) IS NOT, AND IS NOT THIS PHASE'S. The config snapshot still owes the resolved
+     * active-version set `tenant_filter()` takes as a required argument — that resolver is
+     * Laravel's own and lands with the chat path. It is the mechanism that would make a disable
+     * immediate WITHOUT any payload rewrite; the payload rewrite is what makes it effective in its
+     * absence, and the two are complementary rather than alternatives. Nothing reads either today
+     * because there is no chat path in this repository.
      *
      * @throws ValidationException 422 for a move the transition table forbids
      * @throws NotFoundHttpException when the row disappeared between the binding and the write
@@ -426,7 +487,7 @@ final class SourceService
         ?string $actorId = null,
         ?Request $request = null,
     ): KnowledgeSource {
-        return $this->move(
+        $moved = $this->move(
             $organization,
             $source,
             SourceState::Disabled,
@@ -434,6 +495,20 @@ final class SourceService
             $actorId,
             $request,
         );
+
+        // `revertTo: null` — a disable that never reaches the index must NOT put the row back to
+        // `ready`. See `SyncSourceStatusJob`'s docblock: reverting would tell the operator the
+        // source is ready, which is true of the index and the opposite of what they asked for, and
+        // would discard the only durable record that they asked at all.
+        $this->dispatchStatusSync(
+            $organization->organizationId(),
+            $moved->id,
+            SourceState::Disabled->value,
+            revertTo: null,
+            actorId: $actorId,
+        );
+
+        return $moved;
     }
 
     /**
@@ -467,14 +542,20 @@ final class SourceService
      * `POST .../sources/{source}/reprocess` is the route that turns a failed source into a ready
      * one, and it is the route that actually indexes something.
      *
-     * TODO(phase-c): THE MIRROR OF `disable()`'s MARKER, AND IT IS THE MORE DANGEROUS DIRECTION.
-     * Re-enabling is a metadata write here and nowhere else: the same `set_payload` and the same
-     * resolved active-version set are what would put this source back INTO a retrieval query, and
-     * both are unwritten (`ingestion-engineer` for the payload rewrite plus its internal operation,
-     * this service's own snapshot resolver for the version set, `retrieval-engineer` for the
-     * consumer). A disable that does not reach the index leaves a source answering; an enable that
-     * does not reach it leaves a source silently absent from its own organization's answers — the
-     * failure `kb-tenancy-isolation` describes as the correct-filter-wrong-payload case.
+     * ── THE MIRROR OF `disable()`, AND IT IS THE DIRECTION THAT GETS A COMPENSATION ──────────
+     *
+     * The payload rewrite is dispatched here too, with `source_status = ready`, and this is the
+     * direction where a failure is repaired rather than recorded. An enable that does not reach
+     * the index leaves the points carrying `disabled`: the console says ready, every question
+     * about the source goes unanswered, and nothing raises — `kb-tenancy-isolation`'s
+     * correct-filter-wrong-payload case. So `SyncSourceStatusJob` is given `revertTo` and puts the
+     * row back to `disabled` on exhaustion, which makes the console agree with what the index will
+     * actually do and makes the operator's obvious next action — enabling again — re-run the sync.
+     *
+     * `ready` AND NOT `$target->value` IN THE PAYLOAD. The two Ready flavours are identical for
+     * retrieval (§8.11) and the indexer writes the plain `ready` on every point it indexes, so
+     * `ready` is the value the index has actually held; sending `ready_with_warnings` would ask the
+     * far side to write a value nothing has ever written, and it refuses exactly that.
      *
      * @throws ValidationException 422 for a move the transition table forbids
      * @throws NotFoundHttpException when the row disappeared between the binding and the write
@@ -504,7 +585,7 @@ final class SourceService
             ]);
         }
 
-        return $this->move(
+        $moved = $this->move(
             $organization,
             $source,
             $target,
@@ -512,6 +593,16 @@ final class SourceService
             $actorId,
             $request,
         );
+
+        $this->dispatchStatusSync(
+            $organization->organizationId(),
+            $moved->id,
+            'ready',
+            revertTo: SourceState::Disabled->value,
+            actorId: $actorId,
+        );
+
+        return $moved;
     }
 
     /**
@@ -887,6 +978,13 @@ final class SourceService
      * defect 1 arriving by a different road — an object nothing can delete and verification will
      * certify clean over.
      *
+     * THE LEDGER IS THE BACKSTOP, NOT THE MECHANISM, AND THE DISTINCTION MATTERS. Every key below
+     * is reserved before it is written, so an orphan produced any other way — a database failure
+     * between the last write and the commit, a SIGKILL, a 500 — is named and collectable. That is
+     * NOT a licence to relax the all-or-nothing rule above: a partial batch that "the sweep will
+     * clean up" still leaves the caller a 422 and the bucket a set of objects for hours, and the
+     * gate is what makes the common case produce none at all.
+     *
      * ── THE REJECTION ROWS ARE WRITTEN BEFORE THE 422 AND OUTSIDE ANY TRANSACTION ────────────
      *
      * `source.upload.rejected` is ON_FAILURE_LOG, and `AuditLogger` explains why in the terms of
@@ -940,6 +1038,19 @@ final class SourceService
             // content-addressed: `org/{org}/sources/{source}/original/{sha256}`. The user's filename
             // is not in it, is not derivable from it, and goes to `display_name`, which is a column.
             $key = ObjectKey::originalUpload($organizationId, $sourceId, $upload->contentHash);
+
+            // RESERVED BEFORE THE BYTES, WHICH IS THE ENTIRE ORDER (security finding S3). If this
+            // process dies at any point from here until the transaction below commits, this row is
+            // the ONLY thing that names the object — the key is under a source that does not exist,
+            // so the phase-2 purge never visits it and deletion verification certifies it clean
+            // over it. `kb:sweep-orphan-objects` collects it once the grace window passes.
+            //
+            // A FAILURE HERE FAILS THE REQUEST, deliberately and unlike the release below. Nothing
+            // has been written yet, so the caller gets a 500 with no object stored and no row
+            // created; writing the object anyway would recreate the untracked orphan this ledger
+            // exists to eliminate, and would do it in the one case where we already know the
+            // database is unhealthy.
+            $this->pendingObjects->reserve($organizationId, $sourceId, $key);
 
             $this->objectWriter->write($key, $upload);
 
@@ -1034,6 +1145,12 @@ final class SourceService
         string $content,
     ): string {
         $key = ObjectKey::originalText($organizationId, $sourceId, $contentHash);
+
+        // THE SAME RESERVATION THE UPLOAD PATH MAKES, for the same reason. A pasted body is a
+        // smaller object and an equally permanent orphan: `ObjectKey::originalText()` puts it under
+        // the same source-scoped prefix, so a create that stores it and then fails to commit leaves
+        // bytes nothing names and nothing sweeps. See `uploadedItems()` for the full argument.
+        $this->pendingObjects->reserve($organizationId, $sourceId, $key);
 
         $this->objects()->put($key, $content);
 
@@ -1157,6 +1274,64 @@ final class SourceService
      * database is unreachable too there is nothing left to write with, and losing the real cause to
      * a secondary error would leave the operator debugging the wrong outage.
      */
+    /**
+     * Hand the payload rewrite to a queued job, and compensate if the BROKER is the thing that
+     * fails.
+     *
+     * ── TWO DIFFERENT FAILURES, AND ONLY ONE OF THEM IS THIS METHOD'S ────────────────────────
+     *
+     * A rewrite that runs and does not verify is `SyncSourceStatusJob::failed()`'s, after five
+     * attempts, and it is handled there. What this method covers is the case where the job is
+     * never enqueued at all: the status is COMMITTED and the audit row is written by the time we
+     * get here, so an unreachable broker would otherwise leave a source whose row and whose index
+     * disagree with nothing scheduled to reconcile them and no `failed_jobs` entry to say so —
+     * `SyncSourceStatusJob::failed()` is a handler for a job that was never dispatched.
+     *
+     * SO THE COMPENSATION IS THE JOB'S OWN, APPLIED INLINE, and it follows the same asymmetry: an
+     * enable is put back to `disabled` (which is what the index still says), and a disable is left
+     * alone and rethrown. `$revertTo === null` carries that decision from the two call sites
+     * rather than re-deriving it from the target, so the two places that know why cannot disagree.
+     *
+     * THE ORIGINAL EXCEPTION IS RETHROWN AND THE COMPENSATION SWALLOWS ITS OWN FAILURE — the same
+     * shape as `dispatchSubmission()`: if the database is unreachable too, losing the real cause
+     * to a secondary error leaves the operator debugging the wrong outage.
+     */
+    private function dispatchStatusSync(
+        string $organizationId,
+        string $sourceId,
+        string $sourceStatus,
+        ?string $revertTo,
+        ?string $actorId,
+    ): void {
+        try {
+            SyncSourceStatusJob::dispatch(
+                $organizationId,
+                $sourceId,
+                $sourceStatus,
+                $revertTo,
+                $actorId,
+            );
+        } catch (Throwable $exception) {
+            if ($revertTo !== null) {
+                try {
+                    $this->sources->transition(
+                        $organizationId,
+                        $sourceId,
+                        SourceState::from($revertTo),
+                        verified: false,
+                        // Deliberately empty; see `dispatchSubmission()` on why there is no
+                        // operation in the catalog for "the platform could not enqueue".
+                        audit: static function (): void {},
+                    );
+                } catch (Throwable) {
+                    // See the docblock: the original cause is the one worth having.
+                }
+            }
+
+            throw $exception;
+        }
+    }
+
     private function dispatchSubmission(
         string $organizationId,
         string $sourceId,

@@ -21,12 +21,37 @@ import {
 type Mode = 'light' | 'dark';
 const MODES: readonly Mode[] = ['light', 'dark'];
 
-/** Every token as a parsed colour, or a failure naming the token — never a silent skip. */
+/**
+ * Every token as a parsed colour, or a failure naming the token — never a silent skip.
+ *
+ * IT RESOLVES `var(--other-token)` ALIASES, one hop, and that is not a convenience. `--ring`,
+ * `--link` and `--link-active` are declared as `var()` references so that a subtree which
+ * overrides the accent ramp — the bot theme scope — moves them too; a literal copied out of the
+ * ramp would silently stop following it. But an alias is unparseable as a colour, so before this
+ * resolver every aliased token was EXCLUDED FROM THE MATRIX BY CONSTRUCTION rather than by
+ * decision. `--ring` has been in that position since the palette landed. A token that cannot be
+ * measured is a token whose floor nobody is holding.
+ *
+ * One hop only, deliberately: a chain is a design smell here, and a cycle would hang the suite.
+ */
 function tokenColor(name: string, mode: Mode): Oklch {
   const pair = colors[name as keyof typeof colors];
   if (!pair) throw new Error(`no such token: --${name}`);
-  const parsed = parseOklch(pair[mode]);
-  if (!parsed) throw new Error(`--${name} (${mode}) is not a parseable oklch(): ${pair[mode]}`);
+
+  const raw = pair[mode];
+  const alias = /^var\(--([a-z0-9-]+)\)$/.exec(raw);
+  if (alias) {
+    const target = colors[alias[1] as keyof typeof colors];
+    if (!target) throw new Error(`--${name} (${mode}) aliases --${alias[1]}, which is not a token`);
+    const resolved = parseOklch(target[mode]);
+    if (!resolved) {
+      throw new Error(`--${name} (${mode}) aliases --${alias[1]}, which is itself not a colour: ${target[mode]}`);
+    }
+    return resolved;
+  }
+
+  const parsed = parseOklch(raw);
+  if (!parsed) throw new Error(`--${name} (${mode}) is not a parseable oklch(): ${raw}`);
   return parsed;
 }
 
@@ -157,6 +182,39 @@ describe('the contrast matrix (kb-ui-accessibility)', () => {
         // mode; measured against the gamut-mapped value it is 4.66 and clears. The token is still
         // right, for the dark-mode reason rather than the stated one.
         expect(ratio('destructive-foreground', 'destructive-strong', mode)).toBeGreaterThanOrEqual(4.5);
+      });
+
+      it('the accent AS TEXT clears 4.5:1 on every surface it lands on', () => {
+        // ═══ THE ROW WHOSE ABSENCE WAS FINDING R1 ═══════════════════════════════════════════
+        //
+        // The matrix had a row for text ON the accent (`--primary-foreground` under it, via the
+        // -soft pairs and the destructive-strong case) and NO row for the accent AS text. So when
+        // the contrast checker's first run moved `--primary` dark from 0.585 to 0.568 — correctly,
+        // to give `--primary-foreground` its 4.5:1 — it made the unchecked direction worse and
+        // nothing said so. Links measured 3.95 / 3.54 / 3.15 on canvas / card / card-inset in dark
+        // mode, at fourteen call sites plus Button's `link` variant plus prose, for months, until
+        // the first execution of the Playwright suite ran axe over a dark page.
+        //
+        // THE FIX IS THE TOKEN, NOT A NUMBER: `--primary` carries two floors whose feasible
+        // windows do not overlap in dark mode, so no lightness satisfies both. `--link` is a
+        // separate token (aliased onto the ramp so it still follows a tenant's brand) and this row
+        // is what holds it to the text floor. Never point a link at `--primary` to make it pass.
+        for (const surface of ['canvas', 'card', 'card-inset', 'popover', 'primary-soft']) {
+          expect(ratio('link', surface, mode), `link on ${surface}`).toBeGreaterThanOrEqual(4.5);
+          expect(
+            ratio('link-active', surface, mode),
+            `link-active on ${surface}`,
+          ).toBeGreaterThanOrEqual(4.5);
+        }
+
+        // And the negative half, which is the assertion that actually stops the regression: the
+        // token links USED to use must be documented as failing rather than quietly re-adopted.
+        // If someone widens `--primary` enough to clear 4.5 in dark mode they will have broken
+        // `--primary-foreground` on it, and this expectation is where that trade shows up.
+        if (mode === 'dark') {
+          expect(ratio('primary', 'canvas', mode)).toBeLessThan(4.5);
+          expect(ratio('primary-foreground', 'primary', mode)).toBeGreaterThanOrEqual(4.5);
+        }
       });
 
       it('non-text signals clear 3:1 on --card and --canvas', () => {

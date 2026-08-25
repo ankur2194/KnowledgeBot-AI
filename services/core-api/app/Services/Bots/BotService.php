@@ -6,6 +6,7 @@ namespace App\Services\Bots;
 
 use App\Enums\BotAnswerMode;
 use App\Enums\BotStatus;
+use App\Jobs\SyncBotAccessJob;
 use App\Models\Bot;
 use App\Models\BotSourceAssignment;
 use App\Models\Organization;
@@ -19,9 +20,11 @@ use App\Support\Kb\PublicBotIdentifier;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpKernel\Exception\ConflictHttpException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
+use Throwable;
 
 /**
  * The organization's bots: list, create, edit, delete.
@@ -379,13 +382,19 @@ final readonly class BotService
      * which to widen the list, because after Phase C the same omission is a deleted bot whose
      * corpus is still filtered on and whose quota is still counted.
      *
-     * TODO(phase-c): the QDRANT PAYLOAD. `bot_ids` is one of the four mandatory filter terms
-     * (kb-tenancy-isolation), it is a LIST on each point rather than a row of its own, and a
-     * deleted bot's id has to be removed from the points that name it — a delete-by-filter on
-     * `bot_ids` would destroy chunks that other bots still answer from. Never by text match, and
-     * always VERIFIED afterwards (kb-deletion-and-verification): a filtered count that comes back
-     * non-zero is the only evidence that any of this happened, and there is no verification step on
-     * this path at all today.
+     * THE QDRANT PAYLOAD IS REACHED, AND THIS IS THE ITEM THAT IS DONE. `bot_ids` is one of the
+     * four mandatory filter terms (kb-tenancy-isolation), it is a LIST on each point rather than a
+     * row of its own, and a deleted bot's id is removed from the points that name it by
+     * `SyncBotAccessJob` -> `bot.access.sync`, dispatched below. It is a scroll and a
+     * read-modify-write and never a delete-by-filter — a delete would destroy the chunks the other
+     * bots assigned to those sources still answer from — and it ends in a filtered count, because
+     * a count is the only evidence any of it happened (kb-deletion-and-verification).
+     *
+     * ORGANIZATION-WIDE AND NOT SOURCE-BY-SOURCE, and the reason is the ordering above: the
+     * assignments are withdrawn inside the transaction, so by the time the dispatch happens there
+     * is nothing left to enumerate. The revoke therefore addresses every point in the organization
+     * carrying this bot id, which is also the only scope that catches a source whose grant was
+     * withdrawn earlier and whose payload still holds the id.
      *
      * TODO(phase-c/d): the VALKEY FAMILIES, all of which key on `{org_id}:{bot_id}` and therefore
      * strand on exactly this operation — `ans:{org}:{bot}:…` (answer cache) and its `ansidx:`
@@ -465,6 +474,27 @@ final readonly class BotService
 
         if (! $deleted) {
             throw new NotFoundHttpException;
+        }
+
+        // AFTER the commit, and outside the closure above: the closure runs INSIDE the repository's
+        // transaction, and a job dispatched from there would be popped by a worker before the
+        // delete landed — a revoke for a bot that still exists, followed by a delete nothing tells
+        // the index about.
+        //
+        // BEST-EFFORT AND LOUD, never rethrown. The bot is gone and its audit row is written; a
+        // 500 here would tell the operator the delete failed when it succeeded, and their repair —
+        // deleting again — is a 404 by design. A bot id left in a payload is stale rather than
+        // dangerous: ULIDs are never reused, so no future bot can inherit the term.
+        try {
+            SyncBotAccessJob::dispatch($organizationId, $bot->id, false, null, $actorId);
+        } catch (Throwable $exception) {
+            Log::error('bot access revoke could not be enqueued after delete', [
+                'org_id' => $organizationId,
+                'bot_id' => $bot->id,
+                'reason' => 'revoke',
+                'outcome' => 'not-enqueued',
+            ]);
+            report($exception);
         }
     }
 

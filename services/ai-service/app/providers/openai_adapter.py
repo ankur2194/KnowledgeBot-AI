@@ -150,15 +150,21 @@ C3: nothing here can detect a re-trained model behind a stable id, and
 
 from __future__ import annotations
 
+import math
+import time
 from collections.abc import AsyncIterator
 from typing import Any, Final
 
+import httpx
+import openai
 from pydantic import SecretStr
 
-from app.core.errors import ErrorClass
+from app.core.errors import ErrorClass, KbError
 from app.providers.contract import (
+    Capability,
     CapabilityWarning,
     ChatRequest,
+    Diagnostics,
     EmbeddingAdapter,
     EmbeddingRequest,
     EmbeddingResult,
@@ -166,9 +172,11 @@ from app.providers.contract import (
     ProviderAdapter,
     StopReason,
     StreamEvent,
+    Timeouts,
     Usage,
 )
-from app.providers.errors import ProviderCallFailed
+from app.providers.errors import ProviderCallFailed, retry_after_seconds
+from app.retrieval.collection import EmbeddingSpace
 
 __all__ = ["OpenAIAdapter"]
 
@@ -254,6 +262,52 @@ BODY_CODE_TO_CLASS: Final[dict[str, ErrorClass]] = {
     "unsupported_value": ErrorClass.PROVIDER_PERMANENT_REQUEST,
 }
 
+#: The tiebreak, consulted **only** when the body carried no code we recognise. It is
+#: deliberately not the primary axis: the 429 row above splits on a vendor code that the
+#: status cannot distinguish, and every entry here would get that split wrong.
+#:
+#: An unmapped status lands on ``PROVIDER_PERMANENT_REQUEST`` via the caller's default, which
+#: is ``errors.UNMAPPED`` — unknown is permanent, never temporary, because a temporary default
+#: retries a request that will never succeed and hides the fact that a vendor added a code.
+_STATUS_TO_CLASS: Final[dict[int, ErrorClass]] = {
+    401: ErrorClass.PROVIDER_AUTH,
+    403: ErrorClass.PROVIDER_AUTH,
+    429: ErrorClass.PROVIDER_RATE_LIMIT,
+    500: ErrorClass.PROVIDER_TEMPORARY,
+    502: ErrorClass.PROVIDER_TEMPORARY,
+    503: ErrorClass.PROVIDER_TEMPORARY,
+    504: ErrorClass.PROVIDER_TEMPORARY,
+}
+
+#: The vendor's own ceiling on one ``POST /v1/embeddings`` array. Ingestion never approaches it
+#: — ``embedder.MAX_BATCH_TEXTS`` is 64 — so this is a backstop against a caller that is not
+#: ingestion, and it exists so the refusal names the limit rather than arriving as a 400 whose
+#: body we may not log.
+#:
+#: <!-- UNVERIFIED: 2048 is OpenAI's documented array limit as of the 2026-08-07 reading of
+#: their published openapi.yaml; it is not re-checked per release, and the vendor's 400 remains
+#: the authority. -->
+MAX_EMBEDDING_INPUTS: Final[int] = 2048
+
+
+def _body_code(exc: BaseException) -> str | None:
+    """The vendor's ``error.code`` from an SDK exception, or None.
+
+    Defensive at every hop on purpose. The SDK exposes ``body`` as ``object``, a proxy error
+    can return HTML with a JSON content type, and a gateway 502 has no body at all — none of
+    which is a reason to fail while classifying a failure. A ``None`` here means "no code",
+    which the caller handles by falling through to the status.
+    """
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict):
+            code = error.get("code")
+            if isinstance(code, str) and code:
+                return code
+    code = getattr(exc, "code", None)
+    return code if isinstance(code, str) and code else None
+
 
 class OpenAIAdapter:
     """Satisfies ``ProviderAdapter``.
@@ -290,8 +344,29 @@ class OpenAIAdapter:
         the SDK's flat 600 s default — 13x our provider budget. ``read`` is between chunks,
         not total, so a model emitting one token every fifteen seconds never trips it; the
         caller's absolute deadline is what enforces the total.
+
+        THE TIMEOUT HERE IS A FLOOR, NOT THE POLICY. The per-call values live on
+        ``req.timeouts`` and this signature takes no request — it is shared by both surfaces —
+        so the client is built with the contract's defaults and each call passes its own
+        ``timeout=`` override. That is the SDK's documented per-request escape hatch and it
+        keeps one client shape for chat and embedding; what it must never become is a call
+        with no override at all, which would silently inherit the defaults below rather than
+        the tenant's configured budget.
         """
-        raise NotImplementedError("openai-api: AsyncOpenAI(max_retries=0, explicit httpx.Timeout)")
+        defaults = Timeouts()
+        return openai.AsyncOpenAI(
+            api_key=credential.get_secret_value(),
+            base_url=self._base_url,
+            # ALWAYS 0. The SDK retries twice by default, invisibly, inside one `await`.
+            max_retries=0,
+            timeout=httpx.Timeout(
+                defaults.total,
+                connect=defaults.connect,
+                read=defaults.first_token,
+                write=defaults.connect,
+                pool=defaults.connect,
+            ),
+        )
 
     def _translate_in(self, req: ChatRequest, caps: ModelCapabilities) -> dict[str, Any]:
         """Build the Responses body.
@@ -375,8 +450,47 @@ class OpenAIAdapter:
         surface: a different provider is a different vector space, and falling back
         mid-ingestion writes points whose cosine distance to the rest of the collection is
         meaningless — with no width mismatch to make Qdrant reject them.
+
+        THE VENDOR'S MESSAGE NEVER CROSSES INTO THE RAISED ERROR. 401 and 422 bodies routinely
+        echo the request, and on this service the request carries the packed prompt or the
+        tenant's chunk text. What crosses is the vendor's ``code``, which is a closed
+        vocabulary, plus our own sentence.
         """
-        raise NotImplementedError("openai-api: exception + body code -> ErrorClass")
+        code = _body_code(exc)
+        request_id = getattr(exc, "request_id", None)
+        headers = getattr(getattr(exc, "response", None), "headers", None)
+        retry_after = retry_after_seconds(headers) if headers is not None else None
+
+        if isinstance(exc, openai.APITimeoutError | openai.APIConnectionError):
+            # Nothing arrived. There is no body and therefore no code — the absence IS the
+            # evidence, and it is always temporary.
+            return ProviderCallFailed(
+                ErrorClass.PROVIDER_TEMPORARY,
+                "the OpenAI request did not complete: no response was received",
+                tokens_emitted=tokens_emitted,
+                native_code=type(exc).__name__,
+                provider_request_id=request_id,
+            )
+
+        status = getattr(exc, "status_code", None)
+
+        # THE CODE FIRST AND THE STATUS ONLY AS A TIEBREAK. Both values of the 429 arrive as
+        # `RateLimitError`, so a status-first reading treats an exhausted account as a
+        # transient limit: full backoff ladder, silent fallback onto a second account, no page.
+        error_class = BODY_CODE_TO_CLASS.get(code or "")
+        if error_class is None:
+            error_class = _STATUS_TO_CLASS.get(status or 0, ErrorClass.PROVIDER_PERMANENT_REQUEST)
+
+        return ProviderCallFailed(
+            error_class,
+            f"OpenAI refused the call (status {status}, code {code!r})"
+            if status is not None
+            else "the OpenAI call failed and carried no status",
+            tokens_emitted=tokens_emitted,
+            native_code=code,
+            provider_request_id=request_id,
+            retry_after=retry_after,
+        )
 
     # ── embedding (ADR-030) ───────────────────────────────────────────────────
 
@@ -399,8 +513,88 @@ class OpenAIAdapter:
         * The per-input length limit, against the row's ``context_window``. A hard rejection,
           never a truncation — ``embedder.check_window`` performs the same check once per run
           before any customer text leaves the process, and this is the per-request backstop.
+
+        THE TOKEN CEILING IS NOT CHECKED HERE, AND SAYING SO IS BETTER THAN FAKING IT. Counting
+        tokens needs the vendor's own tokenizer, which this process does not have and must not
+        approximate: a character- or word-based estimate is wrong in the dangerous direction on
+        exactly the scripts where a silent trim would be least noticed. Two things already
+        cover it and neither is this function — ``embedder.check_window`` refuses a model whose
+        window cannot hold a maximum chunk, once per run, before any customer text leaves the
+        process, and ``PROVIDER_TRUNCATION_POLICY = "reject"`` means the vendor's own 400 is
+        the enforcement rather than a fallback. **The failure mode being avoided is a check
+        that passes wrongly**, which would convert a loud 400 into an indexed chunk whose tail
+        is unsearchable forever and whose run reported success.
         """
-        raise NotImplementedError
+        warnings: list[CapabilityWarning] = []
+
+        if req.dimensions is not None and Capability.EMBEDDING_DIMENSIONS not in caps.supported:
+            warnings.append(
+                self._unsupported(
+                    caps,
+                    option="dimensions",
+                    detail=(
+                        f"{req.model!r} does not declare Capability.EMBEDDING_DIMENSIONS, so "
+                        f"dimensions={req.dimensions} cannot be honoured. An IGNORED dimensions "
+                        "produces vectors of the model's native width, which the collection "
+                        "cannot hold and which is discovered at upsert after the whole embed "
+                        "spend; an HONOURED one produces a second EmbeddingSpace under the same "
+                        "model id, which upserts cleanly and is meaningless"
+                    ),
+                )
+            )
+
+        if Capability.EMBEDDING_INPUT_TYPE not in caps.supported:
+            # DELIBERATELY ALWAYS A WARNING, NEVER A REJECTION, AND THIS IS THE ONE PLACE THAT
+            # DOES NOT OBEY `on_unsupported`. `EmbeddingRequest.input_type` has no default and
+            # is required, precisely so no caller can omit it and be silently right on two
+            # vendors and silently wrong on a third. Rejecting it here would therefore refuse
+            # EVERY embedding call to a symmetric vendor — the field is unavoidable and its
+            # being ignored is correct behaviour, not a misconfiguration.
+            warnings.append(
+                CapabilityWarning(
+                    option="input_type",
+                    action="ignored",
+                    detail=(
+                        f"OpenAI's embedding models are symmetric and take no query/passage "
+                        f"discriminator, so input_type={req.input_type.value!r} is not sent. "
+                        "It is reported rather than dropped because it IS honoured on NVIDIA "
+                        "NIM, where a wrong value costs recall with nothing raised"
+                    ),
+                )
+            )
+
+        if len(req.texts) > MAX_EMBEDDING_INPUTS:
+            raise KbError(
+                ErrorClass.VALIDATION,
+                f"{len(req.texts)} inputs exceeds OpenAI's ceiling of {MAX_EMBEDDING_INPUTS} "
+                "for one embeddings request. Ingestion batches at embedder.MAX_BATCH_TEXTS and "
+                "never reaches this, so a caller that does is not batching at all",
+            )
+
+        if any(not text.strip() for text in req.texts):
+            # An empty input is a 400 from the vendor, and finding it here names WHICH position
+            # rather than returning a batch-wide refusal for a chunker defect.
+            blank = next(i for i, text in enumerate(req.texts) if not text.strip())
+            raise KbError(
+                ErrorClass.VALIDATION,
+                f"texts[{blank}] is empty or whitespace-only. An empty chunk has no embedding "
+                "and no lexical vector either; it is a chunker defect and must surface as one "
+                "rather than as a vendor 400 on a batch of 64",
+            )
+
+        return warnings
+
+    @staticmethod
+    def _unsupported(caps: ModelCapabilities, *, option: str, detail: str) -> CapabilityWarning:
+        """``reject`` raises before a byte goes out; ``warn`` strips the option and records it.
+
+        There is no third branch, because the third branch people reach for is "drop it
+        quietly" — which is how a bot configured for structured output returns prose for a
+        month with nothing to read in a log.
+        """
+        if caps.on_unsupported == "reject":
+            raise KbError(ErrorClass.VALIDATION, detail)
+        return CapabilityWarning(option=option, action="ignored", detail=detail)
 
     async def embed(
         self,
@@ -425,8 +619,80 @@ class OpenAIAdapter:
         ``max_retries=0`` and an explicit timeout, as on the chat client, and for the sharper
         reason here: an SDK retry inside one ``await`` re-bills the whole batch and the span
         records one call.
+
+        ``with_raw_response`` rather than the plain call, for the reason the module docstring
+        gives about the chat surface: ``x-request-id`` and the rate-limit headers are only
+        reachable from the raw response, they are the only handle vendor support accepts, and
+        they are missing on precisely the failures worth asking about if they are not captured
+        here.
         """
-        raise NotImplementedError("openai-api: POST /v1/embeddings, re-sorted by index")
+        warnings = self.validate_embedding(req, caps)
+
+        body: dict[str, Any] = {"model": req.model, "input": list(req.texts)}
+        if req.dimensions is not None and Capability.EMBEDDING_DIMENSIONS in caps.supported:
+            body["dimensions"] = req.dimensions
+        # NO `input_type`, and no truncation option of any kind — see PROVIDER_TRUNCATION_POLICY.
+
+        client = self._client(credential)
+        started = time.perf_counter()
+        raw = await client.embeddings.with_raw_response.create(
+            **body,
+            # `total` and not `first_token`: there is no stream on this surface, so the only
+            # meaningful bound is the whole request.
+            timeout=httpx.Timeout(
+                req.timeouts.total,
+                connect=req.timeouts.connect,
+                read=req.timeouts.total,
+                write=req.timeouts.connect,
+                pool=req.timeouts.connect,
+            ),
+        )
+        total_ms = int((time.perf_counter() - started) * 1000)
+
+        response = raw.parse()
+        request_id = raw.headers.get("x-request-id")
+        rate_limit = {
+            header: raw.headers[header] for header in RATE_LIMIT_HEADERS if header in raw.headers
+        }
+
+        vectors = _vectors_in_input_order(response.data, expected=len(req.texts))
+        width = len(vectors[0])
+
+        # EVERY VECTOR, NOT THE FIRST. A batch whose widths disagree is a vendor bug we would
+        # otherwise launder into a collection: the first width names the space, the rest upsert
+        # against it, and Qdrant rejects only the ones that differ — mid-run, after the spend,
+        # with a partially indexed version.
+        for position, vector in enumerate(vectors):
+            if len(vector) != width:
+                raise KbError(
+                    ErrorClass.PROVIDER_PERMANENT_REQUEST,
+                    f"OpenAI returned vectors of differing widths in one batch: "
+                    f"texts[0] is {width}-wide and texts[{position}] is {len(vector)}-wide. "
+                    "One batch is one embedding space by definition",
+                )
+
+        return EmbeddingResult(
+            vectors=vectors,
+            space=EmbeddingSpace(
+                provider=self.name,
+                # THE SERVED ID, off the response. `req.model` is an alias with no dated
+                # snapshot on this surface (finding C3), and the space is what names the
+                # collection — so it is built from what answered, never from what was asked.
+                model=response.model,
+                # THE WIDTH ACTUALLY RETURNED. `dimensions` truncates and several ids ship at
+                # more than one width, so the id does not imply it.
+                dimensions=width,
+            ),
+            normalized=_is_unit_norm(vectors[0]),
+            usage=self._embedding_usage(response.usage),
+            provider_request_id=request_id,
+            total_ms=total_ms,
+            diagnostics=Diagnostics(
+                provider=self.name,
+                rate_limit=rate_limit,
+                warnings=warnings,
+            ),
+        )
 
     @staticmethod
     def _embedding_usage(raw: Any) -> Usage:
@@ -446,7 +712,86 @@ class OpenAIAdapter:
 
         Billing reads ``total_input_tokens`` here as everywhere else.
         """
-        raise NotImplementedError("openai-api: embeddings usage.prompt_tokens")
+        prompt_tokens = getattr(raw, "prompt_tokens", None)
+        if not isinstance(prompt_tokens, int):
+            # `estimated` rows are never aggregated into invoiced cost, so an unreadable usage
+            # block degrades the ATTRIBUTION and never the bill. Inventing a number here would
+            # be worse than reporting none: it would be indistinguishable from a measurement.
+            return Usage(source="estimated")
+        return Usage(
+            input_tokens=prompt_tokens,
+            # NOT COPIED FROM `_usage`. That method subtracts `cached_tokens` because on the
+            # chat surface the cached amount is a SUBSET of the input; this endpoint reports no
+            # cached amount at all, so the same code would subtract zero today and start
+            # subtracting the wrong thing the day OpenAI adds one.
+            cache_read_tokens=0,
+            cache_write_tokens=0,
+            output_tokens=0,
+            reasoning_tokens=0,
+            source="provider_final",
+        )
+
+
+def _vectors_in_input_order(data: Any, *, expected: int) -> list[list[float]]:
+    """Re-sort the response on each entry's ``index`` and prove the cover is exact.
+
+    **The positional read is the bug this exists to prevent**, and it is the quietest one on
+    this surface: OpenAI documents that entries may arrive out of order, and
+    ``EmbeddingResult.vectors[i]`` is contractually the embedding of ``texts[i]``. Reading the
+    list positionally produces a fully populated, fully wrong index — every chunk carries some
+    other chunk's vector, nothing raises, every count matches, and retrieval simply returns
+    plausible neighbours that are not neighbours at all.
+
+    A partial or duplicated cover raises rather than returning what arrived. Half a batch
+    written is half a source version's vectors, and the version publishes as complete.
+    """
+    by_index: dict[int, list[float]] = {}
+    for entry in data:
+        index = entry.index
+        if not isinstance(index, int) or not 0 <= index < expected:
+            raise KbError(
+                ErrorClass.PROVIDER_PERMANENT_REQUEST,
+                f"OpenAI returned an embedding at index {index!r}, which is outside the "
+                f"{expected} inputs that were sent",
+            )
+        if index in by_index:
+            raise KbError(
+                ErrorClass.PROVIDER_PERMANENT_REQUEST,
+                f"OpenAI returned two embeddings for index {index}; the response does not "
+                "describe the batch that was sent, and a positional read of it would be silent",
+            )
+        by_index[index] = list(entry.embedding)
+
+    if len(by_index) != expected:
+        missing = sorted(set(range(expected)) - by_index.keys())
+        raise KbError(
+            ErrorClass.PROVIDER_PERMANENT_REQUEST,
+            f"OpenAI returned {len(by_index)} embeddings for {expected} inputs "
+            f"(missing {missing[:8]}). A partial batch is never returned as a partial result: "
+            "it would write half a source version's vectors and the version would publish as "
+            "complete",
+        )
+
+    return [by_index[index] for index in range(expected)]
+
+
+def _is_unit_norm(vector: list[float]) -> bool:
+    """Whether the vendor returned a unit-norm vector, **as observed on this response**.
+
+    Not read from the vendor's documentation, which is the whole point: ``DENSE_DISTANCE`` is
+    fixed to ``"Cosine"`` and folded into the collection name because "every embedding API here
+    documents its vectors as normalized", and this is the only evidence that the claim holds
+    for the vectors actually returned. Cosine and dot product coincide only while it does.
+
+    The tolerance is loose deliberately. This is a recorded finding rather than a raised
+    failure — the indexer L2-normalizes regardless (``embedder.NORMALIZE_EMBEDDINGS``) — so the
+    cost of a false negative is a misleading record and the cost of a tight bound is a false
+    negative on every float32 round trip.
+    """
+    if not vector:
+        return False
+    magnitude = math.sqrt(sum(component * component for component in vector))
+    return abs(magnitude - 1.0) < 1e-3
 
 
 def _assert_conforms(adapter: OpenAIAdapter) -> ProviderAdapter:

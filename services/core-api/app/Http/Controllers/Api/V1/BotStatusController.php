@@ -51,11 +51,12 @@ use Illuminate\Support\Facades\Gate;
  * by the same check that refuses "publish a model-less draft", and a transition-only guard would
  * miss the first case entirely while looking correct.
  *
- * ITS THIRD REFUSAL IS STILL MISSING AND IS STILL NAMED. `BotPolicy` lists three: no model, no
- * ASSIGNED SOURCE, and `allow_general_answers` false in RAG-first mode. Two are implemented;
- * `bot_source_assignments` is Phase C's table and does not exist, so the third would be either a
- * no-op that reads as a check or a query against a table that is not there. The `TODO(phase-c)` in
- * `BotService::assertPublishable()` is where it lands, and this endpoint is what will carry it.
+ * ALL THREE REFUSALS ARE NOW IMPLEMENTED, and this paragraph used to say the third was missing.
+ * `BotPolicy` lists three: no model, no ASSIGNED SOURCE, and `allow_general_answers` false in
+ * RAG-first mode. The second was blocked on `bot_source_assignments`, which Phase C created, so the
+ * `TODO(phase-c)` in `BotService::assertPublishable()` is discharged: the check is
+ * `BotService::PUBLISH_NEEDS_ASSIGNED_SOURCE` and this endpoint is what carries it. An assignment
+ * that exists but is switched off does not count — a disabled grant is what `enabled: false` means.
  *
  * ── WHAT THE GUARD DELIBERATELY DOES NOT LOOK AT ──────────────────────────────────────────────
  *

@@ -298,7 +298,11 @@
   }
 
   & a {
-    color: var(--primary);
+    /* --link, not --primary. Prose links are body-sized text on a surface, which is the floor
+     * --primary cannot meet in dark mode (finding R1: 3.95:1 on --canvas). axe never reported this
+     * one because no e2e route renders prose, so it would have outlived the fourteen it shared the
+     * defect with. See the _link_note in packages/design-tokens/src/tokens.json. */
+    color: var(--link);
     text-decoration: underline;
     text-underline-offset: 2px;
   }

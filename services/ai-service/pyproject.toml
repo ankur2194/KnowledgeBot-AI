@@ -401,5 +401,10 @@ module = [
   "kombu.*",
   "cv2.*",
   "fitz.*",
+  # boto3/botocore ship no py.typed. `boto3-stubs` would type them, and it is deliberately not
+  # added: the only module that calls this client is `app/db/objects.py`, which types it as
+  # `Any` on purpose so a test double needs two methods rather than a mocked session.
+  "boto3.*",
+  "botocore.*",
 ]
 ignore_missing_imports = true

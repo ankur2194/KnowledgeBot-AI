@@ -1,47 +1,39 @@
-import { existsSync } from 'node:fs';
-
-import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
+
+import { scan, skipWithoutAdminSession, summarize } from './harness';
 
 /**
  * `@axe-core/playwright` on `/bots` and `/bots/[botId]`, plus the operability checks a scanner
  * cannot make.
  *
- * ══════════════════════════════════════════════════════════════════════════════════════════════
- * THIS FILE HAS NEVER BEEN EXECUTED. NOT ONCE, NOT PARTIALLY.
- * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * ── FIRST EXECUTED 2026-08-24 ──────────────────────────────────────────────────────────────────
  *
- * It was written in an environment with no browser session and no Laravel, against a container
- * whose chromium is not the pinned build (1194 symlinked as 1234). Every selector below was read
- * out of the components rather than observed in a browser, so treat a first red run as "the spec is
- * wrong" at least as readily as "the page is wrong". Nothing in this file may be cited as evidence
- * that these two routes are accessible; what it is, is the route list, the tag set and the checks
- * written down so the first person with a stack runs them instead of designing them.
+ * The banner here used to read "THIS FILE HAS NEVER BEEN EXECUTED. NOT ONCE, NOT PARTIALLY", and
+ * that stopped being true on 2026-08-24. `./harness.ts` carries the account of that run — the
+ * stack, the browser, and the four different reasons thirteen specs went red on it.
  *
- * ── WHY IT IS COMMITTED ANYWAY, AND WHY IT SKIPS ITSELF ──────────────────────────────────────────
+ * It was written in an environment with no browser session and no Laravel, so every selector below
+ * was read out of the components rather than observed. Every test in this file passed on the run
+ * above, so it now says something about these two routes on that stack — and the container it was
+ * written against had no chromium at all, which is what the `browsers` stage exists to fix.
  *
- * `tests/e2e/public/accessibility.spec.ts` already names this file's address in as many words: the
- * authenticated routes "need `pnpm e2e --project=admin` against a running stack, and the specs for
- * them belong in `tests/e2e/admin/`". The slot exists; the `admin` project exists in
- * playwright.config.ts with its storageState and its `setup` dependency. What does NOT exist is any
- * `*.setup.ts`, so `playwright/.auth/admin.json` is never written — and a Playwright project whose
- * `storageState` file is missing does not skip, it ERRORS at context creation, once per test.
- * Committing these specs unguarded would turn `pnpm web:e2e` from "runs the public project" into a
- * wall of errors, which is a regression in an artifact nobody here can run to notice.
+ * ── THE SETUP NOW EXISTS, AND THIS PARAGRAPH USED TO SAY IT DID NOT ────────────────────────────
  *
- * Hence the file-level guard. `test.skip(condition, reason)` at file scope is evaluated at
- * DECLARATION time, before any fixture is requested, so no browser context is created and no
- * storageState is read. When the setup lands, these run.
+ * It said: "What does NOT exist is any `*.setup.ts`, so `playwright/.auth/admin.json` is never
+ * written", and named writing one as out of scope because it "means inventing a credential and a
+ * seed contract". `tests/e2e/auth.setup.ts` is that file. It invents neither: the credential comes
+ * from `KB_E2E_ADMIN_EMAIL` / `KB_E2E_ADMIN_PASSWORD` in the environment, set by a human who ran
+ * `kb:bootstrap-organization` and completed the ordinary password-reset flow — which is what that
+ * command's refusal to accept a password in any form already required of anybody.
+ *
+ * THE FILE-SCOPE GUARD STAYS, and it is now exact rather than defensive. A Playwright project whose
+ * `storageState` path is missing does not skip, it ERRORS at context creation, once per test, so
+ * `pnpm web:e2e` on an unprepared machine would be a wall of errors instead of a public-project run.
+ * `skipWithoutAdminSession()` is evaluated at DECLARATION time, before any fixture is requested, so
+ * no browser context is created and no storageState is read — and `auth.setup.ts` DELETES a stale
+ * state file when it skips, so the predicate is true if and only if this run authenticated.
  *
  * ── WHAT IS DELIBERATELY NOT HERE ───────────────────────────────────────────────────────────────
- *
- * THE `*.setup.ts` ITSELF. Writing one means inventing a credential and a seed contract, and
- * `services/core-api/database/seeders/DatabaseSeeder.php` is empty ON PURPOSE with a docblock
- * arguing that test fixtures do not belong in it. Deciding how the E2E stack gets an administrator
- * is the control plane's call, not a test file's, and guessing at it would produce a setup that
- * looks authoritative and is fiction. The config's own comment states the shape it must have:
- * authenticate by driving the REAL login route, because "a faked credential cannot fail an
- * isolation test".
  *
  * A SEEDED BOT. These specs discover one from the list rather than assuming a fixture, and skip
  * with a message when the organization has none — the alternative is a spec that fails for a reason
@@ -54,30 +46,7 @@ import { expect, test, type Page } from '@playwright/test';
  * pass stays a human step.
  */
 
-/** Relative to `apps/web`, matching `playwright.config.ts`'s `storageState` for the admin project. */
-const ADMIN_STORAGE_STATE = 'playwright/.auth/admin.json';
-
-test.skip(
-  !existsSync(ADMIN_STORAGE_STATE),
-  `${ADMIN_STORAGE_STATE} does not exist, so no admin session can be restored. It is written by the ` +
-    '`setup` project, whose `*.setup.ts` has not been written — see this file\'s header. Running ' +
-    'these without it is an error per test, not a skip, which is why the whole file opts out here.',
-);
-
-/**
- * `disableRules` is EMPTY and stays that way, exactly as in the public spec. A rule turned off to
- * make a run green is a violation that has been renamed; a genuine false positive is excluded by
- * SELECTOR, with a comment naming why, so the next person sees the scope rather than the silence.
- */
-const scan = (page: Page) =>
-  new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa']);
-
-/** The public spec's failure formatter: the rule, its impact and the first offending node. */
-const summarize = (violations: Awaited<ReturnType<AxeBuilder['analyze']>>['violations']) =>
-  violations.map(
-    (violation) =>
-      `${violation.id} (${violation.impact}): ${violation.help}\n    ${violation.nodes[0]?.target.join(' ')}`,
-  );
+skipWithoutAdminSession();
 
 /**
  * Open `/bots` and return the href of the first bot in the list, or null when there are none.
@@ -227,17 +196,23 @@ test.describe('operability, which a scanner cannot test', () => {
     await page.goto('/bots');
     await expect(page.getByRole('heading', { name: 'Bots', level: 1 })).toBeVisible();
 
-    const sortButtons = page.getByRole('columnheader').getByRole('button');
-
-    test.skip((await sortButtons.count()) === 0, 'the list rendered no table, so there are no headers');
-
-    const first = sortButtons.first();
-
-    await first.click();
-
-    await expect(page.getByRole('columnheader').filter({ has: first })).toHaveAttribute(
-      'aria-sort',
-      /ascending|descending/,
+    // ADDRESS THE HEADER, THEN THE BUTTON INSIDE IT — not the other way round. This read
+    //     page.getByRole('columnheader').filter({ has: sortButtons.first() })
+    // and failed with "element(s) not found" on the first run that had rows to sort. Playwright
+    // re-roots a `has:` locator at each candidate, so a `columnheader` locator inside `has:` looks
+    // for a `<th>` INSIDE a `<th>`, which exists nowhere. The message is indistinguishable from
+    // "the table has no sortable header", which is the opposite of what was on screen.
+    const sortableHeaders = page.getByRole('columnheader').filter({ has: page.getByRole('button') });
+    test.skip(
+      (await sortableHeaders.count()) === 0,
+      'the list rendered no table, so there are no headers',
     );
+
+    const header = sortableHeaders.first();
+    await header.getByRole('button').click();
+
+    // `header` is a LOCATOR and is re-resolved here, which matters: the sort navigates and the
+    // whole table is replaced, so a handle captured before the click would be detached.
+    await expect(header).toHaveAttribute('aria-sort', /ascending|descending/);
   });
 });

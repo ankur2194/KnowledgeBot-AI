@@ -78,7 +78,7 @@ export const SOURCE_COLUMNS = helper.columns([
             JSX child; a link's `href` is the one thing here that is ours. */}
         <Link
           href={`/sources/${encodeURIComponent(row.original.id)}`}
-          className="font-medium text-primary underline-offset-4 hover:underline"
+          className="font-medium text-link underline-offset-4 hover:underline"
         >
           {getValue()}
         </Link>

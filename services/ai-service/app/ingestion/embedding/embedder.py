@@ -109,6 +109,7 @@ from app.ingestion.chunking.chunker import MAX_TOKENS
 from app.observability.instruments import EMBEDDING_BATCH_DURATION, EMBEDDING_CHUNKS
 from app.providers.contract import EmbeddingInputType, EmbeddingResult
 from app.retrieval.collection import (
+    IDENTITY_SCHEME,
     MAX_DIMENSIONS,
     DimensionMismatch,
     EmbeddingSpace,
@@ -139,15 +140,17 @@ __all__ = [
     "classify_canary",
     "embed_passages",
     "enforce_canary",
+    "measure_identity",
     "plan_batches",
     "resolve_identity",
     "to_sparse_vector",
 ]
 
-#: Bump to force every existing vector to be re-identified — it changes every chunk's
-#: `embedding_model_id` and therefore every ingest key at once. It exists so the *composition*
-#: of the identity string can be corrected without the correction being mistaken for drift.
-IDENTITY_SCHEME: Final[str] = "emb/v1"
+# `IDENTITY_SCHEME` is imported from `app.retrieval.collection` and re-exported here, where it
+# used to be defined. It moved because `space_from_identity` PARSES what this module composes,
+# and the parser cannot import the pipeline. Re-exported rather than relocated silently: three
+# call sites below and one test import it from here, and a constant that is the prefix of every
+# ingest key is not worth a rename churn to prove a point about layering.
 
 #: The drift probe. Fixed forever, checked into the repo, and deliberately dull: short ASCII
 #: strings owned by nobody, so the probe is never customer text and never leaves an org's
@@ -548,7 +551,71 @@ def resolve_identity(
     a failure to raise — and it must never enter the identity, for the same reason the digest
     must never enter the space.
     """
-    check_window(context_window, model=space.model)
+    identity = measure_identity(
+        embed=embed,
+        context_window=context_window,
+        model=space.model,
+        org_id=org_id,
+        trace_id=trace_id,
+    )
+    try:
+        # Against the DECLARED space. This is the comparison `measure_identity` structurally
+        # cannot make — it checks the measured width against the width this run was configured
+        # for, while a measured space is consistent with itself by construction. Per-vector
+        # raggedness is already refused inside `canary_digest`, so one width is the whole check.
+        assert_dimensions(space, identity.space.dimensions)
+    except DimensionMismatch as exc:
+        raise KbError(ErrorClass.INTERNAL_DEPENDENCY, str(exc), origin=Origin.DOWNSTREAM) from exc
+    if identity.space != space:
+        raise KbError(
+            ErrorClass.INTERNAL_DEPENDENCY,
+            f"the provider measured its own output as {identity.space!r} while this run is "
+            f"configured for {space!r}; those name two different collections "
+            f"({identity.space.collection} and {space.collection}), and writing one space's "
+            "vectors into the other's collection never raises — it only ranks wrongly",
+            origin=Origin.DOWNSTREAM,
+        )
+
+    # The DECLARED space, not the measured one, and they are equal by the check above. Named
+    # explicitly because the two are interchangeable here and will not stay that way if the
+    # comparison is ever loosened: the collection name must come from what the run was
+    # configured for, or a vendor blip silently re-homes a version's vectors.
+    return EmbeddingModelIdentity(space=space, canary_digest=identity.canary_digest)
+
+
+def measure_identity(
+    *,
+    embed: EmbedCallable,
+    context_window: int,
+    model: str,
+    org_id: str,
+    trace_id: str,
+) -> EmbeddingModelIdentity:
+    """Probe the model and report what it IS, with nothing to compare against. One round trip.
+
+    THE BOOTSTRAPPING CASE, AND IT IS NOT A WEAKER `resolve_identity`. Width is **measured, not
+    declared** (ADR-035) — `provider_models` has no dimensions column, deliberately, because a
+    declared width is a claim a vendor can quietly falsify. So the first ingest for an
+    organization has no `EmbeddingSpace` to check against: the space is the *answer*, not the
+    question, and `resolve_identity` cannot be used because its whole contract is a comparison
+    against a space that does not exist yet.
+
+    The one guard that still applies is per-vector consistency, and it runs here **before** the
+    digest: every probe vector is width-checked against the space the provider measured, which
+    catches the failure a single-vector read cannot — a vendor that truncates one long input
+    truncates it alone. `canary_digest` rejects a ragged response too, and the order between them
+    is deliberate rather than incidental: the digest's message is about fingerprints and never
+    names a collection, so letting it fire first would replace the sentence an operator can act
+    on with one they cannot.
+
+    What it CANNOT catch is a uniform truncation: five vectors all 1024 wide from a model that
+    should return 3072 measure as a coherent 1024-wide space. Nothing detects that on a first
+    observation, by definition — there is no prior. It is detected on the *second* run, when
+    `resolve_identity` compares against the width recorded on the version row, and at that point
+    it is a refusal rather than a silent re-home. Which is why the recorded value is the version's
+    own `embedding_model_version` and never this process's configuration.
+    """
+    check_window(context_window, model=model)
 
     result = embed(
         list(CANARY_TEXTS),
@@ -561,22 +628,25 @@ def resolve_identity(
         raise _probe_malformed(
             f"asked for {len(CANARY_TEXTS)} probe vectors and got {len(result.vectors)}"
         )
+
     try:
+        # EVERY vector, against the space the provider measured — and BEFORE the digest, which
+        # is the whole ordering. `canary_digest` also rejects a ragged response, so running it
+        # first would catch the same defect with a message about fingerprints that never names
+        # the space. Both guards are wanted; only this one says which collection the mismatch is
+        # about, and that is the sentence an operator acts on.
         for vector in result.vectors:
-            assert_dimensions(space, len(vector))
+            assert_dimensions(result.space, len(vector))
     except DimensionMismatch as exc:
         raise KbError(ErrorClass.INTERNAL_DEPENDENCY, str(exc), origin=Origin.DOWNSTREAM) from exc
-    if result.space != space:
-        raise KbError(
-            ErrorClass.INTERNAL_DEPENDENCY,
-            f"the provider measured its own output as {result.space!r} while this run is "
-            f"configured for {space!r}; those name two different collections "
-            f"({result.space.collection} and {space.collection}), and writing one space's "
-            "vectors into the other's collection never raises — it only ranks wrongly",
-            origin=Origin.DOWNSTREAM,
-        )
 
-    return EmbeddingModelIdentity(space=space, canary_digest=canary_digest(result.vectors))
+    return EmbeddingModelIdentity(
+        # THE PROVIDER'S OWN MEASUREMENT of its response, which is the only authority on width
+        # here. The adapter derives it from the vectors it received rather than from a lookup
+        # table keyed by model id — that is what makes the alias-drift detector possible at all.
+        space=result.space,
+        canary_digest=canary_digest(result.vectors),
+    )
 
 
 class CanaryVerdict(StrEnum):

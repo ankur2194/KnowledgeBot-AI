@@ -1,0 +1,900 @@
+{
+  "components": {
+    "schemas": {
+      "BotAccessSyncRequest": {
+        "additionalProperties": false,
+        "description": "Add or remove one bot id in the ``bot_ids`` list on the points in scope.\n\n``bot_id`` is the SUBJECT of the change and travels in the body rather than in\n``X-KB-Bot-Id``: the header names the bot a request is being made *on behalf of*, and this\nrequest is made on behalf of an organization admin about a bot that may already be deleted.",
+        "properties": {
+          "bot_id": {
+            "pattern": "^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$",
+            "title": "Bot Id",
+            "type": "string"
+          },
+          "embedding_model_versions": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "title": "Embedding Model Versions",
+            "type": "array"
+          },
+          "grant": {
+            "title": "Grant",
+            "type": "boolean"
+          },
+          "source_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 1000,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Ids"
+          }
+        },
+        "required": [
+          "bot_id",
+          "grant",
+          "embedding_model_versions"
+        ],
+        "title": "BotAccessSyncRequest",
+        "type": "object"
+      },
+      "Capability": {
+        "description": "What a *model* can do, as recorded on ``provider_models.capability_flags``.\n\nNever inferred from the model id string. ``\"gpt-5.6-luna\"`` and ``\"deepseek-v4-pro\"``\ntell you nothing about whether that deployment accepts sampling parameters, and both\nvendors have already retired ids that code was parsing. The id decays; the row does not.\n\nAdding a member is a THREE-part change \u2014 this enum, the adapter's ``validate()``\nmapping, and the ``provider_models.capability_flags`` backfill. Ship two of the three\nand the flag exists but no model carries it, so the feature is dark and nothing errors.\n\n**Rows are task-exclusive.** A row carrying ``EMBEDDING`` never carries ``TEXT``,\n``TOOL_USE`` or ``REASONING``, and the reverse holds too: ``openai/text-embedding-3-large``\nand ``gpt-5.6-sol`` are different products reached through different endpoints, and a row\nthat claims both describes a model that does not exist. The chat flags below are\nmeaningless on an embedding or rerank row rather than merely false, which is why the\ncheck belongs in the connection save and in a test, not in a runtime branch.",
+        "enum": [
+          "text",
+          "image_input",
+          "tool_use",
+          "structured_output",
+          "json_mode",
+          "reasoning",
+          "reasoning_trace",
+          "sampling",
+          "prompt_caching",
+          "stream_usage",
+          "early_input_usage",
+          "embedding",
+          "embedding_input_type",
+          "embedding_dimensions",
+          "rerank"
+        ],
+        "title": "Capability",
+        "type": "string"
+      },
+      "CollectionReport": {
+        "description": "One collection's counts, as the response carries them.",
+        "properties": {
+          "collection": {
+            "title": "Collection",
+            "type": "string"
+          },
+          "in_scope": {
+            "title": "In Scope",
+            "type": "integer"
+          },
+          "passed": {
+            "title": "Passed",
+            "type": "boolean"
+          },
+          "present": {
+            "title": "Present",
+            "type": "boolean"
+          },
+          "rewritten": {
+            "title": "Rewritten",
+            "type": "integer"
+          },
+          "verified": {
+            "title": "Verified",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "collection",
+          "present",
+          "in_scope",
+          "rewritten",
+          "verified",
+          "passed"
+        ],
+        "title": "CollectionReport",
+        "type": "object"
+      },
+      "EmbeddingConnection-Input": {
+        "additionalProperties": false,
+        "description": "One candidate: a provider connection and the ``provider_models`` row under it.\n\nNot a wire model \u2014 the control plane owns the shape it sends \u2014 but ``strict=True`` all the\nsame, because the one coercion that matters is silent: a ``model`` arriving as something\nother than the vendor id, verbatim, is a different vector space.\n\n**Deliberately absent: any credential field.** Selection answers *which* connection, and\nthe decrypted key reaches the adapter as a per-call argument on ``embed()``. The\nimport-time check at the bottom of this file refuses a field whose name looks like a\nsecret, so attaching one is a startup failure rather than a log line nobody greps.",
+        "properties": {
+          "caps": {
+            "$ref": "#/components/schemas/ModelCapabilities-Input"
+          },
+          "connection_id": {
+            "pattern": "^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$",
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connection_id",
+          "provider",
+          "model",
+          "caps"
+        ],
+        "title": "EmbeddingConnection",
+        "type": "object"
+      },
+      "EmbeddingConnection-Output": {
+        "additionalProperties": false,
+        "description": "One candidate: a provider connection and the ``provider_models`` row under it.\n\nNot a wire model \u2014 the control plane owns the shape it sends \u2014 but ``strict=True`` all the\nsame, because the one coercion that matters is silent: a ``model`` arriving as something\nother than the vendor id, verbatim, is a different vector space.\n\n**Deliberately absent: any credential field.** Selection answers *which* connection, and\nthe decrypted key reaches the adapter as a per-call argument on ``embed()``. The\nimport-time check at the bottom of this file refuses a field whose name looks like a\nsecret, so attaching one is a startup failure rather than a log line nobody greps.",
+        "properties": {
+          "caps": {
+            "$ref": "#/components/schemas/ModelCapabilities-Output"
+          },
+          "connection_id": {
+            "pattern": "^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$",
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connection_id",
+          "provider",
+          "model",
+          "caps"
+        ],
+        "title": "EmbeddingConnection",
+        "type": "object"
+      },
+      "EmbeddingDesignation": {
+        "additionalProperties": false,
+        "description": "The control plane's explicit answer to \"which one embeds\", when it has one.\n\nA pair rather than a bare ``connection_id``, because one connection can carry several\nembedding rows \u2014 ``text-embedding-3-large`` and ``text-embedding-3-small`` are two spaces\non one credential, and designating the connection alone would leave the space undecided.",
+        "properties": {
+          "connection_id": {
+            "pattern": "^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$",
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connection_id",
+          "model"
+        ],
+        "title": "EmbeddingDesignation",
+        "type": "object"
+      },
+      "EmbeddingIneligibility": {
+        "description": "Why one connection cannot be the organization's embedder. **Closed, and pre-call.**\n\nThe same discipline as ``app.rag.rerank.RerankSkipReason``, for the same reason: every\nmember is decidable before any request goes out, and there is deliberately **no member\nmeaning \"the provider errored\"**. A call that fails is an error in `kb-error-taxonomy`\nterms and propagates as one. If a vendor outage could be recorded here it would read as a\nconfiguration state on an admin screen, and an organization would be told to fix a\nconnection that was never broken.\n\nThe difference from ``RerankSkipReason`` is what happens next, and it is the whole of\nC1: a skipped rerank is a cheaper mode of operation, while nothing being eligible here\nmeans the organization cannot ingest at all. These reasons are therefore an *explanation\nattached to a refusal*, never a degraded path.",
+        "enum": [
+          "vendor_has_no_endpoint",
+          "row_lacks_embedding_flag",
+          "row_incoherent"
+        ],
+        "title": "EmbeddingIneligibility",
+        "type": "string"
+      },
+      "EmbeddingReadiness": {
+        "additionalProperties": false,
+        "description": "The verdict, computed once and shaped for both callers.\n\n``selected`` is the answer; ``explanation`` is why there is none. Exactly one of the two\nis populated, enforced below rather than by convention, because a readiness object that\ncould be both would let a caller render a banner *and* proceed to embed.",
+        "properties": {
+          "eligible": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/EmbeddingConnection-Output"
+            },
+            "title": "Eligible",
+            "type": "array"
+          },
+          "explanation": {
+            "default": "",
+            "title": "Explanation",
+            "type": "string"
+          },
+          "rejected": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/Rejection"
+            },
+            "title": "Rejected",
+            "type": "array"
+          },
+          "selected": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EmbeddingConnection-Output"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "selected"
+        ],
+        "title": "EmbeddingReadiness",
+        "type": "object"
+      },
+      "EmbeddingReadinessRequest": {
+        "additionalProperties": false,
+        "description": "What Laravel posts: the organization's candidate set, plus its designation if it has one.\n\n``strict=True, extra=\"forbid\", frozen=True`` \u2014 `pydantic-contracts`' ``Inbound``\nconfiguration, and each setting answers a different failure:\n\n* ``forbid`` \u2014 a field Laravel renames must 422 here rather than evaporate. A dropped\n  ``designated`` would silently resolve an ambiguous organization by the step-5 tiebreak\n  instead of by the operator's explicit choice, which moves the vector space under a corpus\n  with nothing raised anywhere.\n* ``strict`` \u2014 no coercion. ``connection_id`` is a ULID ``str`` and ``model`` is the vendor\n  id verbatim; a value that changed shape during parsing is a different vector space.\n* ``frozen`` \u2014 a request is evidence, not scratch space. It does not buy hashability here\n  because ``connections`` is a ``list`` (see below), and nothing hashes a readiness\n  request.\n\nThere is no ``org_id`` field and there must not be one. The organization is\n``X-KB-Org-Id``, taken from the *verified* headers; a body-supplied tenant is forgeable\nagainst a signature that covers only method, path and body, which is why every ``X-KB-*``\nheader is inside the canonical string in the first place (`kb-internal-api-contracts`).",
+        "properties": {
+          "connections": {
+            "items": {
+              "$ref": "#/components/schemas/EmbeddingConnection-Input"
+            },
+            "maxItems": 200,
+            "title": "Connections",
+            "type": "array"
+          },
+          "designated": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EmbeddingDesignation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "connections"
+        ],
+        "title": "EmbeddingReadinessRequest",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "IngestionAccepted": {
+        "description": "The 202 body. The job id back, and how many items were enqueued \u2014 nothing else.\n\nDeliberately not a projection of the source. This is an internal endpoint and a fuller\nresponse would quietly make it a read API for tenant data; the caller already holds\neverything it sent.",
+        "properties": {
+          "accepted_items": {
+            "title": "Accepted Items",
+            "type": "integer"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "accepted_items"
+        ],
+        "title": "IngestionAccepted",
+        "type": "object"
+      },
+      "IngestionSubmissionRequest": {
+        "additionalProperties": false,
+        "description": "What Laravel posts. One source, its items, and the force nonce.\n\nThere is **no ``org_id`` field and there must not be one**. The organization is\n``X-KB-Org-Id``, taken from the *verified* headers; a body-supplied tenant would be forgeable\nagainst a signature that did not cover it, which is why every ``x-kb-*`` header is inside the\ncanonical string in the first place.",
+        "properties": {
+          "force_nonce": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Force Nonce"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SubmissionItem"
+            },
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Items",
+            "type": "array"
+          },
+          "job_id": {
+            "pattern": "^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$",
+            "title": "Job Id",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/SubmissionSource"
+          }
+        },
+        "required": [
+          "job_id",
+          "source",
+          "items"
+        ],
+        "title": "IngestionSubmissionRequest",
+        "type": "object"
+      },
+      "ModelCapabilities-Input": {
+        "additionalProperties": false,
+        "description": "Mirrors one ``provider_models`` row (docs/11 \u00a716.2). The input to ``validate()``.\n\n``max_output_tokens`` is the model's ceiling, not the request's budget, and the two\ndisagree per model on NIM \u2014 a bot configuration that validates against one NIM model\nis a 422 on the next one served by the same connection.\n\n``strict=True, extra=\"forbid\"`` because this row **arrives from Laravel** \u2014 inside the\nconfiguration snapshot on a chat request, and inside every candidate on\n``POST /internal/v1/embedding/readiness``. It is therefore an inbound contract model and\n`pydantic-contracts` applies in full. Both settings do a different job here and both have\nthe same silent failure mode:\n\n* ``forbid`` \u2014 a renamed or mis-spelled cap key (``capabilities`` for ``supported``,\n  ``max_tokens`` for ``max_output_tokens``) would otherwise evaporate and leave\n  ``supported`` at whatever the model defaults to. On an *embedding* row that is the whole\n  of finding C1 arriving one layer lower: a row that silently lost its embedding flag is a\n  connection that silently stops being eligible, and the operator is told to fix a\n  connection that was never broken.\n* ``strict`` \u2014 ``\"8192\"`` must not become ``8192`` and ``1`` must not become ``True``.\n  ``X-KB-Config-Version`` claims both planes hold the same snapshot; coercion makes that\n  claim false without moving the version.",
+        "properties": {
+          "context_window": {
+            "title": "Context Window",
+            "type": "integer"
+          },
+          "max_output_tokens": {
+            "title": "Max Output Tokens",
+            "type": "integer"
+          },
+          "on_unsupported": {
+            "default": "reject",
+            "enum": [
+              "reject",
+              "warn"
+            ],
+            "title": "On Unsupported",
+            "type": "string"
+          },
+          "supported": {
+            "items": {
+              "$ref": "#/components/schemas/Capability"
+            },
+            "title": "Supported",
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "supported",
+          "context_window",
+          "max_output_tokens"
+        ],
+        "title": "ModelCapabilities",
+        "type": "object"
+      },
+      "ModelCapabilities-Output": {
+        "additionalProperties": false,
+        "description": "Mirrors one ``provider_models`` row (docs/11 \u00a716.2). The input to ``validate()``.\n\n``max_output_tokens`` is the model's ceiling, not the request's budget, and the two\ndisagree per model on NIM \u2014 a bot configuration that validates against one NIM model\nis a 422 on the next one served by the same connection.\n\n``strict=True, extra=\"forbid\"`` because this row **arrives from Laravel** \u2014 inside the\nconfiguration snapshot on a chat request, and inside every candidate on\n``POST /internal/v1/embedding/readiness``. It is therefore an inbound contract model and\n`pydantic-contracts` applies in full. Both settings do a different job here and both have\nthe same silent failure mode:\n\n* ``forbid`` \u2014 a renamed or mis-spelled cap key (``capabilities`` for ``supported``,\n  ``max_tokens`` for ``max_output_tokens``) would otherwise evaporate and leave\n  ``supported`` at whatever the model defaults to. On an *embedding* row that is the whole\n  of finding C1 arriving one layer lower: a row that silently lost its embedding flag is a\n  connection that silently stops being eligible, and the operator is told to fix a\n  connection that was never broken.\n* ``strict`` \u2014 ``\"8192\"`` must not become ``8192`` and ``1`` must not become ``True``.\n  ``X-KB-Config-Version`` claims both planes hold the same snapshot; coercion makes that\n  claim false without moving the version.",
+        "properties": {
+          "context_window": {
+            "title": "Context Window",
+            "type": "integer"
+          },
+          "max_output_tokens": {
+            "title": "Max Output Tokens",
+            "type": "integer"
+          },
+          "on_unsupported": {
+            "default": "reject",
+            "enum": [
+              "reject",
+              "warn"
+            ],
+            "title": "On Unsupported",
+            "type": "string"
+          },
+          "supported": {
+            "items": {
+              "$ref": "#/components/schemas/Capability"
+            },
+            "title": "Supported",
+            "type": "array"
+          }
+        },
+        "required": [
+          "supported",
+          "context_window",
+          "max_output_tokens"
+        ],
+        "title": "ModelCapabilities",
+        "type": "object"
+      },
+      "Rejection": {
+        "additionalProperties": false,
+        "description": "One candidate that cannot embed, with the reason and what the reason was read from.\n\n``detail`` exists so an operator screen can say something better than the enum member.\nIt carries connection ids, provider names, model ids and matrix sources only \u2014 never a\ncredential, and never tenant content.",
+        "properties": {
+          "connection_id": {
+            "pattern": "^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$",
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/EmbeddingIneligibility"
+          }
+        },
+        "required": [
+          "connection_id",
+          "provider",
+          "model",
+          "reason",
+          "detail"
+        ],
+        "title": "Rejection",
+        "type": "object"
+      },
+      "SourceStatusSyncRequest": {
+        "additionalProperties": false,
+        "description": "Which source, which status, and which collections it lives in.\n\nNo ``org_id``: the organization is ``X-KB-Org-Id`` from the *verified* headers. A\nbody-supplied tenant would be forgeable against a signature that did not cover it, which is\nwhy every ``x-kb-*`` header is inside the canonical string.",
+        "properties": {
+          "embedding_model_versions": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "title": "Embedding Model Versions",
+            "type": "array"
+          },
+          "source_id": {
+            "pattern": "^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$",
+            "title": "Source Id",
+            "type": "string"
+          },
+          "source_status": {
+            "pattern": "^(ready|disabled)$",
+            "title": "Source Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_id",
+          "source_status",
+          "embedding_model_versions"
+        ],
+        "title": "SourceStatusSyncRequest",
+        "type": "object"
+      },
+      "SubmissionItem": {
+        "additionalProperties": false,
+        "description": "One row of ``items``, mirroring `IngestionSubmission::toArray()`'s per-item shape.\n\n``strict=True, extra=\"forbid\", frozen=True`` \u2014 the `pydantic-contracts` ``Inbound``\nconfiguration. ``forbid`` is the one doing real work here: a field Laravel renames must 422\nrather than evaporate, and the field most damaging to lose silently is ``content_hash``,\nwhich is a component of the ingest key. A submission that dropped it would compose a\n*valid-looking* key over an empty string, dedupe against nothing, and re-embed the corpus.",
+        "properties": {
+          "byte_size": {
+            "minimum": 0.0,
+            "title": "Byte Size",
+            "type": "integer"
+          },
+          "canonical_key": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Canonical Key",
+            "type": "string"
+          },
+          "content_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "current_version_id": {
+            "anyOf": [
+              {
+                "pattern": "^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Version Id"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "id": {
+            "pattern": "^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "mime": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Mime",
+            "type": "string"
+          },
+          "storage_key": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Storage Key",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "id",
+          "canonical_key",
+          "storage_key",
+          "content_hash",
+          "mime",
+          "byte_size"
+        ],
+        "title": "SubmissionItem",
+        "type": "object"
+      },
+      "SubmissionSource": {
+        "additionalProperties": false,
+        "description": "The source-level facts a worker needs to name and date the version it is building.",
+        "properties": {
+          "effective_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective At"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "id": {
+            "pattern": "^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "origin_url": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin Url"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "title": "Tags",
+            "type": "array"
+          },
+          "type": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "name"
+        ],
+        "title": "SubmissionSource",
+        "type": "object"
+      },
+      "SyncReport": {
+        "description": "The proof, per collection and in total.\n\nReturned in full rather than as a bare ``ok`` because the counts are what an operator reads\nwhen a source is disabled in the control plane and still answering: they say which\ncollection disagreed, and whether the scope was empty or the write was.",
+        "properties": {
+          "collections": {
+            "items": {
+              "$ref": "#/components/schemas/CollectionReport"
+            },
+            "title": "Collections",
+            "type": "array"
+          },
+          "operation": {
+            "title": "Operation",
+            "type": "string"
+          },
+          "passed": {
+            "title": "Passed",
+            "type": "boolean"
+          },
+          "rewritten": {
+            "title": "Rewritten",
+            "type": "integer"
+          },
+          "verified": {
+            "title": "Verified",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "operation",
+          "passed",
+          "rewritten",
+          "verified",
+          "collections"
+        ],
+        "title": "SyncReport",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "KnowledgeBot AI Service",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/internal/v1/embedding/readiness": {
+      "post": {
+        "description": "Return ``embedding_readiness(...)`` for the candidate set in the body. Always 200.\n\n``async def`` and not ``def``: the whole handler is pure Python over a bounded list with no\nI/O at all, so there is nothing to offload and a threadpool hop would only spend one of the\nshared ``CapacityLimiter(40)`` slots that parsing and OCR need (`fastapi-service`).\n\n``POST`` for a read, matching what the control plane sends, because the candidate set is the\ninput and it does not fit in a query string. It is still a read: it creates nothing, stores\nnothing and bills nothing, which is why there is no ``X-KB-Idempotency-Key`` \u2014 that header\nis required on mutations, and a replay record here would be a Valkey key per admin page view\nwith no operation to deduplicate.\n\n``ctx`` is injected and deliberately not used to *compute* anything. It is here for two\nreasons and both are structural: it is what makes a missing ``X-KB-Org-Id`` a 400 at the\ndependency rather than an unscoped success, and it is the only source of the organization \u2014\nan endpoint that read the tenant from ``body`` would accept whichever organization the body\nnamed, which is the substitution the signed header exists to prevent.",
+        "operationId": "embeddingReadiness",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmbeddingReadinessRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmbeddingReadiness"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Which of an organization's connections supplies the embedding credential",
+        "tags": [
+          "embedding"
+        ]
+      }
+    },
+    "/internal/v1/ingestion/jobs": {
+      "post": {
+        "description": "Enqueue one ``kb.ingest.prepare_item`` per item and return 202.\n\n``async def`` with no ``await``: the handler's only work is a broker publish per item, which\nis the one thing here that can block. It is dispatched through `celery_app.send_task`, whose\nclient is synchronous \u2014 so the publish happens inline and the 202 is not returned before the\nmessages are actually on the broker. Answering 202 first and enqueuing after would be a\nsubmission the control plane believes was accepted and no worker will ever see.",
+        "operationId": "submitIngestion",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestionSubmissionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestionAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Accept one ingestion submission and enqueue its items",
+        "tags": [
+          "ingestion"
+        ]
+      }
+    },
+    "/internal/v1/maintenance/bot-access": {
+      "post": {
+        "description": "Apply the ``bot_ids`` rewrite and return its verification counts.\n\n``source_ids: null`` with ``grant: true`` is refused by `app/maintenance/payload.py` with a\n``ValueError``, which renders 422 through the envelope \u2014 it is a malformed instruction, not\nan internal failure.",
+        "operationId": "syncBotAccess",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BotAccessSyncRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add or remove one bot id in the bot_ids list on the points in scope",
+        "tags": [
+          "maintenance"
+        ]
+      }
+    },
+    "/internal/v1/maintenance/source-status": {
+      "post": {
+        "description": "Apply the rewrite and return its verification counts. Raises if it did not verify.\n\nA failed verification is an exception rather than a ``passed: false`` body, and both halves\nof that matter: the control plane's queued job needs a non-2xx to retry and compensate, and\na body it could ignore is a body it will ignore \u2014 which commits a status the index never\nheard about.",
+        "operationId": "syncSourceStatus",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceStatusSyncRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SyncReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rewrite source_status on every indexed point of one source",
+        "tags": [
+          "maintenance"
+        ]
+      }
+    }
+  }
+}

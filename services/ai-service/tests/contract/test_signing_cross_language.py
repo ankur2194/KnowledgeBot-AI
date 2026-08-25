@@ -86,8 +86,30 @@ READINESS_HEADERS: Final[dict[str, str]] = {
 }
 
 #: Every case is a `(header set, body)` pair, and each one names a way the two sides can drift.
+#: The OUTBOUND direction's header set, built from the emitter's own declaration rather than
+#: retyped. Until this landed the matrix proved the canonical bytes for one direction only —
+#: Laravel→FastAPI — and the return leg had no cross-language proof at all. That is the leg that
+#: shipped with a separate `X-KB-Key-Id` header, which the PHP verifier would have folded into
+#: the covered set while the Python signer left it out: a 401 on every callback ever sent, with
+#: no source ever leaving `queued` and neither plane logging a reason.
+CALLBACK_HEADERS: Final[dict[str, str]] = {
+    "X-KB-Actor-Type": "system",
+    "X-KB-Operation": "ingestion.readiness",
+    "X-KB-Org-Id": "01JQZ0000000000000000000AA",
+    "X-KB-Request-Id": "3f8b2c1e-0000-4000-8000-000000000001",
+    "X-KB-Timestamp": "1786000000",
+}
+
 CASES: Final[dict[str, tuple[dict[str, str], bytes]]] = {
     "the-deployed-readiness-set": (READINESS_HEADERS, b'{"connections":[],"designated":null}'),
+    # THE RETURN LEG. A real ingestion status frame, with the header set `CallbackEmitter`
+    # declares — five names and no `X-KB-Bot-Id` (ADR-067), the key id riding inside
+    # `X-KB-Signature` rather than in a header of its own.
+    "the-outbound-callback-set": (
+        CALLBACK_HEADERS,
+        b'{"job_id":"01JQZ0000000000000000000BB","sequence":3,"stage":"publish",'
+        b'"status":"ready","verified":true}',
+    ),
     "empty-body": (READINESS_HEADERS, b""),
     # THE CASE THIS FILE EXISTS FOR. `':'` is 0x3A and `'-'` is 0x2D, so a line-sort and a
     # tuple-sort disagree exactly when one name is a strict prefix of another. No shipped name
@@ -393,3 +415,16 @@ def _client_header_names() -> set[str]:
     literal = re.findall(r"^\s*'([^']+)'\s*=>", block, re.MULTILINE)
     assigned = re.findall(r"\$headers\['([^']+)'\]", block)
     return {name.lower() for name in literal + assigned}
+
+
+def test_the_outbound_case_pins_the_header_set_the_emitter_actually_declares() -> None:
+    """The matrix above proves the BYTES for a header set. This proves it is the RIGHT set.
+
+    Without it, the outbound case could drift into pinning the canonical form of headers no
+    callback carries — a green cross-language matrix over a fiction — while the emitter sent
+    something else and 401ed. `tests/security/test_callback_signing.py` holds the other half:
+    that the emitter really sends what `SIGNED_HEADER_NAMES` declares.
+    """
+    from app.ingestion.callback import SIGNED_HEADER_NAMES
+
+    assert set(CALLBACK_HEADERS) == set(SIGNED_HEADER_NAMES)

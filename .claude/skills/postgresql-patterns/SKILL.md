@@ -49,7 +49,7 @@ CREATE TABLE source_versions (
     source_item_id          char(26) COLLATE "C" NOT NULL
                             REFERENCES source_items (id) ON DELETE RESTRICT,
     version_number          integer NOT NULL,
-    content_hash            bytea   NOT NULL,        -- 32 raw bytes, not 64 hex chars
+    content_hash            char(64) COLLATE "C" NOT NULL,             -- lowercase hex, not bytea
     ingest_key              char(64) COLLATE "C" NOT NULL,             -- kb-source-lifecycle ingest_key()
     parser_cfg_version      text NOT NULL,
     ocr_cfg_version         text NOT NULL,
@@ -65,7 +65,11 @@ CREATE TABLE source_versions (
         'draft','queued','fetching','parsing','normalizing','chunking','embedding',
         'indexing','ready','ready_with_warnings','failed','disabled','deleting','deleted','archived')),
     CONSTRAINT source_versions_retire_after_activate
-        CHECK (retired_at IS NULL OR activated_at IS NOT NULL)
+        CHECK (retired_at IS NULL OR activated_at IS NOT NULL),
+    -- The hex is enforced, not assumed. A `char(64)` will happily hold 64 spaces, and the
+    -- failure that produces is an ingest key for an identity that does not exist.
+    CONSTRAINT source_versions_content_hash_is_hex
+        CHECK (content_hash ~ '^[0-9a-f]{64}$')
 );
 
 -- THE pointer constraint. At most one live version per item, proven by the database.
@@ -105,6 +109,13 @@ CREATE TABLE citations (
 );
 CREATE INDEX citations_chunk_id ON citations (chunk_id);  -- or SET NULL seq-scans citations
 ```
+
+**A digest is hex text here; ciphertext is still `bytea`.** This line used to read `content_hash bytea NOT NULL, -- 32 raw bytes, not 64 hex chars`, and ADR-065 overruled it (`docs/22` § P1) — the shipped migrations store `char(64) COLLATE "C"` with the hex CHECK above, on `source_versions`, `source_items` and `chunks` alike. The distinction is **who reads the column**, not how many bytes it is:
+
+- **Ciphertext is read by one runtime and never compared, rendered or joined**, so `bytea` costs nothing and buys the encoding safety in the gotcha below. Keep it.
+- **A digest is a join key across two runtimes and an object-storage path segment.** `app/ingestion/identity.py` composes it into a `"|"`-separated ingest key **as a `str`**, `ObjectKey::originalUpload()` puts it in a key, and `chunker.py` emits `hexdigest()`. Every producer and consumer already holds hex, so `bytea` adds a `bin2hex`/`hex2bin` pair at each of those boundaries and nothing checks that they pair up.
+
+The failure that decides it is silent in both directions: **`bin2hex()` on a value that is already hex returns a well-formed 128-character string**, which hashes to a well-formed ingest key for an identity that does not exist — so the version never dedupes against its own completed run and no constraint objects. `docs/22` § J3 records two shipped `BinaryCast` defects of exactly this shape. The hex CHECK is what makes the text column no weaker than the binary one: without it, `char(64)` silently blank-pads anything shorter.
 
 ### Row-level security: not in production
 

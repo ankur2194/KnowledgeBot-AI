@@ -10,6 +10,7 @@ use App\Enums\OrgRole;
 use App\Enums\SourceState;
 use App\Enums\SourceType;
 use App\Jobs\SubmitIngestionJob;
+use App\Jobs\SyncSourceStatusJob;
 use App\Models\AuditLog;
 use App\Models\Chunk;
 use App\Models\DocumentElement;
@@ -691,8 +692,15 @@ it('disables a source immediately and audits it with the status it actually held
     expect($row->details['name'] ?? null)->toBe('Refund policy');
     expect($row->actor_id)->toBe($f['ownerA']->id);
 
-    // NOTHING WAS RE-SUBMITTED. Disabling is not a reprocess, and every vector is retained.
-    Queue::assertNothingPushed();
+    // NOTHING WAS RE-SUBMITTED. Disabling is not a reprocess and every vector is retained, so no
+    // `SubmitIngestionJob` may exist — that is the assertion this line has always been about.
+    //
+    // IT USED TO BE `assertNothingPushed()`, AND THAT BECAME THE WRONG SPELLING OF THE SAME CLAIM.
+    // A disable now dispatches `SyncSourceStatusJob`, which carries the `source_status` payload
+    // rewrite to Qdrant — the half of C3's headline requirement the column alone never satisfied.
+    // Asserting "nothing at all" would have made this test a guard against the fix.
+    Queue::assertNotPushed(SubmitIngestionJob::class);
+    Queue::assertPushed(SyncSourceStatusJob::class, 1);
 });
 
 /**

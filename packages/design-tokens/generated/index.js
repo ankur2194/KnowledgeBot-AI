@@ -23,6 +23,8 @@ export const colors = Object.freeze({
   'primary-active': Object.freeze({ light: 'oklch(0.425 0.215 264)', dark: 'oklch(0.700 0.180 264)' }),
   'primary-soft': Object.freeze({ light: 'oklch(0.960 0.022 264)', dark: 'oklch(0.300 0.055 264)' }),
   'primary-soft-foreground': Object.freeze({ light: 'oklch(0.440 0.215 264)', dark: 'oklch(0.800 0.120 264)' }),
+  'link': Object.freeze({ light: 'var(--primary-soft-foreground)', dark: 'var(--primary-soft-foreground)' }),
+  'link-active': Object.freeze({ light: 'var(--primary-active)', dark: 'var(--primary-active)' }),
   'accent': Object.freeze({ light: 'oklch(0.960 0.008 264)', dark: 'oklch(0.300 0.012 266)' }),
   'accent-foreground': Object.freeze({ light: 'oklch(0.205 0.014 266)', dark: 'oklch(0.965 0.004 264)' }),
   'success': Object.freeze({ light: 'oklch(0.585 0.145 152)', dark: 'oklch(0.700 0.145 152)' }),

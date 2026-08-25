@@ -205,6 +205,13 @@ export function UploadFileRow({
               variant="ghost"
               size="sm"
               aria-label={`Cancel ${item.file.name}`}
+              // THE ROW'S ONE ACTION, ADDRESSABLE BY ROW. `<UploadFileList>` restores keyboard focus
+              // to a surviving row after a removal, and it cannot address the control by accessible
+              // name: the name is built from the filename, and a filename may contain a quote, a
+              // bracket or a backslash, none of which survive being pasted into a selector. The row
+              // id is a UUID. Both branches carry it because exactly one of them is rendered, so the
+              // attribute means "this row's action" rather than "this row's Remove".
+              data-row-action={item.id}
               onClick={() => onCancel(item.id)}
             >
               Cancel
@@ -214,6 +221,7 @@ export function UploadFileRow({
               variant="ghost"
               size="sm"
               aria-label={`Remove ${item.file.name}`}
+              data-row-action={item.id}
               onClick={() => onRemove(item.id)}
             >
               Remove

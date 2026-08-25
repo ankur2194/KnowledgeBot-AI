@@ -20,7 +20,21 @@ Intended contents, with the owner each one needs:
     kb.maintenance.abort_stale_multipart    hourly     — object-storage multipart uploads
                                                          abandoned by a failed ingest; they
                                                          bill until aborted
-    kb.maintenance.sweep_orphan_objects     daily      — objects with no surviving row
+    kb.maintenance.sweep_orphan_objects     daily      — objects with no surviving row. NARROWER
+                                                         THAN IT READS, SINCE 2026-08-24: the
+                                                         UPLOAD orphan — an object written by
+                                                         `SourceService::create()` for a source that
+                                                         never committed — is no longer this task's,
+                                                         and cannot be. Its input is
+                                                         `pending_source_objects`, a control-plane
+                                                         table written before each object and
+                                                         deleted after each commit, which nothing on
+                                                         this plane can read; Laravel's
+                                                         `kb:sweep-orphan-objects` owns it (security
+                                                         finding S3). What is left here is the
+                                                         post-purge residue — an object under a
+                                                         prefix whose rows this plane deleted — and
+                                                         it still has no owner.
     kb.maintenance.invalidate_caches        10 minutes — answer-cache eviction on config or
                                                          source change
     kb.maintenance.rebuild_index                       — the ADR-010 proof path; invoked by

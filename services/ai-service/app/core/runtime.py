@@ -59,7 +59,12 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from app.core.config import authenticated_valkey_url, postgres_dsn, qdrant_api_key
+from app.core.config import (
+    authenticated_valkey_url,
+    postgres_dsn,
+    qdrant_api_key,
+    s3_secret_key,
+)
 from app.core.keys import load_key_ring
 from app.db.pool import close_pool, open_pool
 
@@ -95,6 +100,10 @@ class RuntimeClients:
     cache: Any | None
     qdrant: Any | None
     db_pool: Any | None
+    #: The SeaweedFS S3 client, or None where the secret is not mounted. `Any` for the same
+    #: reason as the three above: `app/db/objects.py` is the only module that calls it, through
+    #: two operations, so a double in a test needs two methods rather than a boto3 session.
+    s3: Any | None = None
 
     def __repr__(self) -> str:
         """Redacted by construction, the same way ``KeyRing.__repr__`` is.
@@ -120,6 +129,7 @@ class RuntimeClients:
                 ("cache", self.cache),
                 ("qdrant", self.qdrant),
                 ("db_pool", self.db_pool),
+                ("s3", self.s3),
             )
         )
         return f"RuntimeClients({built})"
@@ -187,6 +197,37 @@ async def open_runtime_clients(settings: Settings) -> RuntimeClients:
             extra={"dependency": "postgres"},
         )
 
+    s3: Any | None = None
+    secret = s3_secret_key(settings.s3_secret_key_path)
+    if secret is not None:
+        import boto3
+        from botocore.config import Config
+
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=settings.s3_endpoint,
+            aws_access_key_id=settings.s3_access_key_id,
+            aws_secret_access_key=secret.get_secret_value(),
+            # SigV4 SIGNS the region and SeaweedFS ignores it, so the string must match what
+            # Laravel signs with byte for byte or every request is a signature mismatch.
+            region_name=settings.s3_region,
+            config=Config(
+                signature_version="s3v4",
+                # PATH ADDRESSING, AND THERE IS EXACTLY ONE WORKING VALUE. Virtual-host
+                # addressing resolves `kb.seaweedfs-s3`, which needs wildcard DNS this
+                # topology does not have — the request then reaches a bucket that does not
+                # exist and every read 404s. `Settings` deliberately has no knob for this.
+                s3={"addressing_style": "path"},
+                retries={"max_attempts": 1, "mode": "standard"},
+            ),
+        )
+    else:
+        logger.warning(
+            "no object-storage client: the configured secret file is not mounted in this "
+            "container. Ingestion cannot fetch an original without it",
+            extra={"dependency": "seaweedfs"},
+        )
+
     return RuntimeClients(
         settings=settings,
         key_ring=key_ring,
@@ -194,6 +235,7 @@ async def open_runtime_clients(settings: Settings) -> RuntimeClients:
         cache=cache,
         qdrant=qdrant,
         db_pool=db_pool,
+        s3=s3,
     )
 
 

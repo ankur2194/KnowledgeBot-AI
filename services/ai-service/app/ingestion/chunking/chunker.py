@@ -49,9 +49,13 @@ from datetime import datetime
 from typing import Any, Final, Protocol
 
 from app.core.errors import ErrorClass, KbError, Origin
+from app.ingestion.cfg_version import compose
 
 __all__ = [
     "ATOMIC_CONTENT_TYPES",
+    "CHUNKER_CFG_INPUTS",
+    "CHUNKER_CFG_SCHEME",
+    "CHUNKER_CFG_TABLE_INPUTS",
     "CHUNKER_VERSION",
     "CHUNK_METADATA_FIELDS",
     "CONTENT_TYPES",
@@ -72,6 +76,7 @@ __all__ = [
     "DocumentElement",
     "SizePolicy",
     "chunk_document",
+    "chunker_cfg_version",
     "derive_chunk_id",
     "embed_prefix",
 ]
@@ -79,6 +84,78 @@ __all__ = [
 #: Config identity. Bumping it mints a new source version for every item, which is the point:
 #: a chunking change that does not re-chunk anything is invisible and untestable.
 CHUNKER_VERSION: Final[str] = "chunker/v1"
+
+#: The scheme `chunker_cfg_version()` composes under. It is `CHUNKER_VERSION` and not a second
+#: string: two identity constants for one stage is two things to bump and one to forget, and
+#: the one that gets forgotten is whichever is not in the diff being reviewed.
+CHUNKER_CFG_SCHEME: Final[str] = CHUNKER_VERSION
+
+#: The constants folded into `chunker_cfg_version`, **as data**, so a test can assert none was
+#: dropped — the same shape as `PARSER_CFG_INPUTS` and `OCR_CFG_INPUTS`, for the same reason: a
+#: tunable outside this tuple is a retune that never reaches a document, because the ingest key
+#: does not move and every resubmission dedupes against the version built under the old value.
+#:
+#: The vocabularies are here alongside the numbers, and that is deliberate. `ELEMENT_KINDS` and
+#: `CONTENT_TYPES` decide which elements survive and which size band each chunk is packed to;
+#: `SENTENCE_TERMINATORS` decides where an oversized unit is cut; and `RANGE_DASH`,
+#: `LOCATOR_SEPARATOR`, `EMPTY_CELL` and `ROW_LABEL_SEPARATOR` are all **inside the embedded
+#: string** and therefore inside `content_hash`, which is stated at each of their definitions.
+#: A change to any of them changes what the provider is asked to embed.
+CHUNKER_CFG_INPUTS: Final[tuple[str, ...]] = (
+    "ATOMIC_CONTENT_TYPES",
+    "CHUNK_METADATA_FIELDS",
+    "CONTENT_TYPES",
+    "ELEMENT_KINDS",
+    "HEADING_KIND",
+    "LIST_ITEM_KIND",
+    "LIST_STEM_KIND",
+    "LOCATOR_SEPARATOR",
+    "MAX_TOKENS",
+    "MERGEABLE_CONTENT_TYPES",
+    "RANGE_DASH",
+    "SENTENCE_TERMINATORS",
+    "TABLE_KIND",
+)
+
+#: `SIZE_POLICY` IS NOT IN THE TUPLE ABOVE, AND ITS ABSENCE IS NOT AN EXCLUSION — it is folded
+#: in FLATTENED, below, as one `size.{content_type}.{field}` entry per number. `canonicalize`
+#: raises on a dataclass on purpose (a default repr carries a memory address and would move the
+#: digest on every process start), and the two ways past that are extending the shared
+#: primitive or flattening here. Flattening is chosen because it makes the digest's inputs
+#: *readable*: `size.prose.overlap_ratio=float:0.12` names the tuned number, so a reviewer
+#: comparing two versions can see which band moved rather than that "the policy" changed.
+_SIZE_POLICY_FIELDS: Final[tuple[str, ...]] = ("min_tokens", "max_tokens", "overlap_ratio")
+
+#: The table renderer's constants, pulled in by name from `table_chunker` because they live in
+#: a sibling module and `globals()` cannot see them. Same test, same reason: a table chunk's
+#: text is built from these, so they are inside `content_hash` exactly like the ones above.
+CHUNKER_CFG_TABLE_INPUTS: Final[tuple[str, ...]] = (
+    "EMPTY_CELL",
+    "ROW_LABEL_SEPARATOR",
+    "TABLE_CONTENT_TYPE",
+)
+
+#: Left out, with the reason on the record rather than in a reviewer's memory.
+CHUNKER_CFG_EXCLUDED: Final[Mapping[str, str]] = {
+    "CHUNKER_VERSION": (
+        "it IS the scheme, so it is already the first line of the composed digest; hashing it "
+        "as an input as well would make the string depend on itself"
+    ),
+    "_CROCKFORD": (
+        "ULID's alphabet, fixed by the format. It is not a setting — changing it would make "
+        "`derive_chunk_id` emit ids that fail `ULID_PATTERN`, which is a bug rather than a "
+        "retune, and minting new versions would not repair it"
+    ),
+    "_SENTENCE_END": (
+        "derived from `SENTENCE_TERMINATORS`, which IS an input. Hashing both would double-"
+        "count one decision and, worse, make the digest move when the regex is merely "
+        "refactored"
+    ),
+    "_CLOSERS": (
+        "part of the same derived pattern as `_SENTENCE_END`; it is a closing-punctuation set "
+        "the splitter steps over, not a boundary rule of its own"
+    ),
+}
 
 #: The hard ceiling any chunk may reach, measured by the injected `measure` — never by
 #: characters. There is no local model any more, so there is also no authoritative tokenizer to
@@ -970,6 +1047,37 @@ def _emit(
             chunker_version=CHUNKER_VERSION,
         ),
     )
+
+
+def chunker_cfg_version() -> str:
+    """`"chunker/v1:t700:1f0c9e33bd4a"` — the identity of every constant that shapes a chunk.
+
+    A component of the ingest key, so a changed constant mints a new source version for every
+    item and forces the reprocess that makes the change real. That is the whole purpose: a
+    chunking change which does not re-chunk anything is invisible, and the way it becomes
+    invisible is that this string did not move.
+
+    **No model pins.** Chunking runs no model — that is what makes it the one stage of the three
+    whose identity is pure configuration, and why `pins=()` here is a fact about the stage
+    rather than an omission. The parser's and the OCR engine's versions travel in their own
+    strings, and folding them in here would make a Docling upgrade look like a chunker change.
+
+    The label carries the token budget because it is the number a person reading a
+    `source_versions` row actually wants, and it is inside the digest as well — a label that
+    could move without the digest moving would be a lie a reader has no way to catch.
+    """
+    from app.ingestion.chunking import table_chunker
+
+    inputs: dict[str, Any] = {name: globals()[name] for name in CHUNKER_CFG_INPUTS}
+    for content_type, policy in SIZE_POLICY.items():
+        for field_name in _SIZE_POLICY_FIELDS:
+            inputs[f"size.{content_type}.{field_name}"] = getattr(policy, field_name)
+    for name in CHUNKER_CFG_TABLE_INPUTS:
+        # Prefixed, so a constant that exists under one name in each module cannot collide and
+        # silently drop one of the two — `compose` hashes by name, and a dict does not complain.
+        inputs[f"table.{name}"] = getattr(table_chunker, name)
+
+    return compose(CHUNKER_CFG_SCHEME, label=f"t{MAX_TOKENS}", inputs=inputs, pins=())
 
 
 # A field lost here is a broken citation or an undeletable chunk, and neither fails loudly at

@@ -79,6 +79,15 @@ def ulid_like(seed: str | None = None) -> str:
     Not a real ULID — nothing here decodes one — but the right *shape*, which is what the
     payload indexes assume (``keyword``, not ``uuid``) and what a length or charset
     validation will reject if it drifts.
+
+    **IT IS UPPERCASE, AND THAT IS ONE SPELLING OUT OF TWO.** Laravel's ``HasUlids`` lowercases
+    every model key, so the ids that actually cross the seam are lowercase; only ``Str::ulid()``
+    ids (``current_job_id``) look like this. Because every fixture in this repository calls this
+    helper, a case-sensitive identifier pattern agreed with all of them and refused every real
+    submission — 1,740 green tests and a 422 from the first tenant (``docs/22`` § R6).
+    ``tests/contract/test_identifier_case_at_the_seam.py`` pins both spellings with the literal
+    strings Laravel produced, deliberately NOT generated here, so widening this helper cannot
+    silently satisfy it.
     """
     alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
     raw = uuid.uuid5(uuid.NAMESPACE_OID, seed).int if seed else uuid.uuid4().int

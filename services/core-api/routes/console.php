@@ -177,9 +177,61 @@ Schedule::onOneServer()->group(function (): void {
         ->withoutOverlapping(10);
 
     /*
-     * PENDING ENTRIES — uncomment each one together with whatever it is still missing: its command
-     * class for the kb:* entries, its TABLE for `queue:prune-failed`. The cadence beside each is the
-     * intended schedule, not a suggestion (laravel-scheduler).
+     * THE OBJECT-STORAGE ORPHAN SWEEP (security finding S3), and the OTHER end of a boundary this
+     * file's header draws. `sweep-abandoned-multipart-uploads` is Celery beat's — it aborts
+     * multipart uploads whose parts `ListObjectsV2` cannot even see — and it is DATA-PLANE REPAIR.
+     * This one is not repair: its input is `pending_source_objects`, a CONTROL-PLANE table this
+     * application writes before every object and deletes after every commit, and no process in the
+     * data plane can read it. Two sweeps, two planes, disjoint inputs, nothing running twice.
+     *
+     * HOURLY AT :43, staggered off the other three so one tick stays one task. Hourly rather than
+     * daily because the rows it collects are the residue of failed create requests and an orphan
+     * costs storage for as long as it survives; the grace window
+     * (`kb.upload_orphan_grace_minutes`, six hours) is what decides how OLD a row must be, so the
+     * cadence only decides how promptly an eligible row is noticed, and 24 hours of extra latency
+     * buys nothing.
+     *
+     * withoutOverlapping(30) against a tick bounded by `kb.upload_orphan_sweep_limit` (500 rows,
+     * two indexed queries and one object DELETE each). A stranded lock costs half an hour against a
+     * six-hour window, so nothing becomes ineligible while it is held.
+     *
+     * IT CAN FAIL, AND THAT IS DESIGNED. The command returns FAILURE when an object delete raced a
+     * commit — bytes of a live source destroyed, unrecoverable — so this entry is one of the few
+     * here whose ScheduledTaskFailed is a real incident rather than a dependency blip. See the
+     * command's docblock for the check-then-act window it detects.
+     */
+    Schedule::command('kb:sweep-orphan-objects')
+        ->name('kb:sweep-orphan-objects')
+        ->hourlyAt(43)
+        ->withoutOverlapping(30);
+
+    /*
+     * RETENTION FOR failed_jobs, live since 2026_08_24_002700 created the table (finding R8).
+     *
+     * That table holds the full serialized job plus an exception trace with arguments. Payloads are
+     * ciphertext for every job implementing ShouldBeEncrypted; traces are not, so the row is
+     * tenant-adjacent data with a retention obligation rather than an operational log. 336 hours is
+     * two weeks: long enough that a failure over a weekend is still retryable on the Monday after
+     * next, short enough that the table is not an unbounded store of decrypted context.
+     *
+     * IT PRUNES BY `failed_at`, WHICH IS INDEXED, and it is the only consumer of that index. A
+     * failure here is a dependency blip, not an incident — unlike kb:sweep-orphan-objects above,
+     * whose FAILURE means bytes were destroyed.
+     */
+    Schedule::command('queue:prune-failed --hours=336')
+        ->name('queue:prune-failed')
+        ->hourlyAt(41)
+        ->withoutOverlapping(30);
+
+    /*
+     * PENDING ENTRIES — uncomment each one together with its command class. The cadence beside each
+     * is the intended schedule, not a suggestion (laravel-scheduler).
+     *
+     * THIS BLOCK NO LONGER CONTAINS AN ENTRY WAITING ON A TABLE, and that is worth one sentence:
+     * `queue:prune-failed` sat here for the entire life of the repository behind the words
+     * "uncomment once the table exists", which is a to-do whose blocking half nobody owned. The
+     * table's absence was found by a real upload failing, not by this comment. A pending entry that
+     * names a missing artifact should be read as a defect report, not as a plan.
      *
      * `sanctum:prune-expired` at the bottom is NOT one of these: it is a PERMANENT omission under
      * decision D11, not a pending entry. Read its comment before adding it back.
@@ -205,11 +257,6 @@ Schedule::onOneServer()->group(function (): void {
     // Usage and quota aggregates.
     // Schedule::command('kb:rollup-usage')
     //     ->name('kb:rollup-usage')->hourlyAt(7)->withoutOverlapping(30);
-
-    // failed_jobs holds full payloads and exception traces indefinitely until this runs; it is a
-    // tenant-data store and belongs to the retention policy. Uncomment once the table exists.
-    // Schedule::command('queue:prune-failed --hours=336')
-    //     ->name('queue:prune-failed')->hourlyAt(41)->withoutOverlapping(30);
 
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // PERMANENTLY OMITTED UNDER DECISION D11 — NOT PENDING, NOT WAITING FOR A TABLE.

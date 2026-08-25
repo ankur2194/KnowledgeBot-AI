@@ -2265,7 +2265,10 @@ knows that is three changes rather than one.
 tails *inside* it, and line 37 justifies that with "the phase-2 sweep and its verification are the
 same prefix string". Those lines are now wrong about `original/` and remain right about `derived/`.
 `.claude/skills/kb-tenancy-isolation/SKILL.md` line 97 restates the same prefix and inherits the
-same correction. This register does not edit skills; the obligation is recorded in `docs/22` § Q11.
+same correction. This register does not edit skills; the obligation was recorded in `docs/22` § Q11
+and **discharged on 2026-08-25** — all three skills now describe this layout, and a third site the
+finding had not listed (`kb-security-baseline/references/file-upload-safety.md`) was found and
+corrected in the same pass.
 Owed since commit `ec58a19` (2026-08-20), which shipped the departure and said an ADR was owed.**
 
 **Decision:** the irreplaceable bytes of a source live at
@@ -2278,11 +2281,20 @@ org/{org_id}/sources/{source_id}/versions/{source_version_id}/derived/…
 
 `original/` is a sibling of `versions/`, scoped to the **source**; `derived/` is unchanged and stays
 scoped to the **version**. On the Laravel side every one of these strings is built by
-`App\Support\Kb\ObjectKey` and by nothing else. **On the data-plane side the twin does not exist
-yet** — `services/ai-service/app/storage/` is not a directory, although two files quote
-`version_prefix()` from it as though it were (`docs/22` § Q8) — so when it is written it must be
-written against this ADR rather than against the skill's diagram, or the two planes will build two
-different layouts.
+`App\Support\Kb\ObjectKey` and by nothing else. **The data-plane twin was written on 2026-08-25**
+— `app/storage/objects.py`, mirroring `ObjectKey` method for method — and
+`tests/contract/test_object_key_cross_language.py` runs the PHP class in a container and compares the
+strings character for character, in both the accept and the refuse direction. That test is the
+enforcement this ADR needs and a docstring cannot give it: two transcriptions of one layout, each
+agreeing with its own documentation and disagreeing on bytes, is a failure neither runtime's own suite
+can see.
+
+**This paragraph used to say the twin did not exist, and warned that whoever wrote it must write it
+against this ADR rather than the skill's diagram. That warning was already too late** — the Python
+side had been composing keys since Phase C, without a module, and it had the layout half wrong: it
+built only `originalUpload()`'s spelling, so every pasted-text source resolved to a key nothing had
+written and failed as `storage` with a message saying its bytes were missing. They were not missing.
+`docs/22` § **S2**.
 
 **Reason: the fixed layout cannot be honoured by the code that holds the bytes, and that is
 structural rather than a preference.** `2026_08_20_002000_create_source_versions_table.php` makes
@@ -2526,3 +2538,380 @@ debugging "why did nothing happen" has to establish which of the two fired.
 **Revisit when** `INGEST_KEY_PARTS` gains or loses a member — the same tripwire ADR-063 names — or
 when the control plane acquires a legitimate reason to know a configuration version before the run,
 which today it does not and cannot.
+
+### ADR-069: The Two Mutable Payload Terms Are Carried by Two Synchronous, Verified Internal Operations — `source.status.sync` and `bot.access.sync`
+
+**Status: `Accepted`. Closes the two `TODO(phase-c)` markers in
+`services/core-api/app/Services/Sources/SourceService.php` (`disable()` and `enable()`) and the
+`TODO(phase-c)` Qdrant-payload item in `app/Services/Bots/BotService.php`. Adds two operations to
+`.claude/skills/kb-internal-api-contracts/SKILL.md`. Does **not** close the config-snapshot
+active-version resolver, which stays Phase D.**
+
+**Decision.** Four payload fields decide what a query may see — `org_id`, `bot_ids`,
+`source_status`, `source_version_id`. Two of them are immutable facts about the point. The other
+two change **after** the write, from the control plane, with no re-ingest, and they are carried by:
+
+| Operation | Effect | Dispatched by |
+|---|---|---|
+| `source.status.sync` | one filtered `set_payload` per collection rewriting `source_status` | `SourceService::disable()` / `::enable()` → `SyncSourceStatusJob` |
+| `bot.access.sync` | scroll + read-modify-write adding or removing one id in the `bot_ids` list | `BotSourceAssignmentService::assign()` / `::remove()`, `BotService::delete()` → `SyncBotAccessJob` |
+
+Both are `POST /internal/v1/maintenance/{source-status,bot-access}`, HMAC-verified,
+`X-KB-Idempotency-Key` required, and — unlike `submitIngestion` next door — **synchronous, answering
+200 with the verification counts**.
+
+**Reason the response is the proof rather than a 202.** `set_payload` returns the same
+acknowledgement whether it rewrote ten thousand points or none. `kb-deletion-and-verification`'s
+rule is not about deletion specifically; it is about the store acknowledging work it did not do, and
+a filtered count is the only evidence any of this happened. A 202 would hand the caller exactly the
+acknowledgement that proves nothing, and the caller is a queued job that can afford to wait. So the
+data plane counts **positively** — points now carrying the intended value, compared against the
+points in scope, `exact=True` on every count — and a report whose counts disagree is an exception on
+both sides rather than a `passed: false` body a caller could ignore.
+
+**Reason the collection set travels in the body.** The collection name encodes the embedding space,
+so a source re-indexed after its organization changed embedding model has points in two of them. The
+set is every DISTINCT `source_versions.embedding_model_version` of the source — **every** version and
+not only the active ones, because a retired version's points survive until the purge. Laravel owns
+that table and resolves it; the handler opens no database connection, for the same reason
+`embedding/readiness` does not. An **empty** collection set is refused outright rather than treated
+as a no-op: zero collections and zero points report identical counts, so the emptiness is decided in
+the job, where the reason — "this source has never been indexed" — is knowable.
+
+**Reason `bot.access.sync` is a read-modify-write and can only ever be one.** `bot_ids` is a LIST on
+each point holding every bot the source is assigned to. A delete-by-filter on it destroys the chunks
+the other bots still answer from, at HTTP 200, first observed weeks later. There is no shape of this
+request that expresses a delete. Points are grouped by their *resulting* `bot_ids` value before
+writing, and the loop re-scrolls from the beginning each pass rather than paging with an offset —
+a rewritten point stops matching the filter, so an offset would skip whichever point moved up into
+its place. `MAX_REWRITE_PASSES` turns the resulting "acknowledged but not applied" infinite loop
+into a failure with a number in it.
+
+**Reason `source_ids: null` is revoke-only.** It means every point in the organization and it exists
+for the deleted-bot case: the `bot_source_assignments` rows are gone by dispatch time, so nothing can
+enumerate what the bot could see. The same scope on a grant would assign a bot to every source the
+tenant owns; it is refused in `SyncBotAccessJob`'s **constructor**, so it cannot be serialized onto
+the queue, and again in `InternalAiClient` and again at the router.
+
+**Reason the compensation is asymmetric.** `SyncSourceStatusJob::failed()` reverts an **enable** and
+never a **disable**. An enable that did not land leaves the points carrying `disabled`: the console
+says ready and every question goes unanswered — `kb-tenancy-isolation`'s correct-filter-wrong-payload
+case — so reverting the row makes the console agree with what the index will actually do and makes
+the operator's obvious next action re-run the sync. A disable that did not land leaves the points
+carrying `ready`: reverting would *also* say ready, which is true of the index and the opposite of
+what the operator asked for, and would discard the only durable record that they asked. The row stays
+`disabled`, the `failed_jobs` row is the truth, and both branches log the divergence first.
+`SyncBotAccessJob` has no compensation at all and says so: the assignment row is already committed
+with its own `bot.source_assignment.*` audit row, which `AuditLogger` marks `ON_FAILURE_ABORT`
+precisely so a retrieval-scope change is never silently unwound.
+
+**Reason there is no replay store for the idempotency key.** The header is required — it is inside
+the canonical string, so a caller that omits it has a signer that disagrees with ours — and it is
+derived from the instruction so two deliveries carry one key. It is deliberately **not** stored: the
+answer *is* the verification count, and returning a first delivery's stale count would tell the
+control plane an index it has not looked at since is in a state it may no longer be in. Both
+operations are convergent — the far side selects the points still *needing* the change — so
+re-running one costs a filtered count and rewrites nothing. Idempotency is a property of the
+operation here, not a claim in Valkey.
+
+**Rejected alternatives.**
+
+- **Purge and re-ingest on disable.** Turns a two-second toggle into a full reprocess at a provider's
+  per-token price, and `kb-source-lifecycle` defines disable as excluding from retrieval *while every
+  vector stays* — which is what makes re-enabling a payload write.
+- **Wait for the config-snapshot resolver instead.** That resolver is what makes a disable immediate
+  with no payload write, and it lands with the chat path. It is complementary rather than an
+  alternative: the snapshot makes a disable instant, the payload rewrite makes it durable and makes a
+  re-enable possible without a re-ingest. Waiting would have left both halves missing.
+- **A `passed: false` 200 instead of an exception.** A body a caller can ignore is a body a caller
+  will ignore, and this caller commits a control-plane status on the strength of the answer.
+- **Deriving the collection set on the data-plane side.** A data-plane read to decide the scope of a
+  data-plane write is a second authority on what the scope is, and the two disagree exactly when it
+  matters.
+
+**Consequences.** `SourceService::disable()` now has a failure mode it did not have before — the
+index was told and did not verify — which is loud, lands in `failed_jobs`, and is strictly better
+than the previous state, where the index was never told at all. `bot_ids` residue after a failed
+revoke is stale rather than dangerous, because ULIDs are never reused, so no future bot can inherit
+the term. And `bot.access.sync`'s cost scales with the corpus rather than being constant, which is
+why `kb.timeouts.maintenance` is 45 s and why `SyncBotAccessJob`'s `#[Timeout]` is 90.
+
+**Revisit when** the config-snapshot active-version resolver lands: at that point a disable is
+already effective through the snapshot before this job runs, and the question worth re-asking is
+whether the payload rewrite should become a background reconciliation rather than a dispatch on the
+admin path. Also revisit if `bot_ids` ever stops being a list — the read-modify-write exists only
+because it is one.
+
+### ADR-070: The Upload Orphan Is Recovered by a Write-Ahead Key Ledger and a Control-Plane Sweep, Not by the Data Plane
+
+**Status: `Accepted`. Closes the `TODO(phase-c)` in
+`services/core-api/app/Services/Sources/Upload/SourceObjectWriter.php` and the security finding it
+reported. Narrows `kb.maintenance.sweep_orphan_objects` in
+`services/ai-service/app/maintenance/tasks.py`, which stays unowned for what remains of it. Does
+**not** change the write-before-row ordering, which is reaffirmed.**
+
+**A note on the label, because two findings share it.** The orphan finding is the
+**security-auditor's S3**, and `docs/22` § S3 is an unrelated finding about the SSE Pydantic models.
+Nothing renumbers either; the code comments say "security finding S3" and mean this one, and every
+one of them sits next to a description of the defect so the label is never load-bearing.
+
+**Decision.** `SourceService::create()` writes objects before the rows, because object storage does
+not join a PostgreSQL transaction. That produces an orphan when the request dies in between. The
+orphan is now **named before it is created**: `pending_source_objects` holds one row per key the
+request is about to write, inserted before the bytes and deleted after the transaction commits. An
+unmatched row is the input to `kb:sweep-orphan-objects`, an hourly Laravel command that re-asks
+`source_items` whether anything claims the key, deletes the object only when nothing does, and skips
+any reservation younger than `kb.upload_orphan_grace_minutes`.
+
+**Reason this is a security finding rather than housekeeping.** The orphan sits at
+`org/{org}/sources/{sourceId}/original/{sha256}` for a `sourceId` that never became a row. The
+phase-2 purge sweeps the prefixes of sources that **exist**, and
+`services/ai-service/app/deletion/verification.py` enumerates only under the prefixes it was given —
+so the object is not merely missed, it is **certified clean while it survives**. That is
+non-negotiable 6 failing in the one direction that produces a signed proof of a deletion that did not
+happen. It is also not self-healing: `ObjectKey::originalUpload()` is source-scoped and the source id
+is minted per request, so retrying the identical upload writes a **different** key.
+
+**Reason the ledger and not "rows first".** `SourceObjectWriter` named both options. Rows-first —
+insert `source_items` with a not-yet-written marker, write the object, clear the marker — changes the
+failure mode of the whole create path: every reader of `source_items` acquires a state in which the
+object may not be there, and `source_items_stored_object_is_complete` has to be weakened to let the
+half-written row exist at all. The ledger is purely additive: no existing reader changes, no CHECK is
+relaxed, and the only new failure mode is a row kept longer than it should be.
+
+**Reason the sweep is Laravel's and not Celery beat's.** `routes/console.php` draws the line as
+*this file decides whether a tenant's work should start; beat schedules data-plane repair*, and this
+sweep's input is a **control-plane table** no process in the data plane can read. The data plane
+keeps the adjacent sweep that genuinely is its own — `sweep-abandoned-multipart-uploads`, whose
+parts `ListObjectsV2` cannot even see — and that separation is why nothing runs twice.
+
+**Reason the sweep binds a tenant context per row.** `SourceItem` carries
+`#[ScopedBy(OrganizationScope::class)]` and that scope **fails closed**: with no bound context it
+applies `whereRaw('1 = 0')`. The claim check asked from a console command with no context therefore
+answers "nothing claims this key" **for every key in the database**, and the sweep deletes every live
+original it has a reservation for while exiting 0. Each row is processed inside
+`TenantContext::runFor($row->organization_id, …)`. The Pest test for this is a two-organization
+fixture — a claimed key in one, an orphan in the other — and removing the `runFor` was measured to
+make it fail by destroying the claimed object, which is the only way to know the test is a test.
+
+**Reason `PendingSourceObject` is the one org-owned model with no scope.** For the mirror-image
+reason `OrganizationUser` and `OrganizationInvitation` have none: the reader that matters runs
+without a context. A scoped model here would make the sweep read zero rows, hourly, forever, exiting
+0 and reporting nothing to collect — the sweep silently ceasing to exist, which is the state the
+finding describes. What replaces the scope is stated in the model's docblock: an explicit
+organization predicate on every repository method, a database CHECK tying the key to the row's own
+organization prefix, and a table that holds no tenant content.
+
+**Reason the grace window is a refusal and not a clamp.** Between "not claimed" and `delete()` there
+is a window in which a create transaction can commit; the grace window is what makes it negligible.
+A configured window below `MINIMUM_GRACE_MINUTES` fails the whole tick with a message rather than
+being silently raised to the floor, because a clamp lets a deployment believe it set zero and get
+fifteen. The command also re-asks the claim **after** the delete and reports a race as a failing exit
+code: nothing can undo the deletion, so the one thing that must not happen is silence.
+
+**Rejected alternatives.**
+
+- **Walk the bucket and delete what `source_items` does not name.** O(objects) against SeaweedFS
+  every tick, blind to abandoned multipart parts anyway, and a full-bucket delete-anything primitive
+  driven by a query.
+- **`ON DELETE CASCADE` from `organizations`.** Deleting the ledger row does not delete the object.
+  A cascade silently discards the only record naming bytes that are still on disk, outside every
+  prefix the purge sweeps — the finding returning by a shorter road. `RESTRICT` makes an unswept
+  orphan block the delete, loudly.
+- **Releasing inside the create transaction.** A rollback would take the release with it, which is
+  harmless; a commit that then failed on a later statement would have discarded the ledger entry for
+  an object nothing points at, which is not.
+- **Failing the request when the release fails.** The source exists and the caller's work succeeded;
+  a 500 there invites a retry that creates a *second* source with a second set of objects. The
+  release is best-effort and the sweep's claimed-count is what a lost release looks like.
+- **An audit row per collected object.** `AuditLogger::OPERATIONS` is a closed catalog, the sweep has
+  no actor and no surviving subject, and the precedent is `SubmitIngestionJob`: do not invent an
+  operation for something no person did.
+
+**Consequences.** Every create request now performs one extra INSERT per object and one DELETE per
+source; the reservation failing fails the request, deliberately, because nothing has been written
+yet. `organizations` gains a delete dependency that a stale reservation can block. And the sweep is
+one of the few scheduled entries whose `ScheduledTaskFailed` is a real incident rather than a
+dependency blip.
+
+**Revisit when** the upload path ever writes an object it does not name in `source_items` — an
+extracted thumbnail, say — because the claim check would then report it unclaimed and delete it. The
+check is "does a `source_items` row name this key", not "is anything using it", and a second kind of
+object needs a second question rather than a wider grace window.
+
+### ADR-071: The E2E Administrator Is a Real Login With an Environment-Supplied Credential, Never a Seeder or a Test-Only Route
+
+**Status: `Accepted`. Adds `apps/web/tests/e2e/auth.setup.ts`, which is the file
+`playwright.config.ts` has declared a `setup` project for since it was written and which never
+existed. Unblocks the `admin` Playwright project — nine spec files, 51 tests — and closes the
+"THE `*.setup.ts` ITSELF" exclusion recorded in four of them.**
+
+**Decision.** The setup fills the real `/login` form with `KB_E2E_ADMIN_EMAIL` /
+`KB_E2E_ADMIN_PASSWORD` from the environment, asserts an authenticated surface rendered, and writes
+`playwright/.auth/admin.json`. With no credential set it **deletes any stale state file and skips**,
+which leaves `pnpm web:e2e` meaning "run the public project" — the behaviour every admin spec's
+file-scope guard already assumed.
+
+**Reason it drives the real route.** `playwright.config.ts` states it at the project: "No test-only
+login endpoint, no `?org=` override, no seeded superuser that skips membership — a faked credential
+cannot fail an isolation test." Logging in for real exercises `GET /sanctum/csrf-cookie`, the
+URL-decoded `X-XSRF-TOKEN` echo, Sanctum's `fromFrontend()` classification of an `app.<domain>` →
+`api.<domain>` request, both rate limiters, the membership read that resolves
+`current_organization_id`, and the `verified` gate. A session minted any other way is a session no
+isolation spec can fail against.
+
+**Reason the credential is not seeded.** `DatabaseSeeder` is empty on purpose and its docblock
+argues that test fixtures do not belong in it. `kb:bootstrap-organization` is the supported path and
+is deliberately built so it *cannot* hand a password to a machine: it accepts one in no form,
+creates the owner with an unusable 64-hex placeholder it never prints, and mails a reset link. That
+is a property to respect, not to route around, so the password an E2E run uses is one a human set
+through the ordinary flow. The consequence is accepted: a prepared machine is a manual step, and the
+skip is what keeps an unprepared one honest.
+
+**Reason the skip deletes the stale state file.** `playwright/.auth/` is gitignored but not
+ephemeral. Skipping while leaving yesterday's file behind makes every admin spec's `existsSync`
+guard pass, the specs run, and they restore an expired session — every one failing at a redirect to
+`/login`, which reads as "the console is broken" rather than "you did not export the credential".
+Deleting it makes the guard true if and only if this run authenticated.
+
+**Reason the session cookie is not the proof.** `src/proxy.ts` records the measurement: Laravel
+issues `kb_session` **to a guest**, because every auth form calls `GET /sanctum/csrf-cookie` first —
+which is why the proxy's "looks signed in" redirect was removed. A setup that proved itself by
+finding the cookie would pass having authenticated nothing. The proof is that `<CurrentOrgBadge/>`
+rendered: it returns `null` unless the session query answered `authenticated` **and** named a
+`current_organization_id` resolving to an active membership, and it is drawn in the browser from
+`GET /api/v1/auth/me`. The cookie is still checked, separately, for the different reason that a
+storageState with no cookies is a valid-looking artifact restoring no session.
+
+**Also in this change, and each is a rule that had no mechanism.**
+
+- `tests/e2e/admin/harness.ts` — four byte-identical copies of the axe tag set, the summarizer and
+  the storage-state guard became one. The tag set is what drifts first and drifts invisibly: a spec
+  scanning `wcag2aa` while its neighbours scan `wcag22aa` reports a clean page and checks less than
+  the file beside it claims.
+- Four new specs — `providers`, `models`, `embedding`, `members` — completing the Phase A admin
+  surface. Each carries an axe pass, a dark-mode pass, a form-or-dialog pass, and an operability
+  block for what a scanner cannot see. **None of them submits anything**: an E2E run against a real
+  stack that created connections, registered models, saved a designation or sent invitations would
+  leave residue in whatever organization the operator pointed it at.
+- `tests/Security/InternalKeyRingSeparationTest.php` — `phpunit.xml` says beside the two
+  `AI_CALLBACK_HMAC_KEY_C*` values that a shared secret would let "a verifier wired to the wrong ring
+  still pass every callback test", and nothing checked it. `IngestionCallbackTest`'s outbound-ring
+  test does not close it: it signs with the outbound **id**, so the verifier refuses on the id lookup
+  before any secret is compared, and it would still pass if the two rings held one value. The new
+  test signs with a callback **id** and the outbound **secret**, which reaches the comparison, and
+  pairs it with the control that the same id and the correct secret is *not* 401. Both were verified
+  by making the rings share a secret: two tests go red, the wire test answering 200 instead of 401.
+- Two product-visible false statements removed. `/settings` and `/settings/providers` both told the
+  administrator that the embedding screen "is being built and is not available yet". The link was
+  rendered a batch before the route existed, deliberately, and the sentence was what made a 404 read
+  as "not yet" — but `(admin)/settings/embedding/page.tsx` exists, so the sentence had become worse
+  than the 404 it explained.
+
+**Rejected alternatives.** A test-only login endpoint or a seeded superuser (the config's own comment
+forbids both, and a credential that skips membership cannot fail an isolation test). A password
+option on `kb:bootstrap-organization` (four independent properties of that command exist to make it
+impossible, and `KB_BOOTSTRAP_OWNER_PASSWORD` would contain the string PASSWORD and need
+allow-listing in `tests/Arch/SecretsResolverTest.php` — that suite telling you not to). Failing
+rather than skipping without a credential (it would make `pnpm web:e2e` red on every machine that has
+not been prepared, including for the public project, which needs no credential at all).
+
+**Consequences.** The admin specs are now *runnable*, which is not the same as *run*: every one of
+them still carries a "THIS FILE HAS NEVER BEEN EXECUTED" banner and every selector in them was read
+out of a component rather than observed. The banners come off when somebody has a green run to point
+at, and a first red run should be read as "the spec is wrong" at least as readily as "the page is
+wrong". `--fail-on-flaky-tests` remains a property of the invocation and cannot be set from the
+config: with `retries: 1`, a spec that only ever passes on the retry exits 0 forever.
+
+**Revisit when** a second E2E role is needed. Several specs skip on "the signed-in role does not hold
+`X`", and the coverage they skip — the analyst's 403 surfaces most of all — needs a second
+storageState and a second project rather than a wider grant on the first account.
+
+---
+
+### ADR-072: The E2E Browser Origin Is `http://localhost`, and the Browser Itself Is a Build Stage
+
+**Status: `Accepted`. Adds the `browsers` stage to `apps/web/Dockerfile` and one environment variable
+to `playwright.config.ts` (`KB_E2E_API_ORIGIN`). Records the topology the first-ever green Playwright
+run was made on, 2026-08-24. **Amended 2026-08-25** with a fourth required override — see
+`CORS_ALLOWED_ORIGINS` below — after a second run on this same harness closed `docs/22` § R1 at
+58 passed / 24 skipped / 0 red.
+
+Do not read a figure for the first run from this line. It has carried one that disagreed with
+`apps/web/tests/e2e/admin/harness.ts` since the day both were written, which is ADR-036's argument
+arriving inside ADR-036's own register; `harness.ts` is where the run is described and it is the
+authority.**
+
+**Decision, in three parts.**
+
+1. **The browser is a build stage, not a runtime install.** `apps/web/Dockerfile` gains a `browsers`
+   stage: `FROM deps`, `playwright install --with-deps chromium`, `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`.
+   Nothing in the production path descends from it, so it changed the size of zero shipped images.
+2. **The browser origin is `http://localhost:3000` and the API origin is `http://localhost:8080`.**
+   Not `app.<domain>` / `api.<domain>`, which is the topology `scripts/dev/hosts.md` teaches and the
+   one this run was first attempted on.
+3. **`webServer.env.NEXT_PUBLIC_API_ORIGIN` is `process.env.KB_E2E_API_ORIGIN ?? 'http://api.invalid'`.**
+   The default is unchanged and stays the default.
+
+**Why the browser had to be a build stage.** `knowledgebot/web:dev` is `node:22-bookworm-slim` plus
+the workspace install: it carries no browser, and — measured — **zero** of `libnss3`, `libnspr4`,
+`libatk-1.0`, `libcups2`, `libgbm1`, `libasound2`. So the gap was not "chromium is missing", which a
+runtime `playwright install` would close; it was that the downloaded binary could not dynamically
+link, and the error for *that* is a spawn failure naming no library. `--with-deps` runs `apt-get`,
+needs root, and is exactly the thing a build stage is for. Two suites were blocked on this and neither
+had ever run: `vitest --project components` (**448 tests**, browser mode via `playwright-core`) and
+the whole Playwright suite. The revision is never written down here — the CLI invoked is the one
+`pnpm install` put in the workspace — because a second place to update produces the message this stage
+exists to prevent: `Executable doesn't exist at /ms-playwright/chromium_headless_shell-<n>/…`.
+
+**Why `localhost` and not the four dev hostnames.** Two constraints have to hold at once, and the
+named-host topology satisfies only the first:
+
+- **Same-site.** Sanctum's SPA flow is cookie-based, so the browser origin and the API origin must
+  share a registrable domain or `kb_session` is never attached and every request answers 401.
+- **Secure context.** `use-file-uploads.ts` calls `crypto.randomUUID()`, which Web Crypto exposes only
+  where the context is potentially trustworthy. On `http://app.knowledgebot.example:3000` it is
+  `undefined`, the handler throws, and the files the user chose never become rows — five specs, no
+  visible error (`docs/22` § R4).
+
+`http://localhost` is the one origin satisfying both without TLS: same-site with itself, and
+potentially-trustworthy by specification. The Playwright container therefore joins the
+`laravel-api` container's **network namespace** (`--network container:knowledgebot-laravel-api-1`), so
+Playwright's own Next server on `:3000` and the FPM pool on `:8080` are both `localhost` to the
+browser. Laravel's `SESSION_DOMAIN` is empty (host-only — a leading-dot domain is invalid for
+`localhost` and the cookie is dropped), `SESSION_SECURE_COOKIE=false`,
+`SANCTUM_STATEFUL_DOMAINS=localhost:3000,localhost:8080`, and — **added 2026-08-25, because this
+list was incomplete and the omission is invisible in every log** —
+`CORS_ALLOWED_ORIGINS=http://localhost:3000`. `config/cors.php` sets `supports_credentials => true`,
+so `allowed_origins` is an exact list that no pattern widens; without the entry the browser's login
+preflight is refused, `auth.setup.ts` times out, the page reports *"the reason was not reported"*,
+and **nothing reaches a Laravel log at all** because the request never arrives. `curl` does not
+enforce CORS, so the obvious reproduction returns `200` and points away from the cause. `docs/22`
+§ R9.
+
+**Why `KB_E2E_API_ORIGIN` had to exist, and why `api.invalid` stays the default.** The literal
+`http://api.invalid` was correct for what the config could do at the time and made the `setup` project
+**unreachable by construction**: `auth.setup.ts` drives the real `/login` form, `lib/api/browser.ts`
+posts it to `NEXT_PUBLIC_API_ORIGIN` from the browser, and there is no server-side proxy on that path
+(`proxy.ts` is routing and CSP, and says explicitly that it is not the gate). Pinned to `.invalid`,
+every sign-in fails on DNS, `admin.json` is never written, and all 51 `[admin]` specs skip on their own
+guard — which reads as "no admin credential is set" rather than "this configuration cannot
+authenticate". The default keeps the property it was chosen for: a spec that reaches the network fails
+on DNS instead of quietly talking to a host that happens to exist.
+
+**What this is not.** It is not a claim that the product works over plain HTTP, and no shipped
+configuration serves it that way — Traefik has one entrypoint and it is `websecure`. It is a statement
+about a test harness, and § R4 records the one product-visible consequence: a comment that explained
+`crypto.randomUUID`'s availability by browser version rather than by secure context.
+
+**Known cost, stated rather than hidden.** `next start` warns *"does not work with `output: standalone`"*
+on every run, because `next.config.ts` sets `output: 'standalone'` and `playwright.config.ts`'s
+`webServer.command` is `pnpm build && pnpm start`. It serves correctly today. The two are nonetheless
+in disagreement, and the honest fix — `node .next/standalone/server.js` — is `admin-web-engineer`'s to
+make, because standalone traces its own `node_modules` and changing the command changes what the specs
+are running against.
+
+**Revisit when** the hosted-chat origin needs coverage. `chat.<domain>` is a *different origin from*
+`app.<domain>` on purpose (ADR-027), and one `localhost` cannot be two origins — so the `(chat)`
+group's CSP and its cookie isolation cannot be tested under this topology at all. That needs Traefik,
+the dev leaf certificate, and the dev CA trusted inside the browser container.
