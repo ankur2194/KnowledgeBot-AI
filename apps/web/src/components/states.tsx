@@ -51,7 +51,13 @@ function StateShell({
         </span>
       ) : null}
       <h3 className="text-h3">{title}</h3>
-      <p className="max-w-prose text-base text-muted-foreground">{body}</p>
+      {/* A `<div>`, NOT a `<p>`. `body` is `ReactNode` and reaches here from four callers
+          (`EmptyState`, `FilteredEmptyState`, `ForbiddenState`, `PageOutOfRangeState`), none of which
+          this shell can see. A paragraph admits only PHRASING content; the browser enforces that by
+          reparenting a block during hydration, which is a mismatch rather than a style bug. Today
+          every caller passes a string or a phrasing-only fragment, so this is closed before the first
+          one does not. `max-w-prose` is unaffected — it is a width, not a content model. */}
+      <div className="max-w-prose text-base text-muted-foreground">{body}</div>
       {action ? <div className="pt-1">{action}</div> : null}
     </div>
   );

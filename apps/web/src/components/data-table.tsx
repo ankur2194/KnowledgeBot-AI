@@ -112,7 +112,14 @@ export function DataTableCard({
       data-slot="data-table-card"
       className="flex flex-col gap-2 rounded-xl bg-card p-card-pad-sm shadow-sm"
     >
-      <p className="text-base font-medium">{title}</p>
+      {/* A `<div>`, NOT a `<p>`. `title` is whatever the `card: 'title'` column's `cell` returned —
+          arbitrary `ReactNode` this component never sees — and a paragraph admits only PHRASING
+          content. `source-columns.tsx` returns a two-line stacked block, which the browser reparents
+          out of a `<p>` while hydrating, so the markup React rendered and the markup the parser kept
+          disagree. Nothing here can narrow `ReactNode` to phrasing, so the container imposes no
+          content model at all. Not a heading either: these cards mirror table rows under one
+          `<caption>`, and an `<h3>` per row would invent a document outline the table does not have. */}
+      <div className="text-base font-medium">{title}</div>
       <dl className="grid grid-cols-2 gap-x-3 gap-y-1">{children}</dl>
       {actions ? <div className="flex items-center justify-end gap-2 pt-1">{actions}</div> : null}
     </div>

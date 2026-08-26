@@ -39,7 +39,12 @@ export function PageHeader({
           <h1 id={titleId} className="text-h1">
             {title}
           </h1>
-          {description ? <p className="text-base text-muted-foreground">{description}</p> : null}
+          {/* A `<div>`, NOT a `<p>`: `description` is `ReactNode`, and a paragraph admits only
+              PHRASING content. Nothing here can narrow the type, so the container imposes no content
+              model — the same rule `DataTableCard`'s title and `StateShell`'s body now carry. */}
+          {description ? (
+            <div className="text-base text-muted-foreground">{description}</div>
+          ) : null}
         </div>
         {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
       </div>

@@ -414,3 +414,77 @@ describe('the pager', () => {
     expect(navigationCalls()[0]?.href).toBe(`${MOCK_PATHNAME}?per_page=50`);
   });
 });
+
+/**
+ * A CARD TITLE CARRIES WHATEVER ITS COLUMN'S `cell` RETURNS, AND THAT IS ARBITRARY REACT.
+ *
+ * `DataTableCard`'s `title` prop is typed `ReactNode` and is fed `<table.FlexRender cell={titleCell} />`
+ * — the output of a column definition this component never sees. So its container may not impose a
+ * content model that `ReactNode` does not express. It used to be a `<p>`, which admits only PHRASING
+ * content, and the constraint was stated nowhere.
+ *
+ * WHY NO EXISTING SPEC CAUGHT IT: every title column in this file and in `bot-columns.tsx` renders a
+ * `<span>`, which is phrasing and therefore legal inside a `<p>`. `source-columns.tsx` renders a
+ * two-line stacked `<div>` — the first block-content title in the repo — and the browser reparented it
+ * out of the paragraph during hydration. React printed the nesting error and `tests/msw/setup.ts` only
+ * FAILS the run for `overlapping act()`, so the message scrolled past a green suite.
+ *
+ * The assertion is on the CONTAINER, not on the sources screen: `closest('p')` is the invariant
+ * ("no block title content inside a paragraph") stated where it can be violated by any future column.
+ */
+describe('the card title accepts block content', () => {
+  const blockHelper = createServerColumnHelper<BotRow>();
+
+  const blockTitleColumns = blockHelper.columns([
+    blockHelper.accessor('name', {
+      header: 'Name',
+      meta: { card: 'title' },
+      // Two stacked lines — the shape `source-columns.tsx` uses for a name over its origin URL.
+      cell: ({ getValue }) => (
+        <div data-testid="block-title" className="flex min-w-0 flex-col">
+          <span>{getValue()}</span>
+          <span>secondary line</span>
+        </div>
+      ),
+    }),
+    blockHelper.accessor('status', { header: 'Status', enableSorting: false }),
+  ]);
+
+  function BlockTitleHarness() {
+    const view = useTableParams(CONFIG);
+
+    return (
+      <ServerDataTable
+        caption="Bots"
+        columns={blockTitleColumns}
+        rows={ROWS}
+        rowCount={ROWS.length}
+        getRowId={(row) => row.id}
+        status="success"
+        isFetching={false}
+        requiredRole="Admin"
+        organizationName="Acme Research"
+        view={view}
+        emptyState={<EmptyState glyph={PlusIcon} title="No bots yet" body="None." action={<Button>Add bot</Button>} />}
+        describeFilter={'No bots match "invoice".'}
+      />
+    );
+  }
+
+  it('does not nest a block-level title inside a paragraph', async () => {
+    await render(<BlockTitleHarness />);
+
+    // SCOPED TO THE CARDS, and that is not incidental. No CSS is imported here (see this file's
+    // header), so the table layout and the card layout are BOTH in the DOM — a bare
+    // `querySelectorAll` returns four nodes for two rows and asserts against the table's copy, which
+    // was never the one inside a paragraph.
+    const cardTitles = [...cards()].map((card) => card.querySelector('[data-testid="block-title"]'));
+    // Present at all: a card layout that dropped the title would pass the nesting assertion vacuously.
+    expect(cardTitles).toHaveLength(ROWS.length);
+
+    for (const title of cardTitles) {
+      expect(title).not.toBeNull();
+      expect(title?.closest('p')).toBeNull();
+    }
+  });
+});

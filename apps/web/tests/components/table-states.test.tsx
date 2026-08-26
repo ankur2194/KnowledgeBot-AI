@@ -120,3 +120,39 @@ describe('the refetch indicator', () => {
     expect(document.querySelectorAll('.kb-skeleton')).toHaveLength(1);
   });
 });
+
+/**
+ * `StateShell`'s `body` IS `ReactNode`, so its container may not be a paragraph.
+ *
+ * The same defect `DataTableCard` carried (see `server-data-table.test.tsx`, "the card title accepts
+ * block content"): a `<p>` admits only PHRASING content, `ReactNode` promises nothing of the kind, and
+ * the constraint appeared in no type and no comment. Every caller today passes a string or a
+ * phrasing-only fragment — `ForbiddenState` is the closest, and it is still just text — so this was
+ * latent rather than broken. It is asserted here so the first caller that passes a block does not
+ * rediscover it as a hydration error in a browser.
+ *
+ * `EmptyState` is the vehicle because it delegates straight to `StateShell`, as do
+ * `FilteredEmptyState`, `ForbiddenState` and `PageOutOfRangeState` — one container, four callers.
+ */
+describe('the state body accepts block content', () => {
+  it('does not nest a block-level body inside a paragraph', async () => {
+    await render(
+      <EmptyState
+        glyph={PlusIcon}
+        title="No bots yet"
+        body={
+          <div data-testid="block-body">
+            <span>A bot answers from the sources you give it.</span>
+            <span>Add one to begin.</span>
+          </div>
+        }
+        action={<Button>Add bot</Button>}
+      />,
+    );
+
+    const body = document.querySelector('[data-testid="block-body"]');
+    // Present at all: a shell that dropped the body would satisfy the nesting check vacuously.
+    expect(body).not.toBeNull();
+    expect(body?.closest('p')).toBeNull();
+  });
+});
