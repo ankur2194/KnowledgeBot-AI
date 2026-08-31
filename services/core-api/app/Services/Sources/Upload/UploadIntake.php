@@ -5,7 +5,10 @@ declare(strict_types=1);
 namespace App\Services\Sources\Upload;
 
 use App\Enums\UploadRejectionReason;
+use App\Exceptions\KbException;
 use App\Exceptions\UploadRejected;
+use App\Models\Organization;
+use App\Services\Quotas\QuotaGate;
 use finfo;
 use Illuminate\Http\UploadedFile;
 use Normalizer;
@@ -97,6 +100,39 @@ use ZipArchive;
  *
  * It does not write anything. Objects are written by `SourceObjectWriter`, after the whole batch has
  * passed, so a batch with one bad file leaves no bytes behind.
+ *
+ * ═══ THE STORAGE QUOTA IS CHECKED HERE, TWICE, AND NEITHER CHECK IS ONE OF THE SIX ══════════
+ *
+ * `App\Services\Quotas\QuotaGate::assertUploadPermitted()` is called at STEP 0 and again at
+ * STEP 7. It is in this class rather than in `SourceService` because this class is where the "do not
+ * pay for what you are about to refuse" ordering already lives, and a quota is the cheapest refusal
+ * of all — it needs no bytes at all.
+ *
+ * STEP 0, BEFORE ANY FILE IS TOUCHED: refuse an organization that is ALREADY over its storage
+ * allowance. This is the same argument step 1 makes about size — "rejecting a 4 GB upload after
+ * writing it to disk is not a rejection" — one level up, and it is the check that fires under abuse,
+ * where it costs one Valkey read and no PostgreSQL query at all (`QuotaCounters`: a refusal computed
+ * from the cached lower bound is sound, because the counter can only ever be LOW).
+ *
+ * STEP 7, AFTER THE WHOLE BATCH HAS PASSED: refuse a batch that would TAKE the organization over.
+ * It is charged against the ACCEPTED, DEDUPLICATED total, because that is what will actually be
+ * stored — a rejected file writes nothing, and two byte-identical files in one batch write one
+ * object. Doing this at step 0 with the declared sizes would be cheaper and would refuse a batch for
+ * "storage allowance" when the real reason was a 10 GB file the size check was about to reject,
+ * which is a worse sentence for the same outcome.
+ *
+ * A QUOTA BREACH IS `tenant_quota` (403) AND NOT AN `UploadRejected`. It is not a property of the
+ * file, so it has no token in `UploadRejectionReason` — that enum is the closed vocabulary of the
+ * six-step gate and every member names a step. It is also a BATCH refusal rather than a per-file one,
+ * so it cannot be collected into the `files.{index}` map the way a refusal is. It therefore
+ * propagates out of `screen()` and renders through the one envelope as 403 / `tenant_quota` /
+ * `retryable: false`.
+ *
+ * IT WRITES NO AUDIT ROW, and the omission is deliberate: `source.upload.rejected` carries a closed
+ * `reason` token naming which STEP refused, and a quota breach refused no step. Auditing it would
+ * mean widening that vocabulary with a value whose meaning is "this file was fine", which makes
+ * every existing query over that column ambiguous. What records a quota refusal is the `usage_events`
+ * ledger the refusal was computed from, which is a stronger record than a note that somebody tried.
  */
 final class UploadIntake
 {
@@ -112,13 +148,36 @@ final class UploadIntake
      */
     private const MAX_NAME_LENGTH = 255;
 
+    public function __construct(
+        /**
+         * THE STORAGE ADMISSION GATE. Injected rather than resolved, so a test can exercise the
+         * six-step gate against a real quota gate and a fixed ledger without either being reachable
+         * from a route — the same reason `SourceService` injects this class rather than constructing
+         * it.
+         */
+        private readonly QuotaGate $quotas,
+    ) {}
+
     /**
      * Screen one multipart batch. Nothing is written and nothing is decided about the source.
      *
      * @param  array<int, UploadedFile>  $files  keyed by the part index the client sent
+     *
+     * @throws KbException `tenant_quota` (403) when the organization is already over its storage
+     *                     allowance, or when this batch would take it over. A BATCH refusal, not a
+     *                     per-file one — see the class docblock for why it is not an
+     *                     `UploadRejected`.
      */
-    public function screen(array $files): UploadScreening
+    public function screen(Organization $organization, array $files): UploadScreening
     {
+        // ── STEP 0: IS THIS ORGANIZATION ALREADY OVER ITS STORAGE ALLOWANCE? ─────────────────
+        //
+        // BEFORE A SINGLE BYTE IS READ, hashed or sniffed. `additional: 0` asks only "has the
+        // ceiling already been reached", which is the question that can be answered from the cached
+        // lower bound alone — so an organization grinding at this endpoint while over quota is
+        // refused for the cost of one Valkey GET, with no PostgreSQL aggregate and no file I/O.
+        $this->quotas->assertUploadPermitted($organization, 0);
+
         $accepted = [];
         $rejected = [];
 
@@ -159,6 +218,27 @@ final class UploadIntake
                     .'with no reference count. Upload it once.',
             );
         }
+
+        // ── STEP 7: WOULD THIS BATCH TAKE THE ORGANIZATION OVER? ────────────────────────────
+        //
+        // CHARGED AGAINST THE ACCEPTED, DEDUPLICATED TOTAL, because that is what will actually be
+        // stored: a rejected file writes nothing, and two byte-identical files in one batch write
+        // ONE content-addressed object. Summing the raw `$files` instead would over-charge a batch
+        // containing a duplicate and would refuse it for a ceiling it does not actually reach.
+        //
+        // RUN EVEN WHEN THE BATCH HAS REJECTIONS, and that ordering is deliberate rather than an
+        // oversight: `SourceService` is all-or-nothing, so a batch with any rejection stores
+        // nothing — but this call is what keeps the two refusals from being decided in a different
+        // order on a future caller that admits partial batches. Charging zero for an all-rejected
+        // batch is free, since `assertUploadPermitted` with 0 additional is the step-0 question
+        // again.
+        $this->quotas->assertUploadPermitted(
+            $organization,
+            array_sum(array_map(
+                static fn (AcceptedUpload $upload): int => $upload->byteSize,
+                $accepted,
+            )),
+        );
 
         return new UploadScreening($accepted, $rejected);
     }

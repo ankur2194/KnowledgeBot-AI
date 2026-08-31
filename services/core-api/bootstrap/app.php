@@ -163,15 +163,36 @@ return Application::configure(basePath: dirname(__DIR__))
         // a route-list test can assert no session middleware reaches a token-authenticated surface.
         // SubstituteBindings is present in all of them because route-model binding is what turns a
         // foreign identifier into a 404 at binding time (laravel-rbac-policies).
+        // FIRST, AND BEFORE BINDINGS. One class resolves the credential, binds the SURFACE and binds
+        // the TENANT CONTEXT, for the same reason `org.member` does all three on the admin surface:
+        // the organization a request may act in is the organization its credential names, and a
+        // stack where one of the three ran and another did not is a scoped query with no scope.
+        //
+        // ORDERING. `SubstituteBindings` issues queries for the ids in the path, and every model in
+        // the conversation graph is org-scoped — directly or through `conversations`. Resolved
+        // before the tenant context is bound, a binding runs against `1 = 0` and 404s, which reads
+        // as a routing bug rather than an ordering one. The priority list below carries the same
+        // rule for the admin surface's TenantContext; this group states it by ORDER because
+        // ResolveChatSession is not in that list.
+        //
+        // THERE IS NO `BindSurface` ENTRY: ResolveChatSession binds `Surface::PublicRuntime` itself.
+        // Splitting it into a second middleware would allow a route that authenticated without
+        // binding the surface — and the default binding is `Surface::Admin`, so such a route would
+        // deny with a 403 and an admin body, turning every rejection into an existence oracle.
         $middleware->group('runtime', [
+            \App\Http\Middleware\ResolveChatSession::class,
             \Illuminate\Routing\Middleware\SubstituteBindings::class,
-            // TODO(auth): App\Http\Middleware\ResolveChatSession + BindSurface(public) — laravel-sanctum-auth.
-            // TODO(tenancy): App\Http\Middleware\TenantContext — see the priority list below.
         ]);
 
+        // UNAUTHENTICATED BY DESIGN. There is no credential to resolve — the caller is a loader
+        // script on a page we do not control — so the only thing that can be checked before a
+        // controller runs is that an `Origin` header is present and is a real, exact origin. WHICH
+        // origin is allowed depends on which bot the body names, so that half lives in the service.
+        //
+        // It binds `Surface::Sdk` for the same reason the runtime group's entry does.
         $middleware->group('sdk', [
+            \App\Http\Middleware\ValidateEmbedOrigin::class,
             \Illuminate\Routing\Middleware\SubstituteBindings::class,
-            // TODO(auth): App\Http\Middleware\ValidateEmbedOrigin + BindSurface(public).
         ]);
 
         $middleware->group('internal', [

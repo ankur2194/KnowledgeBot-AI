@@ -355,9 +355,33 @@ createServer((request, response) => {
         return;
       }
       mintCount += 1;
-      response.writeHead(200, { 'content-type': 'application/json', ...cors });
-      // Opaque, not a JWT carrying claims the client could read or that we would then trust.
-      response.end(JSON.stringify({ token: `kbw_fixture.${mintCount}`, expires_in: 1800 }));
+      response.writeHead(200, {
+        'content-type': 'application/json',
+        // The real response carries this, and a credential in an intermediary's cache is a
+        // credential for everyone who shares that cache.
+        'cache-control': 'no-store',
+        ...cors,
+      });
+      /**
+       * WRAPPED — `{"data": {...}}` — BECAUSE THE REAL ONE IS.
+       *
+       * This fixture answered at the TOP LEVEL, which is the same shape the loader used to read,
+       * so the whole e2e suite was green over a defect that made the widget unable to authenticate
+       * on any real deployment. It is the second time this file concealed a loader defect by
+       * agreeing with it (see the `sdk/v1` vs `api/v1` note above), and the lesson is the same one:
+       * a fixture written to match the client proves the client matches itself.
+       *
+       * Every success body on the Laravel public API carries a `data` key — `DumpOpenApiCommand`
+       * refuses to publish an operation without one — so the wrapper is the contract, not a quirk
+       * of this endpoint. A loader that regresses to the top-level read now gets `undefined` from
+       * `readSessionGrant`, emits `error { reason: 'session_malformed' }`, and fails every
+       * session-carrying spec instead of passing them.
+       *
+       * The token is opaque, not a JWT carrying claims the client could read or would then trust.
+       */
+      response.end(
+        JSON.stringify({ data: { token: `kbw_fixture.${mintCount}`, expires_in: 1800 } }),
+      );
     });
     return;
   }

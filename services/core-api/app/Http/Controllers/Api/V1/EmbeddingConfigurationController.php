@@ -115,6 +115,11 @@ final class EmbeddingConfigurationController extends Controller
             $organization,
             $request->designation(),
             $this->actorId(),
+            // THE REQUEST, so the audit row carries `ip_address` and `user_agent`. It is passed
+            // rather than resolved inside the service for the reason every other audited write on
+            // this surface passes it: a service that reaches for `request()` cannot be called from a
+            // console command or a job without either lying about the caller or blowing up.
+            $request,
         );
 
         // THE ORGANIZATION THE WRITE RETURNED, NOT THE BOUND ONE. `designate()` returns the row as

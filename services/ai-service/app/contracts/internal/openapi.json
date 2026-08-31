@@ -69,6 +69,95 @@
         "title": "Capability",
         "type": "string"
       },
+      "ChatExecuteRequest": {
+        "additionalProperties": false,
+        "description": "One chat turn, as the control plane resolved it. **Deliberately unhashable.**\n\nA ``dict`` field costs ``frozen=True`` its hashability, and that is the correct outcome\nrather than something to shim around: hashing this model would pull the credentials in,\nwhich is exactly what :func:`snapshot_hash` exists to prevent. The hashable object is\n:class:`ConfigSnapshot`.",
+        "properties": {
+          "actor_type": {
+            "enum": [
+              "user",
+              "anonymous_session",
+              "scheduler",
+              "system"
+            ],
+            "title": "Actor Type",
+            "type": "string"
+          },
+          "bot_id": {
+            "pattern": "^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$",
+            "title": "Bot Id",
+            "type": "string"
+          },
+          "client_message_id": {
+            "pattern": "^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$",
+            "title": "Client Message Id",
+            "type": "string"
+          },
+          "config": {
+            "$ref": "#/components/schemas/ConfigSnapshot"
+          },
+          "conversation_id": {
+            "pattern": "^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$",
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "deadline_epoch_ms": {
+            "minimum": 0.0,
+            "title": "Deadline Epoch Ms",
+            "type": "integer"
+          },
+          "history": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 200,
+            "title": "History",
+            "type": "array"
+          },
+          "message_id": {
+            "pattern": "^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$",
+            "title": "Message Id",
+            "type": "string"
+          },
+          "org_id": {
+            "pattern": "^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$",
+            "title": "Org Id",
+            "type": "string"
+          },
+          "provider_credentials": {
+            "patternProperties": {
+              "^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$": {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              }
+            },
+            "title": "Provider Credentials",
+            "type": "object"
+          },
+          "query": {
+            "maxLength": 32000,
+            "minLength": 1,
+            "title": "Query",
+            "type": "string"
+          }
+        },
+        "required": [
+          "org_id",
+          "bot_id",
+          "conversation_id",
+          "message_id",
+          "client_message_id",
+          "actor_type",
+          "query",
+          "deadline_epoch_ms",
+          "config",
+          "provider_credentials"
+        ],
+        "title": "ChatExecuteRequest",
+        "type": "object"
+      },
       "CollectionReport": {
         "description": "One collection's counts, as the response carries them.",
         "properties": {
@@ -106,6 +195,109 @@
           "passed"
         ],
         "title": "CollectionReport",
+        "type": "object"
+      },
+      "ConfigSnapshot": {
+        "additionalProperties": false,
+        "description": "docs/06 \u00a711.2 \u2014 FastAPI never queries Laravel's tables; this is the whole input.\n\n**Hashable, and that is load-bearing.** No field here is a ``dict`` or a ``list``, so a\nfrozen instance hashes and is the correct per-request cache key. :class:`ChatExecuteRequest`\nis deliberately not hashable; see :func:`snapshot_hash`.\n\n**No credential is in this object and none may ever be added.** The snapshot exists to be\npersisted and replayed, so a provider key put inside it lands in columns no redaction\nfixture covers.",
+        "properties": {
+          "allowed_version_ids": {
+            "items": {
+              "pattern": "^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$",
+              "type": "string"
+            },
+            "maxItems": 10000,
+            "minItems": 1,
+            "title": "Allowed Version Ids",
+            "type": "array"
+          },
+          "bot_instructions": {
+            "default": "",
+            "maxLength": 32000,
+            "title": "Bot Instructions",
+            "type": "string"
+          },
+          "config_version": {
+            "minimum": 1.0,
+            "title": "Config Version",
+            "type": "integer"
+          },
+          "connection": {
+            "$ref": "#/components/schemas/ProviderConnection"
+          },
+          "embedding_connection": {
+            "$ref": "#/components/schemas/ProviderConnection"
+          },
+          "embedding_model_version": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Embedding Model Version",
+            "type": "string"
+          },
+          "fallback_connections": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProviderConnection"
+            },
+            "title": "Fallback Connections",
+            "type": "array"
+          },
+          "max_output_tokens": {
+            "maximum": 200000.0,
+            "minimum": 1.0,
+            "title": "Max Output Tokens",
+            "type": "integer"
+          },
+          "reasoning_effort": {
+            "$ref": "#/components/schemas/ReasoningEffort",
+            "default": "none"
+          },
+          "rerank_connection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderConnection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "retrieval": {
+            "$ref": "#/components/schemas/RetrievalConfig"
+          },
+          "retrieval_configuration_version": {
+            "minimum": 1.0,
+            "title": "Retrieval Configuration Version",
+            "type": "integer"
+          },
+          "stream": {
+            "default": true,
+            "title": "Stream",
+            "type": "boolean"
+          },
+          "temperature": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temperature"
+          }
+        },
+        "required": [
+          "config_version",
+          "retrieval_configuration_version",
+          "connection",
+          "embedding_connection",
+          "retrieval",
+          "allowed_version_ids",
+          "embedding_model_version",
+          "max_output_tokens"
+        ],
+        "title": "ConfigSnapshot",
         "type": "object"
       },
       "EmbeddingConnection-Input": {
@@ -419,6 +611,75 @@
         "title": "ModelCapabilities",
         "type": "object"
       },
+      "ProviderConnection": {
+        "additionalProperties": false,
+        "description": "One ``provider_connections`` row plus the ``provider_models`` row it will be used with.\n\n**There is no ``api_key`` here and none may be added.** ADR-011 puts credentials on\n:class:`ChatExecuteRequest`, outside the snapshot, because :class:`ConfigSnapshot` is hashed\ninto ``configuration_version`` and persisted into ``retrieval_traces`` and the playground. A\n``SecretStr`` inside it would digest as ``'**********'`` \u2014 so the hash looks stable for the\nwrong reason \u2014 and every rotation would move a version that nothing about the configuration\nactually changed. Moving it back inside is the reflexive tidy-up; this comment is the reason\nit is wrong.",
+        "properties": {
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "caps": {
+            "$ref": "#/components/schemas/ModelCapabilities-Input"
+          },
+          "connection_id": {
+            "pattern": "^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$",
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "fallback_on_rate_limit": {
+            "default": false,
+            "title": "Fallback On Rate Limit",
+            "type": "boolean"
+          },
+          "model": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "openai",
+              "anthropic",
+              "deepseek",
+              "nvidia_nim",
+              "openrouter"
+            ],
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connection_id",
+          "provider",
+          "model",
+          "caps"
+        ],
+        "title": "ProviderConnection",
+        "type": "object"
+      },
+      "ReasoningEffort": {
+        "description": "Seven levels, and two of them exist only because a vendor ships them.\n\n``MINIMAL`` sits between ``NONE`` and ``LOW`` because OpenAI ships it as a distinct level;\n``XHIGH`` between ``HIGH`` and ``MAX`` because Anthropic does. An enum missing either\nsilently rounds a provider's recommended setting to the nearest level we happen to model,\nwith no diff and no warning (`kb-provider-adapter-contract`).",
+        "enum": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "title": "ReasoningEffort",
+        "type": "string"
+      },
       "Rejection": {
         "additionalProperties": false,
         "description": "One candidate that cannot embed, with the reason and what the reason was read from.\n\n``detail`` exists so an operator screen can say something better than the enum member.\nIt carries connection ids, provider names, model ids and matrix sources only \u2014 never a\ncredential, and never tenant content.",
@@ -452,6 +713,94 @@
           "detail"
         ],
         "title": "Rejection",
+        "type": "object"
+      },
+      "RetrievalConfig": {
+        "additionalProperties": false,
+        "description": "The tunable core of the pipeline (stages 5-13). Every value is an evaluation-run output.\n\n`kb-rag-query-contract`'s standing instruction applies to all of them: a changed top-K,\nthreshold or window without an evaluation run attached is an unreviewable change.\n\nThe first five are the sketch's. The rest are additive with defaults matching\n``app/rag/runner.py::RetrievalConfig``, so a body that omits them behaves exactly as the\nrunner's own defaults do \u2014 which is what makes them safe to add to a shipped shape.",
+        "properties": {
+          "citations_enabled": {
+            "default": true,
+            "title": "Citations Enabled",
+            "type": "boolean"
+          },
+          "dense_top_k": {
+            "maximum": 200.0,
+            "minimum": 1.0,
+            "title": "Dense Top K",
+            "type": "integer"
+          },
+          "fusion_k": {
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Fusion K",
+            "type": "integer"
+          },
+          "history_window_turns": {
+            "default": 8,
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "History Window Turns",
+            "type": "integer"
+          },
+          "max_per_document": {
+            "default": 3,
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Max Per Document",
+            "type": "integer"
+          },
+          "question_max_chars": {
+            "default": 4000,
+            "maximum": 32000.0,
+            "minimum": 1.0,
+            "title": "Question Max Chars",
+            "type": "integer"
+          },
+          "require_at_least_one_citation": {
+            "default": true,
+            "title": "Require At Least One Citation",
+            "type": "boolean"
+          },
+          "rerank_top_n": {
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Rerank Top N",
+            "type": "integer"
+          },
+          "reserve_output": {
+            "default": 1024,
+            "maximum": 100000.0,
+            "minimum": 1.0,
+            "title": "Reserve Output",
+            "type": "integer"
+          },
+          "retain": {
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Retain",
+            "type": "integer"
+          },
+          "rewrite_enabled": {
+            "default": true,
+            "title": "Rewrite Enabled",
+            "type": "boolean"
+          },
+          "sparse_top_k": {
+            "maximum": 200.0,
+            "minimum": 1.0,
+            "title": "Sparse Top K",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "dense_top_k",
+          "sparse_top_k",
+          "rerank_top_n",
+          "fusion_k",
+          "retain"
+        ],
+        "title": "RetrievalConfig",
         "type": "object"
       },
       "SourceStatusSyncRequest": {
@@ -728,6 +1077,63 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/internal/v1/chat/stream": {
+      "post": {
+        "description": "Stream one grounded answer as the nine internal events.\n\n**Everything runs inside this generator.** Work done in an endpoint body before the response\nis returned sits outside Starlette's disconnect-watching task group, so a client that hangs\nup during an eight-second retrieval leg would not be noticed at all.\n\n**Exactly one terminal frame on every path** \u2014 ``message.complete`` or ``error``, never both\nand never neither. The cancellation terminal is emitted from ``except\nasyncio.CancelledError`` and then re-raised, never from ``finally``: yielding while\n``GeneratorExit`` unwinds raises ``RuntimeError``, the ASGI layer swallows it, and the only\nsymptom is a missing terminal frame for a turn the vendor billed in full.\n\n**The response has already started by the time anything interesting can fail**, so no\nexception handler can run and no status can change: a mid-stream failure is an ``error``\nframe or it is a dropped connection. Body-shape failures still become a 422 envelope,\nbecause FastAPI validates before this function is called.\n\n**``provider.fallback`` and ``provider.usage`` are built from ``ProviderAttempt`` records,\none per attempt, through the router's ``record`` sink** \u2014 not from the terminal\n``ChatResult``, which deliberately cannot say which connection answered. Reading only the\nterminal event, a fallback answer is indistinguishable from a primary one and the cost of\nfalling back is invisible.",
+        "operationId": "chatStream",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatExecuteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "itemSchema": {
+                  "properties": {
+                    "data": {
+                      "type": "string"
+                    },
+                    "event": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "retry": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Run the grounded-answer pipeline and stream its normalized events",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
     "/internal/v1/embedding/readiness": {
       "post": {
         "description": "Return ``embedding_readiness(...)`` for the candidate set in the body. Always 200.\n\n``async def`` and not ``def``: the whole handler is pure Python over a bounded list with no\nI/O at all, so there is nothing to offload and a threadpool hop would only spend one of the\nshared ``CapacityLimiter(40)`` slots that parsing and OCR need (`fastapi-service`).\n\n``POST`` for a read, matching what the control plane sends, because the candidate set is the\ninput and it does not fit in a query string. It is still a read: it creates nothing, stores\nnothing and bills nothing, which is why there is no ``X-KB-Idempotency-Key`` \u2014 that header\nis required on mutations, and a replay record here would be a Valkey key per admin page view\nwith no operation to deduplicate.\n\n``ctx`` is injected and deliberately not used to *compute* anything. It is here for two\nreasons and both are structural: it is what makes a missing ``X-KB-Org-Id`` a 400 at the\ndependency rather than an unscoped success, and it is the only source of the organization \u2014\nan endpoint that read the tenant from ``body`` would accept whichever organization the body\nnamed, which is the substitution the signed header exists to prevent.",

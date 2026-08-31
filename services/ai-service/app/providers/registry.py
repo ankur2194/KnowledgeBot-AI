@@ -25,10 +25,12 @@ from __future__ import annotations
 
 from typing import Any, Final
 
+from app.core.config import get_settings
 from app.providers.anthropic import AnthropicAdapter
 from app.providers.deepseek import DeepSeekAdapter
 from app.providers.nim import NimAdapter
 from app.providers.openai_adapter import OpenAIAdapter
+from app.providers.openrouter import OpenRouterAdapter
 
 __all__ = ["ADAPTERS"]
 
@@ -37,23 +39,34 @@ __all__ = ["ADAPTERS"]
 #: silent lookup miss on every existing connection row, and the miss reads as "this vendor has
 #: no adapter in this build" rather than as a typo.
 #:
-#: **Only the OpenAI embedding arm is implemented.** Every other cell of every adapter still
-#: raises, which is not a defect of this table: the 2026-08-10 line puts the five wire adapters
-#: out of scope, and the embedding arm crossed it only because ``run_version`` cannot index a
-#: chunk without exactly one. A connection naming any other vendor resolves to an object here
-#: and fails at the call, which is why `bind_embedder` asks the capability matrix first.
+#: **All five wire adapters are implemented**, chat included. This entry used to read "only the
+#: OpenAI embedding arm is implemented … the 2026-08-10 line puts the five wire adapters out of
+#: scope"; that line was redrawn on **2026-08-26** and the adapters were written. What has not
+#: changed is that presence here is still only "an object exists for this name": the surfaces a
+#: vendor actually serves are ``capabilities.PROVIDER_TASKS``, and a row's flags are the other
+#: half — three vendors embed, two publish a rerank route, and of those two only one returns a
+#: scale this pipeline can threshold. Ask the matrix; this table cannot answer that question and
+#: is not arranged to try.
 ADAPTERS: Final[dict[str, Any]] = {
     "openai": OpenAIAdapter(),
     "anthropic": AnthropicAdapter(),
     "deepseek": DeepSeekAdapter(),
     "nvidia_nim": NimAdapter(),
-    # NO `openrouter` ENTRY, AND THE ABSENCE IS THE HONEST ANSWER RATHER THAN A GAP.
-    # `OpenRouterAdapter` requires a shared `httpx` client and this deployment's public app URL
-    # at construction — it is the only adapter that is not credential-free to build, because
-    # its attribution headers carry our identity rather than the tenant's. Constructing one
-    # here would mean inventing both, and an adapter built against an invented app URL sends a
-    # wrong `HTTP-Referer` on every call, which is an attribution error nothing raises.
+    # THE ONE ENTRY THAT IS NOT CREDENTIAL-FREE TO BUILD, and it is worth knowing why before
+    # copying its shape. Every other adapter carries no identity of ours — the tenant's key is
+    # a per-call argument and nothing else crosses. OpenRouter's attribution headers name the
+    # CALLING APPLICATION, which is this deployment, so it needs `settings.public_app_url` at
+    # construction. That value comes from configuration and never from an inbound request: the
+    # widget runs on customer sites, and an `HTTP-Referer` filled from a request publishes
+    # every customer domain onto a third party's public app-rankings page. An adapter built
+    # against an invented URL sends wrong attribution on every call and nothing raises, which
+    # is why the placeholder that used to sit here was an absent entry rather than a guess.
     #
-    # A connection naming `openrouter` therefore resolves to nothing and `bind_embedder` fails
-    # with a sentence, rather than resolving to an object that misreports who is calling.
+    # `http=None` means the adapter builds a short-lived `httpx.AsyncClient` per call, the same
+    # arrangement the four siblings have one SDK layer down. A single shared client would be
+    # better and it belongs in `app/core/runtime.py`'s `RuntimeClients`, not here: a client
+    # constructed at import binds its connection pool to whichever event loop first uses it,
+    # and this module is imported by Celery workers that run a fresh loop per task. Reported
+    # rather than done — restructuring the lifespan is `fastapi-service`'s call.
+    "openrouter": OpenRouterAdapter(http=None, public_app_url=get_settings().public_app_url),
 }

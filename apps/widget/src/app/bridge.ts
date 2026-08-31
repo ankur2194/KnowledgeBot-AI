@@ -1,4 +1,4 @@
-import type { Envelope } from '../bridge/protocol.js';
+import type { Envelope, SessionGrant } from '../bridge/protocol.js';
 import { KB, parse } from '../bridge/protocol.js';
 
 /**
@@ -68,10 +68,14 @@ export function safePageUrl(value: unknown): string | null {
   }
 }
 
-export interface SessionGrant {
-  readonly token: string;
-  readonly expires_in: number;
-}
+/**
+ * Re-exported, NOT re-declared. The grant is a cross-document shape, so it lives in protocol.ts —
+ * the one file both bundles contain — and both halves compile against the same declaration. A
+ * second `interface SessionGrant` here would let the loader and the frame disagree about a field
+ * name while both type-checked, which is the shape of the defect this file's `typeof grant?.token`
+ * guard silently absorbed.
+ */
+export type { SessionGrant };
 
 /**
  * Everything the frame app must do in response to a host message. Passing these in keeps this

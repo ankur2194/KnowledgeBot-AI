@@ -69,7 +69,37 @@ function kbReadLogLines(string $path): array
     return $lines;
 }
 
+/**
+ * A live public-runtime credential for the probe routes below.
+ *
+ * ═══ WHY THESE PROBES NEED ONE NOW, WHEN THEY DID NOT BEFORE ═══════════════════════════════
+ *
+ * The `runtime` group used to be `SubstituteBindings` and nothing else, so a route registered into
+ * it answered anybody. Phase D put `ResolveChatSession` at the front of it (bootstrap/app.php),
+ * which is the whole point of the group — one class resolves the credential, binds `Surface`, and
+ * binds the tenant context, because a stack where one of the three ran and another did not is a
+ * scoped query with no scope. These nine tests then 401ed before their route body ever ran, and the
+ * failure read as a correlation defect rather than as a middleware they had not been told about.
+ *
+ * MINTING ONE IS THE FIX; MOVING THE PROBES OFF THE GROUP IS NOT. This file's header states its own
+ * rule — it drives the SHIPPED channel rather than a private one with the same options, because a
+ * private copy keeps agreeing with itself after the real thing drifts. The same rule applies to the
+ * middleware stack: `/rt/v1` ships behind `ResolveChatSession`, so a probe that skips it is proving
+ * correlation on a stack no request ever takes. What is under test — the id on the response, on
+ * every log line of the request, and in the error envelope — is unchanged by carrying a bearer.
+ *
+ * @return array<string, string>
+ */
+function kbRuntimeProbeHeaders(): array
+{
+    return chatHeaders(chatSessionToken(chatFixture()));
+}
+
 it('writes a real contract-shaped line through the configured stdout channel', function (): void {
+    // BEFORE THE CAPTURE, in every test in this file. Building the fixture touches the database and
+    // Valkey, and anything it logged after the redirect would be counted as a line this request
+    // wrote — turning a fixture's diagnostics into a failed assertion about correlation.
+    $headers = kbRuntimeProbeHeaders();
     $path = kbCaptureStdoutChannel();
 
     Route::middleware('runtime')
@@ -80,7 +110,7 @@ it('writes a real contract-shaped line through the configured stdout channel', f
         })
         ->name('runtime._kb_test.log');
 
-    currentTest()->getJson('/rt/v1/_kb_test/log')->assertOk();
+    currentTest()->getJson('/rt/v1/_kb_test/log', $headers)->assertOk();
 
     $lines = kbReadLogLines($path);
 
@@ -115,6 +145,9 @@ it('writes a real contract-shaped line through the configured stdout channel', f
 });
 
 it('puts the same request id on every line of one request, and a different one on the next', function (): void {
+    // One session across both requests, because that is what a widget does — and because two
+    // sessions would make "a different id on the next request" true for the wrong reason.
+    $headers = kbRuntimeProbeHeaders();
     $path = kbCaptureStdoutChannel();
 
     Route::middleware('runtime')
@@ -126,8 +159,8 @@ it('puts the same request id on every line of one request, and a different one o
         })
         ->name('runtime._kb_test.twice');
 
-    $first = currentTest()->getJson('/rt/v1/_kb_test/twice')->assertOk();
-    $second = currentTest()->getJson('/rt/v1/_kb_test/twice')->assertOk();
+    $first = currentTest()->getJson('/rt/v1/_kb_test/twice', $headers)->assertOk();
+    $second = currentTest()->getJson('/rt/v1/_kb_test/twice', $headers)->assertOk();
 
     $lines = kbReadLogLines($path);
 
@@ -146,6 +179,7 @@ it('puts the same request id on every line of one request, and a different one o
 });
 
 it('adopts a well-formed inbound X-KB-Request-Id so one id spans both planes', function (): void {
+    $headers = kbRuntimeProbeHeaders();
     $path = kbCaptureStdoutChannel();
 
     Route::middleware('runtime')
@@ -158,13 +192,14 @@ it('adopts a well-formed inbound X-KB-Request-Id so one id spans both planes', f
 
     $supplied = '01JAAAAAAAAAAAAAAAAAAAAAAA';
 
-    $response = currentTest()->getJson('/rt/v1/_kb_test/adopt', [RequestId::HEADER => $supplied]);
+    $response = currentTest()->getJson('/rt/v1/_kb_test/adopt', $headers + [RequestId::HEADER => $supplied]);
 
     expect($response->headers->get(RequestId::HEADER))->toBe($supplied)
         ->and(kbReadLogLines($path)[0]['request_id'])->toBe($supplied);
 });
 
 it('refuses an inbound id that could forge a log line, and mints its own instead', function (string $hostile): void {
+    $headers = kbRuntimeProbeHeaders();
     $path = kbCaptureStdoutChannel();
 
     Route::middleware('runtime')
@@ -175,7 +210,7 @@ it('refuses an inbound id that could forge a log line, and mints its own instead
         })
         ->name('runtime._kb_test.hostile');
 
-    currentTest()->getJson('/rt/v1/_kb_test/hostile', [RequestId::HEADER => $hostile])->assertOk();
+    currentTest()->getJson('/rt/v1/_kb_test/hostile', $headers + [RequestId::HEADER => $hostile])->assertOk();
 
     $lines = kbReadLogLines($path);
 
@@ -193,6 +228,7 @@ it('refuses an inbound id that could forge a log line, and mints its own instead
 ]);
 
 it('gives the error envelope the same request id the log line carries', function (): void {
+    $headers = kbRuntimeProbeHeaders();
     $path = kbCaptureStdoutChannel();
 
     Route::middleware('runtime')
@@ -203,7 +239,7 @@ it('gives the error envelope the same request id the log line carries', function
         })
         ->name('runtime._kb_test.boom');
 
-    $response = currentTest()->getJson('/rt/v1/_kb_test/boom')->assertStatus(404);
+    $response = currentTest()->getJson('/rt/v1/_kb_test/boom', $headers)->assertStatus(404);
 
     // bootstrap/app.php's render closure reads X-KB-Request-Id off the REQUEST, which this
     // middleware writes back — so the id in the envelope and the id in the log line are one string

@@ -53,6 +53,7 @@ import {
   providerModelEditDefaults,
   providerModelEditSchema,
 } from '../src/forms/provider-model.js';
+import { quotaLimitsSchema } from '../src/forms/quota-limits.js';
 import { uploadDefaults, uploadSchema } from '../src/forms/upload.js';
 
 /**
@@ -647,6 +648,40 @@ const MIRRORS: Readonly<Record<string, Mirror>> = {
     }),
     sized: { 'supported.*': capabilityFlagOfLength },
   },
+
+  /**
+   * THE QUOTA CEILINGS, and the one manifest in Phase 6a's nine that is a real form.
+   *
+   * FOUR `present|nullable|integer|min:0|max:9007199254740991` FIELDS, and every one of those five
+   * rule names is in PROBED_RULES — so this entry is probed end to end with no `sized` override and
+   * no suppression. `present` is the interesting probe: it asserts the schema REFUSES an omitted
+   * key, which is the whole reason the endpoint is a PUT. On this body an omitted key and a null key
+   * would otherwise mean the same thing while meaning opposite things — "leave it alone" and "remove
+   * this ceiling entirely" — so a client that dropped a key would silently make an organization
+   * unlimited, and `strictObject` with four required keys is the mirror of that.
+   *
+   * `max:9007199254740991` IS `Number.MAX_SAFE_INTEGER`, which is why the probe at the boundary is
+   * honest rather than a rounding accident: the boundary+1 value the harness generates is the first
+   * integer a JSON double cannot represent exactly, and both sides refuse it.
+   *
+   * WHAT NO PROBE HERE REACHES, said out loud because an entry in this map is silent forever: the
+   * DIRECTION of the change. `QuotaLimitService::apply()` refuses a RAISE from any actor without
+   * `users.is_platform_owner` and lets a LOWER through — a comparison between the submitted numbers
+   * and the PERSISTED ones, which is not a validation rule, is not in `rules()`, and could not be in
+   * any schema. It is enforced server-side and DISCLOSED client-side from
+   * `SessionUser.is_platform_owner` (apps/web/src/features/quotas), because the refusal arrives as
+   * `error_class: 'authorization'` and `bootstrap/app.php` rewrites every authorization message to
+   * one constant — so the server's own explanation is structurally unreadable from a browser.
+   */
+  'App\\Http\\Requests\\UpdateQuotaLimitsRequest': {
+    schema: quotaLimitsSchema,
+    baseline: () => ({
+      storage_bytes_quota: 10_737_418_240,
+      bots_quota: 25,
+      users_quota: 50,
+      monthly_tokens_quota: 5_000_000,
+    }),
+  },
 };
 
 /**
@@ -1040,6 +1075,78 @@ const NO_CLIENT_FORM: Readonly<Record<string, string>> = {
   // fix it" is a to-do the suite is holding, and holding it in the assertion is what got it closed
   // rather than forgotten. rhf-zod-forms NN3 — a schema ships WITH a committed manifest and a drift
   // test or it does not ship — is why the schema could not simply be written earlier.
+
+  // ── PHASE 6a's NINE MANIFESTS, REGISTERED BY PHASE 6b ───────────────────────────────────────
+  //
+  // ALL NINE LANDED WITH THE ENDPOINTS AND NONE WAS REGISTERED, so this suite was RED on `main`
+  // before a line of 6b was written — nine `must appear in exactly one of MIRRORS or
+  // NO_CLIENT_FORM` failures plus the closure assertion. That is the register working exactly as
+  // designed: `rules/` is dumped by `php artisan kb:dump-form-rules` from executing code, and a
+  // manifest nobody classified fails BY NAME rather than being a form that 422s in production on a
+  // rule it was never told about. Eight are exempt on the merits below; the ninth is a MIRRORS
+  // entry above, because the quotas screen renders it.
+
+  // ── THE THREE REMAINING QUERY-STRING MANIFESTS ──────────────────────────────────────────────
+  //
+  // `IndexBotsRequest`'s argument reaches all three verbatim and is not restated per entry: they are
+  // read out of the URL by `apps/web/src/lib/table/params.ts`, which CLAMPS — a `sort` outside the
+  // endpoint's sortable set degrades to the default, a `per_page` outside the declared sizes
+  // degrades to the default — where a Zod mirror would have to REJECT, with no field, no control and
+  // no per-field error to key a message to. This harness can say accept or reject and has no
+  // vocabulary for "degrades to the default".
+  //
+  // WHAT THESE THREE ADD THAT THE FIRST THREE COULD NOT SAY. The first three were all `sort` +
+  // `per_page` + `filter` over one table; these carry EQUALITY and RANGE filters — `channel`,
+  // `status`, `operation`, `outcome`, `from`, `until`, `bot_id` — and two of them close their
+  // vocabulary with `Rule::in(...)`. So a client DOES read these manifests, and reads them for their
+  // `in:` members rather than for their bounds: `enumFromRule()` in
+  // `apps/web/src/lib/table/rules.ts` turns the 45-name `operation` rule and the five-member
+  // `channel` rule into the closed sets those filters offer. That is the same derivation the
+  // sortable sets use, and it is why a hand-typed operation list is the thing this exemption
+  // forbids rather than the thing it permits.
+
+  'App\\Http\\Requests\\IndexConversationsRequest':
+    'EXEMPT: the fourth query-string manifest, not a form — no control, no resolver and no per-field error, and the client CLAMPS where a mirroring schema would have to reject. Its `channel` and `status` `in:` sets are READ from this file by apps/web through `enumFromRule` rather than restated, so the filter chips cannot offer a value the endpoint would 422; `bot_id`/`user_id`/`session_id` are opaque handles a screen passes through, and `from`/`until` carry `after:from`, a cross-field rule the date controls express by construction (the second picker\'s min is the first picker\'s value)',
+
+  'App\\Http\\Requests\\IndexAuditLogsRequest':
+    'EXEMPT: the fifth query-string manifest, and the one whose `in:` set is largest — 45 operation names, plus a two-member `outcome`. Both are READ from this file by apps/web through `enumFromRule` rather than restated: a hand-copied 45-name list is a 422 one dropdown click away the moment the server audits something new, and it is the exact drift a mirror could not catch either, since a mirroring schema would be the SAME hand-copy wearing a resolver. `subject_type` is `required_with:subject_id` — CROSS_FIELD, and the console renders neither control',
+
+  'App\\Http\\Requests\\ShowAnalyticsRequest':
+    'EXEMPT: the sixth query-string manifest and the smallest — `bot_id`, `from`, `until`. The dashboard\'s bot picker posts an id chosen from the bot list (the SwitchOrganizationRequest shape: picked, never typed) and the window is two date controls whose `after:from` pairing is expressed by the second picker\'s min. No free-text field, no per-field error, and the RESOLVED window comes back on `AnalyticsResource.window` so the screen labels itself from the server\'s answer rather than from its own request',
+
+  // ── THE FOUR PUBLIC-RUNTIME MANIFESTS: `sdk/v1` AND `rt/v1` ─────────────────────────────────
+  //
+  // A SHARED CATEGORY WITH ONE ARGUMENT, and it is not the query-string one. These bodies ARE
+  // submitted by clients — hosted chat, the widget and (one day) mobile all post three of the four —
+  // but not one of them is a FORM: every field is either a value the CODE chooses from a set the
+  // server published, or a value the code MINTS. There is no control, no `useForm`, no resolver and
+  // no per-field error, which is the same claim `SwitchOrganizationRequest` and the three mail-link
+  // token requests rest on.
+  //
+  // AND THE SHAPES ARE PINNED ANYWAY, in this package, by something stronger than a probe:
+  // `ChatSendBody` in `src/chat.ts` is the TYPE every client's send body is declared as, so a client
+  // that posted `text` instead of `content` fails a typecheck rather than a 422 — which is the one
+  // failure this manifest could actually catch, and it is already caught. A Zod mirror would add a
+  // runtime parse in front of a two-key object literal the compiler already checks.
+
+  'App\\Http\\Requests\\MintChatSessionRequest':
+    'EXEMPT: `bot_id` is the public id out of the embed snippet or the URL segment — the code has it, nobody types it — and `user_token` is ACCEPTED AND IGNORED server-side (there is no per-bot signing secret, so `verifyUserToken()` is deliberately unwritten; WidgetSessionService says so). A schema would validate a field the server does not read and a field no control renders. Every refusal on this route is a byte-identical 404 by design, so there is nothing for `applyServerErrors` to key either',
+
+  'App\\Http\\Requests\\StoreRuntimeConversationRequest':
+    'EXEMPT: one optional `locale`, which the client reads from `navigator.language` and never from a control. Its `regex:` is a BCP-47 shape check the browser\'s own value satisfies by construction, and the honest client behaviour on a locale the server refuses is to OMIT the key (null means "we were not told", a real state) rather than to block conversation creation — which is the opposite of what a resolver does',
+
+  'App\\Http\\Requests\\SendChatMessageRequest':
+    'EXEMPT: the composer is not a form. `client_message_id` is MINTED by the client (`crypto.randomUUID`, the idempotency key), and `content` is a textarea whose only client-side rule would be `max:32000` — a limit the `<textarea maxLength>` already enforces and which the composer announces as it is approached, per kb-ui-accessibility. The two-key body shape is pinned harder than a probe could pin it: `ChatSendBody` in src/chat.ts is the declared type of every client\'s send, so posting `text` is a typecheck failure rather than a 422',
+
+  'App\\Http\\Requests\\StoreChatFeedbackRequest':
+    'EXEMPT: `rating` is one of two values chosen by WHICH BUTTON was pressed, and `comment` is the fixed four-item reason picker (kb-ai-chat-ux: an unqualified downvote is not usable signal) — a set of literals the code owns, not a free-text field. `max:4000` bounds a value no control can produce. Same shape as UpdateSourceStatusRequest: a control whose only value comes from a closed set the code picked from',
+
+  // ── AND ONE MORE THAT PREDATES 6a AND WAS NEVER REGISTERED EITHER ───────────────────────────
+  //
+  // Found by the same closure assertion, in the same run, which is the point of a closure assertion:
+  // it does not care which batch left the gap.
+  'App\\Http\\Requests\\DesignateRerankConnectionRequest':
+    'OWED, not exempt: it is `DesignateEmbeddingConnectionRequest`\'s twin — the same `present|nullable` pair, the same `required_with` in both directions — and `embeddingDesignationSchema` MIRRORS that one, so nothing about the shape resists a mirror. There is simply no rerank designation screen: `rg "rerank-configuration" apps/web/src` is empty. rhf-zod-forms NN3 is why the schema is not written ahead of it — an unread schema is one whose drift nobody notices, because the only thing that reads a form schema is a resolver. It graduates with `/settings/rerank`, and it can be written mechanically from `embedding-designation.ts` on that day. NOTE the two are NOT the same schema and must not share one: ADR-030 makes rerank CAPABILITY-GATED, so a rerank designation may legitimately name a connection whose provider cannot rerank and be refused for a reason the embedding path has no member for',
 };
 
 // ── rule classification ──────────────────────────────────────────────────────────────────────────
@@ -4592,8 +4699,11 @@ describe('ownership columns are unrepresentable', () => {
     // Then FIVE arrived at once with the bot editor's child collections and the status transition
     // (12 -> 17), which is the closure argument paying off a second time: none of the five needed a
     // line here, and all five are now inside the ownership assertion the moment their MIRRORS entry
-    // landed.
-    expect(checked.length, 'every schema in the package must be reached').toBe(17);
+    // landed. `quotaLimitsSchema` took it to 18 the same way — no line here, in the assertion the
+    // moment its MIRRORS entry landed — which matters more on that one than on most: the quotas
+    // endpoint is the closest thing on this API to a body where an `organization_id` would look
+    // plausible, since a ceiling is a fact ABOUT an organization rather than about a child record.
+    expect(checked.length, 'every schema in the package must be reached').toBe(18);
 
     for (const [label, schema] of checked) {
       expect(schemaPaths(schema).filter(isOwnershipPath), label).toEqual([]);

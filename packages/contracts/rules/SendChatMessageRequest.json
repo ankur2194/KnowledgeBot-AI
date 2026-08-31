@@ -1,0 +1,17 @@
+{
+    "class": "App\\Http\\Requests\\SendChatMessageRequest",
+    "rules": {
+        "client_message_id": [
+            "bail",
+            "required",
+            "string",
+            "ulid"
+        ],
+        "content": [
+            "bail",
+            "required",
+            "string",
+            "max:32000"
+        ]
+    }
+}

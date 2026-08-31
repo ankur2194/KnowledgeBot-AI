@@ -56,6 +56,26 @@ function rolePermissionMatrix(): array
             'sources.manage' => true,
             'sources.upload' => true,
             'sources.assign' => true,
+            // §6.2 verbatim: "Review conversations and analytics." — one sentence, two
+            // permissions, and both halves are granted here.
+            'analytics.view' => true,
+            'conversations.view' => true,
+            // AN EXTENSION OF THE SPECIFICATION, NOT A READING OF IT, and it is stated here because
+            // this file is the INDEPENDENT statement of the matrix. §6.1 gives "Access
+            // platform-level audit logs" to the PLATFORM OWNER — not an org role at all — and
+            // §6.2-§6.5 never mention audit logs in either direction. The extension rests on
+            // SCOPE: §6.1's grant is across tenants, while §18.11 makes an organization's OWN
+            // trail its own compliance obligation, and §6.2's "Configure retention and privacy
+            // options" is the responsibility that obligation attaches to.
+            'audit.view' => true,
+            // §6.2's "Manage organization settings" — AND §6.1 gives the same four numbers to the
+            // PLATFORM owner. The two sentences overlap and the spec never says which wins; the
+            // contradiction is recorded in Permission::QuotasManage and in the migration, and the
+            // owner-only grant here is the narrow reading. The guard that keeps it from being
+            // self-service plan escalation is in QuotaLimitService — an org owner may LOWER a
+            // limit, and RAISING one needs users.is_platform_owner — which is behaviour, not a
+            // permission, and therefore not assertable in this file.
+            'quotas.manage' => true,
             'members.view' => true,
             'members.manage' => true,
             'members.manage_owner' => true,
@@ -79,6 +99,23 @@ function rolePermissionMatrix(): array
             'sources.manage' => true,
             'sources.upload' => true,
             'sources.assign' => true,
+            // §6.3's "Review failures" and "Review conversations and evaluations". The analytics
+            // surface IS where a failure is reviewed: provider error rate, fallback rate and
+            // ingestion failures are three of its tiles.
+            'analytics.view' => true,
+            // The other half of "Review conversations and evaluations", verbatim.
+            'conversations.view' => true,
+            // §6.3's "Review failures" again, and the rows that carry them —
+            // `provider.connection.credential_rotation_failed`, `bot.delete.refused` and
+            // `source.upload.rejected` exist nowhere else. An Administrator also PERFORMS most of
+            // what this table records, so a role that may rotate a credential and may not see that
+            // it was rotated is a hole in the record rather than a restriction on it.
+            'audit.view' => true,
+            // THE SECOND PERMISSION AN ADMINISTRATOR DOES NOT HOLD, and it is new. §6.3 opens "an
+            // administrator manages operational settings but may not own BILLING or destructive
+            // organization-level actions"; a quota ceiling is the billing boundary, and §6.1 gives
+            // limit control to the platform owner outright.
+            'quotas.manage' => false,
             'members.view' => true,
             'members.manage' => true,
             'members.manage_owner' => false,
@@ -108,13 +145,34 @@ function rolePermissionMatrix(): array
             'sources.manage' => true,
             'sources.upload' => true,
             'sources.assign' => true,
+            // NOT GRANTED, AND THIS IS THE ROW THAT NEEDED DECIDING. §6.4's six items are all
+            // source operations, and the closest — "view source freshness" — is a column on the
+            // source list served by `sources.view`, not §8.23's dashboard. That dashboard carries
+            // TOKEN SPEND AND ESTIMATED PROVIDER COST, and §6.4 is the one role the spec explicitly
+            // keeps away from the provider account (`providers.view` and not `providers.manage` is
+            // the same line). Silence is not a grant.
+            'analytics.view' => false,
+            // NEITHER IS GRANTED, AND THE TEMPTING ARGUMENT FOR EACH IS REFUSED SEPARATELY.
+            // `conversations.view`: §6.4's "review parsed content" is the SOURCE detail
+            // projection that `sources.view` already serves — a transcript is verbatim end-user
+            // text, not parsed content, and it is the most privacy-loaded data this platform
+            // stores. `audit.view`: twelve of the audited operations are `source.*` and this role
+            // owns sources, but the endpoint is ONE list over the whole vocabulary, so granting it
+            // to answer a source question also hands over credential rotations, member role
+            // changes and login events carrying colleagues' addresses and IPs. A source-scoped
+            // trail is a subject filter on a surface somebody may read, not a reason to widen who
+            // may read the surface.
+            'conversations.view' => false,
+            'audit.view' => false,
+            'quotas.manage' => false,
             'members.view' => false,
             'members.manage' => false,
             'members.manage_owner' => false,
         ],
 
-        // Reporting only, and NO LONGER AN ALL-FALSE ROW — which is the single most surprising line
-        // in this file for anyone who read the previous version.
+        // Reporting only, and THREE PERMISSIONS NOW. This row was all-false once, then held exactly
+        // `bots.view`; Phase E adds `analytics.view`, which is the first permission granted to this
+        // role FOR ITS OWN JOB rather than to make somebody else's screen usable.
         //
         // `bots.view` is an EXTENSION OF THE SPECIFICATION decided with the repo owner: §6.5 never
         // mentions bots in either direction, and Phase E has an analyst review conversations PER
@@ -137,6 +195,26 @@ function rolePermissionMatrix(): array
             'sources.manage' => false,
             'sources.upload' => false,
             'sources.assign' => false,
+            // THE ANALYST'S ACTUAL JOB, and the reason this row is no longer a single true. §6.5
+            // opens "A reviewer inspects chatbot quality" and lists "Compare retrieval or model
+            // configurations": the feedback split, the insufficient-evidence count and the latency
+            // percentiles ARE that comparison. Reporting-only stays reporting-only — every tile is
+            // an aggregate and no write, credential, member or source comes with it.
+            'analytics.view' => true,
+            // THE MOST DIRECTLY SPECIFIED GRANT IN THIS WHOLE FILE. §6.5's responsibilities open
+            // "Review conversations." and its fifth item is "Review source citations and retrieval
+            // traces" — which is why the permission covers the transcript's citations and its
+            // trace and not only the message text. It is the READ half: capturing feedback (§6.5's
+            // second item) is the runtime's own surface, authorized by conversation ownership
+            // rather than by an org permission.
+            'conversations.view' => true,
+            // NOT GRANTED. An audit row is about COLLEAGUES — who rotated a credential, who
+            // changed a role, which address failed a login — and none of §6.5's five items is an
+            // administrative action. Reporting-only is about the bots, not about the people.
+            'audit.view' => false,
+            // Reading how much of a quota is used is a report; changing the ceiling is a plan
+            // change. An analyst holds no write on this surface and this is not the exception.
+            'quotas.manage' => false,
             'members.view' => false,
             'members.manage' => false,
             'members.manage_owner' => false,
@@ -236,6 +314,29 @@ it('keeps the role catalog fixed at four, because there is no per-tenant role CR
     // names every case four times over and fails if one is missing. It is a guard on the DATASET
     // SIZE, so that a permission added with a full set of matrix rows still trips one line that a
     // human has to look at, because widening the privilege catalog is not a thing that should be
-    // possible to do entirely mechanically. Phase C1 took it from 7 to 11.
-    expect(Permission::cases())->toHaveCount(11);
+    // possible to do entirely mechanically. Phase C1 took it from 7 to 11; Phase E took it to 13;
+    // Phase 6a takes it to 15.
+    //
+    // ── THE BAR EVERY NEW CASE CLEARS IS A TEST OF THE SUBJECT, NOT OF THE ROW ────────────────
+    //
+    // `Permission::BotsManage` states it: "a permission nobody grants differently is a permission
+    // that fails silently in both directions", which is why there is no `bots.publish`. THIS
+    // PARAGRAPH USED TO APPLY IT AS A ROW-SHAPE SCAN AND SAID, OF THE TWO CASES ADDED IN PHASE E,
+    // "no case already here has either shape". THAT SENTENCE WAS FALSE ON THE DAY IT WAS WRITTEN:
+    // `quotas.manage` is Owner-alone and so is `members.manage_owner`, six lines above it in this
+    // very file. It is corrected rather than deleted because the correction is the useful part —
+    // the row-shape reading, applied literally, forbids every permission this catalog could ever
+    // gain, since all five reachable Owner-containing subsets are already occupied.
+    //
+    // What actually distinguishes a real case from a redundant one is whether it is THE SAME
+    // ACTION ON THE SAME RECORDS under a second name. `bots.publish` would have been; `sources.
+    // upload` knowingly is, and its docblock says so and gives its reason. `quotas.manage` is not
+    // (`organizations`' four ceilings, versus `organization_users`' role column). Phase 6a's two
+    // are not either, and each collides with a different existing row: `conversations.view` is
+    // Owner/Admin/Analyst like `analytics.view` but reads ROWS where that one reads counts, sums
+    // and percentiles; `audit.view` is Owner/Admin like `members.view` but reads `audit_logs`
+    // where that one reads members and invitations. Both arguments are written out in
+    // App\Enums\Permission and both are re-stated by the columns above, which is what makes this
+    // file the independent statement it claims to be.
+    expect(Permission::cases())->toHaveCount(15);
 });

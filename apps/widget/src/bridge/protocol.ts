@@ -57,6 +57,28 @@ export interface LoaderOptions {
 }
 
 /**
+ * THE CHAT-SESSION GRANT, as it crosses the bridge.
+ *
+ * Declared HERE rather than in either half, because BOTH documents handle it: the loader reads it
+ * out of the mint response and posts it once, the frame reads it out of the envelope and installs
+ * it as its module-scoped bearer. One declaration means a field renamed on one side stops
+ * compiling on the other, instead of arriving as `undefined` and being interpolated into a header.
+ *
+ * `expires_in` is a DURATION IN SECONDS, never an instant. The reason lives on the server side of
+ * the contract (`ChatSessionResource`): an absolute expiry would be compared against a stranger's
+ * clock, which may be minutes or years wrong, so the proactive refresh would fire constantly or
+ * never. It is also a floor rather than a promise — the TTL slides on every authorized request.
+ *
+ * This type describes the grant ITSELF. It is deliberately not the shape of the HTTP body that
+ * carries it: that body is `{"data": {...}}`, and the unwrap happens in exactly one place
+ * (`readSessionGrant`, loader/bridge.ts).
+ */
+export interface SessionGrant {
+  readonly token: string;
+  readonly expires_in: number;
+}
+
+/**
  * THE PAYLOAD OF THE §8.20 `error` SDK EVENT — the one event a stranger's analytics acts on.
  *
  * `retryable` IS MANDATORY, and it is mandatory because of ADR-029 (finding O1). `internal_dependency`
@@ -83,9 +105,19 @@ export interface SdkErrorPayload {
    * A consumer may narrow this further; it may never stand in for it.
    */
   readonly retryable: boolean;
-  /** A closed, widget-local discriminator naming WHICH failure produced the class. Never free text,
-   *  never anything derived from a message, a URL or an exception. */
-  readonly reason?: 'frame_blocked' | 'mint_failed' | 'refresh_failed';
+  /**
+   * A closed, widget-local discriminator naming WHICH failure produced the class. Never free text,
+   * never anything derived from a message, a URL or an exception.
+   *
+   * `session_malformed` is the newest member and it exists because of a defect that produced NO
+   * signal at all: the mint answered 200 with `{"data": {...}}`, the loader read `token` at the top
+   * level, got `undefined`, and handed it on. `undefined` does not throw. Folding that into
+   * `mint_failed` would have been cheaper and wrong — a rejected mint is the customer's embedding
+   * configuration (an unlisted origin, a wrong bot id), while this one is OUR contract breaking
+   * against a build of the loader that is pinned on their page and cannot be patched from here.
+   * Same class and same retry answer, different people, so: a different `reason`.
+   */
+  readonly reason?: 'frame_blocked' | 'mint_failed' | 'refresh_failed' | 'session_malformed';
 }
 
 /**

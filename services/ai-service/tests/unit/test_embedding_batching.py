@@ -128,7 +128,8 @@ def _short(text: str) -> int:
 #
 # It patched `app/retrieval/sparse.py:tokenize` because that function raised
 # `NotImplementedError` — the analyzer was an open evaluation question and the fixture's own
-# docstring said so. ADR-069 decided it, so the real analyzer runs here now and one fewer thing
+# docstring said so. The analyzer decision closed it, so the real analyzer runs here now and one
+# fewer thing
 # in this file is a fake. Nothing else about the fixture's argument changes: the point was
 # always that the *real* encoder should execute — term ids, BM25 passage weights, the sorted
 # `SparseVector` and the `EmptySparsePassage` raise — and now the segmentation is real too.

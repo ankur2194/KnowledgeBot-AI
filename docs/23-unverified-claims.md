@@ -506,6 +506,51 @@ decided about that seam is therefore verified only against itself:
 running processes reads exactly like a verified one, and Phase C produced several. Each is recorded
 with the observable that will test it, not with a claim that it works.
 
+## Raised by the adapter and RAG-stage effort — markers in `services/`, not in the skill library
+
+**One entry, and its shape is the reason it is here rather than in
+[`docs/22`](22-spec-findings-and-decisions.md) as a decision.** `docs/22` § T19 records a coupling
+between the chunker's maximum chunk size and a rerank model's pair window. It reads like a design
+question and it is not one: **there is nothing to decide.** It is a fact about two pinned vendor model
+ids that this host cannot read, and reading it discharges the question and five constants beside it in
+one stroke. Recording it as a design argument would produce a decision made without the number that
+decides it — which is the failure `docs/22` § G9 is the worked example of, where a threshold was very
+nearly moved on reasoning that measurement then refuted.
+
+**These are markers in the tree, in `services/ai-service/app/providers/nim.py`, rather than in the skill
+library**, so they do not belong in the class table above or in the per-file list below — both of which
+cover `.claude/skills/`. `grep -n 'UNVERIFIED' services/ai-service/app/providers/nim.py` lists every
+marker in that file; the ranking ones are a **subset** of them, and the reason the ranking subset can be
+discharged in one stroke is that each of its unknowns was pinned as a **named constant** rather than as a
+literal inside a body builder. The constants are the list — `RANKING_PATH`, `RANKING_RESULTS_FIELD`,
+`RANKING_INDEX_FIELD`, `RANKING_SCORE_FIELD`, `MAX_RERANK_PASSAGES` — and they are greppable by name,
+which is the property that makes a guess auditable instead of merely admitted.
+
+| Claim | Class | Owner | How it closes |
+|---|---|---|---|
+| **The pair window of each pinned NVIDIA NIM ranking model is unread, and `chunker.MAX_TOKENS` is 700.** The two ids — `nvidia/nv-rerankqa-mistral-4b-v3` and `nvidia/llama-3.2-nv-rerankqa-1b-v2` — were pinned **as a family**, without either model's `(query, passage)` token ceiling being compared against the chunk size that will be sent to it. If either is 512, then a full-size chunk over-runs it. The shipped code is wrong in the safe direction and says so: `validate_rerank` **refuses** the over-long pair before the call, `ESTIMATED_CHARS_PER_TOKEN = 3.0` deliberately over-states so the refusal errs toward a false refusal rather than a silent truncation, and `nim.py`'s module docstring names the whole coupling and reports it upward rather than absorbing it. So the risk today is a loud refusal for an affected organization, and the risk if the guard were ever relaxed is **silent truncation on every request**: the reranker scores a prefix, and the evidence threshold then thresholds a number computed from a fragment — one tenant, no exception, no metric, quality only. | **S** | `provider-adapter-engineer`, before either id is offered in the catalogue UI | **One page-read of each model's catalog page**, recording the pair window. Cheapest class in this file. It cannot be closed by reasoning and it does not need a live credential. |
+| **The NIM ranking wire shape is inferred, not sourced.** `.claude/skills/nvidia-nim-api/SKILL.md` sources the ranking endpoint's *existence* and its *logit scale* and nothing further, so the endpoint path, the request field names, the per-request passage cap and the per-pair token ceiling are all guesses. They are pinned as **named constants rather than literals buried in a body builder**, precisely so the guess is greppable: `RANKING_PATH`, `RANKING_RESULTS_FIELD`, `RANKING_INDEX_FIELD`, `RANKING_SCORE_FIELD` and `MAX_RERANK_PASSAGES`. `RANKING_SCORE_FIELD` is the one that must not be read loosely — a tolerant reader accepting `score` as well as `logit` would admit a differently-scaled number into a threshold comparison, which is the failure the whole scale-plumbing in that file exists to make impossible. | **P** | `provider-adapter-engineer` | **One recorded response from each pinned id** discharges all five at once, and the same response carries the pair window the row above needs — which is why the two rows close together or not at all. |
+
+## Raised by the chat-path effort — three things the tree structurally cannot check, 2026-08-31
+
+**All three are the same shape and it is not a class in the table above: code that is complete,
+typed, covered and green, whose coverage cannot reach the thing that would break it.** None is a
+marker in `.claude/skills/`, so none belongs in the class table or the per-file list; the class letter
+in each row is the nearest fit rather than a claim of membership.
+
+**Why they are grouped rather than filed with their subsystems.** D1–D6 and E1–E4 landed roughly
+4,500 lines across three runtimes, and each phase verified itself and reported green. `docs/22` § T59
+is what happened when the suites were finally run together: a live defect in code that had passed its
+own Feature, Security and Contract tests, and that stayed green when re-run alone. These three rows are
+the places where **no** combination of suites we can run would have found it, so they are worth naming
+before someone reads a passing suite as evidence about them.
+
+| Claim | Class | Owner | How it closes |
+|---|---|---|---|
+| **No wire adapter has ever spoken to its vendor.** All five `stream()` translations, four different usage arithmetics, five stop-reason maps and the whole error classification are exercised only against fixtures written from vendor documentation — `grep -rl 'KB_LIVE\|live_credential' services/ai-service/tests` returns nothing, and there is no live-credential path in the suite. **The cancel path is the part to worry about**, and `contract.py:577-585` says so itself: exactly one terminal `ChatResult` on every path, emitted from `except asyncio.CancelledError` and re-raised, never from `finally`, because a yield during `GeneratorExit` raises `RuntimeError` that ASGI swallows — **the symptom is a missing usage row, not an error**. That rule has never had a real socket close under it. The fallback router inherits the same gap: it has never failed over on an error a vendor actually returned, only on one a fixture asserted. | **P** | `provider-adapter-engineer` | One recorded streaming response per vendor, including one cancelled mid-stream, kept as a fixture. Cancellation is the one that cannot be reasoned about — it must be observed. |
+| **The Valkey quota-counter path is executed by no test in any suite.** `phpunit.xml:135` leaves `REDIS_CACHE_HOST` deliberately unset so the `ephemeral` connection resolves `valkey-cache` and fails, and its comment argues that *"a loud 'connection refused' is the correct answer until the test profile grows a second Valkey."* **Phase 5 made it quiet.** `QuotaCounters` catches `Throwable` at four sites, marks itself `degraded` for the life of the process, logs one warning and falls back to PostgreSQL — which is correct behaviour and is exactly why every quota assertion in the suite now exercises the fallback and none exercises the cache. The key grammar, the TTL, `forget()`, and the deliberate `get`-then-`increment` no-op-on-miss are all unrun. Nothing is wrong and nothing is checked; the phpunit comment's reasoning simply stopped describing the code beneath it. | **M** | `platform-devops-engineer` with `control-plane-engineer` | A second Valkey in the Compose `test` profile and `REDIS_CACHE_HOST` pointed at it — which is the condition the phpunit comment already names as the one that resolves this. Pointing it at `valkey-test` is **not** the fix and that comment explains why: it would put the evicting and non-evicting keyspaces on one server, and a lock wrongly written to the evicting store would then pass every test. |
+| **The relay has never consumed a frame emitted by FastAPI.** The Contract suite bans `Http::fake()` for the right reason — a faked SSE body is a string, so the relay drains it in microseconds and every buffering, ordering, heartbeat and disconnect bug passes — and `tests/Support/SseFixtureServer.php` is a real socket. It is a **PHP** socket that emits frames this repository wrote. `docs/22` § T34 verified the other half independently: FastAPI 0.141.1's native `EventSourceResponse` frames, heartbeats and checkpoints, but only when `routing.py:400`'s declared `response_class` and an async-generator handler are both present. **Both halves are verified and they have never been connected.** The specific untested seam is the 15-second `: ping` comment — Laravel's relay must forward it as its own disconnect probe, and `response()->stream()` was chosen over `eventStream()` precisely because the latter cannot emit a comment. Nothing has ever checked that the ping FastAPI sends is the ping Laravel forwards. | **M** | `control-plane-engineer` with `platform-devops-engineer` | The Playwright end-to-end run against a live `ai-api`, which is the only place both processes exist at once. Until then this is unverified, not merely untested. |
+
 ## Full list, by file
 
 Line numbers are accurate as of this commit and will drift as files are edited.

@@ -59,7 +59,7 @@ function scheduledEntryNames(): array
 }
 
 it('schedules exactly the expected entry set', function (): void {
-    // SIX LIVE ENTRIES. Everything still commented out in routes/console.php is missing its command
+    // EIGHT LIVE ENTRIES. Everything still commented out in routes/console.php is missing its command
     // class or — in `sanctum:prune-expired`'s case — a producer for the rows it would prune; each is
     // listed there with what it is waiting for. NOTHING IS WAITING ON A TABLE ANY MORE:
     // `queue:prune-failed` was the last such entry, and 2026_08_24_002700 created `failed_jobs`
@@ -79,7 +79,17 @@ it('schedules exactly the expected entry set', function (): void {
         'auth:clear-resets',
         'horizon:snapshot',
         'kb:create-audit-partitions',
+        // THE SECOND PARTITIONED TABLE, AND ITS ABSENCE IS THE QUIET OUTAGE RATHER THAN THE LOUD
+        // ONE. `usage_events` has no default partition either, so past the runway every ledger
+        // INSERT fails with 23514 — and `SourceService::recordStorageUsage()` swallows and logs, so
+        // metering simply STOPS, every quota reads low, the gate admits everything, and the first
+        // symptom is an invoice. There is no error rate to alert on.
+        'kb:create-usage-partitions',
         'kb:prune-auth-tokens',
+        // DERIVES the usage rows nothing recorded and RECONCILES the quota counters against
+        // PostgreSQL. It moved out of the pending block together with its command class, which is
+        // the rule that block exists to state.
+        'kb:rollup-usage',
         'kb:sweep-orphan-objects',
         'queue:prune-failed',
     ]);
@@ -108,6 +118,17 @@ it('keeps the audit partition creator scheduled, because its absence is a timed 
     // and no retention window has been decided. If that decision is ever made, this expectation is
     // the place it has to be argued.
     expect($names)->not->toContain('kb:prune-audit-partitions');
+
+    // AND THE USAGE-LEDGER PRUNER STAYS OUT FOR A SECOND REASON ON TOP OF THAT ONE, which is worth
+    // its own line because the first reason alone might one day be satisfied by a retention policy
+    // while the second is still live. `QuotaMetric::StorageBytes` is summed over ALL TIME with no
+    // period lower bound, so dropping the month an organization's oldest objects were uploaded
+    // REDUCES its computed storage usage while the bytes are still in the bucket — it silently
+    // gains allowance it did not buy. `monthly_tokens` is unaffected, because its period is the
+    // calendar month, which is exactly what makes the hazard easy to miss: the tile most people
+    // look at keeps reading correctly. Scheduling this needs the storage metric period-bounded or
+    // snapshotted FIRST.
+    expect($names)->not->toContain('kb:prune-usage-partitions');
 });
 
 it('names every entry, because an unnamed job entry shares a mutex with its class', function (): void {

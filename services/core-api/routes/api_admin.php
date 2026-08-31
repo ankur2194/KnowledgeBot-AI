@@ -2,17 +2,23 @@
 
 declare(strict_types=1);
 
+use App\Http\Controllers\Api\V1\AnalyticsController;
+use App\Http\Controllers\Api\V1\AuditLogController;
 use App\Http\Controllers\Api\V1\BotController;
 use App\Http\Controllers\Api\V1\BotDomainController;
 use App\Http\Controllers\Api\V1\BotSourceAssignmentController;
 use App\Http\Controllers\Api\V1\BotStarterQuestionController;
 use App\Http\Controllers\Api\V1\BotStatusController;
+use App\Http\Controllers\Api\V1\ConversationController;
 use App\Http\Controllers\Api\V1\EmbeddingConfigurationController;
 use App\Http\Controllers\Api\V1\InvitationController;
 use App\Http\Controllers\Api\V1\MemberController;
+use App\Http\Controllers\Api\V1\PlaygroundSessionController;
 use App\Http\Controllers\Api\V1\ProviderConnectionController;
 use App\Http\Controllers\Api\V1\ProviderModelController;
+use App\Http\Controllers\Api\V1\QuotaController;
 use App\Http\Controllers\Api\V1\ReprocessSourceController;
+use App\Http\Controllers\Api\V1\RerankConfigurationController;
 use App\Http\Controllers\Api\V1\ResendInvitationController;
 use App\Http\Controllers\Api\V1\RotateProviderCredentialController;
 use App\Http\Controllers\Api\V1\SourceController;
@@ -110,6 +116,46 @@ Route::middleware(['auth:sanctum', 'surface:admin', 'org.member', 'verified', 't
             ->name('embedding-configuration.update');
 
         /*
+         * THE RERANK DESIGNATION — the third per-surface provider choice.
+         *
+         * `bots.provider_connection_id` decides who ANSWERS, `/embedding-configuration` above
+         * decides who EMBEDS, and this pair decides who RERANKS. Until it existed, "use NVIDIA NIM
+         * for reranking and OpenAI for chat" was not expressible anywhere in the platform:
+         * `app/rag/rerank.py::rerank_gate` takes a `model` argument and nothing upstream of it
+         * decided what that model was.
+         *
+         * IT MIRRORS THE EMBEDDING ROUTES' SHAPE AND NOT THEIR BEHAVIOUR, and the one difference is
+         * worth reading before either action is changed. A missing embedding designation blocks
+         * INGESTION — `show` there is a blocking banner and its verdict comes from the data plane on
+         * every read, uncached. A missing rerank designation blocks NOTHING: stage 11 is skipped
+         * before any call goes out and candidates are served in fused order, which is a cheaper,
+         * measured, supported mode reported on the retrieval trace as `rerank_skip_reason`. So
+         * `show` here is a pure read of two columns on the bound `organizations` row — no service,
+         * no query, no cross-seam request — and there is no readiness endpoint to mirror.
+         *
+         * WHICH VENDORS CAN RERANK IS NOT ANSWERED ON THIS SIDE OF THE SEAM AND MUST NOT BECOME SO.
+         * It is three questions — does the vendor publish a ranking route, does the model row claim
+         * the capability, can this platform threshold the scale it returns — and
+         * `capabilities.can_rerank` is the AND of all three and their only home. What Laravel
+         * enforces here is TENANCY AND EXISTENCE: the designated connection must be one of this
+         * organization's, and the (connection, model) pair must be a row in its catalogue.
+         *
+         * `update` is a PUT rather than a PATCH because the designation is a PAIR whose halves are
+         * meaningless apart, and clearing it is `{"connection_id": null, "model": null}` rather than
+         * a DELETE: turning reranking off is an operating mode, not the removal of a resource.
+         *
+         * Both sit under {organization} with ->scopeBindings(), so a foreign id 404s at BINDING
+         * time; `org.member` re-reads the membership row before that; and Gate::authorize() runs in
+         * the controller because `can` middleware covers checks 2-4 only and never reaches check 5
+         * (entity status).
+         */
+        Route::get('/rerank-configuration', [RerankConfigurationController::class, 'show'])
+            ->name('rerank-configuration.show');
+
+        Route::put('/rerank-configuration', [RerankConfigurationController::class, 'update'])
+            ->name('rerank-configuration.update');
+
+        /*
          * PROVIDER CONNECTIONS — the organization's stored credentials.
          *
          * `{providerConnection}` RESOLVES THROUGH `$organization->providerConnections()` because
@@ -152,10 +198,12 @@ Route::middleware(['auth:sanctum', 'surface:admin', 'org.member', 'verified', 't
 
         /*
          * A GUARDED HARD DELETE. Refused with 409 while the connection is the organization's
-         * designated embedding credential — which is exactly what the composite ON DELETE RESTRICT
-         * on `organizations.embedding_connection_id` intends, and the controller does not work
-         * around it: the constraint stays the authority and the pre-flight check is only the
-         * actionable sentence.
+         * designated embedding credential OR its designated rerank credential — which is exactly
+         * what the two composite ON DELETE RESTRICT constraints on
+         * `organizations.embedding_connection_id` and `organizations.rerank_connection_id` intend,
+         * and the controller does not work around either: the constraints stay the authority and
+         * the pre-flight checks are only the actionable sentences. The two refusals carry DIFFERENT
+         * sentences because they name different consequences — see ProviderConnectionService.
          */
         Route::delete('/provider-connections/{providerConnection}', [ProviderConnectionController::class, 'destroy'])
             ->name('provider-connections.destroy');
@@ -381,6 +429,63 @@ Route::middleware(['auth:sanctum', 'surface:admin', 'org.member', 'verified', 't
          */
         Route::put('/bots/{bot}/status', [BotStatusController::class, '__invoke'])
             ->name('bots.status.update');
+
+        /*
+         * THE D5 PLAYGROUND'S CREDENTIAL — an ADMIN route that issues a PUBLIC RUNTIME bearer.
+         *
+         * ── IT IS HERE PRECISELY SO `rt/v1` DOES NOT HAVE TO CHANGE ─────────────────────────
+         *
+         * routes/api_public.php's header states the rule as a decision: *"`ResolveChatSession`
+         * resolves ONE mechanism, the `kbw_` chat session, and adding a second is a deliberate
+         * change to the four-mechanisms rule, not an omission to patch in a later route."* Teaching
+         * that middleware to also accept an admin session cookie is exactly the change it refuses —
+         * two auth paths on one endpoint means two authorization paths and one of them will drift.
+         *
+         * So the console mints instead. It calls THIS route with its ordinary cookie session, gets
+         * a `kbw_` bearer, and talks to the completely unmodified streaming path. `rt/v1` still
+         * resolves exactly one credential TYPE; what this route changes is who may be issued one
+         * and what its server-side record says about them (`kind: playground` -> `actor_type: user`
+         * + diagnostics, derived from that ONE stored field so no two fields can disagree).
+         *
+         * ── A POST, BECAUSE IT IS NOT IDEMPOTENT ────────────────────────────────────────────
+         *
+         * Each call mints a NEW bearer under a NEW Valkey key; the previous one keeps working until
+         * its own TTL lapses. That is the same semantics `POST /sdk/v1/session` has and the same
+         * reason `invitations/{invitation}/resend` is a POST: a call that issues a capability is
+         * not a state assertion.
+         *
+         * ── `bots.manage` AND NOT `bots.view` ───────────────────────────────────────────────
+         *
+         * All four roles hold `bots.view`. A playground turn spends the organization's provider
+         * quota and writes a conversation row, so it is a WRITE wearing a chat control — an analyst
+         * who may read a bot's settings must not be able to spend tokens from that screen. The
+         * shipped panel already hides its composer on `canManage === false`, and UI hiding is not
+         * one of the six checks. There is no `bots.playground` permission for the reason there is no
+         * `bots.publish` one: it would be granted to exactly the same two roles.
+         *
+         * ── CHECK 5 IS THE BOT'S STATUS, AND IT IS NOT `isRetrievable()` ────────────────────
+         *
+         * `testing` and `published` only. `BotStatus::isPlaygroundReachable()` is a SECOND narrow
+         * method rather than a widening of the public one, and its docblock records that the enum
+         * contradicted itself about this: `isRetrievable()`'s paragraph says the playground
+         * authorizes by policy alone, while `Draft`'s own case comment says *"Never reachable from
+         * any channel, including the admin playground."* The specific statement wins and it is also
+         * the fail-closed reading.
+         *
+         * ── AUDITED as `bot.playground_session.minted`, ON_FAILURE_LOG ──────────────────────
+         *
+         * The credential is already in Valkey when the row is written, so there is nothing to roll
+         * back — `auth.login.succeeded`'s shape, not `provider.connection.*`'s. The row carries the
+         * bot, the DERIVED session id, the diagnostics flag and the lifetime, and no token in any
+         * form. It exists for the one fact the resulting conversation, provider-call and usage rows
+         * do not record: that a diagnostics-capable bearer was issued, to whom, and for how long.
+         *
+         * NO SECOND LIMITER. `throttle:admin`'s (organization, user) budget is the whole of check 6:
+         * this mint touches no credential and verifies no password, and the money is spent by the
+         * chat turn, which has its own four-scope sliding window inside ChatGate.
+         */
+        Route::post('/bots/{bot}/playground-session', [PlaygroundSessionController::class, '__invoke'])
+            ->name('bots.playground-session.store');
 
         /*
          * THE WIDGET ORIGIN ALLOW-LIST — a SECURITY CONTROL, not a preference (docs/02 §8.3,
@@ -766,4 +871,124 @@ Route::middleware(['auth:sanctum', 'surface:admin', 'org.member', 'verified', 't
 
         Route::get('/members', [MemberController::class, 'index'])
             ->name('members.index');
+
+        /*
+         * ═══ CONVERSATION REVIEW (docs/04 §8.22, §6.2/§6.3/§6.5) ══════════════════════════════
+         *
+         * TWO ENDPOINTS AND NO WRITE. A thread is opened by the public runtime, written by the
+         * relay's finalizer, and removed by the retention sweeper or by an erasure workflow that is
+         * `deletion-engineer`'s — §18.11 treats a transcript as EVIDENCE, so a surface that could
+         * both read and destroy it would be able to rewrite the record it exists to preserve.
+         *
+         * `{conversation}` RESOLVES THROUGH `$organization->conversations()` because the group calls
+         * ->scopeBindings(). `Model::childRouteBindingRelationshipName()` is
+         * `Str::plural(Str::camel($childType))`, so the segment name and the relation name are one
+         * fact in two places: `{conversation}` derives `conversations()`, which
+         * App\Models\Organization declares for exactly this. Rename either and the binding falls to
+         * the UNSCOPED `else` branch — `Conversation::resolveRouteBinding($id)`, executed inside
+         * SubstituteBindings, upstream of the Gate call — and every foreign thread is loaded into
+         * memory before authorization runs.
+         *
+         * NEITHER ROUTE HAS AN ENTITY-STATUS CHECK, deliberately: reading what was said, and why an
+         * answer was refused, is exactly what a suspended organization's operator needs to do, and
+         * neither action writes. The one status check this surface SHOULD have is §18.10's
+         * per-organization "may administrators review conversations" switch, WHICH HAS NO COLUMN —
+         * `ConversationController`'s docblock carries the measurement and the TODO rather than
+         * inventing one here.
+         *
+         * THE TRANSCRIPT IS NOT THE RUNTIME'S. `rt/v1`'s transcript is scoped to the SESSION that
+         * owns the thread and is settled-only; this one is scoped to the ORGANIZATION and carries
+         * unsettled turns, citations, retrieval traces, feedback and provider attempts. Both go
+         * through one repository so the join up to `conversations` — the only tenancy the four
+         * child tables have — is expressed once.
+         */
+        Route::get('/conversations', [ConversationController::class, 'index'])
+            ->name('conversations.index');
+
+        Route::get('/conversations/{conversation}', [ConversationController::class, 'show'])
+            ->name('conversations.show');
+
+        /*
+         * ═══ THE AUDIT TRAIL (§18.11) ═════════════════════════════════════════════════════════
+         *
+         * ONE ENDPOINT, READ-ONLY, AND NO ROW ROUTE. A `/audit-logs/{auditLog}` would need a
+         * binding over a table whose primary key is the composite `(id, created_at)` a partitioned
+         * table requires and whose model deliberately carries NO `#[ScopedBy]` — so the binding
+         * would resolve a row with no tenant predicate and hand it to a policy that THROWS on a
+         * platform-scope row. Filtering the list by actor or by subject answers the same questions
+         * through the one query shape that carries the organization predicate.
+         *
+         * IT IS BEHIND `audit.view`, WHICH THE OWNER AND THE ADMINISTRATOR HOLD AND THE KNOWLEDGE
+         * MANAGER AND THE ANALYST DO NOT — a narrower set than `conversations.view` two blocks up,
+         * and the difference is deliberate: an audit row names a COLLEAGUE, carries their IP
+         * address and their user agent, and twelve of the operations being `source.*` is not a
+         * reason to hand an ingestion operator the credential-rotation rows beside them.
+         * `Permission::AuditView` also records that the grant is an EXTENSION of the spec rather
+         * than a reading of it: §6.1 gives "Access platform-level audit logs" to the PLATFORM owner
+         * and §6.2-§6.5 name no organization role at all.
+         *
+         * PLATFORM-SCOPE ROWS (organization_id IS NULL) ARE NEVER RETURNED HERE. That is a decision
+         * and not an accident of `organization_id = ?` being false for a NULL; the repository, the
+         * interface and a Security test all state it, because the change that would undo it is a
+         * one-line `orWhereNull()` that reads like a feature request.
+         *
+         * NO ENTITY-STATUS CHECK: a suspended organization needs its audit trail MORE than an
+         * active one does, because that is what an incident looks like.
+         */
+        Route::get('/audit-logs', [AuditLogController::class, 'index'])
+            ->name('audit-logs.index');
+
+        /*
+         * ═══ THE USAGE AND QUALITY DASHBOARD (§8.23) ══════════════════════════════════════════
+         *
+         * ONE ENDPOINT AND NOT ELEVEN. The tiles are read together — they are one screen — so a
+         * tile per endpoint would be eleven round trips, eleven authorization checks and eleven
+         * chances for one of them to be scoped differently from the other ten.
+         * `kb-tenancy-isolation` lists analytics as its own isolation layer precisely because
+         * "group by bot_id and drop the redundant organization_id" is such an easy thing to talk
+         * yourself into, and the queries stay separate inside the repository so each keeps its own
+         * explicit organization predicate.
+         *
+         * A GET WITH A QUERY STRING, not a POST with a body. Every parameter is a filter over a
+         * read; a POST would make the dashboard uncacheable by every layer that caches on the URL
+         * and would put a body on a request that changes nothing.
+         *
+         * NO ENTITY-STATUS CHECK. A suspended organization's operator still needs to read their own
+         * numbers, and this endpoint writes nothing — see the controller.
+         */
+        Route::get('/analytics', AnalyticsController::class)
+            ->name('analytics.show');
+
+        /*
+         * ═══ THE QUOTA CEILINGS ═══════════════════════════════════════════════════════════════
+         *
+         * `show` and `update` sit behind DIFFERENT permissions, which is unusual on this surface and
+         * is the point: reading how much of an allowance is used is a report (`analytics.view`),
+         * and changing the ceiling is a plan change (`quotas.manage`, held by the Organization Owner
+         * alone among the four org roles). Collapsing them would hand the ceiling to every role that
+         * may read the dashboard, including the Analyst.
+         *
+         * `update` IS A PUT AND NOT A PATCH, for the reason the two designation endpoints above are
+         * PUTs and then some: the four ceilings are a COMPLETE SET, and on this body an omitted key
+         * and a null key would otherwise mean the same thing while meaning opposite things — "leave
+         * it alone" versus "remove this ceiling entirely". A client that dropped a key from its
+         * payload would silently remove a limit.
+         *
+         * THERE IS A CHECK ON `update` THAT IS NOT VISIBLE ANYWHERE IN THIS FILE:
+         * `QuotaLimitService` refuses a RAISE from a caller who is not `users.is_platform_owner`.
+         * It cannot be middleware or a policy — it is a comparison between the submitted numbers and
+         * the persisted ones — and it exists because §6.1 assigns limit control to the platform
+         * owner while §6.2 gives the org owner "manage organization settings". That contradiction is
+         * recorded in Permission::QuotasManage and in the migration, not resolved.
+         *
+         * Both sit under {organization} with ->scopeBindings(), so a foreign id 404s at BINDING
+         * time; `org.member` re-reads the membership row before that; and Gate::authorize() runs in
+         * the controller because `can` middleware covers checks 2-4 only and never reaches check 5
+         * (entity status).
+         */
+        Route::get('/quotas', [QuotaController::class, 'show'])
+            ->name('quotas.show');
+
+        Route::put('/quotas', [QuotaController::class, 'update'])
+            ->name('quotas.update');
     });

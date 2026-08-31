@@ -294,7 +294,7 @@ describe('the shell says once what every panel then obeys', () => {
 });
 
 describe('the tab strip', () => {
-  it('offers the three tabs and shows one panel at a time', async () => {
+  it('offers the four tabs and shows one panel at a time', async () => {
     worker.use(botHandler());
 
     const screen = await renderScreen();
@@ -303,17 +303,90 @@ describe('the tab strip', () => {
     await expect.element(screen.getByRole('tab', { name: 'Identity & voice' })).toBeVisible();
     await expect.element(screen.getByRole('tab', { name: 'Model & retrieval' })).toBeVisible();
     await expect.element(screen.getByRole('tab', { name: 'Publishing' })).toBeVisible();
+    // THE FOURTH IS D5's PLAYGROUND, and it is a TAB rather than a nav item on purpose: the
+    // playground is a view of ONE bot, it reads the configuration the three sibling tabs set, and a
+    // nav item would need a bot picker — which is the bot list with extra steps.
+    await expect.element(screen.getByRole('tab', { name: 'Playground' })).toBeVisible();
 
     // ── WHAT RADIX ACTUALLY DOES, MEASURED HERE RATHER THAN ASSUMED ──────────────────────────
-    // All three `role="tabpanel"` ELEMENTS exist; only the selected one is un-`hidden`, and only the
+    // All four `role="tabpanel"` ELEMENTS exist; only the selected one is un-`hidden`, and only the
     // selected one has CHILDREN — `TabsContent` renders `present && children`. So a panel's component
     // is unmounted when its tab is not selected, which destroys its form state, which is exactly why
     // the shell owns the unsaved-edit guard: the outgoing panel is gone by the time anyone could ask.
     // `forceMount` is not the escape hatch it looks like — it makes `present` unconditionally true
-    // and `hidden` is `!present`, so all three would become VISIBLE at once.
-    expect(document.querySelectorAll('[role="tabpanel"]')).toHaveLength(3);
+    // and `hidden` is `!present`, so all four would become VISIBLE at once.
+    //
+    // THE COUNT IS ASSERTED RATHER THAN THE NAMES ALONE, and it is what turned red when the fourth
+    // tab landed — which is the check working: a panel added to the strip and not to `TABS`, or the
+    // reverse, is invisible to a name-by-name assertion.
+    expect(document.querySelectorAll('[role="tabpanel"]')).toHaveLength(4);
     expect(document.querySelectorAll('[role="tabpanel"]:not([hidden])')).toHaveLength(1);
     expect(document.body.textContent).toContain('Identity & voice');
+  });
+
+  it('shows the playground with a live composer and NO standing contract notice', async () => {
+    worker.use(botHandler());
+
+    const screen = await renderScreen();
+    await expect.element(screen.getByRole('heading', { name: /Support bot/ })).toBeVisible();
+
+    await screen.getByRole('tab', { name: 'Playground' }).click();
+
+    // ── THE COMPOSER IS LIVE, WHICH IS WHAT THE CREDENTIAL BOUGHT ─────────────────────────────
+    // `POST .../bots/{bot}/playground-session` mints the `kbw_` bearer `rt/v1` already resolved, and
+    // `StreamChatMessageController` now reads `diagnostics: $session->diagnostics`. The fixture bot
+    // is `testing`, which is playground-reachable, and the session fixture is an OWNER — so both
+    // gates are open and `ChatSurface` gets a real connection rather than `null`.
+    // ENABLED, not merely present: `ChatSurface` renders the composer disabled when `connection` is
+    // null, so `toBeVisible()` alone would pass over exactly the state this is asserting against.
+    await expect.element(screen.getByRole('textbox', { name: 'Your question' })).toBeEnabled();
+
+    // ── AND THE NOTICE THAT USED TO SIT ABOVE IT IS GONE, ASSERTED BY ABSENCE ─────────────────
+    // Both conditions it described are closed. A standing notice about a gap that no longer exists
+    // is worse than no notice: it teaches an operator to distrust a working panel, so the next real
+    // warning is read as decoration too. Pinned here so it cannot come back by copy-paste.
+    expect(document.body.textContent).not.toContain(
+      'The playground needs two things the runtime does not offer yet',
+    );
+    expect(document.body.textContent).not.toContain('diagnostics permission');
+
+    // AND THE SAVED CONFIGURATION IS READ-ONLY AND SAYS SO. There is no temporary model override:
+    // `SendChatMessageRequest` validates exactly `{client_message_id, content}` and its
+    // `withValidator()` REJECTS an `extra` key, so a body carrying a model id 422s every send. A
+    // select that changed a local value and sent nothing would let an operator compare two models,
+    // read two answers from the same one, and conclude something false.
+    await expect
+      .element(screen.getByText(/This run uses the bot.s saved settings/))
+      .toBeVisible();
+  });
+
+  it('refuses the composer on a bot the playground cannot reach, and names the move', async () => {
+    /**
+     * `PlaygroundSessionController` refuses `draft`, `paused` and `archived` with a 409, and
+     * `bootstrap/app.php` renders every deliberate 409 as `internal_dependency` — "Something on our
+     * side is unavailable. Try again shortly." That sentence is false and unactionable for a bot
+     * nobody has moved out of draft yet, so the panel says the true thing instead of letting the
+     * mint produce the misleading one.
+     *
+     * IT IS AN AFFORDANCE, NOT AUTHORIZATION: the server refuses whatever this renders. What makes
+     * it safe to pre-judge is that the check is a pure function of the row already on screen
+     * (`BotStatus::isPlaygroundReachable()`) rather than of state only the server holds — which is
+     * the line the publish guard draws in the other direction.
+     */
+    worker.use(botHandler({ ...BOT, status: 'draft' }));
+
+    const screen = await renderScreen();
+    await expect.element(screen.getByRole('heading', { name: /Support bot/ })).toBeVisible();
+
+    await screen.getByRole('tab', { name: 'Playground' }).click();
+
+    await expect
+      .element(screen.getByText(/cannot be run from the playground while it is draft/))
+      .toBeVisible();
+    // `ChatSurface` renders the composer DISABLED rather than absent when `connection` is null —
+    // the control stays where the reader expects it and the notice beside it says why, which is the
+    // shape `references/states.md` asks for over a control that vanishes.
+    await expect.element(screen.getByRole('textbox', { name: 'Your question' })).toBeDisabled();
   });
 
   it('switches panels, and the tab is not in the URL', async () => {

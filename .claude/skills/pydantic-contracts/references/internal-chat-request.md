@@ -1,9 +1,15 @@
 # The internal chat request, complete — reference
 
 Depth for `pydantic-contracts`. Spec: `docs/06-architecture.md` §11.2, §11.4, `docs/11-data-model.md` §16.2.
-The inbound half of `services/ai-service/app/contracts/internal/chat.py`. The outbound stream union lives in the skill body and shares this module; `Ulid` is declared once, there.
+The inbound half of `services/ai-service/app/contracts/internal/chat.py`. The outbound stream union lives in the skill body and shares this module.
 
-**This module does not exist yet.** `ls services/ai-service/app/contracts/internal/` returns `__init__.py` and `.gitkeep`. The chat router and the five provider wire adapters are out of the current scope by explicit ruling, so everything below is a specification for whoever writes them — read it as what the file must be, not as what it is. The credential field in particular carries a shape that **no code implements**: see the note on `provider_credentials`.
+**This module exists.** It landed with `app/api/internal/v1/chat.py` and the `chatStream` operation in `app/contracts/internal/openapi.json`; `grep -n 'provider_credentials' services/ai-service/app/contracts/internal/chat.py` is the measure, and `grep -n 'chatStream' services/ai-service/app/contracts/internal/openapi.json` says the router serves it. This paragraph used to read *"This module does not exist yet"* and cite an `ls` returning `__init__.py` and `.gitkeep` — an absence-claim with nothing watching for the absence ending, which is exactly the shape ADR-036 is about. Read what follows as the **specification the shipped module was written from**, and read the module for what it is.
+
+Three things about the shipped file that this sketch does not say, and that a reader comparing the two will notice:
+
+- **`Ulid` is imported, not declared.** It already exists at `app/providers/contract.py:127` and is exported; a second `Annotated[str, StringConstraints(...)]` would be drift, not independence. The shipped one also accepts **lowercase** — Laravel's `HasUlids` lowercases every model key while `Str::ulid()` upper-cases, and one request body carries both (`docs/22` § R6). The pattern written below is the upper-case-only form and would 422 every real submission.
+- **`retrieval_configuration_version` is an `int` on the wire and a `str` in `app/rag/runner.py::RetrievalConfig`.** The endpoint converts once. Both are deliberate — the wire value is a version number, the runner's is an opaque identity it only ever records — and neither is the other's spelling.
+- **Eight fields below the sketch's set are forced by rules stated elsewhere**, not added for convenience: `allowed_version_ids` and `embedding_model_version` on the snapshot (non-negotiable 2 and `bge-m3-embeddings` respectively — the four mandatory filter terms and the vector space the passages were embedded in), `embedding_connection` / `rerank_connection` / `fallback_connections`, `ProviderConnection.caps` (`ModelCapabilities`' own docstring says the row arrives here), `bot_instructions`, and `message_id` / `history` on the request. The module docstring lists each with the rule that forces it. `org_id` and `bot_id` are kept exactly as written below **and are never used as scope** — the endpoint checks them against the verified `X-KB-*` headers and refuses on a disagreement, because a tenant a caller can set in a body is a parameter and not a scope.
 
 ```python
 # services/ai-service/app/contracts/internal/chat.py

@@ -57,7 +57,20 @@ enum OrgRole: string
             // org-level actions, and creating a second owner is the one action the role that
             // performed it cannot undo: the new owner may immediately demote or remove them. An
             // admin who needs another owner asks an owner.
-            self::Admin => $permission !== Permission::MembersManageOwner,
+            // TWO EXCEPTIONS NOW, NOT ONE. `quotas.manage` joins `members.manage_owner` on the
+            // list an Administrator does not hold, and the argument is §6.3's own opening
+            // sentence: an administrator "manages operational settings but may not own BILLING or
+            // destructive organization-level actions." A quota ceiling is the billing boundary
+            // wearing an operational hat — and §6.1 assigns limit control to the PLATFORM owner
+            // outright, which is a contradiction Permission::QuotasManage records rather than
+            // resolves. Written as an `in_array` over a named set rather than a second `!==`,
+            // because a chain of negated comparisons is where a reviewer stops reading and the
+            // next exception gets appended with `&&` in the wrong place.
+            self::Admin => ! in_array(
+                $permission,
+                [Permission::MembersManageOwner, Permission::QuotasManage],
+                true,
+            ),
             // Written as an explicit `in_array` over a NAMED SET rather than as a chain of `===`
             // comparisons: the set is about to keep growing (sources, conversations, evaluation
             // datasets all land on this role in later phases) and a growing `||` chain is where a
@@ -71,6 +84,14 @@ enum OrgRole: string
             // `providers.view` and NOT `providers.manage` is unchanged and is the line §6.4 draws
             // explicitly: an ingestion operator has to know whether the organization can embed at
             // all, and may not touch the credential or the embedding designation.
+            //
+            // THE SET DID NOT GROW IN PHASE 6a, AND BOTH ABSENCES ARE DECISIONS. `conversations.view`
+            // is withheld because §6.4's "review parsed content" is the SOURCE detail projection
+            // that `sources.view` already serves, and a transcript is verbatim end-user text rather
+            // than parsed content. `audit.view` is withheld because the audit endpoint is one list
+            // over the whole operation vocabulary — granting it to answer a `source.*` question
+            // hands over credential rotations, member role changes and login events carrying
+            // colleagues' addresses and IPs. Each case's own docblock carries the argument.
             self::KnowledgeManager => in_array(
                 $permission,
                 [
@@ -93,7 +114,31 @@ enum OrgRole: string
             // reads nothing from `knowledge_sources`, so the grant would widen an analyst's reach
             // to every document title, tag and crawl URL in the organization to serve a screen that
             // does not read them.
-            self::Analyst => $permission === Permission::BotsView,
+            // NO LONGER EXACTLY ONE PERMISSION. §6.5 is reporting-only and reporting is now
+            // expressible: `analytics.view` is §8.23's dashboard, and §6.5's own words are "A
+            // reviewer inspects chatbot quality" plus "Compare retrieval or model configurations"
+            // — the feedback split, the insufficient-evidence count and the latency percentiles
+            // ARE that comparison. `bots.view` stays for the reason it was granted: a transcript is
+            // uninterpretable without the bot that produced it.
+            //
+            // AND `conversations.view` IS THE THIRD, WHICH IS THE ONE §6.5 NAMES MOST DIRECTLY.
+            // The section's first two responsibilities are "Review conversations." and "Add
+            // feedback", and its fifth is "Review source citations and retrieval traces" — so the
+            // transcript, its citations and its trace are this role's stated job rather than an
+            // inference from it. It is the read half only; capturing feedback is the runtime's own
+            // surface, authorized by conversation ownership.
+            //
+            // STILL NO WRITE, NO CREDENTIAL, NO MEMBER AND NO SOURCE. `audit.view` is deliberately
+            // NOT here: an audit row is about COLLEAGUES — who rotated a credential, who changed a
+            // role, which address failed a login — and none of §6.5's five items is an
+            // administrative action. `analytics.view` reaches only aggregates, and `quotas.manage`
+            // stays out because reading how much of a quota is used is a report while changing the
+            // ceiling is a plan change.
+            self::Analyst => in_array(
+                $permission,
+                [Permission::BotsView, Permission::AnalyticsView, Permission::ConversationsView],
+                true,
+            ),
         };
     }
 

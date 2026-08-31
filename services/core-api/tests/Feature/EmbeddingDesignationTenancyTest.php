@@ -131,6 +131,12 @@ it('refuses to delete a connection that is currently designated', function (): v
             ->designateEmbeddingConnection(
                 $org->id,
                 new EmbeddingDesignation($connection->id, 'text-embedding-3-large'),
+                // THE AUDIT CLOSURE, REQUIRED SINCE THE EMBEDDING DESIGNATION BECAME AUDITED. A
+                // no-op here on purpose: what is under assertion is ON DELETE RESTRICT, and writing
+                // a real audit row would drag AuditLogger's whole failure policy into a test about
+                // a foreign key. tests/Feature/EmbeddingConfigurationTest.php is where the row
+                // itself is asserted.
+                static function (): void {},
             );
     });
 
@@ -164,7 +170,12 @@ it('refuses to write a designation at all when the tenant context does not agree
     $designation = new EmbeddingDesignation($connection->id, 'text-embedding-3-large');
 
     // DIRECTION 1: no context at all — the pooled worker whose context was never set.
-    expect(fn (): mixed => $repository->designateEmbeddingConnection($org->id, $designation))
+    // The audit closure is a no-op in every call below: the precondition is checked BEFORE the
+    // transaction opens, so none of these reaches a write and none of them reaches the closure. A
+    // closure that raised would therefore prove nothing and would only obscure which guard fired.
+    $noAudit = static function (): void {};
+
+    expect(fn (): mixed => $repository->designateEmbeddingConnection($org->id, $designation, $noAudit))
         ->toThrow(\LogicException::class);
 
     // DIRECTION 2: a context naming somebody else — the pooled worker still holding the previous
@@ -173,7 +184,7 @@ it('refuses to write a designation at all when the tenant context does not agree
 
     expect(fn (): mixed => app(\App\Support\Tenancy\TenantContext::class)->runFor(
         $other->id,
-        fn (): mixed => $repository->designateEmbeddingConnection($org->id, $designation),
+        fn (): mixed => $repository->designateEmbeddingConnection($org->id, $designation, $noAudit),
     ))->toThrow(\LogicException::class);
 
     // AND IT IS NOT THE 422. A KbException here would mean the repository had converted "I could
@@ -181,7 +192,7 @@ it('refuses to write a designation at all when the tenant context does not agree
     $caught = null;
 
     try {
-        $repository->designateEmbeddingConnection($org->id, $designation);
+        $repository->designateEmbeddingConnection($org->id, $designation, $noAudit);
     } catch (\Throwable $e) {
         $caught = $e;
     }
@@ -199,7 +210,7 @@ it('refuses to write a designation at all when the tenant context does not agree
     // CLEARING IS HELD TO THE SAME BAR, deliberately. A precondition that depends on the value of
     // an argument is the same trap in a smaller size — and undesignating under a context naming
     // another tenant is the stale-worker shape, not a harmless no-op.
-    expect(fn (): mixed => $repository->designateEmbeddingConnection($org->id, null))
+    expect(fn (): mixed => $repository->designateEmbeddingConnection($org->id, null, $noAudit))
         ->toThrow(\LogicException::class);
 });
 

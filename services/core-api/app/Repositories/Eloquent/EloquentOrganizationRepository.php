@@ -14,8 +14,11 @@ use App\Models\ProviderModelEntry;
 use App\Models\User;
 use App\Repositories\Contracts\OrganizationRepositoryInterface;
 use App\Services\Embedding\EmbeddingDesignation;
+use App\Services\Quotas\QuotaLimits;
+use App\Services\Rerank\RerankDesignation;
 use App\Support\Tenancy\TenantContext;
 use Carbon\CarbonImmutable;
+use Closure;
 use Illuminate\Support\Facades\DB;
 use LogicException;
 use RuntimeException;
@@ -78,6 +81,7 @@ final class EloquentOrganizationRepository implements OrganizationRepositoryInte
     public function designateEmbeddingConnection(
         string $organizationId,
         ?EmbeddingDesignation $designation,
+        Closure $audit,
     ): Organization {
         // ── THE PRECONDITION, CHECKED BEFORE THE TRANSACTION OPENS ────────────────────────────
         //
@@ -114,18 +118,9 @@ final class EloquentOrganizationRepository implements OrganizationRepositoryInte
         // console command, a queued job or a backfill must wrap the call in
         // `TenantContext::runFor($organizationId, ...)` — one line, and the same line the request
         // path already executes.
-        if (! $this->tenants->isBound() || $this->tenants->orgId() !== $organizationId) {
-            throw new LogicException(
-                'designateEmbeddingConnection() was called for organization ['.$organizationId
-                .'] with no matching tenant context bound. The catalog re-verification inside it '
-                .'reads a #[ScopedBy(OrganizationScope::class)] model, which fails closed, so '
-                .'without an agreeing context the check answers "empty" for a reason that has '
-                .'nothing to do with the catalog. Wrap the call in '
-                .'TenantContext::runFor($organizationId, ...) — the request path already does.',
-            );
-        }
+        $this->assertAgreeingTenantContext('designateEmbeddingConnection', $organizationId);
 
-        return DB::transaction(function () use ($organizationId, $designation): Organization {
+        return DB::transaction(function () use ($organizationId, $designation, $audit): Organization {
             // lockForUpdate, because this is a read-modify-write on a value another transaction
             // can change between the read and the write — two administrators designating at once
             // is textbook write skew (postgresql-patterns, "Isolation"). What is at stake is not a
@@ -139,6 +134,13 @@ final class EloquentOrganizationRepository implements OrganizationRepositoryInte
             if (! $organization instanceof Organization) {
                 throw new RuntimeException("Organization [{$organizationId}] no longer exists.");
             }
+
+            // READ BEFORE THE WRITE, because after it the previous pair is gone and the audit row is
+            // the only place it could ever have been recorded. On THIS designation the previous pair
+            // is more than provenance: `(provider, model)` IS the vector space (ADR-031), so it is
+            // the only record of which space the already-indexed corpus is in — i.e. the answer to
+            // "what would a re-index have to go back to", which is a decision with a price attached.
+            $previous = EmbeddingDesignation::fromOrganization($organization);
 
             // RE-VERIFIED UNDER THE LOCK, and this is the authority rather than a second opinion:
             // no foreign key backs `(embedding_connection_id, embedding_model)`, so if this query
@@ -184,6 +186,224 @@ final class EloquentOrganizationRepository implements OrganizationRepositoryInte
             // a designation that names another organization's connection even if every layer
             // above it were bypassed, and the CHECK rejects half a designation.
             $organization->save();
+
+            // INSIDE the transaction, after the UPDATE, before the COMMIT. Both embedding
+            // designation operations are ON_FAILURE_ABORT, so an audit write that fails rethrows and
+            // takes the designation with it — a change to the vector space every future corpus is
+            // indexed under is not a state this table may reach with nothing recording who made it.
+            $audit($organization, $previous);
+
+            return $organization;
+        });
+    }
+
+    /**
+     * Set or clear the (connection, model) pair that reranks this organization's retrieval
+     * candidates, and write the audit row inside the same transaction.
+     *
+     * ── IT IS THE EMBEDDING METHOD'S SHAPE, WITH ONE CHECK MISSING AND ONE ADDED ───────────────
+     *
+     * MISSING: there is no pre-flight resolver call and no readiness verdict, because there is no
+     * resolution rule for reranking on either side of the seam. Whether the designated vendor can
+     * usefully rerank is three questions — does the vendor publish a ranking route, does this model
+     * row claim the capability, can this platform threshold the score scale it returns — and
+     * `services/ai-service/app/providers/capabilities.py::can_rerank` is the one place they are
+     * answered. Re-implementing any of them here would be a second decision procedure that can
+     * disagree with the first, and it would disagree in the direction of refusing a configuration
+     * that works the day a vendor ships an endpoint. The refusal, when there is one, arrives at
+     * QUERY time as `rerank_skip_reason` on the retrieval trace.
+     *
+     * ADDED: the audit closure. See the interface for why it is required and why the embedding twin
+     * not having one is a gap rather than a precedent.
+     *
+     * ── THE RACE THIS CLOSES ──────────────────────────────────────────────────────────────────
+     *
+     * The same one, in the same direction, with a quieter symptom. `organizations.rerank_model` is
+     * a bare `text` column with no foreign key to `provider_models`, so a catalog delete committing
+     * between the service's pre-flight checks and this write would leave the organization naming a
+     * row that is gone. Embedding's version of that failure breaks the next upload loudly; this one
+     * turns reranking off, and the only symptom is answers getting worse. So it is re-verified
+     * under the `organizations` row lock, which is the same lock
+     * `EloquentProviderModelRepository::delete()` takes — the two serialise and whichever loses is
+     * refused.
+     *
+     * A PLAIN SELECT AND NOT `lockForUpdate()` ON THE MODEL ROW, for the reason the embedding
+     * method records at length: the `organizations` lock above IS the mutual exclusion, and locking
+     * the model row here as well would order the two locks in the opposite direction from the
+     * delete path (model -> organizations there, organizations -> model here), which is the
+     * textbook ABBA deadlock. Both requests would fail with 40P01 instead of one of them being
+     * refused for a reason it can act on.
+     *
+     * @param  Closure(Organization, ?RerankDesignation): void  $audit
+     *
+     * @throws KbException `validation` (422) when the pair names a catalog row this organization
+     *                     does not have
+     * @throws LogicException when no tenant context is bound, or the bound one names a different
+     *                        organization than $organizationId
+     */
+    public function designateRerankConnection(
+        string $organizationId,
+        ?RerankDesignation $designation,
+        Closure $audit,
+    ): Organization {
+        // CHECKED BEFORE THE TRANSACTION OPENS, and checked unconditionally — including when
+        // $designation is null and no scoped query runs. See designateEmbeddingConnection() for the
+        // full argument; the short version is that a precondition depending on the value of an
+        // argument rots the first time somebody adds a second scoped read, and clearing a
+        // designation under a context naming ANOTHER organization is the stale-pooled-worker shape
+        // rather than a harmless no-op.
+        $this->assertAgreeingTenantContext('designateRerankConnection', $organizationId);
+
+        return DB::transaction(function () use ($organizationId, $designation, $audit): Organization {
+            // lockForUpdate, because this is a read-modify-write on a value another transaction can
+            // change between the read and the write — two administrators designating at once is
+            // textbook write skew. It is also the lock the catalog delete takes, which is what makes
+            // the re-verification below an authority rather than a second opinion.
+            $organization = Organization::query()
+                ->whereKey($organizationId)
+                ->lockForUpdate()
+                ->first();
+
+            if (! $organization instanceof Organization) {
+                throw new RuntimeException("Organization [{$organizationId}] no longer exists.");
+            }
+
+            // READ BEFORE THE WRITE, because after it the previous pair is gone and the audit row
+            // is the only place it could ever have been recorded. "From what, to what" is the whole
+            // content of a designation-change record.
+            $previous = RerankDesignation::fromOrganization($organization);
+
+            if ($designation !== null) {
+                // EXISTENCE ONLY, AND DELIBERATELY NOT THE CAPABILITY FLAG. Both ownership
+                // predicates are explicit — the organization AND the connection — so a pair naming
+                // another tenant's catalog row is simply ABSENT rather than "rejected by a
+                // comparison we wrote"; the model's #[ScopedBy(OrganizationScope::class)] is the
+                // backstop under both, and the composite foreign key on the write is the backstop
+                // under that.
+                //
+                // What this does NOT do is check that `capability_flags` claims `rerank`. That is
+                // the ROW axis of `capabilities.can_rerank`, one of three, and asking it here would
+                // be one third of a rule re-implemented on the wrong side of the seam — it would
+                // start refusing configurations the data plane accepts the first time the other two
+                // axes move. The row has to EXIST so there is something for the data plane to
+                // examine and something to bill against; what it claims is read over there.
+                $exists = ProviderModelEntry::query()
+                    ->where('organization_id', '=', $organizationId)
+                    ->where('provider_connection_id', '=', $designation->connectionId)
+                    ->where('model', '=', $designation->model)
+                    ->exists();
+
+                if (! $exists) {
+                    // `validation` and not a 409: this IS about a field of the submitted body — the
+                    // pair the operator named — which is what distinguishes it from the connection
+                    // delete's 409, which is about the state of a different record.
+                    throw KbException::validation(
+                        'That model is no longer in this connection\'s catalog, so it cannot be '
+                        .'designated as the rerank model. It was most likely removed while this '
+                        .'form was open. Reload the provider configuration and choose again.',
+                    );
+                }
+            }
+
+            // Neither column is fillable and forceFill is not used: the designation is written here,
+            // through one method, and nowhere else. Assigning the attributes directly keeps
+            // Model::shouldBeStrict()'s guard on mass assignment intact for every other path.
+            $organization->rerank_connection_id = $designation?->connectionId;
+            $organization->rerank_model = $designation?->model;
+
+            // The database has the last word. The composite foreign key
+            // (id, rerank_connection_id) -> provider_connections (organization_id, id) rejects a
+            // designation naming another organization's connection even if every layer above were
+            // bypassed, and the CHECK rejects half a designation.
+            $organization->save();
+
+            // INSIDE the transaction, after the UPDATE, before the COMMIT. Both rerank operations
+            // are ON_FAILURE_ABORT, so an audit write that fails rethrows and takes the designation
+            // with it — a change to which credential sees this tenant's questions is not a state
+            // this table may reach with nothing recording who made it.
+            $audit($organization, $previous);
+
+            return $organization;
+        });
+    }
+
+    /**
+     * Write all four quota ceilings, and audit the change, in one transaction.
+     *
+     * ── `lockForUpdate` FOR THE SAME REASON THE TWO DESIGNATIONS TAKE IT, WITH MONEY ATTACHED ──
+     *
+     * This is a read-modify-write on values another transaction can change between the read and the
+     * write: two administrators editing the quota form at once is textbook write skew
+     * (`postgresql-patterns`, "Isolation"). What is at stake is not a counter — the losing write
+     * decides what the organization is allowed to spend, and nothing downstream would ever raise
+     * about it. The PREVIOUS four values are read under that same lock, which is what makes the
+     * audit row's `previous_*` half an observation rather than a guess.
+     *
+     * ── NO CATALOG RE-VERIFICATION AND NO CROSS-TABLE CHECK, DELIBERATELY ────────────────────
+     *
+     * Unlike the two designation methods there is nothing here to race: a quota is four numbers on
+     * this row and references nothing. `organizations_quotas_nonnegative` is the only database rule
+     * and it is a CHECK rather than a foreign key, so it cannot be invalidated by a concurrent
+     * delete somewhere else. The lock is for write skew alone.
+     *
+     * IN PARTICULAR, THIS METHOD DOES NOT CHECK THAT THE NEW CEILING IS ABOVE CURRENT USAGE. Setting
+     * a limit BELOW what an organization has already consumed is legal and is a real operator
+     * action — it is how you stop a runaway tenant — and `QuotaGate` then refuses every further
+     * metered action while leaving what already exists in place. Refusing the write instead would
+     * mean the only way to cap an over-consuming organization is to delete its data first.
+     *
+     * @param  Closure(Organization, QuotaLimits): void  $audit
+     *
+     * @throws LogicException when no tenant context is bound, or the bound one names a different
+     *                        organization than $organizationId
+     */
+    public function setQuotaLimits(
+        string $organizationId,
+        QuotaLimits $limits,
+        Closure $audit,
+    ): Organization {
+        // CHECKED BEFORE THE TRANSACTION OPENS, and checked unconditionally. See
+        // designateEmbeddingConnection() for the full argument. The short version for this method:
+        // there is no scoped read here to fail closed, so the guard is not protecting a query — it
+        // is protecting against the stale-pooled-worker shape on the row that decides what a tenant
+        // may spend, which is a place a silent no-op would be worse than a loud refusal.
+        $this->assertAgreeingTenantContext('setQuotaLimits', $organizationId);
+
+        return DB::transaction(function () use ($organizationId, $limits, $audit): Organization {
+            $organization = Organization::query()
+                ->whereKey($organizationId)
+                ->lockForUpdate()
+                ->first();
+
+            if (! $organization instanceof Organization) {
+                throw new RuntimeException("Organization [{$organizationId}] no longer exists.");
+            }
+
+            // READ UNDER THE LOCK, BEFORE THE WRITE. After it the old ceilings exist nowhere, and
+            // "who removed the ceiling, and what was it" is the whole content of the audit row.
+            $previous = QuotaLimits::fromOrganization($organization);
+
+            // NOT FILLABLE AND `forceFill` IS NOT USED: the four columns are written here, through
+            // one method, and nowhere else. Assigning the attributes directly keeps
+            // Model::shouldBeStrict()'s guard on mass assignment intact for every other path — which
+            // matters more on these four than on most, because a mass-assignable quota would let a
+            // PATCH on an unrelated settings form remove the ceiling on an organization's spend.
+            //
+            // NULLS ARE WRITTEN AS NULLS. A `?? 0` here would freeze an unmetered organization and a
+            // `?: null` would silently remove a ceiling somebody set to zero deliberately.
+            $organization->storage_bytes_quota = $limits->storageBytes;
+            $organization->bots_quota = $limits->bots;
+            $organization->users_quota = $limits->users;
+            $organization->monthly_tokens_quota = $limits->monthlyTokens;
+
+            // The database has the last word: `organizations_quotas_nonnegative` refuses a negative
+            // ceiling even if every layer above were bypassed.
+            $organization->save();
+
+            // INSIDE the transaction, after the UPDATE, before the COMMIT.
+            // `organization.quota_limits.updated` is ON_FAILURE_ABORT, so an audit write that fails
+            // rethrows and takes the quota change with it.
+            $audit($organization, $previous);
 
             return $organization;
         });
@@ -311,5 +531,51 @@ final class EloquentOrganizationRepository implements OrganizationRepositoryInte
         // tenancy-exempt: `organizations` IS the tenant root and has no organization_id. This is the
         // bootstrap command's refusal predicate — see the interface for why it lives beside the write.
         return Organization::query()->exists();
+    }
+
+    /**
+     * The precondition both designation writes declare, checked before their transaction opens.
+     *
+     * WHY IT EXISTS AT ALL. Each of those methods re-verifies a (connection, model) pair against
+     * ProviderModelEntry, which carries #[ScopedBy(OrganizationScope::class)], and that scope FAILS
+     * CLOSED: with no bound context it appends `1 = 0`, and with a context naming another
+     * organization it appends a predicate that conflicts with the explicit one beside it. Either
+     * way the query is unconditionally empty — not because the catalog row is gone, but because the
+     * query could not ask the question. Everywhere else in this layer an empty scoped read renders
+     * as "not found", which is benign and roughly true. THERE it would be INTERPRETED, into a
+     * specific 422 asserting that somebody deleted the model row while the operator's form was
+     * open. That sentence would be false, and it would send whoever read it to the wrong table.
+     *
+     * So the two conditions are separated before the interpretation happens: a caller in the wrong
+     * context gets a LogicException naming the real defect, and `! $exists` is left meaning only the
+     * one thing it can now mean.
+     *
+     * THIS IS NOT A THIRD ISOLATION LAYER AND MUST NOT BE READ AS ONE. It never widens a query and
+     * it grants nothing — the explicit `organization_id` predicate is still the mechanism and the
+     * global scope is still the backstop. It is a caller-contract check, in the same register as
+     * the LogicExceptions in App\Models\AuditLog.
+     *
+     * NO PRODUCTION PATH CAN TRIP IT. App\Http\Middleware\TenantContext binds
+     * `$request->route('organization')` and both designation controllers pass the id of the model
+     * bound from that same segment, so the two agree by construction. A console command, a queued
+     * job or a backfill must wrap the call in `TenantContext::runFor($organizationId, ...)` — one
+     * line, and the same line the request path already executes.
+     *
+     * @throws LogicException when the ambient context is unbound or names another organization
+     */
+    private function assertAgreeingTenantContext(string $method, string $organizationId): void
+    {
+        if ($this->tenants->isBound() && $this->tenants->orgId() === $organizationId) {
+            return;
+        }
+
+        throw new LogicException(
+            $method.'() was called for organization ['.$organizationId
+            .'] with no matching tenant context bound. The catalog re-verification inside it '
+            .'reads a #[ScopedBy(OrganizationScope::class)] model, which fails closed, so '
+            .'without an agreeing context the check answers "empty" for a reason that has '
+            .'nothing to do with the catalog. Wrap the call in '
+            .'TenantContext::runFor($organizationId, ...) — the request path already does.',
+        );
     }
 }

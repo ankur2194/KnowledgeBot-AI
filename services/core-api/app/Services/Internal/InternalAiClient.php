@@ -5,13 +5,17 @@ declare(strict_types=1);
 namespace App\Services\Internal;
 
 use App\Exceptions\KbException;
+use App\Services\Chat\ChatContext;
+use App\Services\Chat\ConfigSnapshot;
 use App\Services\Embedding\EmbeddingCandidate;
 use App\Services\Embedding\EmbeddingDesignation;
 use App\Services\Embedding\EmbeddingReadiness;
 use App\Services\Sources\IngestionSubmission;
+use App\Support\Crypto\CredentialVault;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
+use SensitiveParameter;
 
 /**
  * The ONLY class in this application permitted to open a connection to `ai-api`.
@@ -37,7 +41,221 @@ final class InternalAiClient
     /** A relayed field PATH is bounded for the same reason, and paths are short by construction. */
     private const MAX_RELAYED_FIELD_LENGTH = 128;
 
-    public function __construct(private readonly InternalRequestSigner $signer) {}
+    public function __construct(
+        private readonly InternalRequestSigner $signer,
+        private readonly CredentialVault $vault,
+    ) {}
+
+    /**
+     * Open the chat stream: `POST /internal/v1/chat/stream`, SSE back, relayed to the client.
+     *
+     * ═══ THE ONE PLACE `provider_credentials` IS CONSTRUCTED ════════════════════════════════
+     *
+     * ADR-011, restated as a property of THIS METHOD: the map is a TOP-LEVEL sibling of `config`,
+     * never a member of it, and it is built from sealed rows decrypted into a local that dies with
+     * this method. `rg -n 'provider_credentials' services/core-api/app` must show exactly one
+     * construction site, and this is it.
+     *
+     * IT IS A MAP AND NOT ONE FIELD (finding F12, ruled 2026-08-12 as `docs/22` § G7). One turn can
+     * need three keys — chat, embedding (ADR-031 explicitly permits a different connection), rerank —
+     * plus one per fallback link. `ConfigSnapshot::connectionIdsInPlay()` decides which; this method
+     * decrypts each at the point it enters the map and never builds an intermediate array of
+     * plaintext keys, because a plain `array<string,string>` of secrets is one `var_export` in an
+     * exception message away from printing all three.
+     *
+     * A CONNECTION WITH NO SEALED ROW IS A REFUSAL, NOT A FALLBACK TO THE CHAT KEY. Falling back
+     * would send one tenant's key to a vendor they did not choose for that surface and would embed
+     * the question in a vector space the corpus was not indexed in — neither of which raises
+     * anywhere downstream. The far side's `credential_for()` fails closed for the same reason; this
+     * fails closed one hop earlier, so the refusal names the surface rather than arriving as a
+     * relayed 422 mid-stream.
+     *
+     * ═══ `requestEpoch()`, NOT `callEpoch()` — AND THIS IS THE OPPOSITE CHOICE FROM THE JOBS ══
+     *
+     * This method is reached from an HTTP request handler under PHP-FPM, where one request is one
+     * process and `LARAVEL_START` genuinely is this request's start. The far side's remaining budget
+     * then shrinks as ours does, which is the whole reason the header is an absolute instant.
+     * `callEpoch()` here would silently EXTEND the deadline past the client's own 60 s, so Laravel
+     * would abandon a turn the data plane was still happily billing for. Finding B1/Q2 is the
+     * mirror-image mistake on the queued paths; the two names read differently enough that picking
+     * the wrong one is a visible choice.
+     *
+     * ═══ NO `->retry()`, AND `read_timeout` IS NOT OPTIONAL ═════════════════════════════════
+     *
+     * Laravel never retries its chat call: the provider adapter owns provider retries, and attempts
+     * multiply across tiers (3×3 is nine provider calls from one click). And with `'stream' => true`
+     * Guzzle returns as soon as headers land, so `->timeout()` does not bound the BODY read at all —
+     * `read_timeout` is documented to default to `default_socket_timeout` and is in fact never set
+     * (guzzle#2783). Unset, a dead upstream holds this FPM child forever. It is set BELOW the
+     * heartbeat interval doubled, so a healthy-but-quiet upstream produces a `null` from
+     * `UpstreamStream::frames()` rather than a stall.
+     *
+     * ═══ `X-KB-Bot-Id` IS PRESENT HERE AND ABSENT ON EVERY OTHER CALL IN THIS CLASS ═════════
+     *
+     * Not an inconsistency: a knowledge source is ORGANIZATION-owned and is assigned to zero or many
+     * bots (ADR-067), so ingestion and the two maintenance operations have no single bot to name. A
+     * chat turn has exactly one, and the far side REQUIRES it — `chat_stream` raises `validation`
+     * without it, because the mandatory Qdrant filter has a bot-access term and there would be no
+     * value to put in it.
+     *
+     * @param  array<string, array{credential_ciphertext: string, data_key_ciphertext: string}>  $sealed
+     *                                                                                                    connection_id => the sealed material, read org-scoped by the caller. Keys that are not
+     *                                                                                                    in `connectionIdsInPlay()` are ignored; an id in play with no entry here is a refusal.
+     *
+     * @throws KbException `validation` when a surface has no credential; `internal_dependency` when
+     *                     the data plane is unreachable or refuses before the first byte
+     */
+    public function openChatStream(
+        ConfigSnapshot $snapshot,
+        ChatContext $context,
+        int $deadlineMs,
+        #[SensitiveParameter] array $sealed,
+    ): UpstreamStream {
+        $credentials = [];
+
+        foreach ($snapshot->connectionIdsInPlay() as $connectionId) {
+            $row = $sealed[$connectionId] ?? null;
+
+            if ($row === null) {
+                // The MESSAGE NAMES NO CONNECTION ID AND NO VENDOR. This refusal is rendered to
+                // whoever is chatting, which on the widget surface is a stranger on a customer's
+                // marketing site; the id belongs in the operator's log line, not in the envelope.
+                throw KbException::validation(
+                    'This bot is configured against a provider connection whose credential is not '
+                    .'available, so the turn cannot run. An administrator needs to re-enter the key '
+                    .'for that connection.',
+                );
+            }
+
+            // DECRYPTED ONE AT A TIME, STRAIGHT INTO THE MAP. Never into a named local and never
+            // through a comprehension over every row: the resulting plain array of plaintexts has
+            // no masking anywhere in it, and one `str()` of it in an exception or a debug line
+            // prints every key the tenant owns.
+            $credentials[$connectionId] = $this->vault->open(
+                $row['credential_ciphertext'],
+                $row['data_key_ciphertext'],
+            );
+        }
+
+        // Serialize the CONFIG once to derive its version, then serialize the whole body once and
+        // sign those exact bytes. Re-encoding JSON to hash it is not byte-stable and produces
+        // intermittent 401s.
+        $versioned = $snapshot->withVersion(
+            $this->snapshotVersion(json_encode($snapshot->hashableArray(), JSON_THROW_ON_ERROR)),
+        );
+
+        $body = json_encode([
+            // Present, checked against the verified headers on the far side, and then unused. Scope
+            // comes from the signed headers; `assert_scope_agrees()` refuses a disagreement, which
+            // catches a control plane that resolved a snapshot for one tenant and signed for another.
+            'org_id' => $context->organizationId,
+            'bot_id' => $context->botId,
+            'conversation_id' => $context->conversationId,
+            'message_id' => $context->messageId,
+            'client_message_id' => $context->clientMessageId,
+            'actor_type' => $context->actorType->value,
+            // THE INTERNAL FIELD NAME IS `query` AND THE PUBLIC ONE IS `content`. Laravel maps one
+            // onto the other here and nowhere else; a client that posts `query` to the public API
+            // gets a 422, and `text` is the `token` frame's field.
+            'query' => $context->query,
+            // A LIST, and `array_values` is load-bearing: an associative array with gaps encodes as
+            // a JSON OBJECT, and the far side types this `tuple[str, ...]` — so a history that lost
+            // one turn to a filter would 422 the whole request rather than send a short window.
+            'history' => array_values($context->history),
+            'deadline_epoch_ms' => $deadlineMs,
+            'config' => $versioned->toArray(),
+            // TOP-LEVEL, BESIDE `config` AND NEVER INSIDE IT. See the docblock; ADR-011 property 1
+            // is that rotating a key must not move `configuration_version`, and the version above
+            // was derived from `hashableArray()`, which cannot reach this map.
+            'provider_credentials' => $credentials,
+        ], JSON_THROW_ON_ERROR);
+
+        $path = '/internal/'.config('kb.contract_version').'/chat/stream';
+        $timestamp = (string) time();
+
+        // Build the X-KB-* set ONCE and derive both the signature and the request from it.
+        $headers = [
+            'X-KB-Org-Id' => $context->organizationId,
+            // PRESENT HERE, ABSENT EVERYWHERE ELSE IN THIS CLASS — see the docblock.
+            'X-KB-Bot-Id' => $context->botId,
+            'X-KB-Actor-Type' => $context->actorType->value,
+            'X-KB-Operation' => 'chat.execute',
+            // Also the replay nonce, so it is per-REQUEST and never derived from anything stable.
+            'X-KB-Request-Id' => $context->requestId,
+            'X-KB-Config-Version' => (string) $versioned->version,
+            'X-KB-Contract-Version' => (string) config('kb.contract_version'),
+            // ABSOLUTE epoch milliseconds, computed by the CALLER from its own remaining budget and
+            // passed in — this method never re-derives one, because a fresh duration downstream is
+            // exactly what the header exists to prevent.
+            'X-KB-Deadline' => (string) $deadlineMs,
+            // A MUTATION: it bills tokens and writes a transcript. The key is derived from the
+            // conversation and the client-minted message id, so a double submit collapses instead of
+            // billing two generations.
+            'X-KB-Idempotency-Key' => $context->idempotencyKey(),
+            'X-KB-Timestamp' => $timestamp,
+        ];
+
+        if ($context->actorId !== null) {
+            $headers['X-KB-Actor-Id'] = $context->actorId;
+        }
+
+        $signature = $this->signer->sign('POST', $path, $body, $headers);
+
+        try {
+            $response = Http::baseUrl((string) config('services.ai.url'))
+                ->withBody($body, 'application/json')
+                ->withHeaders($headers + [
+                    'Accept' => 'text/event-stream',
+                    'X-KB-Signature' => $signature,   // redacted from every log line
+                ])
+                ->connectTimeout((int) config('kb.timeouts.connect'))
+                ->timeout((int) config('kb.timeouts.internal'))
+                // `stream => true` routes this through Guzzle's StreamHandler and returns as soon as
+                // headers land, which is what makes the relay a relay rather than a buffer.
+                // `read_timeout` bounds the BODY read and has no working default — see the docblock.
+                ->withOptions([
+                    'stream' => true,
+                    'read_timeout' => (int) config('kb.timeouts.stream_read'),
+                ])
+                // NO ->retry(). Retry ownership is the provider adapter's.
+                ->post($path);
+        } catch (ConnectionException) {
+            // NOT CHAINED: a connection exception's message carries the resolved internal host and
+            // port — topology a tenant must never be told.
+            throw KbException::aiServiceUnavailable(
+                'The AI service could not be reached to answer this message.',
+            );
+        }
+
+        if ($response->failed()) {
+            // A pre-stream refusal — a 422 on the body, a 401 on the signature. It arrives as JSON
+            // rather than as SSE, and the relay has not written a byte yet, so it can still be a
+            // status. `->json()` reads the buffered error body; a streamed 4xx is small by
+            // construction because the far side's handlers run before the generator starts.
+            throw $this->relay($response->status(), $response->json(), 'answering this message');
+        }
+
+        // ── `detach()` AND NOT `resource()`, AND THE DIFFERENCE IS A LAYER ──────────────────
+        //
+        // `Response::resource()` wraps the PSR body in `GuzzleHttp\Psr7\StreamWrapper`, a userland
+        // stream wrapper that implements no `stream_set_option` — so any attempt to set a timeout or
+        // a blocking mode on it raises a warning, which Laravel converts to an exception and the
+        // relay reports as a failure on a turn that was working. `detach()` returns the SOCKET the
+        // handler is actually reading, so `feof()` means "the far side hung up" and `fclose()` means
+        // "the far side is told" rather than "a wrapper was discarded".
+        //
+        // Detaching leaves the Guzzle response holding an empty body. Nothing reads it afterwards:
+        // this method returns the stream and the response object goes out of scope.
+        $resource = $response->toPsrResponse()->getBody()->detach();
+
+        if (! is_resource($resource)) {
+            throw KbException::aiServiceUnavailable(
+                'The AI service accepted the message but returned no readable stream.',
+            );
+        }
+
+        return new UpstreamStream($resource);
+    }
 
     /**
      * Ask the data plane which of this organization's connections supplies the embedding
@@ -256,7 +474,7 @@ final class InternalAiClient
         }
 
         if ($response->failed()) {
-            throw $this->relay($response->status(), $response->json());
+            throw $this->relay($response->status(), $response->json(), 'submitting this source version for ingestion');
         }
 
         $payload = $response->json();
@@ -462,7 +680,7 @@ final class InternalAiClient
         }
 
         if ($response->failed()) {
-            throw $this->relay($response->status(), $response->json());
+            throw $this->relay($response->status(), $response->json(), 'synchronizing this source\'s retrieval scope');
         }
 
         $report = $response->json();
@@ -517,8 +735,15 @@ final class InternalAiClient
      *     how two planes agree on a field survives only where every hop that copies the field
      *     preserves it, and this method is such a hop. It fails closed, below.
      */
-    private function relay(int $status, mixed $payload): KbException
+    private function relay(int $status, mixed $payload, ?string $subject = null): KbException
     {
+        // DEFAULTED RATHER THAN REQUIRED, so the three existing call sites keep the sentence they
+        // shipped with byte for byte. It is a parameter at all because FOUR operations now share
+        // this method and the two fallback sentences below name only one of them — an unclassified
+        // failure on a chat turn told the operator to look at their embedding configuration, which
+        // is a wrong lead rather than a vague one.
+        $subject ??= "resolving this organization's embedding configuration";
+
         $errorClass = is_array($payload) ? ($payload['error_class'] ?? null) : null;
         $message = is_array($payload) ? ($payload['message'] ?? null) : null;
         $retryable = is_array($payload) ? ($payload['retryable'] ?? null) : null;
@@ -530,8 +755,7 @@ final class InternalAiClient
             // unavailable, and it is the ONE case where deriving from the status is correct,
             // because there is no assigned class to relay.
             return KbException::aiServiceUnavailable(
-                'The AI service returned an unclassified error while resolving this '
-                ."organization's embedding configuration (HTTP {$status}).",
+                "The AI service returned an unclassified error while {$subject} (HTTP {$status}).",
             );
         }
 
@@ -539,7 +763,12 @@ final class InternalAiClient
             $errorClass,
             is_string($message) && $message !== ''
                 ? $message
-                : 'The AI service rejected the embedding-readiness request.',
+                // DERIVED FROM $subject FOR THE SAME REASON THE SENTENCE ABOVE IS. This read
+                // 'The AI service rejected the embedding-readiness request.' until 2026-08-27 —
+                // a second hard-coded noun, three call sites away from being right, and missed
+                // when the first one was fixed because fixing one instance of a claim reads as
+                // fixing the claim (`docs/22` § Q16).
+                : "The AI service rejected this request while {$subject}.",
             $status,
             // A NON-BOOLEAN IS `null`, NOT `false`. `null` means "the envelope did not say", which
             // relayed() maps to DOWNSTREAM — the same reading a missing field has always had. A

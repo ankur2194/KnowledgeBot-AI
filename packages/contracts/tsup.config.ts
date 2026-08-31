@@ -10,6 +10,12 @@ export default defineConfig({
   entry: {
     index: 'src/index.ts',
     'forms/index': 'src/forms/index.ts',
+    // The admin-only SSE union (`retrieval.trace`). Its OWN entry, never a root re-export: the root
+    // is budgeted at <=1 kB brotli inside apps/widget's app shell and `toKbAdminEvent` is real
+    // runtime code. A separate entry keeps that budget a property of the build rather than of
+    // whether tree-shaking happened to work — the silently-passing size gate preact-vite-library
+    // warns about. See src/admin.ts.
+    admin: 'src/admin.ts',
   },
   // Both formats: apps/mobile runs Jest, which resolves the `require` condition.
   format: ['esm', 'cjs'],

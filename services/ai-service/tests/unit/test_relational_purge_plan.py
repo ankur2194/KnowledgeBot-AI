@@ -113,9 +113,13 @@ def test_every_sparse_statistics_table_is_purged(table: str) -> None:
     to the write allow-list arrives already failing this test instead of accumulating quietly for
     however long it takes someone to notice rows keyed to a version that does not exist.
 
-    `retrieval_traces` and `evaluation_results` are deliberately not in scope: they are
-    conversation-side, an ordinary source deletion **retains** them, and only a data-subject
-    erasure sweeps them — in place, by their own row ids, never by version.
+    `evaluation_results` is deliberately not in scope: it is conversation-side, an ordinary
+    source deletion **retains** it, and only a data-subject erasure sweeps it — in place, by its
+    own row ids, never by version. `retrieval_traces` used to be named here beside it and is
+    not any more, because it left `ALLOWED_TABLES` entirely on 2026-08-27 (ADR-033 property 2:
+    the admin playground reads it). The parametrization reads out of `ALLOWED_TABLES`, so that
+    removal needed no edit here — this sentence is the one that would have gone stale, which is
+    the difference between a list computed from the tuple and a list restated beside it.
     """
     assert table in PLAN_TABLES, (
         f"{table} is on the data plane's write allow-list and is keyed by source_version_id, but "

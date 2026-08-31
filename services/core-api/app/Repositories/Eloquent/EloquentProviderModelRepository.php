@@ -214,10 +214,30 @@ final class EloquentProviderModelRepository implements ProviderModelRepositoryIn
                 ->lockForUpdate()
                 ->first();
 
-            if ($organization instanceof Organization
-                && $organization->embedding_connection_id === $connectionId
-                && $organization->embedding_model === $row->model) {
-                return ProviderModelDeletion::Designated;
+            // BOTH DESIGNATIONS, NOT ONE (`docs/22` § T36). This check read the embedding pair
+            // only, so deleting the row the RERANK designation named succeeded and reranking
+            // stopped — no error, no metric movement, answers quietly worse. The two are separate
+            // arms rather than an `||` because the caller turns the verdict into the operator's
+            // remedy, and the remedies are different endpoints.
+            //
+            // NO SECOND LOCK IS TAKEN, and that is why this is a safe place to add the arm.
+            // `$organization` is already held FOR UPDATE and carries both pairs;
+            // `designateRerankConnection()` re-verifies the catalog under this same
+            // `organizations` row lock, so the rerank designate/delete race serialises exactly as
+            // the embedding one does. Reaching for a lock on `provider_models` here instead would
+            // order the two paths model -> organizations while the designate path orders them
+            // organizations -> model, which is the ABBA deadlock that method's docblock warns
+            // about at length.
+            if ($organization instanceof Organization) {
+                if ($organization->embedding_connection_id === $connectionId
+                    && $organization->embedding_model === $row->model) {
+                    return ProviderModelDeletion::DesignatedForEmbedding;
+                }
+
+                if ($organization->rerank_connection_id === $connectionId
+                    && $organization->rerank_model === $row->model) {
+                    return ProviderModelDeletion::DesignatedForRerank;
+                }
             }
 
             // BEFORE the delete, because after it there is nothing left to describe: this is a

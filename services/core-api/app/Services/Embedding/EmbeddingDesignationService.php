@@ -8,7 +8,9 @@ use App\Exceptions\KbException;
 use App\Models\Organization;
 use App\Repositories\Contracts\EmbeddingCandidateRepositoryInterface;
 use App\Repositories\Contracts\OrganizationRepositoryInterface;
+use App\Services\Audit\AuditLogger;
 use App\Services\Internal\InternalAiClient;
+use Illuminate\Http\Request;
 
 /**
  * Set or clear which connection supplies an organization's embedding credential.
@@ -38,6 +40,7 @@ final readonly class EmbeddingDesignationService
         private EmbeddingCandidateRepositoryInterface $candidates,
         private OrganizationRepositoryInterface $organizations,
         private InternalAiClient $ai,
+        private AuditLogger $audit,
     ) {}
 
     /**
@@ -49,6 +52,7 @@ final readonly class EmbeddingDesignationService
         Organization $organization,
         ?EmbeddingDesignation $proposed,
         ?string $actorId = null,
+        ?Request $request = null,
     ): array {
         $organizationId = $organization->organizationId();
 
@@ -79,8 +83,68 @@ final readonly class EmbeddingDesignationService
             throw KbException::validation($readiness->explanation);
         }
 
-        $organization = $this->organizations->designateEmbeddingConnection($organizationId, $proposed);
+        $organization = $this->organizations->designateEmbeddingConnection(
+            $organizationId,
+            $proposed,
+            // A FULL CLOSURE AND NOT AN ARROW FUNCTION: `fn () => $this->record(...)` implicitly
+            // RETURNS the call's value, and `record()` is void — both a PHPStan finding and a quiet
+            // lie about the contract, which types the callback as returning void.
+            function (Organization $row, ?EmbeddingDesignation $previous) use ($actorId, $request): void {
+                $this->record($row, $previous, $actorId, $request);
+            },
+        );
 
         return ['organization' => $organization, 'readiness' => $readiness];
+    }
+
+    /**
+     * One audit row describing the change, written inside the repository's transaction.
+     *
+     * ── THIS CLOSES THE GAP THE RERANK PAIR MADE VISIBLE, AND IT IS THE BIGGER OF THE TWO ────
+     *
+     * Until it existed, `designateEmbeddingConnection()` wrote with no audit call and no closure to
+     * pass one through, so "who moved the vector space, and from what" had no answer in
+     * `audit_logs`. `(provider, model)` IS the vector space (ADR-031) — it is part of the Qdrant
+     * collection name — so re-designating it strands every chunk already indexed until somebody
+     * re-embeds the whole corpus at a provider's per-token price, and clearing it hands the choice
+     * to the resolution rule in `embedding_selection.py`, which may pick a different connection or
+     * refuse outright and block ingestion for the organization.
+     *
+     * BOTH PAIRS COME OFF THE PERSISTED ROW, never from request input — which is what makes
+     * "nothing credential-shaped can appear here" a property of the code rather than of the caller's
+     * discipline. `Organization` has no credential to offer: the key lives on
+     * `provider_connections`, envelope-encrypted, and this path never reads that table.
+     */
+    private function record(
+        Organization $row,
+        ?EmbeddingDesignation $previous,
+        ?string $actorId,
+        ?Request $request,
+    ): void {
+        $current = EmbeddingDesignation::fromOrganization($row);
+
+        // WHICH OPERATION IS DERIVED FROM THE PERSISTED STATE, not from the argument the caller
+        // passed. The two cannot disagree today, and deriving it from the row is what keeps that
+        // true if a future path ever writes these columns another way.
+        $operation = $current === null
+            ? AuditLogger::EMBEDDING_DESIGNATION_CLEARED
+            : AuditLogger::EMBEDDING_DESIGNATION_SET;
+
+        $details = $current === null ? [] : $current->toArray();
+
+        // Nulls are skipped by the sanitizer without being reported, so an organization that had no
+        // previous designation simply omits both keys rather than writing a pair of nulls.
+        $details['previous_connection_id'] = $previous?->connectionId;
+        $details['previous_model'] = $previous?->model;
+
+        $this->audit->record(
+            $operation,
+            organizationId: $row->organizationId(),
+            actorId: $actorId,
+            details: $details,
+            subjectType: Organization::class,
+            subjectId: $row->id,
+            request: $request,
+        );
     }
 }

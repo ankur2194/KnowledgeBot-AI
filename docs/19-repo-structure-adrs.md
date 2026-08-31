@@ -2915,3 +2915,275 @@ are running against.
 `app.<domain>` on purpose (ADR-027), and one `localhost` cannot be two origins — so the `(chat)`
 group's CSP and its cookie isolation cannot be tested under this topology at all. That needs Traefik,
 the dev leaf certificate, and the dev CA trusted inside the browser container.
+
+---
+
+ADR-073…075 came from the effort of **2026-08-26/27** that built the five provider wire adapters, the
+RAG stage modules, the conversation schema, the fallback router and the rerank designation. The full
+register is [`docs/22`](22-spec-findings-and-decisions.md) § *Found while building the adapters, the
+RAG stages and the conversation schema — T1–T41*; the three below are the items from it that are
+decisions rather than defects. None supersedes anything. Two of them — 074 and 075 — are **applications
+of an accepted ADR rather than departures from one**, which is why neither carries a supersession line:
+ADR-074 is ADR-033's three admission properties producing a removal for the first time, and ADR-075 is
+`postgresql-patterns`' partitioning rule found not to apply, with the reason named.
+
+**ADR-073 is different in kind and should be read first.** It is not a new decision at all: it was
+taken in code on 2026-08-26, is recorded in full in a docstring, and was cited from five sites in
+`services/ai-service` as **"ADR-069"** — a number this register had already assigned to *The Two
+Mutable Payload Terms*, above. So for a day the analyzer decision had no ADR and its citations pointed
+at an unrelated one. The five citations have since been changed to name the decision rather than a
+number, which is the correct interim (`docs/22` § T41); ADR-073 is the number they may now carry.
+**The rule that produced the collision is worth stating once: a number is assigned here and nowhere
+else.** A call site that mints one is how two decisions come to share a heading and neither can be
+looked up.
+
+### ADR-073: The BM25 Analyzer Is NFKC → Casefold → NFKC, Character Bigrams for Unsegmented Scripts, and Word-Character Runs Everywhere Else — Pinned at `bm25/v1` Only While No Corpus Exists
+
+**Status: `Accepted` 2026-08-26, recorded here 2026-08-27. Supersedes nothing. Closes the open half of
+ADR-032 (finding C2) and retires the dated ruling that held it open,
+[`docs/22`](22-spec-findings-and-decisions.md) § G6. Constrained by ADR-034 and does not change
+it.** The authority on what was chosen is `services/ai-service/app/retrieval/sparse.py`'s `tokenize`
+docstring, which was written with the implementation; this entry is the register's copy of the argument
+and the place a code comment may point.
+
+**Context.** ADR-032 restored the sparse arm with locally computed BM25 and shipped every part of it
+except the analyzer, deliberately: `tokenize` raised, and the hold was recorded as a dated ruling
+rather than a to-do, *"precisely so it would not be filled with a plausible default"*. The plausible
+default is whitespace segmentation, and the reason it is dangerous is not that it is inaccurate — it is
+that its inaccuracy is **invisible in every metric this pipeline has**. An entire Chinese, Japanese or
+Thai sentence becomes one term, that term is in no query, the lexical branch returns nothing, and *a
+branch that matches nothing is indistinguishable from a corpus that contains nothing*.
+
+**Decision, in four parts.**
+
+1. **Normalization is NFKC, then `casefold()`, then NFKC again.** The second pass is not redundant:
+   full case folding can emit sequences that are not NFKC-normalized, so a single pass is not
+   idempotent and the function could disagree with itself across a round trip through storage.
+   Compatibility folding is what makes fullwidth `ＡＢＣ` and `ABC` one term.
+2. **Characters in a script written without word separators are emitted as character bigrams**, with a
+   run of length one emitted as itself, because a one-character run has no bigram and dropping it would
+   silently lose every single-ideograph term. The membership test is a fixed table of codepoint ranges,
+   `_UNSEGMENTED_RANGES`. **Hangul is deliberately absent** — Korean is space-segmented, so bigramming
+   it would shred words that segment correctly on their own.
+3. **Everything else is a maximal run of word characters** — Unicode categories `Lu Ll Lt Lm Lo Nd Nl
+   No Mn Mc`. `Mn`/`Mc` are in the set on purpose: dropping combining marks decomposes Devanagari and
+   Arabic words into pieces that hash to ids no query will produce. Punctuation separates, so `abc-123`
+   is two terms. A script boundary ends a run even with no punctuation between it, so `漢字abc` is two
+   runs analyzed by two rules.
+4. **`SPARSE_ANALYZER_VERSION` stays `bm25/v1`**, and the same function analyzes passages and queries —
+   `encode_passage` and `encode_query` both call it and neither pre-processes its input.
+
+**Reason the ranges are a table and not a library.** `unicodedata` exposes no script property, so the
+alternatives are `regex`, PyICU, or a per-language segmenter. Every one of them would make **a version
+in a lockfile part of the analyzer identity**, and by ADR-034 the analyzer identity is inside the
+collection name — so a routine dependency bump would silently be a corpus-wide reindex, and the diff
+that caused it would be one line in `uv.lock`. A hand-written range table is cruder and is *ours*: it
+changes only when someone changes it, in a file whose neighbours say what that costs.
+
+**Reason the version did not move, and this is the load-bearing half.** `run_version` raised
+`NotImplementedError` until this function existed, so **no corpus has ever been indexed under
+`bm25/v1`** and this choice invalidates nothing. That is the entire argument for taking the decision at
+that moment rather than deferring it: the identical decision taken after the first tenant indexes is a
+full re-embed of every organization's dense vectors at a provider's per-token price (ADR-034), charged
+to whoever happens to be holding it. **The freedom is a property of the corpus being empty, and it
+expires the first time a tenant indexes.**
+
+**Rejected alternatives.**
+
+- **Whitespace segmentation.** The default everyone reaches for, and the failure above: silent, total,
+  per-language loss of the lexical arm with every dashboard green. Rejected on the failure mode rather
+  than on accuracy.
+- **A segmentation library (`regex` script properties, PyICU, jieba, MeCab, SudachiPy).** Better
+  segmentation than bigrams, and it puts a third party's version number inside the collection name. It
+  also adds a model or a dictionary to a repository whose whole scoping decision (ADR-030) is about
+  what is loaded locally — a dictionary is not model inference, but it is one more pinned artifact with
+  a licence and a revision, for a gain no evaluation run has yet measured.
+- **Keeping joiners, so `abc-123` stays one term.** Tempting because part numbers are exactly what the
+  lexical arm is for. Rejected because **every rule that keeps a joiner has to keep it identically on
+  both sides, forever**: a query written `abc 123`, `abc‑123` with a non-breaking hyphen, or `ABC-123`
+  must reach the same id as the indexed passage, and the analyzer that guarantees that is the one with
+  the fewest special cases. Splitting costs a little precision and **costs no recall**, because a query
+  containing `abc-123` splits the same way.
+- **A single NFKC pass.** Cheaper and not idempotent under casefolding; the failure is a term that
+  survives one trip through storage and not two.
+- **Per-language analyzers selected by detected language.** Makes the analyzer a function of a detector
+  whose output can differ between the indexing run and the query, which is the query/passage
+  disagreement this decision exists to make structurally impossible.
+- **Bumping to `bm25/v2` "to be safe".** Rejected because it is not free and reads as if it were: the
+  version is inside the collection name, so a defensive bump renames the collection and re-embeds the
+  dense vectors. A version bump is a migration, not a hygiene measure.
+
+**Consequences, including the ones that hurt.** Bigrams are a real degradation against a real
+segmenter: they roughly double the term count for CJK text, they produce term ids that cross word
+boundaries, and precision on those languages is worse than a dictionary segmenter would give — this is
+a floor that makes the arm work at all, not a good analyzer for CJK. Term overlap across scripts is
+**zero**, so cross-lingual retrieval rides entirely on the dense branch, exactly as ADR-032 already
+recorded. `abc-123` splitting costs precision on part numbers, which is the lexical arm's own use case.
+And each of `BM25_K1`, `BM25_B`, `BM25_AVGDL`, `TERM_ID_MODULUS` and the term-hash personalization is an
+input to this identity: changing any one of them is this decision changing, with the same price.
+
+**Revisit condition, and it is an expiry rather than a trigger.** This decision is cheap to change
+**only while no corpus has been indexed under `bm25/v1`**, and that stops being true at the first
+successful `run_version`. The observable is the existence of any Qdrant collection whose name carries
+the current `EmbeddingSpace` digest — after that, an analyzer change is a planned migration (a second
+collection, both live, the active-version pointer moving once) with a provider bill attached, and never
+an edit. Revisit **before** that point if an evaluation run over a CJK or Thai corpus shows bigram
+recall materially below a segmenter's; revisit **after** it only with the migration budgeted.
+
+---
+
+### ADR-074: `retrieval_traces` Leaves the Data Plane's Write Allow-List; Laravel Writes It in the Same Transaction as the Message
+
+**Status: `Accepted` 2026-08-27. Supersedes nothing. Closes
+[`docs/22`](22-spec-findings-and-decisions.md) § T28. It changes the membership of `ALLOWED_TABLES` in
+`services/ai-service/app/db/writes.py` and therefore narrows ADR-033's list, which is _applying_
+ADR-033 rather than replacing it: ADR-033's decision is that admission is three properties rather than
+a list, and this is the first time those properties have produced a removal. ADR-012's original
+rationale is likewise untouched.**
+
+**Context.** ADR-033's second admission property is *"no public API path reads or writes the table"*,
+and ADR-033 calls it the one that actually bites. `retrieval_traces` was admitted under it. Two
+admin-facing surfaces then arrived that are precisely a request to **read** that table from a public
+API path: the playground's diagnostics panel, and the per-turn diagnostics on a historical conversation
+transcript. The second is the one with no way out — a live SSE frame can serve the playground, and
+nothing but the row can serve a transcript read six weeks later.
+
+**Decision.** `retrieval_traces` comes off `ALLOWED_TABLES`. The data plane continues to **build** the
+trace — `app/rag/runner.py` assembles `RetrievalTrace` with every field `docs/04` §8.24 requires and
+emits it as the `retrieval.trace` frame — and never writes the row. Laravel's relay finalizer persists
+it, inside the same transaction that already writes the message row, the citation rows and the usage
+row.
+
+**Reason: the sibling, not the property in the abstract.** `citations` and `retrieval_traces` are the
+same kind of row — per-message diagnostics of one turn, written once when the turn finalizes, read
+afterwards by an admin screen — and `citations` has always been Laravel's. The split across planes was
+the anomaly; property 2 is the rule that names it. Arguing the property abstractly invites the
+interpretation that was rejected below; arguing from the sibling does not, because there is no reading
+of "these two rows are different" that survives looking at the schema.
+
+**Reason the predicted cost turned out to be already paid.** § T28 priced the third option at *"a round
+trip of trace data back across the seam"*. There is no extra round trip: the frame is already on the
+wire because the playground needs it live, and the finalizer already parses the stream. Persisting it
+costs one more `INSERT` inside a transaction that was already open — and buys atomicity the split could
+not: **a trace can no longer outlive or precede the message it describes.** Under the old arrangement
+two writers on two planes wrote two rows with no transaction between them.
+
+**Rejected alternatives** — the three § T28 enumerated, which are not equivalent:
+
+- **The playground reads the live `retrieval.trace` frame and never the table.** Works for the
+  playground and does nothing for a historical transcript, which is the surface that cannot be served
+  any other way. It answers the easier half of the problem and leaves the harder half to be answered
+  again, differently.
+- **Declare that an admin read is not "the public API".** The cheapest edit and the most expensive
+  consequence: it weakens property 2 for **every other name on the list**, permanently, on an argument
+  that would apply equally to the next one. A property with an exception for the case in front of you
+  is not a property.
+- **Keep the data plane as the writer and have Laravel read the row it does not write.** This is the
+  status quo restated, and it is what property 2 forbids: a data-plane writer sitting beside a Laravel
+  reader, with no policy, no audit row, and none of the framework-applied organization scope that every
+  other conversation-side read goes through.
+
+**Consequences, including the one that is invisible from here.** `erase_data_subject` (ADR-015,
+`docs/13` §18.10) overwrites three verbatim columns in place — `citations.excerpt`,
+`retrieval_traces.selected_evidence`, `evaluation_results.retrieved_evidence`. **Two of those three are
+now swept over the core-api seam and only `evaluation_results.retrieved_evidence` is a local
+statement.** `app/deletion/tasks.py` says so at its own docstring; if that sentence and the comment in
+`writes.py` ever disagree, the tuple is the authority. Second: the trace's persistence now depends on
+the frame reaching the finalizer, so a frame the relay drops is a row that is never written — which
+makes `docs/22` § T32 (the client event union has no name for `retrieval.trace`) a *neighbour* of this
+decision rather than an unrelated parser gap. Third, and stated because it is the honest cost:
+`retrieval_traces` has a migration and a model and, at the time of writing, **no writer on either
+plane** — the relay finalizer is Phase 4. The check is
+`grep -rn 'retrieval_traces' services/core-api/app services/ai-service/app`, read for a statement
+rather than for a mention.
+
+**What this does not do.** It does not decide whether any *other* allow-listed name should follow.
+Each is a separate application of the three properties, and the removal that produced this ADR is
+evidence the properties work, not evidence the list should shrink.
+
+**Revisit when** an admin surface stops being the only reader — specifically, when something inside the
+data plane needs to read a trace it did not just produce. The evaluation suite is the candidate: it
+reads `evaluation_results` locally today, and the day it wants a *production* turn's trace it will be
+reading a Laravel-owned table over the seam, which is the mirror image of the problem this ADR closed.
+The answer at that point is a read endpoint on the seam, not a re-admission.
+
+---
+
+### ADR-075: `messages` and `provider_calls` Stay Unpartitioned; Retention Is `retention_expires_at` Plus a Partial Index on `conversations`
+
+**Status: `Accepted` 2026-08-27. Supersedes nothing. Closes
+[`docs/22`](22-spec-findings-and-decisions.md) § T23 and retires the unresolved-contradiction paragraph
+in `services/core-api/database/migrations/2026_08_26_002800_create_conversations_table.php`, which now
+records this ruling and its expiry instead.
+[`postgresql-patterns`](../.claude/skills/postgresql-patterns/SKILL.md)'s Definition of done asks for
+both tables to be `PARTITION BY RANGE (created_at)`; this ADR does _not_ say that rule is wrong, and
+the skill is owed no correction.**
+
+**Context.** `postgresql-patterns` requires the partitioning decision to be taken *before the first row
+lands*, which is correct and is why this is an ADR rather than a backlog item. D1 shipped the six
+conversation tables unpartitioned and wrote the contradiction into the migration's docblock rather than
+resolving it silently. The ruling is that the rule's precondition does not hold for these two tables.
+
+**Decision.** `messages` and `provider_calls` are ordinary tables. Retention is a `retention_expires_at`
+column on `conversations` with a partial index over it, so a sweep deletes **conversations** in bounded
+batches and the children go with the cascade — rather than sweeping `messages` by date.
+
+**Reason: the precedent is the argument, and it does not transfer.** `audit_logs` is monthly
+range-partitioned (ADR-041) and is exactly the right shape for it — append-only, no children, nothing
+holding a foreign key into it — so `PRIMARY KEY (id, created_at)` costs it nothing and
+`DETACH PARTITION CONCURRENTLY` is available. `usage_events` (2026-08-27) is partitioned for the same
+reasons and its own docblock states them. `messages` is the opposite shape: **it is referenced.** A
+partitioned table's unique constraints must contain the partition key, so `messages` would take
+`PRIMARY KEY (id, created_at)`, every referencing table would carry a denormalized `message_created_at`
+alongside a composite foreign key, and `provider_calls.message_id` — nullable, `ON DELETE SET NULL` —
+could not be a foreign key at all. That trades away referential-integrity constraints to buy a
+retention mechanism this schema already has by another route.
+
+**Do not take a count of those references from this entry (ADR-036).** The migration docblock says four
+and names them; the tree currently holds a fifth the docblock does not count, `messages`' own
+self-referencing `messages_parent_same_conversation` — `(conversation_id, parent_message_id) REFERENCES
+messages (conversation_id, id) ON DELETE SET NULL (parent_message_id)` — which is the strongest instance
+of the argument, because a partitioned self-reference would have to carry the partition key on both
+sides of a constraint whose whole job is to keep a reply inside its own conversation. The command is
+
+```bash
+grep -rn 'REFERENCES messages' services/core-api/database/migrations/
+```
+
+**Why weakening one of those constraints is the specific risk, rather than a general worry.**
+`docs/22` § Q3 is this repository's own record of it: a composite foreign key was quietly weakened, and
+the test covering it wrote a row violating **both** halves and asserted a disjunction, so dropping the
+constraint left forty tests green. A denormalized `message_created_at` maintained by application code
+across four or five tables is that shape multiplied, and the failure is a child row pointing at a
+message in a different conversation — which every downstream filter would then *agree* with.
+
+**Rejected alternatives.**
+
+- **Partition both tables now, as the skill asks.** The honest reading of the Definition of done, and
+  it is rejected on the trade above rather than on effort. It also pulls in a partition creation and
+  pruning subsystem of the kind `audit_logs` needed two console commands and a scheduler entry for —
+  real machinery whose failure mode is a missing future partition and an insert that errors at
+  midnight.
+- **Partition `provider_calls` only.** It has one child-shaped relationship and looks like the easy
+  half. Rejected because `provider_calls.message_id` is the reference that partitioning `messages`
+  breaks, so splitting the decision leaves the two tables disagreeing about whether that link is a
+  foreign key, and because a per-table answer means the retention story is two mechanisms.
+- **Delete from `messages` by date directly, with no partitioning and no `conversations` sweep.** This
+  is the shape the partial index was chosen to avoid: an unbounded date scan over the largest table in
+  the schema, with the cascade fanning out per row.
+
+**Consequences, including the ones that hurt.** A batched delete is strictly weaker than
+`DETACH PARTITION CONCURRENTLY`: it takes row locks, it produces dead tuples for autovacuum to reclaim,
+and it competes with live traffic in a way a detach does not. The skill is right that converting after
+rows exist is a full-table rewrite, so this decision is genuinely one-way in practice. And the
+retention path now depends on a *partial* index continuing to be chosen by the planner — a predicate the
+query must match exactly, which is a coupling between a migration and a sweep query that nothing
+mechanically checks.
+
+**Revisit condition, and it is a measurement rather than a feeling** — a ruling with no stated way to
+become wrong is the shape `docs/22` § Q5 and § Q6 are both about. The trade re-opens when either of two
+things is observed: **a retention sweep's p99 stops fitting its batch window**, or **the partial index
+stops being chosen for that sweep** (an `EXPLAIN` showing a sequential scan on `conversations`, or the
+predicate drifting out of alignment with the query). Whoever observes it owns re-opening this, and the
+migration that reverses it is a full-table rewrite that must be budgeted as one — never attached as a
+follow-up to something else.

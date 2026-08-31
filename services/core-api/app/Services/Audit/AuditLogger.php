@@ -312,6 +312,161 @@ final class AuditLogger
     public const PROVIDER_MODEL_DELETED = 'provider.model.deleted';
 
     /**
+     * ── THE TWO RERANK-DESIGNATION OPERATIONS ─────────────────────────────────────────────────
+     *
+     * `organizations.rerank_connection_id` / `rerank_model` decide which of an organization's
+     * credentials sees its END USERS' QUESTIONS and its retrieved chunk text at rerank time, and
+     * which provider account is billed for it. Nothing else in the platform records a change to
+     * that: `organizations` has no history table, `updated_at` moves for a rename too, and the
+     * designation is not on any resource a reader can diff after the fact.
+     *
+     * ── WHY TWO OPERATIONS AND NOT ONE `changed` ──────────────────────────────────────────────
+     *
+     * The same reason `source.disabled` and `source.enabled` are two: the two acts have different
+     * consequences and a reader filters for one of them. Clearing the designation turns stage 11
+     * OFF for the whole organization — answers stop being reranked and are served from fused order
+     * with NO error, no metric jump on any single request, and nothing on the response to say so.
+     * That is the single most invisible configuration change on this surface, and "did anybody turn
+     * reranking off, and when" has to be a query rather than a scan of every `changed` row's
+     * details.
+     *
+     * ── WHY BOTH ARE ON_FAILURE_ABORT ─────────────────────────────────────────────────────────
+     *
+     * The real test is "can this still be rolled back", and it answers yes for both: each is
+     * written inside EloquentOrganizationRepository::designateRerankConnection()'s transaction,
+     * before the COMMIT. Nothing has happened irreversibly by the time the row is written.
+     *
+     * ── `previous_*` IS ECHOED AND IT IS THE HALF THAT MAKES THE ROW USEFUL ───────────────────
+     *
+     * A designation row that records only the new value cannot answer "what did this replace",
+     * and after the write the old pair exists nowhere — the column has been overwritten. Both the
+     * new and the previous pair are read off the `organizations` row inside the transaction, never
+     * from request input. A null previous half is SKIPPED by the sanitizer without being reported
+     * (the same rule the three pricing keys rely on), so "there was no previous designation" is the
+     * ABSENCE of the two keys rather than a pair of nulls.
+     *
+     * ── NOTHING HERE IS A CREDENTIAL, AND NOTHING HERE CAN BECOME ONE ─────────────────────────
+     *
+     * A connection ULID and a vendor model id, both read off `organizations`. The key itself is
+     * envelope-encrypted on `provider_connections`, this path never reads that table, and there is
+     * no field in either allow-list a caller could route a secret through — the standing sweep in
+     * AuditLoggerTest asserts that over every operation rather than over this comment.
+     *
+     * ── THE GAP THIS PAIR MADE VISIBLE IS NOW CLOSED, ONE BLOCK DOWN ─────────────────────────
+     *
+     * This paragraph used to end "THE EMBEDDING DESIGNATION IS AUDITED BY NOTHING", recorded as a
+     * gap rather than fixed because closing it meant changing a repository method's signature and
+     * every caller. It IS closed: `EMBEDDING_DESIGNATION_SET` / `_CLEARED` are the next two
+     * constants and they mirror this pair exactly — same two-operation split, same ABORT policy,
+     * same `previous_*` echo, same allow-list shape.
+     *
+     * The ordering is worth one sentence, because it is backwards from how it should have gone: the
+     * embedding designation is STRICTLY MORE CONSEQUENTIAL than this one — re-designating it changes
+     * `(provider, model)`, and that pair IS the vector space (ADR-031), so it renames the Qdrant
+     * collection and strands every indexed chunk until a re-index at a provider's per-token price.
+     * The less consequential surface got its audit first because it was the one being built.
+     */
+    public const RERANK_DESIGNATION_SET = 'organization.rerank_designation.set';
+
+    public const RERANK_DESIGNATION_CLEARED = 'organization.rerank_designation.cleared';
+
+    /**
+     * ── THE TWO EMBEDDING-DESIGNATION OPERATIONS ──────────────────────────────────────────────
+     *
+     * They mirror the rerank pair one block up in every structural detail, and they are the MORE
+     * consequential of the two. `organizations.embedding_connection_id` / `embedding_model` decide
+     * which credential pays for every embedding call AND WHICH VECTOR SPACE EVERY FUTURE CORPUS IS
+     * INDEXED UNDER: that `(provider, model)` pair IS the vector space (ADR-031), it is part of the
+     * Qdrant collection name, and moving it strands every chunk already indexed until somebody
+     * re-embeds the whole corpus at a provider's per-token price.
+     *
+     * Nothing else records that. `organizations` has no history table, `updated_at` moves for a
+     * rename too, and the designation is not on any resource a reader can diff after the fact. So
+     * before these two existed, "who moved the vector space, and from what" had no answer anywhere.
+     *
+     * ── WHY TWO OPERATIONS AND NOT ONE `changed` ─────────────────────────────────────────────
+     *
+     * The same reason `source.disabled` and `source.enabled` are two, and it bites harder here.
+     * CLEARING the designation does not turn embedding off — it hands the choice back to the
+     * resolution rule in `services/ai-service/app/providers/embedding_selection.py`, which may
+     * resolve to a DIFFERENT connection, or may refuse outright and BLOCK INGESTION for the whole
+     * organization (ADR-031: two eligible connections that disagree on `(provider, model)` are a
+     * refusal, not a tiebreak). "Did anybody clear the embedding designation, and when" is therefore
+     * the first question asked when uploads start failing, and it has to be a query rather than a
+     * scan of every `changed` row's details.
+     *
+     * NOTE THE ASYMMETRY WITH RERANK, because it is the one thing about this pair that is NOT a
+     * mirror: a null rerank designation means "do not rerank", a supported mode. A null embedding
+     * designation means "let the rule pick", and the rule can fail.
+     *
+     * ── WHY BOTH ARE ON_FAILURE_ABORT ────────────────────────────────────────────────────────
+     *
+     * The real test is "can this still be rolled back", and it answers yes for both: each is written
+     * inside `EloquentOrganizationRepository::designateEmbeddingConnection()`'s transaction, before
+     * the COMMIT. Nothing has happened irreversibly by the time the row is written.
+     *
+     * ── `previous_*` IS ECHOED AND IT IS THE HALF THAT MAKES THE ROW USEFUL ──────────────────
+     *
+     * A designation row that records only the new value cannot answer "what did this replace", and
+     * after the write the old pair exists nowhere. It is also the only thing that says WHICH VECTOR
+     * SPACE THE EXISTING CORPUS IS IN — the answer to "what do I have to re-index back to" — which
+     * on this pair is a decision with a price attached.
+     *
+     * Both pairs are read off the LOCKED `organizations` row inside the transaction, never from
+     * request input.
+     *
+     * ── NOTHING HERE IS A CREDENTIAL, AND NOTHING HERE CAN BECOME ONE ────────────────────────
+     *
+     * A connection ULID and a vendor model id, both read off `organizations`. The key itself is
+     * envelope-encrypted on `provider_connections`, this path never reads that table, and there is
+     * no field in either allow-list a caller could route a secret through — the standing sweep in
+     * AuditLoggerTest asserts that over every operation rather than over this comment.
+     */
+    public const EMBEDDING_DESIGNATION_SET = 'organization.embedding_designation.set';
+
+    public const EMBEDDING_DESIGNATION_CLEARED = 'organization.embedding_designation.cleared';
+
+    /**
+     * ── THE QUOTA-LIMIT OPERATION ─────────────────────────────────────────────────────────────
+     *
+     * `organizations.storage_bytes_quota`, `bots_quota`, `users_quota`, `monthly_tokens_quota` — the
+     * four ceilings `QuotaGate` refuses against. Changing one changes what an organization is
+     * ALLOWED TO SPEND, and §6.1 assigns that control to the PLATFORM owner while §6.2 gives the
+     * organization owner "manage organization settings"; the two sentences overlap on exactly these
+     * four columns and the specification never says which wins. `Permission::QuotasManage` records
+     * the contradiction. THIS ROW IS WHAT MAKES THE RESOLUTION AUDITABLE while it is unresolved.
+     *
+     * ── ONE OPERATION AND NOT ONE PER METRIC ─────────────────────────────────────────────────
+     *
+     * Unlike the two designation pairs above, this is a single `updated` rather than a split, and
+     * the difference is that a designation has two acts with OPPOSITE consequences (setting one
+     * chooses a vendor; clearing one hands the choice to a rule that can refuse) while a quota write
+     * has one act applied to four numbers. Splitting it four ways would make a single form
+     * submission four rows that a reader has to reassemble to see what changed.
+     *
+     * ── EVERY VALUE IS ECHOED, BEFORE AND AFTER, AND `raised` IS THE FIELD THAT MATTERS ──────
+     *
+     * The `previous_*` half is what makes "who removed the ceiling" answerable — after the write the
+     * old numbers exist nowhere. `raised` is a derived boolean recorded because it is the security
+     * question: `QuotaLimitService` permits an organization owner to LOWER a limit and requires
+     * `users.is_platform_owner` to RAISE or REMOVE one, so a `raised: true` row should always have a
+     * platform owner as its actor and a row that does not is the thing an audit of this surface is
+     * looking for.
+     *
+     * A null in any of the eight numeric keys means UNLIMITED, and nulls are skipped by the
+     * sanitizer without being reported — so "this metric is unmetered" is the ABSENCE of the key,
+     * exactly as it is for `previous_connection_id` on the designation pairs.
+     *
+     * ── ON_FAILURE_ABORT ─────────────────────────────────────────────────────────────────────
+     *
+     * Written inside `EloquentOrganizationRepository::setQuotaLimits()`'s transaction, before the
+     * COMMIT, so the rollback test passes: a failed audit write takes the quota change with it. A
+     * ceiling that moved with nothing recording who moved it is the one state this table exists to
+     * make impossible.
+     */
+    public const QUOTA_LIMITS_UPDATED = 'organization.quota_limits.updated';
+
+    /**
      * ── THE THREE BOT OPERATIONS ───────────────────────────────────────────────────────────────
      *
      * A BOT IS NOT A CREDENTIAL EITHER, AND THESE ARE AUDITED FOR THE SAME KIND OF REASON THE
@@ -427,6 +582,90 @@ final class AuditLogger
      * bot was removed without being able to say which.
      */
     public const BOT_DELETED = 'bot.deleted';
+
+    /**
+     * A DELETE that was REFUSED because the bot has held at least one conversation.
+     *
+     * ── IT IS THE ONLY OPERATION D1 ADDS, AND IT RECORDS A NON-EVENT ON PURPOSE ────────────────
+     *
+     * Every other row in this map describes something that happened. This one describes something
+     * that did not, and it earns its place on the same ground §18.11 makes for the destructive
+     * operations: A TRANSCRIPT IS AN AUDIT RECORD, and an attempt to destroy an organization's
+     * entire conversation history is exactly the event an investigation opens with. Nothing else
+     * records it — the request 409s, the response body is not retained, and `updated_at` does not
+     * move on a row nothing wrote.
+     *
+     * IT IS `OUTCOME_FAILURE`, WHICH IS WHAT MAKES IT DISTINGUISHABLE FROM `bot.deleted`. A reader
+     * filtering this table for successful destruction sees only the real ones; a reader asking "did
+     * anyone TRY" has a value to ask for. Folding the two into one operation with an outcome column
+     * the caller chooses is the shape this map exists to refuse — `outcome` is a property of the
+     * OPERATION here precisely so a call site cannot pick it.
+     *
+     * IT IS `ON_FAILURE_LOG`, AND IT IS THE SECOND ROW IN THIS FILE TO BE SO FOR THE SAME REASON AS
+     * `source.upload.rejected`: the class docblock's test is "can this still be rolled back", and
+     * the answer is no because there is nothing to roll back. The refusal is already decided, no row
+     * was written, and aborting would turn a legitimate 409 into a 500 — a lie to the caller AND
+     * still no audit row.
+     *
+     * ── `conversation_count` IS THE FIELD THAT MAKES THE ROW USEFUL ───────────────────────────
+     *
+     * It is the tripwire the `bot.deleted` child counts are: a scalar that tells a reader HOW MUCH
+     * was at stake. A refusal protecting three test conversations and one protecting four hundred
+     * thousand are different events, and only the number distinguishes them.
+     *
+     * NO CONVERSATION IDENTIFIERS, NO PARTICIPANT, NO MESSAGE TEXT, EVER. `audit_logs` is
+     * append-only, long-lived and exportable; a conversation is a customer's end users talking to
+     * us. The knowledge-source block above states the same rule for document text, and the reason is
+     * identical.
+     */
+    public const BOT_DELETE_REFUSED = 'bot.delete.refused';
+
+    /**
+     * ── THE D5 PLAYGROUND CREDENTIAL, AND WHY IT IS AUDITED AT ALL ─────────────────────────────
+     *
+     * This one was DECIDED rather than defaulted, because both answers are defensible and the wrong
+     * one is invisible either way. §18.11's list is "credential changes … and every destructive
+     * operation", and a playground mint is neither a change to a stored credential nor destructive:
+     * the turn it enables already writes a `conversations` row, a `messages` row, a `provider_calls`
+     * row and a `usage_events` row, which is a far better record of what was spent than an audit
+     * line could be.
+     *
+     * IT IS AUDITED ANYWAY, FOR THE ONE THING NONE OF THOSE ROWS RECORDS: that a bearer carrying
+     * `actor_type: user` WITH DIAGNOSTICS ENABLED was issued, to whom, for which bot, and for how
+     * long. That credential is the only one in the platform a `retrieval.trace` frame can be
+     * forwarded to — candidate chunk ids, per-branch scores, and the resolved filter object naming
+     * the organization and every allowed version id. "Who was issued a diagnostics credential for
+     * this bot, and when" is a question an incident asks, and without this row the honest answer is
+     * a `conversations` row on a channel that does not say a token was minted at all — one mint can
+     * produce many conversations, or none.
+     *
+     * `auth.login.succeeded` IS THE PRECEDENT, not `provider.connection.*`. Both are the ISSUANCE of
+     * a session credential rather than a change to a stored secret, and both are therefore
+     * `ON_FAILURE_LOG` on the class docblock's real test — "can this still be rolled back". It
+     * cannot: the record is already in Valkey when this row is written and the token is already on
+     * its way to the caller. Aborting would turn a successful mint into a 500 while leaving a LIVE
+     * BEARER behind, which is strictly worse than the missing row it was trying to prevent.
+     *
+     * ── THE FOUR FIELDS, AND THE ONE THAT IS CONSPICUOUSLY ABSENT ──────────────────────────────
+     *
+     * NO `token`, IN ANY FORM — not echoed, not fingerprinted, not a prefix. `ChatSessionResource`
+     * states the rule this row obeys: the plaintext exists in the response body and in the caller's
+     * memory and NOWHERE else. `AuditLoggerTest`'s standing guard would refuse an ECHOED field named
+     * for a bearer capability; there is simply no field here for it to catch.
+     *
+     * `session_id` IS ECHOED AND IT IS NOT THE TOKEN. It is `substr(sha256(secret), 0, 32)` — a
+     * one-way function of the bearer, derivable FROM it and useless without it, which is exactly why
+     * `WidgetSession` already calls it safe as a rate-limit subject and in a log line. It is what
+     * ties this row to the `rl:` buckets and the log lines that name the same session, and it is the
+     * only identifier that can do so.
+     *
+     * `bot_id` is load-bearing for the reason it is on every `bot.*` child row: `bot.deleted` is a
+     * HARD delete, so `subject_id` resolves to nothing afterwards. `diagnostics` is recorded even
+     * though it is always `true` today, for the reason `bot.domain.created` records an always-
+     * `pending` status: if a second playground kind is ever introduced, the rows for the two read
+     * side by side without a reader having to remember which era they are in.
+     */
+    public const BOT_PLAYGROUND_SESSION_MINTED = 'bot.playground_session.minted';
 
     /**
      * ── THE THREE ORIGIN-ALLOW-LIST OPERATIONS, AND WHY THEY EXIST AT ALL ──────────────────────
@@ -1048,6 +1287,101 @@ final class AuditLogger
             ],
         ],
 
+        // ── THE TWO RERANK-DESIGNATION OPERATIONS ─────────────────────────────────────────────
+        //
+        // See the constants for why there are two rather than one `changed`, why both are ABORT,
+        // and why `previous_*` is the half that makes the row readable. `subject_type`/`subject_id`
+        // point at the Organization, which is the record the columns live on.
+        self::RERANK_DESIGNATION_SET => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                // The pair as PERSISTED, read back off the locked `organizations` row rather than
+                // taken from the request — which is what makes "no credential can appear here" a
+                // property of the code rather than of the caller's discipline.
+                'connection_id' => self::ECHOED,
+                'model' => self::ECHOED,
+                // What it replaced. Absent entirely when there was no previous designation: a null
+                // is skipped by sanitize() without being reported, so the two keys' ABSENCE is the
+                // statement, exactly as it is for the three pricing keys one block up.
+                'previous_connection_id' => self::ECHOED,
+                'previous_model' => self::ECHOED,
+            ],
+        ],
+        self::RERANK_DESIGNATION_CLEARED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            // NO `connection_id`/`model` PAIR, because after a clear there is none — writing the
+            // two keys as nulls would be indistinguishable from a `set` row whose sanitizer dropped
+            // them. The whole content of this row is what stopped reranking and who stopped it.
+            'details' => [
+                'previous_connection_id' => self::ECHOED,
+                'previous_model' => self::ECHOED,
+            ],
+        ],
+
+        // ── THE TWO EMBEDDING-DESIGNATION OPERATIONS ─────────────────────────────────────────
+        //
+        // The rerank pair's allow-list, repeated rather than shared through a constant — the same
+        // call the four connection operations and the three model operations make, and the same
+        // reason: the lists must be able to DIVERGE. `subject_type`/`subject_id` point at the
+        // Organization, which is the record the columns live on.
+        self::EMBEDDING_DESIGNATION_SET => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                // The pair as PERSISTED, read back off the locked `organizations` row rather than
+                // taken from the request — which is what makes "no credential can appear here" a
+                // property of the code rather than of the caller's discipline.
+                'connection_id' => self::ECHOED,
+                'model' => self::ECHOED,
+                // WHICH VECTOR SPACE THE EXISTING CORPUS IS IN, i.e. what a re-index would have to
+                // go back to. Absent entirely when there was no previous designation: a null is
+                // skipped by sanitize() without being reported.
+                'previous_connection_id' => self::ECHOED,
+                'previous_model' => self::ECHOED,
+            ],
+        ],
+        self::EMBEDDING_DESIGNATION_CLEARED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            // NO `connection_id`/`model` PAIR, because after a clear there is none — writing the two
+            // keys as nulls would be indistinguishable from a `set` row whose sanitizer dropped
+            // them. The whole content of this row is what the organization USED to embed with, which
+            // is the only thing that says what to re-index back to if the resolution rule now picks
+            // something else or refuses.
+            'details' => [
+                'previous_connection_id' => self::ECHOED,
+                'previous_model' => self::ECHOED,
+            ],
+        ],
+
+        // ── THE QUOTA-LIMIT OPERATION ────────────────────────────────────────────────────────
+        //
+        // Eight numbers and one derived boolean. See the constant for why it is one operation
+        // rather than four, and why `raised` is the field an audit of this surface reads first.
+        self::QUOTA_LIMITS_UPDATED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            'on_failure' => self::ON_FAILURE_ABORT,
+            'details' => [
+                // The four ceilings AS PERSISTED, read back off the locked `organizations` row.
+                // A key's ABSENCE means null, i.e. UNLIMITED.
+                'storage_bytes_quota' => self::ECHOED,
+                'bots_quota' => self::ECHOED,
+                'users_quota' => self::ECHOED,
+                'monthly_tokens_quota' => self::ECHOED,
+                // What they replaced. After the write the old numbers exist nowhere.
+                'previous_storage_bytes_quota' => self::ECHOED,
+                'previous_bots_quota' => self::ECHOED,
+                'previous_users_quota' => self::ECHOED,
+                'previous_monthly_tokens_quota' => self::ECHOED,
+                // DERIVED FROM THE TWO PAIRS ABOVE, INSIDE THE SERVICE, and not from request input.
+                // True when any ceiling went up or became unlimited. A `true` row whose actor is not
+                // a platform owner is the finding an audit of this surface exists to produce.
+                'raised' => self::ECHOED,
+            ],
+        ],
+
         // ── THE THREE BOT OPERATIONS ───────────────────────────────────────────────────────────
         //
         // ONE ALLOW-LIST, REPEATED THREE TIMES RATHER THAN SHARED THROUGH A CONSTANT — the same
@@ -1251,6 +1585,62 @@ final class AuditLogger
                 // THE RETRIEVAL SCOPE — see BOT_CREATED above for the whole argument.
                 'source_assignment_count' => self::ECHOED,
                 'enabled_source_assignment_count' => self::ECHOED,
+            ],
+        ],
+        self::BOT_DELETE_REFUSED => [
+            // THE ONLY FAILURE-OUTCOME ROW IN THE `bot.*` FAMILY. See the constant's docblock for
+            // why a refused delete is audited at all and why it is a separate operation rather than
+            // a `bot.deleted` row with a different outcome.
+            'outcome' => self::OUTCOME_FAILURE,
+            'on_failure' => self::ON_FAILURE_LOG,
+            'details' => [
+                // The same surviving identification the `bot.deleted` row carries — and here the
+                // bot is NOT gone, which is the point: a reader has a row to go and look at.
+                'name' => self::ECHOED,
+                'slug' => self::ECHOED,
+                'status' => self::ECHOED,
+                // THE TRIPWIRE. How much history the refusal protected. A scalar and nothing else:
+                // no conversation ids, no participants, no message text. See the constant.
+                'conversation_count' => self::ECHOED,
+                // A CLOSED TOKEN NAMING WHICH GUARD REFUSED, in the shape `source.upload.rejected`
+                // uses for the same reason: never an exception message, which would be unbounded,
+                // would vary by driver version, and on this path would quote a constraint name that
+                // means nothing to a compliance reader.
+                'reason' => self::ECHOED,
+            ],
+        ],
+
+        // ── THE D5 PLAYGROUND CREDENTIAL ───────────────────────────────────────────────────────
+        //
+        // The constant's docblock carries the whole decision: what this row records that no
+        // `conversations`, `provider_calls` or `usage_events` row does, why `auth.login.succeeded`
+        // rather than `provider.connection.*` is the precedent, and why there is no token field of
+        // any kind on it.
+        self::BOT_PLAYGROUND_SESSION_MINTED => [
+            'outcome' => self::OUTCOME_SUCCESS,
+            // LOG, on the class docblock's real test — "can this still be rolled back". It cannot:
+            // the Valkey record is already written and the bearer is already on its way out. An
+            // ABORT here would 500 a request that HAD ISSUED A LIVE CREDENTIAL, which is strictly
+            // worse than the missing row it was trying to prevent.
+            'on_failure' => self::ON_FAILURE_LOG,
+            'details' => [
+                // `subject_id` is the bot, and this is here anyway for the reason every `bot.*`
+                // child row carries it: `bot.deleted` is a HARD delete, after which `subject_id`
+                // resolves to nothing.
+                'bot_id' => self::ECHOED,
+                // NOT THE TOKEN AND NOT DERIVABLE INTO ONE — see the constant's docblock. It is
+                // `substr(sha256(secret), 0, 32)`, which is what ties this row to the `rl:` buckets
+                // and the log lines that name the same session.
+                'session_id' => self::ECHOED,
+                // Always `true` today, recorded anyway so a second playground kind would read
+                // beside this one — the same call `bot.domain.created` makes about an always
+                // `pending` status.
+                'diagnostics' => self::ECHOED,
+                // THE LIFETIME OF THE CAPABILITY, IN SECONDS. An integer takes sanitize()'s
+                // `is_int()` path — never truncated, never redacted — and it is what makes a mint
+                // that happened during an incident window answerable as "was it still live at
+                // 14:20".
+                'expires_in' => self::ECHOED,
             ],
         ],
 

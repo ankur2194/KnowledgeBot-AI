@@ -79,6 +79,29 @@ final readonly class ProviderModelService
         .'connection_id and model both null), read the readiness verdict it returns, and delete '
         .'the row after that.';
 
+    /**
+     * The same sentence for the rerank designation, and it is a SEPARATE constant rather than a
+     * parameterised one (`docs/22` § T36).
+     *
+     * TWO CONSTANTS BECAUSE THE CONSEQUENCES ARE NOT THE SAME SENTENCE WITH A NOUN SWAPPED.
+     * Clearing the embedding designation returns the organization to resolve-by-rule and may
+     * select a different `(provider, model)` than the existing corpus was indexed under — a
+     * re-index. Clearing the rerank designation turns reranking off until another is chosen, which
+     * changes ranking quality and costs nothing to undo. An operator acting on the wrong one of
+     * those two has been actively misled.
+     *
+     * IT ALSO NAMES THE SYMPTOM, WHICH THE EMBEDDING ONE DOES NOT NEED TO. An embedding
+     * designation naming a missing row fails the next upload loudly. This one fails silently, so
+     * the sentence has to say what "silently" means or the operator has no reason to believe the
+     * refusal is worth respecting.
+     */
+    public const DESIGNATED_FOR_RERANK = 'This model is the organization\'s designated rerank '
+        .'model, so deleting it would leave the designation naming a catalog row that no longer '
+        .'exists — and unlike the embedding designation, nothing would report it: reranking would '
+        .'simply stop, with no error and no metric movement, and the only symptom would be answers '
+        .'getting worse. Clear the rerank designation first (PUT /rerank-configuration with '
+        .'connection_id and model both null) and delete the row after that.';
+
     /** SQLSTATE 23505 — unique_violation. */
     private const UNIQUE_VIOLATION = '23505';
 
@@ -247,8 +270,15 @@ final readonly class ProviderModelService
             // "not designated", and the repository's in-transaction re-read under the same row
             // lock the designation write takes found otherwise. The loser deserves exactly what
             // the pre-flight check would have said a millisecond earlier.
-            ProviderModelDeletion::Designated => throw new ConflictHttpException(
+            ProviderModelDeletion::DesignatedForEmbedding => throw new ConflictHttpException(
                 self::DESIGNATED_FOR_EMBEDDING,
+            ),
+
+            // The same race on the other designation, and the reason it is a separate arm is the
+            // reason the enum has a fourth case: the operator has to be told which configuration
+            // to clear. See `docs/22` § T36.
+            ProviderModelDeletion::DesignatedForRerank => throw new ConflictHttpException(
+                self::DESIGNATED_FOR_RERANK,
             ),
 
             // Deleted between the binding and the transaction. DELETE is not idempotent here on

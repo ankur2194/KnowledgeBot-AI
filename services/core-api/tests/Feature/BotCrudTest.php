@@ -11,6 +11,7 @@ use App\Enums\OrgRole;
 use App\Enums\Provider;
 use App\Models\AuditLog;
 use App\Models\Bot;
+use App\Models\Conversation;
 use App\Models\KnowledgeSource;
 use App\Models\Organization;
 use App\Models\ProviderConnection;
@@ -1269,4 +1270,86 @@ it('deletes a bot with its children, and 404s the second attempt', function (): 
 
     // AND THE ORIGINAL BOT SURVIVES, so the delete's predicate really did name one row.
     assertDatabaseHas('bots', ['id' => $fixture['botA']->id]);
+});
+
+it('refuses to delete a bot that has held a conversation, and says archiving is the route', function (): void {
+    $fixture = botCrudFixture();
+
+    $bot = Bot::factory()->recycle($fixture['orgA'])
+        ->create(['name' => 'ALPHA answered somebody', 'slug' => 'alpha-answered']);
+
+    // ONE CONVERSATION IS ENOUGH, AND THAT IS THE RULE RATHER THAN A THRESHOLD. A transcript is an
+    // audit record: it is what answers a customer who disputes an answer and what a provider
+    // invoice is reconciled against, so there is no count at which destroying it becomes acceptable.
+    Conversation::factory()->recycle($fixture['orgA'])->recycle($bot)->create();
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    // A 409 AND NOT A 422, because the request is a bare DELETE and there is no field to key the
+    // error on — the distinction ProviderModelController::destroy() draws.
+    currentTest()->deleteJson(
+        "/api/v1/organizations/{$fixture['orgA']->id}/bots/{$bot->id}",
+        [],
+        spaHeaders(),
+    )
+        ->assertStatus(409)
+        ->assertJsonPath('message', BotService::DELETE_BLOCKED_BY_CONVERSATIONS);
+
+    // NOTHING WAS TOUCHED. A refusal that had already removed a child collection would be worse
+    // than a cascade, because it would look like a failed request.
+    assertDatabaseHas('bots', ['id' => $bot->id]);
+
+    // AND NO `bot.deleted` ROW EXISTS. The check runs BEFORE the audit closure precisely so a
+    // refused delete cannot leave the trail claiming a deletion that did not happen.
+    expect(
+        AuditLog::query()
+            ->where('operation', '=', AuditLogger::BOT_DELETED)
+            ->where('subject_id', '=', $bot->id)
+            ->exists(),
+    )->toBeFalse();
+
+    // THE ATTEMPT IS RECORDED THOUGH, AND THAT IS THE ONLY THING THAT RECORDS IT. The request 409s,
+    // the response body is not retained and `updated_at` does not move on a row nothing wrote — so
+    // without this row nothing in the platform knows somebody tried to destroy an organization's
+    // conversation history.
+    $refusal = AuditLog::query()
+        ->where('operation', '=', AuditLogger::BOT_DELETE_REFUSED)
+        ->where('subject_id', '=', $bot->id)
+        ->firstOrFail();
+
+    /** @var array<string, mixed> $details */
+    $details = (array) $refusal->details;
+
+    expect($refusal->outcome)->toBe(AuditLogger::OUTCOME_FAILURE)
+        ->and($details['name'])->toBe('ALPHA answered somebody')
+        ->and($details['slug'])->toBe('alpha-answered')
+        // THE TRIPWIRE: how much history the refusal protected.
+        ->and($details['conversation_count'])->toBe(1)
+        ->and($details['reason'])->toBe(BotService::DELETE_REFUSED_REASON_CONVERSATIONS);
+});
+
+it('deletes the same bot once its conversations are gone, which is what makes the refusal about conversations', function (): void {
+    $fixture = botCrudFixture();
+
+    $bot = Bot::factory()->recycle($fixture['orgA'])
+        ->create(['name' => 'ALPHA briefly used', 'slug' => 'alpha-briefly-used']);
+
+    $conversation = Conversation::factory()->recycle($fixture['orgA'])->recycle($bot)->create();
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    // THE POSITIVE CONTROL FOR THE TEST ABOVE, AND IT IS THE POINT RATHER THAN A PREAMBLE. Without
+    // it, that 409 also passes against a bot that could not be deleted for some entirely unrelated
+    // reason — a broken policy, a missing child cascade, an archived-read-only rule misfiring.
+    $conversation->delete();
+
+    currentTest()->deleteJson(
+        "/api/v1/organizations/{$fixture['orgA']->id}/bots/{$bot->id}",
+        [],
+        spaHeaders(),
+    )
+        ->assertOk()
+        ->assertExactJson(['data' => ['acknowledged' => true]]);
+
+    assertDatabaseMissing('bots', ['id' => $bot->id]);
 });

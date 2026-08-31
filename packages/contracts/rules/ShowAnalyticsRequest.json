@@ -1,0 +1,20 @@
+{
+    "class": "App\\Http\\Requests\\ShowAnalyticsRequest",
+    "rules": {
+        "bot_id": [
+            "sometimes",
+            "nullable",
+            "string",
+            "ulid"
+        ],
+        "from": [
+            "sometimes",
+            "date"
+        ],
+        "until": [
+            "sometimes",
+            "date",
+            "after:from"
+        ]
+    }
+}

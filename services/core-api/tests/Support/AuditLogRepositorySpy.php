@@ -6,6 +6,10 @@ namespace Tests\Support;
 
 use App\Models\AuditLog;
 use App\Repositories\Contracts\AuditLogRepositoryInterface;
+use App\Services\Audit\AuditLogFilter;
+use App\Support\Http\ListQuery;
+use Illuminate\Contracts\Pagination\LengthAwarePaginator;
+use LogicException;
 use Throwable;
 
 /**
@@ -67,6 +71,33 @@ final class AuditLogRepositorySpy implements AuditLogRepositoryInterface
         ];
 
         return new AuditLog;
+    }
+
+    /**
+     * THE READ SIDE IS NOT SPIED, AND THIS METHOD REFUSES RATHER THAN RETURNING AN EMPTY PAGE.
+     *
+     * `AuditLogRepositoryInterface` grew `paginate()` in Phase 6a, and it is on the same interface
+     * on purpose — that table has no `#[ScopedBy]` backstop, so the explicit `organization_id`
+     * argument is its only tenancy and a second query elsewhere would be a second place to forget
+     * it. This class exists for tests/Unit/AuditLoggerTest.php, which asserts what the WRITER
+     * decides to persist with no database, no container and no facades; there is nothing here to
+     * paginate.
+     *
+     * An empty paginator would be the tempting stub and it is the wrong one: a reader test wired to
+     * this spy by accident would go green against a surface that returns nothing, which is the
+     * shape `pest-testing` NN2 exists to forbid. Failing loudly names the mistake at the call site.
+     */
+    public function paginate(
+        string $organizationId,
+        AuditLogFilter $filter,
+        ListQuery $query,
+    ): LengthAwarePaginator {
+        throw new LogicException(
+            'AuditLogRepositorySpy is the WRITE side only. A test that needs to read audit rows '
+            .'needs a database, which means it belongs in Feature/ or Security/ against the real '
+            .'EloquentAuditLogRepository — an empty page returned from here would make a reader '
+            .'assertion pass against a surface that returns nothing.',
+        );
     }
 
     /**

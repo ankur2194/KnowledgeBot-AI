@@ -63,6 +63,50 @@ final class EloquentProviderConnectionRepository implements ProviderConnectionRe
     /**
      * @return list<ProviderConnection>
      */
+    /**
+     * @param  list<string>  $connectionIds
+     * @return array<string, array{credential_ciphertext: string, data_key_ciphertext: string}>
+     */
+    public function sealedFor(string $organizationId, array $connectionIds): array
+    {
+        if ($connectionIds === []) {
+            // NOT A QUERY WITH AN EMPTY `whereIn`. That form is `WHERE 1 = 0` in Laravel and would
+            // be harmless here, but writing the guard makes the empty case a stated outcome rather
+            // than a behaviour of the query builder somebody might "simplify".
+            return [];
+        }
+
+        $sealed = [];
+
+        // The explicit organization predicate is the mechanism; #[ScopedBy(OrganizationScope::class)]
+        // is the backstop. `$connectionIds` is a list of ids the BOT names, so a stale or foreign id
+        // must MISS rather than read another tenant's ciphertext.
+        $rows = ProviderConnection::query()
+            ->where('organization_id', '=', $organizationId)
+            ->whereIn('id', array_values(array_unique($connectionIds)))
+            ->get();
+
+        foreach ($rows as $row) {
+            $credential = $row->credential_ciphertext;
+            $dataKey = $row->data_key_ciphertext;
+
+            // BOTH HALVES OR NO ENTRY. Both columns are NOT NULL in the schema, so this cannot fire
+            // on a well-formed row — and an entry carrying one half would satisfy the caller's
+            // presence check and then fail inside the vault with a decryption error that names no
+            // surface, which is the one failure shape this method exists to make impossible.
+            if (! is_string($credential) || ! is_string($dataKey) || $credential === '' || $dataKey === '') {
+                continue;
+            }
+
+            $sealed[(string) $row->id] = [
+                'credential_ciphertext' => $credential,
+                'data_key_ciphertext' => $dataKey,
+            ];
+        }
+
+        return $sealed;
+    }
+
     public function forOrg(string $organizationId): array
     {
         // The explicit predicate is the mechanism; #[ScopedBy(OrganizationScope::class)] on the
@@ -164,11 +208,12 @@ final class EloquentProviderConnectionRepository implements ProviderConnectionRe
                 ->where('provider_connection_id', '=', $connectionId)
                 ->delete();
 
-            // The remaining ON DELETE RESTRICT reference is
-            // `organizations.embedding_connection_id`. It is checked in the controller as a 409
-            // with an actionable sentence; if a designation lands between that check and this
-            // statement, PostgreSQL raises 23503 and the service maps it onto the SAME 409. The
-            // constraint is the authority, the check is the good error message.
+            // The remaining ON DELETE RESTRICT references are TWO, and both are on `organizations`:
+            // `embedding_connection_id` and `rerank_connection_id`. Each is checked in the
+            // controller as a 409 with its own actionable sentence; if a designation lands between
+            // that check and this statement, PostgreSQL raises 23503 and the service maps the
+            // CONSTRAINT NAME onto the same 409 the pre-flight check would have produced. The
+            // constraints are the authority, the checks are the good error messages.
             $connection->delete();
 
             return true;

@@ -87,6 +87,27 @@ final readonly class ProviderConnectionService
         .'/embedding-configuration with connection_id and model both null), read the readiness '
         .'verdict it returns, and delete the connection after that.';
 
+    /**
+     * The same refusal for the RERANK designation, and it sits here beside its twin rather than in a
+     * second place for the reason the constant above records: it is raised from the controller's
+     * pre-flight 409 AND from the 23503 mapping below, and a caller who loses the race between them
+     * deserves the same sentence rather than a constraint name in a 500.
+     *
+     * ── IT NAMES A DIFFERENT CONSEQUENCE, BECAUSE THE CONSEQUENCE IS DIFFERENT ────────────────
+     *
+     * Deleting the embedding connection strands an indexed corpus in a vector space nothing can
+     * reproduce. Deleting the rerank connection does not break anything: `ON DELETE RESTRICT` is
+     * still right, but the reason is the opposite one. If the designation were simply cleared,
+     * stage 11 would stop running with NO error, no metric jump on any single request, and nothing
+     * on any response to say so — answers would just get worse. That is the failure this platform is
+     * least able to notice, so the operator turns reranking off explicitly and sees what that means.
+     */
+    public const DESIGNATED_FOR_RERANK = 'This connection supplies the organization\'s rerank '
+        .'credential, so deleting it would silently stop reranking for every bot — answers would '
+        .'be served in fused order with no error anywhere. Turn reranking off first (PUT '
+        .'/rerank-configuration with connection_id and model both null), and delete the connection '
+        .'after that.';
+
     /** SQLSTATE 23503 — foreign_key_violation. */
     private const FOREIGN_KEY_VIOLATION = '23503';
 
@@ -199,8 +220,8 @@ final readonly class ProviderConnectionService
      * Hard-delete the connection and its model rows.
      *
      * @throws ConflictHttpException when the connection is still the organization's designated
-     *                               embedding credential — which the controller checks first, so
-     *                               reaching it here means the designation landed in between
+     *                               embedding OR rerank credential — which the controller checks
+     *                               first, so reaching it here means a designation landed in between
      */
     public function delete(
         Organization $organization,
@@ -232,6 +253,15 @@ final readonly class ProviderConnectionService
             // earlier — the constraint is the authority and the check is only the good message.
             if ($this->violates($conflict, 'organizations_embedding_connection_same_org')) {
                 throw new ConflictHttpException(self::DESIGNATED_FOR_EMBEDDING, $conflict);
+            }
+
+            // THE SECOND ARM, AND IT IS TESTED SEPARATELY RATHER THAN ASSUMED TO FOLLOW. Two
+            // composite ON DELETE RESTRICT constraints now reference this row and they are
+            // distinguished only by constraint NAME inside the driver's message, so an arm added
+            // without its own test is an arm that can match the wrong one — or neither, and fall
+            // through to a 500 describing a race the caller cannot act on.
+            if ($this->violates($conflict, 'organizations_rerank_connection_same_org')) {
+                throw new ConflictHttpException(self::DESIGNATED_FOR_RERANK, $conflict);
             }
 
             throw $conflict;

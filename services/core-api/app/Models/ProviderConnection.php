@@ -37,6 +37,16 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property int $credential_version
  * @property string $last_four
  * @property ProviderConnectionStatus $status
+ *
+ * THE TWO CIPHERTEXT PROPERTIES ARE ANNOTATED, AND ANNOTATING THEM IS NOT A RELAXATION.
+ * They are `bytea` columns holding the SEALED credential and the WRAPPED data key — neither is the
+ * plaintext, and neither is usable without the KEK. They are read in exactly one place,
+ * `EloquentProviderConnectionRepository::sealedFor()`, which hands them to the one method permitted
+ * to open an envelope; the alternative to declaring them was `getAttribute()`, which returns
+ * `mixed` and would have silenced the analyser by making the read UNTYPED rather than by describing
+ * it. `$hidden` still keeps both out of `toArray()`, which is what stops them reaching a response.
+ * @property string $credential_ciphertext
+ * @property string $data_key_ciphertext
  * @property \Illuminate\Support\Carbon|null $created_at
  * @property \Illuminate\Support\Carbon|null $updated_at
  */

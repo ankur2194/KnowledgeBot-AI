@@ -17,6 +17,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.api.health import router as health_router
+from app.api.internal.v1.chat import router as chat_router
 from app.api.internal.v1.embedding import router as embedding_router
 from app.api.internal.v1.ingestion import router as ingestion_router
 from app.api.internal.v1.maintenance import router as maintenance_router
@@ -290,15 +291,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.settings = settings
 
     app.include_router(health_router)
+    app.include_router(chat_router)
     app.include_router(embedding_router)
     app.include_router(ingestion_router)
     app.include_router(maintenance_router)
 
     # TODO(owning agents): one router per contract group under app/api/internal/v1/ —
-    # chat, providers, retrieval, crawl, deletion, evaluation. Each is an
+    # providers, retrieval, crawl, deletion, evaluation. Each is an
     # APIRouter(prefix="/internal/v1", dependencies=[Depends(verify_hmac)]): signature
     # verification is a ROUTER-level dependency so a new endpoint cannot forget it.
-    # `ingestion` came off this list when the seam landed; the rest are still absent.
+    # `ingestion` came off this list when the seam landed, and `chat` came off it with the
+    # internal chat seam; the rest are still absent.
 
     # LAST, AND NOT FROM `lifespan`. `FastAPIInstrumentor.instrument_app` replaces
     # `app.build_middleware_stack`, and Starlette calls that method exactly once, lazily, on the

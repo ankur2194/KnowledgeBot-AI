@@ -1,0 +1,17 @@
+{
+    "class": "App\\Http\\Requests\\StoreChatFeedbackRequest",
+    "rules": {
+        "comment": [
+            "sometimes",
+            "nullable",
+            "string",
+            "max:4000"
+        ],
+        "rating": [
+            "bail",
+            "required",
+            "string",
+            "in:\"positive\",\"negative\""
+        ]
+    }
+}

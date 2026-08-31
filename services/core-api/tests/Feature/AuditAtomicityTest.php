@@ -1357,6 +1357,557 @@ it('does not remove a starter question when the audit row cannot be written', fu
 });
 
 // -------------------------------------------------------------------------------------------
+// ON_FAILURE_ABORT: THE THREE ORGANIZATION-LEVEL SETTINGS
+// -------------------------------------------------------------------------------------------
+//
+// THE SAME TECHNIQUE ON A SUBJECT THAT IS NOT A ROW OF ITS OWN. All five operations below write
+// COLUMNS ON `organizations` — the embedding designation, the rerank designation, and the four
+// quota ceilings — and that changes what "nothing committed" can be observed AS: there is no row
+// to be absent afterwards, only a value that has to come back. So every case here is arranged as a
+// REPLACEMENT of a value that is already there rather than as a first write, which makes all five
+// the strong shape the create-flavoured cases above cannot reach: `save()` runs BEFORE the audit
+// closure in each of the three repository methods, so the columns really are written and really
+// have to come back on the ROLLBACK TO SAVEPOINT, to a specific previous value rather than to null.
+//
+//   embedding set      THE MOST CONSEQUENTIAL OPERATION IN THIS FILE. `(provider, model)` IS the
+//                      vector space (ADR-031) and it is part of the Qdrant collection name, so a
+//                      re-designation that committed without its audit row strands every chunk
+//                      already indexed — undoing it costs a full re-embed at a provider's
+//                      per-token price — and `organizations` has no history table, `updated_at`
+//                      moves for a rename too, and the pair is on no resource a reader can diff.
+//                      "Who moved the vector space, and from what" would have no answer anywhere.
+//   embedding cleared  the same write with both columns going to null, which does NOT mean "stop
+//                      embedding": it hands the choice back to the resolution rule in
+//                      services/ai-service/app/providers/embedding_selection.py, which may resolve
+//                      to a different connection or REFUSE outright and block ingestion for the
+//                      whole organization. "Did anybody clear it, and when" is therefore the first
+//                      question asked when uploads start failing, and it is a separate operation
+//                      precisely so it can be a query rather than a scan of every row's details.
+//   rerank set         the same shape one surface over, and QUIETER when it goes wrong: a lost
+//                      rerank designation raises nothing, changes no status and moves no metric on
+//                      any single request. The only symptom is answers getting worse.
+//   rerank cleared     as above; `rerank_gate` returns MODEL_NOT_CONFIGURED and fused order is
+//                      served, which is a supported mode — so nothing downstream ever objects.
+//   quota updated      FOUR columns in ONE save(), all four written before the audit closure, so
+//                      the rollback has to bring back four independently observable numbers. A
+//                      ceiling that moved with nothing recording who moved it is the one state
+//                      this table exists to make impossible, and `raised` is derived INSIDE the
+//                      transaction — the audit row is the authority over the service's pre-check,
+//                      which reads the bound row outside the lock and can lose a race.
+//
+// EVERY CASE ESTABLISHES ITS STARTING STATE THROUGH THE REAL ENDPOINT, BEFORE THE BREAK, and that
+// is the positive control. It is stronger than a fixture write, because it shows this exact
+// request shape returning 200 and persisting moments before the identical shape has to 500 and
+// persist nothing. Without it every rollback assertion below is also satisfied by an endpoint that
+// has been failing for an unrelated reason since long before the partitions were dropped.
+
+/**
+ * The four model ids these cases designate between. All four are real NVIDIA NIM catalogue ids, so
+ * the fixture reads like a configuration somebody would make — and NOTHING IN LARAVEL CHECKS THAT,
+ * which RerankConfigurationTest asserts explicitly. They are real only for readability.
+ *
+ * FOUR CONSTANTS OF THIS FILE'S OWN, WITH NAMES OF THIS FILE'S OWN, for the reason
+ * ATOMICITY_PROVIDER_CREDENTIAL states at length: a top-level `const` is process-global once its
+ * file is loaded, so reusing RerankConfigurationTest.php's `RERANK_MODEL` would couple two files
+ * that PHPUnit may load in either order or — running this file alone — not at all, and declaring a
+ * second `RERANK_MODEL` here would be a redeclaration fatal in a full run and only in a full run.
+ *
+ * THE REPLACEMENT PAIR DIFFERS FROM THE ORIGINAL IN BOTH HALVES on purpose. A re-designation that
+ * moved only the model would leave `*_connection_id` identical before and after, and half of each
+ * rollback assertion below would then be true whatever the transaction did.
+ */
+const ATOMICITY_EMBEDDING_MODEL = 'nvidia/nv-embedqa-e5-v5';
+
+const ATOMICITY_EMBEDDING_REPLACEMENT = 'nvidia/llama-3.2-nv-embedqa-1b-v2';
+
+const ATOMICITY_RERANK_MODEL = 'nvidia/llama-3.2-nv-rerankqa-1b-v2';
+
+const ATOMICITY_RERANK_REPLACEMENT = 'nvidia/nv-rerankqa-mistral-4b-v3';
+
+/**
+ * TWO ORGANIZATIONS. Org A holds TWO connections — the one it is designated to and the one each
+ * case tries to move to — and org B holds one, carrying THE SAME TWO MODEL IDS as org A's first.
+ *
+ * ORG B IS FULLY CONFIGURED AND IS ONLY EVER A CONTROL: both designations set, all four ceilings
+ * set, and every test below asserts it is still standing afterwards. Only the connection ULID and
+ * the four numbers distinguish it from org A, which is the point — a write whose organization
+ * predicate had been deleted would overwrite a plausible-looking row, and no assertion keyed on
+ * org A's id can see that. A one-organization fixture would pass every case here with the tenant
+ * term removed.
+ *
+ * ORG B'S QUOTAS ARE SET DIRECTLY ON THE ROW rather than through the endpoint, because it has no
+ * member to act as: it exists to be left alone. Org A's starting state, by contrast, is always
+ * established through the real endpoint — see the section header for why that is the positive
+ * control rather than a convenience.
+ *
+ * A HELPER OF THIS FILE'S OWN, with a name of its own, for the reason botAtomicityFixture() states:
+ * Pest declares test-file helpers at FILE SCOPE, so a second declaration of a name another test
+ * file already uses is a redeclaration fatal in a full run and only in a full run. That is also why
+ * the three URL helpers below are not `rerankUrl()` and `quotaUrl()`, which
+ * RerankConfigurationTest.php and QuotaEndpointTest.php already declare.
+ *
+ * @return array{
+ *     orgA: Organization, orgB: Organization,
+ *     ownerA: User,
+ *     primaryA: ProviderConnection, standbyA: ProviderConnection,
+ *     connectionB: ProviderConnection,
+ * }
+ */
+function organizationSettingsAtomicityFixture(): array
+{
+    $orgA = Organization::factory()->create(['name' => 'Settings Atomicity Org ALPHA']);
+    $orgB = Organization::factory()->create(['name' => 'Settings Atomicity Org BRAVO']);
+
+    // ->recycle($org) on every factory without exception: ProviderConnectionFactory refuses to run
+    // without one, because a connection minted into a THIRD organization is what makes a tenancy
+    // assertion pass with the filter deleted.
+    //
+    // ONE CONNECTION CARRYING BOTH AN EMBEDDING ROW AND A RERANK ROW, which is the ordinary shape:
+    // one credential, one vendor, several catalogue entries. It is also what lets the embedding and
+    // rerank cases share a fixture without either one's designation being able to satisfy the
+    // other's assertion — the two model ids are different strings.
+    $primaryA = ProviderConnection::factory()->recycle($orgA)
+        ->provider(Provider::NvidiaNim)
+        ->withModel(ATOMICITY_EMBEDDING_MODEL, ['embedding'])
+        ->withModel(ATOMICITY_RERANK_MODEL, ['rerank'])
+        ->create(['label' => 'ALPHA atomicity primary']);
+
+    // A SECOND CREDENTIAL WITH THE SAME VENDOR, which is a real configuration (two billing
+    // accounts) and keeps every id in this fixture a ULID rather than letting the provider column
+    // become the thing that distinguishes them.
+    $standbyA = ProviderConnection::factory()->recycle($orgA)
+        ->provider(Provider::NvidiaNim)
+        ->withModel(ATOMICITY_EMBEDDING_REPLACEMENT, ['embedding'])
+        ->withModel(ATOMICITY_RERANK_REPLACEMENT, ['rerank'])
+        ->create(['label' => 'ALPHA atomicity standby']);
+
+    $connectionB = ProviderConnection::factory()->recycle($orgB)
+        ->provider(Provider::NvidiaNim)
+        ->withModel(ATOMICITY_EMBEDDING_MODEL, ['embedding'])
+        ->withModel(ATOMICITY_RERANK_MODEL, ['rerank'])
+        ->create(['label' => 'BRAVO atomicity primary']);
+
+    // NOT FILLABLE AND `forceFill` IS NOT USED, exactly as the repository writes them: assigning
+    // the attributes directly keeps Model::shouldBeStrict()'s guard on mass assignment intact.
+    $orgB->embedding_connection_id = $connectionB->id;
+    $orgB->embedding_model = ATOMICITY_EMBEDDING_MODEL;
+    $orgB->rerank_connection_id = $connectionB->id;
+    $orgB->rerank_model = ATOMICITY_RERANK_MODEL;
+    $orgB->storage_bytes_quota = 22_000;
+    $orgB->bots_quota = 9;
+    $orgB->users_quota = 11;
+    $orgB->monthly_tokens_quota = 1_800_000;
+    $orgB->save();
+
+    return [
+        'orgA' => $orgA,
+        'orgB' => $orgB,
+        'ownerA' => User::factory()->recycle($orgA)->orgRole(OrgRole::Owner)
+            ->create(['email' => SpaSession::uniqueEmail('settings-atomicity-owner')]),
+        'primaryA' => $primaryA,
+        'standbyA' => $standbyA,
+        'connectionB' => $connectionB,
+    ];
+}
+
+function atomicityEmbeddingUrl(Organization $organization): string
+{
+    return "/api/v1/organizations/{$organization->id}/embedding-configuration";
+}
+
+function atomicityRerankUrl(Organization $organization): string
+{
+    return "/api/v1/organizations/{$organization->id}/rerank-configuration";
+}
+
+function atomicityQuotaUrl(Organization $organization): string
+{
+    return "/api/v1/organizations/{$organization->id}/quotas";
+}
+
+/**
+ * The data plane's readiness verdict, faked.
+ *
+ * IT IS NOT THE SUBJECT AND IT IS NOT A STREAM. pest-testing NN4 bans Http::fake() on the CHAT
+ * RELAY path, where a faked body is a string the relay drains in microseconds and every buffering,
+ * heartbeat and ordering bug passes. This is a small buffered JSON round trip and the rule it
+ * carries belongs to embedding_selection.py, which tests it. What matters here is only that the
+ * verdict is READY: an unready one is a 422 raised BEFORE the transaction opens, and a case that
+ * got one would never reach the property this section is about.
+ */
+function atomicityReadinessFake(string $connectionId): void
+{
+    Http::fake([
+        '*/internal/v1/embedding/readiness' => Http::response([
+            'selected' => [
+                'connection_id' => $connectionId,
+                'provider' => Provider::NvidiaNim->value,
+                'model' => ATOMICITY_EMBEDDING_MODEL,
+                'caps' => ['supported' => ['embedding'], 'context_window' => 8192, 'max_output_tokens' => 0],
+            ],
+            'eligible' => [],
+            'rejected' => [],
+            'explanation' => '',
+        ], 200),
+    ]);
+}
+
+it('does not move the embedding designation when its audit row cannot be written', function (): void {
+    $fixture = organizationSettingsAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    atomicityReadinessFake($fixture['primaryA']->id);
+
+    $url = atomicityEmbeddingUrl($fixture['orgA']);
+
+    // POSITIVE CONTROL, AND IT IS THE REQUEST ITSELF. See the section header: this exact shape
+    // returns 200 and persists here, which is what makes the identical shape 500ing below a
+    // statement about the audit write rather than about the endpoint.
+    currentTest()->putJson($url, [
+        'connection_id' => $fixture['primaryA']->id,
+        'model' => ATOMICITY_EMBEDDING_MODEL,
+    ], spaHeaders())->assertOk();
+
+    assertDatabaseHas('organizations', [
+        'id' => $fixture['orgA']->id,
+        'embedding_connection_id' => $fixture['primaryA']->id,
+        'embedding_model' => ATOMICITY_EMBEDDING_MODEL,
+    ]);
+
+    // AND THE OPERATION THIS TEST IS REGISTERED AGAINST IS THE ONE THIS REQUEST ACTUALLY WRITES.
+    // Without this line the completeness gate's claim — that every ABORT operation with a producer
+    // has a test HERE — is a claim about a test name. `record()` derives the operation from the
+    // PERSISTED state, so a future path that wrote these columns another way would produce a
+    // different row and every assertion below would still pass.
+    expect(AuditLog::query()->where('operation', '=', AuditLogger::EMBEDDING_DESIGNATION_SET)->count())
+        ->toBe(1, 'this request did not write an `'.AuditLogger::EMBEDDING_DESIGNATION_SET
+            .'` row, so nothing below is a test of that operation\'s failure policy');
+
+    auditWritesBroken();
+
+    // A REPLACEMENT AND NOT A FIRST WRITE. Both columns are written by save() before the audit
+    // closure runs (EloquentOrganizationRepository::designateEmbeddingConnection), so both really
+    // have to come back — to a specific previous PAIR rather than to the null a create-flavoured
+    // case would assert. This is the shape that fails if the audit write is moved out of the
+    // repository's transaction in either direction.
+    currentTest()->putJson($url, [
+        'connection_id' => $fixture['standbyA']->id,
+        'model' => ATOMICITY_EMBEDDING_REPLACEMENT,
+    ], spaHeaders())
+        // ON_FAILURE_ABORT rethrows the QueryException UNWRAPPED, so the taxonomy classifies the
+        // SQLSTATE rather than a service-layer wrapper.
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    // THE VECTOR SPACE DID NOT MOVE. That pair IS the vector space (ADR-031) and it is part of the
+    // Qdrant collection name, so a designation that committed without its audit row strands every
+    // chunk already indexed, and the one record of what to re-index BACK to — the `previous_*`
+    // half of the row that was refused — would never have existed.
+    assertDatabaseHas('organizations', [
+        'id' => $fixture['orgA']->id,
+        'embedding_connection_id' => $fixture['primaryA']->id,
+        'embedding_model' => ATOMICITY_EMBEDDING_MODEL,
+    ]);
+
+    // NOWHERE, not merely "not on org A". A commit that reached any row is visible here.
+    assertDatabaseMissing('organizations', ['embedding_model' => ATOMICITY_EMBEDDING_REPLACEMENT]);
+    assertDatabaseMissing('organizations', ['embedding_connection_id' => $fixture['standbyA']->id]);
+
+    // AND ORG B SURVIVES, designated to a connection of ITS OWN that carries the SAME model id — so
+    // a write whose organization predicate had been deleted is visible here and in no assertion
+    // above, and a rollback that reached beyond its own savepoint is visible only here.
+    assertDatabaseHas('organizations', [
+        'id' => $fixture['orgB']->id,
+        'embedding_connection_id' => $fixture['connectionB']->id,
+        'embedding_model' => ATOMICITY_EMBEDDING_MODEL,
+    ]);
+});
+
+it('does not clear the embedding designation when its audit row cannot be written', function (): void {
+    $fixture = organizationSettingsAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    atomicityReadinessFake($fixture['primaryA']->id);
+
+    $url = atomicityEmbeddingUrl($fixture['orgA']);
+
+    // POSITIVE CONTROL: the designation this test claims survives is really there, and it got there
+    // through the endpoint that is about to fail.
+    currentTest()->putJson($url, [
+        'connection_id' => $fixture['primaryA']->id,
+        'model' => ATOMICITY_EMBEDDING_MODEL,
+    ], spaHeaders())->assertOk();
+
+    // A CLEAR RUN TO COMPLETION FIRST, AND IT IS THE CONTROL THIS CASE CANNOT DO WITHOUT. The
+    // request below never writes its row, so nothing after the break can show WHICH operation this
+    // test covers — and the completeness gate registers it against `cleared`, not `set`. This is
+    // the one clear that is allowed to succeed, and it proves the endpoint produces that operation.
+    currentTest()->putJson($url, ['connection_id' => null, 'model' => null], spaHeaders())->assertOk();
+
+    expect(AuditLog::query()->where('operation', '=', AuditLogger::EMBEDDING_DESIGNATION_CLEARED)->count())
+        ->toBe(1, 'clearing the designation did not write an `'
+            .AuditLogger::EMBEDDING_DESIGNATION_CLEARED
+            .'` row, so nothing below is a test of that operation\'s failure policy');
+
+    // RESTORED, so the break below has a non-null pair to roll back TO. A clear attempted from an
+    // already-cleared row would assert two nulls came back, which is true of a transaction that did
+    // nothing at all.
+    currentTest()->putJson($url, [
+        'connection_id' => $fixture['primaryA']->id,
+        'model' => ATOMICITY_EMBEDDING_MODEL,
+    ], spaHeaders())->assertOk();
+
+    assertDatabaseHas('organizations', [
+        'id' => $fixture['orgA']->id,
+        'embedding_connection_id' => $fixture['primaryA']->id,
+        'embedding_model' => ATOMICITY_EMBEDDING_MODEL,
+    ]);
+
+    auditWritesBroken();
+
+    // CLEARING IS A DIFFERENT OPERATION AND NOT A `set` WITH NULLS — `record()` derives it from the
+    // PERSISTED state, so this request is the only producer of
+    // `organization.embedding_designation.cleared` and the only thing that can prove its policy.
+    currentTest()->putJson($url, ['connection_id' => null, 'model' => null], spaHeaders())
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    // THE PAIR CAME BACK. A clear that committed without its audit row hands the choice to the
+    // resolution rule in embedding_selection.py, which may pick a DIFFERENT connection — silently
+    // changing the vector space under a corpus nobody reindexed — or refuse outright and block
+    // ingestion for the organization, with nothing recording that anybody cleared anything.
+    assertDatabaseHas('organizations', [
+        'id' => $fixture['orgA']->id,
+        'embedding_connection_id' => $fixture['primaryA']->id,
+        'embedding_model' => ATOMICITY_EMBEDDING_MODEL,
+    ]);
+
+    assertDatabaseMissing('organizations', [
+        'id' => $fixture['orgA']->id,
+        'embedding_connection_id' => null,
+    ]);
+
+    // ORG B SURVIVES, still designated. A clear whose predicate lost its organization term would
+    // leave org B with two nulls, which is a state nothing downstream raises about.
+    assertDatabaseHas('organizations', [
+        'id' => $fixture['orgB']->id,
+        'embedding_connection_id' => $fixture['connectionB']->id,
+        'embedding_model' => ATOMICITY_EMBEDDING_MODEL,
+    ]);
+});
+
+it('does not move the rerank designation when its audit row cannot be written', function (): void {
+    $fixture = organizationSettingsAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    // UNREACHABLE ON CORRECT CODE, and that is the point of stating it: neither rerank action
+    // crosses the seam, which RerankConfigurationTest pins with Http::assertNothingSent(). It is
+    // armed here so that if this endpoint ever grows a round trip, this test fails on its
+    // assertions rather than on a socket the suite must never open.
+    Http::fake();
+
+    $url = atomicityRerankUrl($fixture['orgA']);
+
+    // POSITIVE CONTROL, AND IT IS THE REQUEST ITSELF.
+    currentTest()->putJson($url, [
+        'connection_id' => $fixture['primaryA']->id,
+        'model' => ATOMICITY_RERANK_MODEL,
+    ], spaHeaders())->assertOk();
+
+    assertDatabaseHas('organizations', [
+        'id' => $fixture['orgA']->id,
+        'rerank_connection_id' => $fixture['primaryA']->id,
+        'rerank_model' => ATOMICITY_RERANK_MODEL,
+    ]);
+
+    // AND THE OPERATION THIS TEST IS REGISTERED AGAINST IS THE ONE THIS REQUEST ACTUALLY WRITES.
+    // Without it the completeness gate's claim is a claim about a test name.
+    expect(AuditLog::query()->where('operation', '=', AuditLogger::RERANK_DESIGNATION_SET)->count())
+        ->toBe(1, 'this request did not write an `'.AuditLogger::RERANK_DESIGNATION_SET
+            .'` row, so nothing below is a test of that operation\'s failure policy');
+
+    auditWritesBroken();
+
+    // Both columns are written by save() before the audit closure runs
+    // (EloquentOrganizationRepository::designateRerankConnection), so both have to come back.
+    currentTest()->putJson($url, [
+        'connection_id' => $fixture['standbyA']->id,
+        'model' => ATOMICITY_RERANK_REPLACEMENT,
+    ], spaHeaders())
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    // THE QUIETEST OF THE FIVE, WHICH IS WHY IT IS AUDITED. A rerank designation that committed
+    // without its audit row raises nothing, changes no status, and moves no metric on any single
+    // request — the credential that sees this tenant's end-user questions and its retrieved chunk
+    // text changes, the billing moves with it, and the only symptom is answers getting worse.
+    assertDatabaseHas('organizations', [
+        'id' => $fixture['orgA']->id,
+        'rerank_connection_id' => $fixture['primaryA']->id,
+        'rerank_model' => ATOMICITY_RERANK_MODEL,
+    ]);
+
+    assertDatabaseMissing('organizations', ['rerank_model' => ATOMICITY_RERANK_REPLACEMENT]);
+    assertDatabaseMissing('organizations', ['rerank_connection_id' => $fixture['standbyA']->id]);
+
+    // ORG B SURVIVES, on a connection of its own carrying the SAME model id.
+    assertDatabaseHas('organizations', [
+        'id' => $fixture['orgB']->id,
+        'rerank_connection_id' => $fixture['connectionB']->id,
+        'rerank_model' => ATOMICITY_RERANK_MODEL,
+    ]);
+});
+
+it('does not clear the rerank designation when its audit row cannot be written', function (): void {
+    $fixture = organizationSettingsAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    Http::fake();
+
+    $url = atomicityRerankUrl($fixture['orgA']);
+
+    currentTest()->putJson($url, [
+        'connection_id' => $fixture['primaryA']->id,
+        'model' => ATOMICITY_RERANK_MODEL,
+    ], spaHeaders())->assertOk();
+
+    // A CLEAR RUN TO COMPLETION FIRST, for the reason the embedding clear states: the request
+    // below never writes its row, so nothing after the break can show which operation this test
+    // covers, and the completeness gate registers it against `cleared` rather than `set`.
+    currentTest()->putJson($url, ['connection_id' => null, 'model' => null], spaHeaders())->assertOk();
+
+    expect(AuditLog::query()->where('operation', '=', AuditLogger::RERANK_DESIGNATION_CLEARED)->count())
+        ->toBe(1, 'clearing the designation did not write an `'
+            .AuditLogger::RERANK_DESIGNATION_CLEARED
+            .'` row, so nothing below is a test of that operation\'s failure policy');
+
+    // RESTORED, so the break below has a non-null pair to roll back TO.
+    currentTest()->putJson($url, [
+        'connection_id' => $fixture['primaryA']->id,
+        'model' => ATOMICITY_RERANK_MODEL,
+    ], spaHeaders())->assertOk();
+
+    assertDatabaseHas('organizations', [
+        'id' => $fixture['orgA']->id,
+        'rerank_connection_id' => $fixture['primaryA']->id,
+        'rerank_model' => ATOMICITY_RERANK_MODEL,
+    ]);
+
+    auditWritesBroken();
+
+    // The only producer of `organization.rerank_designation.cleared`: `record()` derives the
+    // operation from the PERSISTED state, so a clear is the one request that can write it.
+    currentTest()->putJson($url, ['connection_id' => null, 'model' => null], spaHeaders())
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    // THE PAIR CAME BACK, and this is the case where "nothing committed" is hardest to notice in
+    // production: a clear that stuck is a SUPPORTED operating mode — `rerank_gate` returns
+    // MODEL_NOT_CONFIGURED before any call goes out and `evidence.select_unranked` serves fused
+    // order — so no error is raised, no status changes, and the trail says nobody turned it off.
+    assertDatabaseHas('organizations', [
+        'id' => $fixture['orgA']->id,
+        'rerank_connection_id' => $fixture['primaryA']->id,
+        'rerank_model' => ATOMICITY_RERANK_MODEL,
+    ]);
+
+    assertDatabaseMissing('organizations', [
+        'id' => $fixture['orgA']->id,
+        'rerank_connection_id' => null,
+    ]);
+
+    assertDatabaseHas('organizations', [
+        'id' => $fixture['orgB']->id,
+        'rerank_connection_id' => $fixture['connectionB']->id,
+        'rerank_model' => ATOMICITY_RERANK_MODEL,
+    ]);
+});
+
+it('moves no quota ceiling when the audit row cannot be written', function (): void {
+    $fixture = organizationSettingsAtomicityFixture();
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    // UNREACHABLE ON CORRECT CODE: neither quota action crosses the seam. Armed for the reason the
+    // rerank cases arm it.
+    Http::fake();
+
+    $url = atomicityQuotaUrl($fixture['orgA']);
+
+    // POSITIVE CONTROL, AND IT IS THE REQUEST ITSELF. Setting a ceiling where there was none is a
+    // LOWERING rather than a raise — `null` is unlimited, so nothing is higher — which is why an
+    // organization owner may make this call and the fixture needs no platform-owner flag.
+    currentTest()->putJson($url, [
+        'storage_bytes_quota' => 10_000,
+        'bots_quota' => 5,
+        'users_quota' => 7,
+        'monthly_tokens_quota' => 900_000,
+    ], spaHeaders())->assertOk();
+
+    assertDatabaseHas('organizations', [
+        'id' => $fixture['orgA']->id,
+        'storage_bytes_quota' => 10_000,
+        'bots_quota' => 5,
+        'users_quota' => 7,
+        'monthly_tokens_quota' => 900_000,
+    ]);
+
+    // AND THE OPERATION THIS TEST IS REGISTERED AGAINST IS THE ONE THIS REQUEST ACTUALLY WRITES.
+    // Without it the completeness gate's claim is a claim about a test name.
+    expect(AuditLog::query()->where('operation', '=', AuditLogger::QUOTA_LIMITS_UPDATED)->count())
+        ->toBe(1, 'this request did not write an `'.AuditLogger::QUOTA_LIMITS_UPDATED
+            .'` row, so nothing below is a test of that operation\'s failure policy');
+
+    auditWritesBroken();
+
+    // FOUR COLUMNS IN ONE save(), ALL FOUR BEFORE THE AUDIT CLOSURE
+    // (EloquentOrganizationRepository::setQuotaLimits), so the rollback has to bring back four
+    // independently observable numbers rather than one. All four move DOWN, so the service's
+    // direction guard admits the write and this test reaches the transaction it is about.
+    currentTest()->putJson($url, [
+        'storage_bytes_quota' => 4_000,
+        'bots_quota' => 2,
+        'users_quota' => 3,
+        'monthly_tokens_quota' => 100_000,
+    ], spaHeaders())
+        ->assertStatus(500)
+        ->assertJsonPath('error_class', 'internal_dependency');
+
+    // EVERY CEILING CAME BACK. A quota that moved with nothing recording who moved it is the one
+    // state this table exists to make impossible — §6.1 assigns limit control to the PLATFORM owner
+    // while §6.2 gives the organization owner "manage organization settings", and the audit row is
+    // what makes that unresolved contradiction reviewable at all.
+    assertDatabaseHas('organizations', [
+        'id' => $fixture['orgA']->id,
+        'storage_bytes_quota' => 10_000,
+        'bots_quota' => 5,
+        'users_quota' => 7,
+        'monthly_tokens_quota' => 900_000,
+    ]);
+
+    // AND NO ROW ANYWHERE HOLDS THE SUBMITTED NUMBERS. Keyed on the metric a partial commit would
+    // be most damaging on: a storage ceiling that stuck refuses every further upload.
+    assertDatabaseMissing('organizations', ['storage_bytes_quota' => 4_000]);
+    assertDatabaseMissing('organizations', ['monthly_tokens_quota' => 100_000]);
+
+    // ORG B SURVIVES, WITH ALL FOUR OF ITS OWN NUMBERS. This is the assertion a missing
+    // organization predicate lands on: `setQuotaLimits()` writes four plain integers, so a write
+    // that reached the wrong row leaves no constraint violation and no dangling reference behind
+    // it — unlike the two designations, whose composite foreign keys would refuse.
+    assertDatabaseHas('organizations', [
+        'id' => $fixture['orgB']->id,
+        'storage_bytes_quota' => 22_000,
+        'bots_quota' => 9,
+        'users_quota' => 11,
+        'monthly_tokens_quota' => 1_800_000,
+    ]);
+});
+
+// -------------------------------------------------------------------------------------------
 // ON_FAILURE_LOG: the action stands, and the failure is loud
 // -------------------------------------------------------------------------------------------
 
@@ -1489,6 +2040,33 @@ it('has a test in this file for every ABORT-policy operation that has a producer
         AuditLogger::BOT_STARTER_QUESTION_CREATED,
         AuditLogger::BOT_STARTER_QUESTION_DELETED,
         AuditLogger::BOT_STARTER_QUESTION_UPDATED,
+
+        // THE FIVE ORGANIZATION-LEVEL SETTING OPERATIONS, from THREE producers. All three are live
+        // and all three are reachable through a shipped controller, so none of these five belongs
+        // in $noProducer:
+        //
+        //   EmbeddingDesignationService  <- EmbeddingConfigurationController@update
+        //                                   (PUT /organizations/{organization}/embedding-configuration)
+        //   RerankDesignationService     <- RerankConfigurationController@update
+        //                                   (PUT /organizations/{organization}/rerank-configuration)
+        //   QuotaLimitService            <- QuotaController@update
+        //                                   (PUT /organizations/{organization}/quotas)
+        //
+        // FIVE OPERATIONS AND THREE PRODUCERS BECAUSE EACH DESIGNATION IS A PAIR: `record()` in
+        // both services derives `set` versus `cleared` from the PERSISTED state rather than from
+        // the argument it was passed, so a clear is the only request that can write the `cleared`
+        // row and each half needs its own case. Each of the five is covered above by a test that
+        // breaks the audit INSERT and asserts the column values came back.
+        //
+        // ALL FIVE ARE THE STRONG SHAPE — they REPLACE a value rather than write a first one, and
+        // `save()` runs before the audit closure in all three repository methods — so every one of
+        // them fails if the audit write is moved outside the transaction. The embedding pair is the
+        // one to read first: that `(provider, model)` IS the vector space (ADR-031).
+        AuditLogger::EMBEDDING_DESIGNATION_CLEARED,
+        AuditLogger::EMBEDDING_DESIGNATION_SET,
+        AuditLogger::QUOTA_LIMITS_UPDATED,
+        AuditLogger::RERANK_DESIGNATION_CLEARED,
+        AuditLogger::RERANK_DESIGNATION_SET,
     ];
 
     // ROLE_CHANGED has no producer: PATCH /members/{user} is deliberately not built yet, because the

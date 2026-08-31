@@ -66,10 +66,6 @@ SPARSE_TABLES: Final[tuple[str, str]] = (
 #: ``ALLOWED_TABLES`` is.
 NO_MIGRATION_YET: Final[frozenset[str]] = frozenset(
     {
-        # Per-query retrieval diagnostics. `app/retrieval/` holds no statement against it and
-        # `app/deletion/tasks.py` only names it in prose, describing the redaction it will
-        # eventually need on `selected_evidence`.
-        "retrieval_traces",
         # Per-case evaluation detail. `app/evaluation/run.py` and `tasks.py` describe the row
         # they will write; `evaluation/`'s orchestration is a deliberate stub (CLAUDE.md), so
         # the writer does not exist and neither does the schema.

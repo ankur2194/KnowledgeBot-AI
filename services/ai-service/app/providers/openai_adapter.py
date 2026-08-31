@@ -17,10 +17,19 @@ the opposite of Anthropic, where the same normalization step is a verbatim assig
 getting the direction wrong on a 200k-token cached document is a five-figure reporting error
 in whichever direction was guessed.
 
-**Cache writes are unreportable.** A write bills at 1.25x uncached input and the API returns
-no write amount at all — only reads. ``cache_write_tokens`` stays 0 and the estimate
-under-reports the first request against each new prefix. Reconcile against the billing
-export; never synthesize a write amount.
+**Cache writes are reported when the SDK reports them, and derived — never synthesized.**
+This paragraph said *"the API returns no write amount at all — only reads,*
+``cache_write_tokens`` *stays 0"* until 2026-08-27, and it was contradicting ``_usage`` a
+thousand lines below in the same file: `openai==2.53.0` added
+``InputTokensDetails.cache_write_tokens`` and ``_usage`` reads it. A write bills at 1.25x
+uncached input, so getting this wrong under-reports the first request against each new prefix.
+What has NOT changed is the rule the old wording was protecting: **a write amount is never
+invented.** Absent the field the bucket is 0 and the shortfall is reconciled against the billing
+export. And whether the reported amount is a *subset* of ``input_tokens`` or a *sibling* of it is
+decided from the numbers rather than guessed — see ``_usage``, which falls back to the
+subset-free arithmetic when ``cached + written`` cannot fit inside the reported input. Both
+branches leave ``total_input_tokens`` equal to the vendor's billed input, so a wrong guess costs
+attribution and never the bill.
 
 **``max_output_tokens`` is a cap on visible output PLUS reasoning tokens, and reasoning is
 generated first.** At high effort a small cap is consumed entirely by invisible thinking:
@@ -67,7 +76,12 @@ precisely the failures support asks about.
 Empty text deltas are common at the head of a stream, so TTFT starts at the first NON-empty
 one; usage and the stop reason are read from the terminal event and nowhere else.
 
-¹ <!-- UNVERIFIED: event name not re-checked against the 2.53 event reference. -->
+¹ Verified against ``openai==2.53.0``: ``ResponseFunctionCallArgumentsDeltaEvent.type`` is the
+literal ``"response.function_call_arguments.delta"``, and every other name in this table is the
+``type`` literal of a member of that release's ``ResponseStreamEvent`` union. The marker that
+used to sit here asked for a re-check against the prose event reference; the SDK's generated
+types come from OpenAI's own OpenAPI description and are the stronger source. The live table is
+``DELTA_EVENTS`` below — this one is documentation and the code reads the other.
 
 ## Usage normalization
 
@@ -150,10 +164,12 @@ C3: nothing here can detect a re-trained model behind a stable id, and
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import math
 import time
-from collections.abc import AsyncIterator
-from typing import Any, Final
+from collections.abc import AsyncIterator, Mapping
+from typing import Any, Final, Literal
 
 import httpx
 import openai
@@ -164,6 +180,8 @@ from app.providers.contract import (
     Capability,
     CapabilityWarning,
     ChatRequest,
+    ChatResult,
+    Delta,
     Diagnostics,
     EmbeddingAdapter,
     EmbeddingRequest,
@@ -227,6 +245,77 @@ EMBEDDING_MODELS: Final[tuple[str, ...]] = (
     "text-embedding-3-large",
     "text-embedding-3-small",
 )
+
+#: Responses stream event -> ``Delta.kind``. A table rather than an ``if`` ladder so a test can
+#: read the mapping instead of restating it, and so an event this adapter does not translate is
+#: a missing key rather than a branch nobody notices.
+#:
+#: Every name here is verified against ``openai==2.53.0``'s own ``ResponseStreamEvent`` union —
+#: each is the ``type`` literal of a member class (``ResponseTextDeltaEvent``,
+#: ``ResponseReasoningSummaryTextDeltaEvent``, ``ResponseRefusalDeltaEvent``,
+#: ``ResponseFunctionCallArgumentsDeltaEvent``). That discharges the marker this module used to
+#: carry over ``response.function_call_arguments.delta``: the SDK's generated types come from
+#: OpenAI's own OpenAPI description, which is a stronger source than a prose event reference.
+#:
+#: ``response.reasoning_text.delta`` is deliberately ABSENT. It carries the raw chain of
+#: thought on models that emit one, and the summary event is what a ``REASONING_TRACE`` pane
+#: renders; translating both would emit the same thinking twice, once verbatim.
+DELTA_EVENTS: Final[Mapping[str, Literal["text", "reasoning", "tool_args", "refusal"]]] = {
+    "response.output_text.delta": "text",
+    "response.reasoning_summary_text.delta": "reasoning",
+    "response.refusal.delta": "refusal",
+    "response.function_call_arguments.delta": "tool_args",
+}
+
+#: The three events that carry a terminal ``response`` object, and the only place usage and the
+#: stop reason are read from. ``response.created`` and ``response.in_progress`` carry a
+#: ``response`` too — with ``status: "in_progress"`` and no usage — so matching on the presence
+#: of the attribute rather than on this tuple would read a stop reason off the FIRST event of
+#: every stream and report ``ERROR`` on every successful turn.
+TERMINAL_EVENTS: Final[tuple[str, ...]] = (
+    "response.completed",
+    "response.incomplete",
+    "response.failed",
+)
+
+#: How one retrieved block is rendered into its own ``input_text`` part. Untrusted data: it is a
+#: part of a user-role message and never reaches ``instructions``. The layout is fixed and the
+#: ordering is the caller's, because prefix caching is exact string matching at this vendor and
+#: a re-rendered or re-sorted evidence list is a full cache miss that costs 10x and looks normal.
+CONTEXT_BLOCK_TEMPLATE: Final[str] = "[{index}] {title}\n{text}"
+
+#: ``text.format.name`` is required by the Responses schema shape and is not a free-text field
+#: (a-z, A-Z, 0-9, underscore, dash; 64 max). Constant rather than derived from anything
+#: per-request: it sits inside the cacheable prefix.
+STRUCTURED_OUTPUT_NAME: Final[str] = "answer"
+
+#: ``strict`` on a FUNCTION tool, which is a different question from ``strict`` on the response
+#: format. A tool schema arrives from a bot's configuration and is not ours to constrain to
+#: OpenAI's subset; asking for enforcement it cannot satisfy is a 400 on a request that would
+#: otherwise work. The response schema IS ours to check, and ``validate()`` does check it.
+TOOL_STRICT: Final[bool] = False
+
+#: ``detail`` is required on an ``input_image`` part. ``"auto"`` lets the vendor choose the
+#: tiling; pinning ``"high"`` multiplies image token cost with nothing in the contract asking
+#: for it.
+IMAGE_DETAIL: Final[str] = "auto"
+
+#: The ``safety_identifier`` is a one-way hash truncated to this many hex characters — an
+#: abuse-signal handle and nothing more. Never an email, a user id or an org id in the clear:
+#: all three would leave our boundary as plaintext (`kb-security-baseline`).
+SAFETY_IDENTIFIER_LENGTH: Final[int] = 32
+
+#: OpenAI strict structured-output keywords that are rejected outright. A schema carrying one
+#: is a 400 at request time, after the retrieval spend, so it is refused before the first byte.
+STRICT_FORBIDDEN_KEYWORDS: Final[frozenset[str]] = frozenset(
+    {"allOf", "not", "if", "then", "else", "dependentRequired"}
+)
+
+#: OpenAI's published strict-mode ceilings. Checked here because the failure is a 400 whose body
+#: we may not log, on a request the tenant assembled from a schema that passed review.
+STRICT_MAX_DEPTH: Final[int] = 10
+STRICT_MAX_PROPERTIES: Final[int] = 5000
+STRICT_MAX_ENUM_VALUES: Final[int] = 1000
 
 #: Read off the live response before iterating, and tenant-safe. Parsed into
 #: ``Diagnostics.rate_limit``; the SDK reads none of them for us.
@@ -309,6 +398,110 @@ def _body_code(exc: BaseException) -> str | None:
     return code if isinstance(code, str) and code else None
 
 
+def _estimated_usage(deltas_emitted: int) -> Usage:
+    """What a turn that never reached its terminal event can honestly claim.
+
+    Usage arrives only in the terminal event on this vendor — ``EARLY_INPUT_USAGE`` is OFF for
+    exactly this reason — so a cancelled or mid-stream-failed turn has no input count at all
+    and inventing one would be a fabricated bill. What it does have is the number of non-empty
+    deltas it forwarded, and on this API a text delta is approximately one token, so that is
+    the output estimate.
+
+    ``source="estimated"``, which is what keeps it out of invoiced cost. The alternative is a
+    ``Usage()`` of zeros, and a free call and a cancelled call then look identical — which is
+    how billing silently under-counts every abandoned turn.
+    """
+    return Usage(output_tokens=deltas_emitted, source="estimated")
+
+
+def _strict_schema_violations(schema: dict[str, Any]) -> list[str]:
+    """OpenAI strict-mode subset check, run before the first byte.
+
+    The rules are narrow and none of them is guessable from a schema that "looks fine": an
+    object at the root (not ``anyOf``), every property listed in ``required``,
+    ``additionalProperties: false`` on every object, no ``allOf``/``not``/``if``/``then``/
+    ``else``/``dependentRequired``, and the published depth, property and enum ceilings.
+
+    **A Pydantic model is not a schema that passes this.** An ``Optional[str]`` field emits
+    neither a ``required`` entry nor a null union unless configured to, so the generated
+    document is rejected at request time — after retrieval has been paid for, with a message
+    body we are not allowed to log. Checking here converts that into a validation error naming
+    the property.
+
+    Returns every violation rather than the first: a schema with four problems should be fixed
+    once, not four times.
+    """
+    violations: list[str] = []
+    properties_seen = 0
+
+    def walk(node: Any, path: str, depth: int) -> None:
+        nonlocal properties_seen
+        if not isinstance(node, dict):
+            return
+        if depth > STRICT_MAX_DEPTH:
+            violations.append(f"{path} nests deeper than the {STRICT_MAX_DEPTH}-level ceiling")
+            return
+
+        forbidden = sorted(STRICT_FORBIDDEN_KEYWORDS & node.keys())
+        if forbidden:
+            violations.append(f"{path} uses {', '.join(forbidden)}, which strict mode rejects")
+
+        enum = node.get("enum")
+        if isinstance(enum, list) and len(enum) > STRICT_MAX_ENUM_VALUES:
+            violations.append(
+                f"{path} has {len(enum)} enum values, above the {STRICT_MAX_ENUM_VALUES} ceiling"
+            )
+
+        if node.get("type") == "object":
+            if node.get("additionalProperties") is not False:
+                violations.append(f"{path} must set additionalProperties to false")
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                properties_seen += len(properties)
+                required = node.get("required")
+                missing = sorted(
+                    properties.keys() - set(required if isinstance(required, list) else [])
+                )
+                if missing:
+                    violations.append(
+                        f"{path} omits {', '.join(missing)} from required; strict mode requires "
+                        "EVERY property to be listed, and an optional field is expressed as a "
+                        "null union instead"
+                    )
+                for name, child in properties.items():
+                    walk(child, f"{path}.{name}", depth + 1)
+
+        for keyword in ("items", "prefixItems", "contains"):
+            child = node.get(keyword)
+            if isinstance(child, dict):
+                walk(child, f"{path}[{keyword}]", depth + 1)
+            elif isinstance(child, list):
+                for position, member in enumerate(child):
+                    walk(member, f"{path}[{keyword}][{position}]", depth + 1)
+
+        for keyword in ("anyOf", "oneOf"):
+            members = node.get(keyword)
+            if isinstance(members, list):
+                for position, member in enumerate(members):
+                    walk(member, f"{path}.{keyword}[{position}]", depth)
+
+        for container in ("$defs", "definitions"):
+            defs = node.get(container)
+            if isinstance(defs, dict):
+                for name, child in defs.items():
+                    walk(child, f"{container}.{name}", depth)
+
+    if schema.get("type") != "object":
+        violations.append("the root must be an object; anyOf at the root is rejected")
+    walk(schema, "root", 1)
+
+    if properties_seen > STRICT_MAX_PROPERTIES:
+        violations.append(
+            f"{properties_seen} properties, above the {STRICT_MAX_PROPERTIES} ceiling"
+        )
+    return violations
+
+
 class OpenAIAdapter:
     """Satisfies ``ProviderAdapter``.
 
@@ -387,13 +580,306 @@ class OpenAIAdapter:
         root, and no ``allOf``/``not``/``if``. A Pydantic model does not emit that by
         default, so the schema is validated in ``validate()``, not assumed.
         """
-        raise NotImplementedError("openai-api: Responses body")
+        body: dict[str, Any] = {
+            "model": req.model,
+            # THE BOT INSTRUCTION ONLY. Retrieved text is a user-role data part below; source
+            # text that can reach the instruction slot is prompt injection with our own
+            # retrieval pipeline as the delivery mechanism.
+            "instructions": req.system,
+            "input": self._input_items(req),
+            # INCLUDES reasoning tokens, which are generated first. See the module docstring:
+            # at high effort a small cap is consumed entirely by invisible thinking.
+            "max_output_tokens": req.max_output_tokens,
+            "stream": True,
+            # The API default is True, which retains the tenant's retrieved document text and
+            # the end user's question on OpenAI's servers for 30 days.
+            "store": False,
+            # The default drops items from the START of `input`, which is exactly where the
+            # retrieved evidence sits — citations would then point at text never sent.
+            "truncation": "disabled",
+            # Keyed on the bot, because the bot's instruction plus context layout is what is
+            # actually identical across requests. Not the conversation (too sparse to ever hit)
+            # and not the org (one key would take far more than the per-key request rate).
+            "prompt_cache_key": f"kb:{req.bot_id}",
+            "safety_identifier": hashlib.sha256(req.org_id.encode()).hexdigest()[
+                :SAFETY_IDENTIFIER_LENGTH
+            ],
+        }
+
+        if req.reasoning is not None and Capability.REASONING in caps.supported:
+            # The seven contract levels are OpenAI's seven levels, so this is an identity map
+            # and not a rounding. Per-model SUBSETS are real and are not knowable from here —
+            # `capability_flags` carries one REASONING boolean, not a ladder — so a model that
+            # rejects a level answers 400 `unsupported_value`, which classifies as
+            # PROVIDER_PERMANENT_REQUEST and names the level. That is the loud direction.
+            reasoning: dict[str, Any] = {"effort": req.reasoning.effort}
+            if req.reasoning.include_trace and Capability.REASONING_TRACE in caps.supported:
+                # Only when a UI will actually render it: the trace is billed either way, and
+                # asking for a summary the pane never shows is spend with no reader.
+                reasoning["summary"] = "auto"
+            body["reasoning"] = reasoning
+            # NO `budget_tokens` ANYWHERE. OpenAI has no equivalent control; `validate()`
+            # reports it rather than this method dropping it.
+
+        if req.temperature is not None and Capability.SAMPLING in caps.supported:
+            body["temperature"] = req.temperature
+
+        if req.response_schema is not None and Capability.STRUCTURED_OUTPUT in caps.supported:
+            # Responses nests differently from Chat Completions: no `json_schema` WRAPPER
+            # object, and `name` is required. Copying the Chat Completions shape here is a 400.
+            body["text"] = {
+                "format": {
+                    "type": "json_schema",
+                    "name": STRUCTURED_OUTPUT_NAME,
+                    "strict": True,
+                    "schema": req.response_schema,
+                }
+            }
+
+        if req.tools and Capability.TOOL_USE in caps.supported:
+            # Function tools are FLAT on Responses — no nested `function` object, which is the
+            # Chat Completions shape and a 400 here.
+            body["tools"] = [
+                {
+                    "type": "function",
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                    "strict": TOOL_STRICT,
+                }
+                for tool in req.tools
+            ]
+
+        return body
+
+    @staticmethod
+    def _input_items(req: ChatRequest) -> list[dict[str, Any]]:
+        """Evidence first, conversation second, images last — and the order is load-bearing.
+
+        Prefix caching at this vendor is exact string matching over the head of the request, so
+        the stable material (the bot's blocks, in the order the retrieval stage assigned) goes
+        first and the per-turn material goes last. A re-sorted evidence list is a full cache
+        miss that costs roughly ten times as much and reports as a perfectly normal request.
+
+        Assistant turns carry a plain string rather than a content list on purpose: the list
+        form of an input message accepts ``input_*`` parts only, and ``output_text`` belongs to
+        a different item shape that also requires an ``id`` and a ``status`` we do not have for
+        a turn we replayed out of PostgreSQL.
+        """
+        items: list[dict[str, Any]] = []
+
+        if req.context_blocks:
+            items.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": CONTEXT_BLOCK_TEMPLATE.format(
+                                index=block.index, title=block.title, text=block.text
+                            ),
+                        }
+                        for block in req.context_blocks
+                    ],
+                }
+            )
+
+        for message in req.messages:
+            if message.role == "assistant":
+                items.append({"role": "assistant", "content": message.content})
+            else:
+                items.append(
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": message.content}],
+                    }
+                )
+
+        if req.images:
+            # Base64 data URLs only. `ImageInput` has deliberately no URL form: a URL the
+            # vendor fetches is a tenant-supplied fetch we cannot guard.
+            parts = [
+                {
+                    "type": "input_image",
+                    "detail": IMAGE_DETAIL,
+                    "image_url": f"data:{image.media_type};base64,{image.data_b64}",
+                }
+                for image in req.images
+            ]
+            for item in reversed(items):
+                if item["role"] == "user" and isinstance(item["content"], list):
+                    item["content"] = [*item["content"], *parts]
+                    break
+            else:
+                items.append({"role": "user", "content": parts})
+
+        return items
 
     def validate(self, req: ChatRequest, caps: ModelCapabilities) -> list[CapabilityWarning]:
-        """Reject or warn per ``caps.on_unsupported``; never drop an option silently."""
-        raise NotImplementedError
+        """Reject or warn per ``caps.on_unsupported``; never drop an option silently.
 
-    def stream(
+        Every optional field on ``ChatRequest`` appears below, including the two that read as
+        infrastructure rather than as options — ``stream`` and ``cache_hint`` — because a field
+        the caller set and this adapter ignored is a silent drop whatever the field is named.
+
+        ``max_output_tokens`` and the strict schema are RAISES rather than warnings, and the
+        difference is that neither has a "send it without the option" form: there is no request
+        to make once the cap exceeds the model's ceiling, and a schema outside the strict subset
+        is a 400 whose body we may not log, arriving after the whole retrieval spend.
+        """
+        warnings: list[CapabilityWarning] = []
+
+        if not req.stream:
+            warnings.append(
+                self._unsupported(
+                    caps,
+                    option="stream",
+                    detail=(
+                        f"stream=False is not honoured for {req.model!r}: this adapter always "
+                        "sends stream=True because the Laravel relay measures time-to-first-"
+                        "token and a buffered turn reports one that is indistinguishable from "
+                        "a stall. The answer is identical; only the delivery differs"
+                    ),
+                )
+            )
+
+        if req.temperature is not None and Capability.SAMPLING not in caps.supported:
+            warnings.append(
+                self._unsupported(
+                    caps,
+                    option="temperature",
+                    detail=(
+                        f"{req.model!r} does not declare Capability.SAMPLING, so "
+                        f"temperature={req.temperature} cannot be sent. The 5.x reasoning line "
+                        "REJECTS sampling parameters with 400 unsupported_value rather than "
+                        "ignoring them, so sending it anyway is a hard failure at request time "
+                        "that reads as an outage on the fallback dashboard"
+                    ),
+                )
+            )
+
+        if req.response_schema is not None:
+            if Capability.STRUCTURED_OUTPUT not in caps.supported:
+                warnings.append(
+                    self._unsupported(
+                        caps,
+                        option="response_schema",
+                        detail=(
+                            f"{req.model!r} does not declare Capability.STRUCTURED_OUTPUT. "
+                            "JSON_MODE is not a substitute — it produces valid JSON with no "
+                            "schema enforcement — and a bot configured for structured output "
+                            "that quietly returns prose is not noticed for a month"
+                        ),
+                    )
+                )
+            else:
+                violations = _strict_schema_violations(req.response_schema)
+                if violations:
+                    # ALWAYS A RAISE, on both `on_unsupported` settings. There is no
+                    # "send it without the schema" form of this: the caller asked for enforced
+                    # structure, and the alternative to refusing here is a 400 after retrieval
+                    # has been paid for, carrying a message we are not allowed to log.
+                    raise KbError(
+                        ErrorClass.VALIDATION,
+                        f"response_schema is outside OpenAI's strict subset for {req.model!r}: "
+                        + "; ".join(violations),
+                    )
+
+        if req.reasoning is not None:
+            if Capability.REASONING not in caps.supported:
+                warnings.append(
+                    self._unsupported(
+                        caps,
+                        option="reasoning",
+                        detail=(
+                            f"{req.model!r} does not declare Capability.REASONING, so "
+                            f"effort={req.reasoning.effort!r} cannot be requested"
+                        ),
+                    )
+                )
+            else:
+                if req.reasoning.budget_tokens is not None:
+                    warnings.append(
+                        self._unsupported(
+                            caps,
+                            option="reasoning.budget_tokens",
+                            detail=(
+                                "OpenAI has no reasoning budget control — effort is the only "
+                                f"dial — so budget_tokens={req.reasoning.budget_tokens} cannot "
+                                "be expressed. It is reported rather than dropped because NIM "
+                                "ENFORCES it, so a caller reading it as portable would size a "
+                                "budget here that silently does nothing"
+                            ),
+                        )
+                    )
+                if req.reasoning.include_trace and Capability.REASONING_TRACE not in caps.supported:
+                    warnings.append(
+                        self._unsupported(
+                            caps,
+                            option="reasoning.include_trace",
+                            detail=(
+                                f"{req.model!r} declares REASONING without REASONING_TRACE, so "
+                                "no summary is requested and the reasoning pane stays empty "
+                                "while the trace is still billed inside output_tokens"
+                            ),
+                        )
+                    )
+
+        if req.images and Capability.IMAGE_INPUT not in caps.supported:
+            warnings.append(
+                self._unsupported(
+                    caps,
+                    option="images",
+                    detail=(
+                        f"{req.model!r} does not declare Capability.IMAGE_INPUT, so "
+                        f"{len(req.images)} image(s) cannot be sent. Dropping them silently "
+                        "would leave the model answering a question about a picture it never "
+                        "saw, in prose that never says so"
+                    ),
+                )
+            )
+
+        if req.tools and Capability.TOOL_USE not in caps.supported:
+            warnings.append(
+                self._unsupported(
+                    caps,
+                    option="tools",
+                    detail=(
+                        f"{req.model!r} does not declare Capability.TOOL_USE, so "
+                        f"{len(req.tools)} tool definition(s) cannot be sent"
+                    ),
+                )
+            )
+
+        if req.cache_hint == "prefix" and Capability.PROMPT_CACHING not in caps.supported:
+            warnings.append(
+                self._unsupported(
+                    caps,
+                    option="cache_hint",
+                    detail=(
+                        f"{req.model!r} does not declare Capability.PROMPT_CACHING, so a "
+                        "cacheable prefix cannot be claimed. prompt_cache_key is still sent — "
+                        "it is a routing key and is inert without caching — but no cost "
+                        "reduction should be expected and none will be reported"
+                    ),
+                )
+            )
+
+        if req.max_output_tokens > caps.max_output_tokens:
+            # A RAISE on both settings, for the same reason as the schema: there is no request
+            # to make with the option removed. `max_output_tokens` has no default we could fall
+            # back to that would not silently change the answer length the tenant configured.
+            raise KbError(
+                ErrorClass.VALIDATION,
+                f"max_output_tokens={req.max_output_tokens} exceeds the ceiling "
+                f"{caps.max_output_tokens} recorded for {req.model!r}. The cap also has to "
+                "cover reasoning tokens, which are generated first, so a request sized against "
+                "the wrong ceiling returns an empty answer and a full bill",
+            )
+
+        return warnings
+
+    async def stream(
         self,
         req: ChatRequest,
         caps: ModelCapabilities,
@@ -413,13 +899,256 @@ class OpenAIAdapter:
         asyncio.CancelledError`` branch and then re-raises. Never from ``finally``: an async
         generator that yields while ``GeneratorExit`` unwinds raises ``RuntimeError``, the
         ASGI layer swallows it, and the usage row disappears for a turn OpenAI still billed.
+
+        A vendor failure ends the stream with a terminal ``ChatResult`` carrying an
+        ``error_class`` rather than by raising, because ``ChatResult`` is the single channel
+        the contract gives this generator and a raise leaves the turn with no usage row at
+        all. The classification is ``classify()``'s and the fallback decision is the router's;
+        this method never picks a second vendor.
         """
-        raise NotImplementedError("openai-api: Responses stream translation")
+        started = time.perf_counter()
+
+        # BEFORE THE FIRST BYTE. Under `on_unsupported="reject"` this raises out of the
+        # generator without a ChatResult, which is correct: nothing was sent, nothing was
+        # billed, and there is no turn to finalize.
+        warnings = self.validate(req, caps)
+
+        first_token_ms: int | None = None
+        parts: list[str] = []
+        deltas_emitted = 0
+        usage = Usage()
+        stop = StopReason.ERROR
+        error_class: str | None = None
+        request_id: str | None = None
+        rate_limit: dict[str, str] = {}
+        extras: dict[str, Any] = {}
+        native_stop_reason: str | None = None
+
+        try:
+            client = self._client(credential)
+            events = await client.responses.create(
+                **self._translate_in(req, caps),
+                # The per-call budget, never the client's constructed default. `read` is
+                # BETWEEN CHUNKS, so a model emitting one token every fifteen seconds never
+                # trips it; the caller's absolute deadline is what bounds the total.
+                timeout=httpx.Timeout(
+                    req.timeouts.total,
+                    connect=req.timeouts.connect,
+                    read=req.timeouts.first_token,
+                    write=req.timeouts.connect,
+                    pool=req.timeouts.connect,
+                ),
+            )
+
+            # IMMEDIATELY, AND BEFORE THE FIRST ITERATION. `.response` is the live httpx
+            # response: `x-request-id` and the rate-limit headers are readable here and are
+            # gone with the connection if the stream dies mid-flight — which is precisely the
+            # failure vendor support asks about.
+            headers = getattr(getattr(events, "response", None), "headers", None) or {}
+            request_id = headers.get("x-request-id")
+            rate_limit = {
+                header: headers[header] for header in RATE_LIMIT_HEADERS if header in headers
+            }
+
+            async for event in events:
+                event_type = getattr(event, "type", None)
+                kind = DELTA_EVENTS.get(event_type or "")
+                if kind is not None:
+                    text = getattr(event, "delta", "") or ""
+                    if not text:
+                        # Empty deltas are common at the head of a stream. Starting TTFT on
+                        # one reports a first token that carried nothing.
+                        continue
+                    if first_token_ms is None:
+                        first_token_ms = int((time.perf_counter() - started) * 1000)
+                    deltas_emitted += 1
+                    if kind == "text":
+                        parts.append(text)
+                    yield Delta(kind=kind, text=text, index=getattr(event, "output_index", 0) or 0)
+                elif event_type in TERMINAL_EVENTS:
+                    terminal = event.response
+                    usage = self._usage(getattr(terminal, "usage", None))
+                    stop = self._stop(terminal)
+                    native_stop_reason = getattr(terminal, "status", None)
+                    served = getattr(terminal, "model", None)
+                    if served is not None:
+                        # The SERVED id. `gpt-5.6` floats to `gpt-5.6-sol` and there are no
+                        # dated snapshots on that line, so what answered is not necessarily
+                        # what was asked for.
+                        extras["response_model"] = served
+                    if stop is StopReason.ERROR:
+                        # `status: "failed"`, or a status this adapter does not map. Unknown is
+                        # PERMANENT, never temporary: a temporary default retries a request
+                        # that will never succeed and hides that the vendor added a value.
+                        error_class = ErrorClass.PROVIDER_PERMANENT_REQUEST.value
+        except asyncio.CancelledError:
+            # HERE, AND THEN RE-RAISE. Never from `finally`: an async generator that yields
+            # while GeneratorExit unwinds raises RuntimeError, the ASGI layer swallows it, and
+            # the only symptom is a missing usage row for a turn OpenAI billed in full.
+            yield self._terminal(
+                parts=parts,
+                stop=StopReason.CANCELLED,
+                usage=_estimated_usage(deltas_emitted),
+                error_class=ErrorClass.USER_CANCELLATION.value,
+                request_id=request_id,
+                first_token_ms=first_token_ms,
+                started=started,
+                native_stop_reason=native_stop_reason,
+                rate_limit=rate_limit,
+                warnings=warnings,
+                extras=extras,
+            )
+            raise
+        except Exception as exc:
+            # One terminal event on EVERY path, so a failure is reported through `error_class`
+            # rather than by raising out of the generator and losing the turn's accounting.
+            # A KbError already carries our own classification — re-classifying it as a vendor
+            # fault would file a validation defect of ours as OpenAI's.
+            failure = (
+                exc
+                if isinstance(exc, KbError)
+                else self.classify(exc, tokens_emitted=deltas_emitted)
+            )
+            error_class = failure.error_class.value
+            request_id = getattr(failure, "provider_request_id", None) or request_id
+            yield self._terminal(
+                parts=parts,
+                stop=StopReason.ERROR,
+                usage=_estimated_usage(deltas_emitted),
+                error_class=error_class,
+                request_id=request_id,
+                first_token_ms=first_token_ms,
+                started=started,
+                native_stop_reason=native_stop_reason,
+                rate_limit=rate_limit,
+                warnings=warnings,
+                extras=extras,
+            )
+            return
+
+        yield self._terminal(
+            parts=parts,
+            stop=stop,
+            usage=usage,
+            error_class=error_class,
+            request_id=request_id,
+            first_token_ms=first_token_ms,
+            started=started,
+            native_stop_reason=native_stop_reason,
+            rate_limit=rate_limit,
+            warnings=warnings,
+            extras=extras,
+        )
+
+    def _terminal(
+        self,
+        *,
+        parts: list[str],
+        stop: StopReason,
+        usage: Usage,
+        error_class: str | None,
+        request_id: str | None,
+        first_token_ms: int | None,
+        started: float,
+        native_stop_reason: str | None,
+        rate_limit: dict[str, str],
+        warnings: list[CapabilityWarning],
+        extras: dict[str, Any],
+    ) -> ChatResult:
+        """Build the one terminal event. Every exit from ``stream()`` comes through here.
+
+        One construction site, so the three paths cannot drift on what a ``ChatResult``
+        carries — the drift that shows up as a cancelled turn with no rate-limit headers or an
+        errored turn with no request id, both discovered while reading an incident.
+        """
+        return ChatResult(
+            text="".join(parts),
+            stop_reason=stop,
+            usage=usage,
+            provider_request_id=request_id,
+            first_token_ms=first_token_ms,
+            total_ms=int((time.perf_counter() - started) * 1000),
+            error_class=error_class,
+            diagnostics=Diagnostics(
+                provider=self.name,
+                # THE VENDOR'S OWN WORD, kept even when it maps to ERROR. It is what tells us
+                # OpenAI added a status.
+                native_stop_reason=native_stop_reason,
+                rate_limit=rate_limit,
+                warnings=warnings,
+                extras=extras,
+            ),
+        )
 
     @staticmethod
     def _usage(raw: Any) -> Usage:
-        """Normalize usage. SUBTRACT the cached amount — it is a subset here."""
-        raise NotImplementedError("openai-api: input_tokens - cached_tokens")
+        """Normalize usage. SUBTRACT the cached amount — it is a subset here.
+
+        ``usage.input_tokens_details.cached_tokens`` is, in OpenAI's own wording, "part of the
+        total input_tokens count". Our buckets are disjoint and billing reads
+        ``total_input_tokens``, so the subtraction is what keeps the sum equal to the vendor's
+        own billed input. Anthropic's buckets are siblings and the same step there is a
+        verbatim assignment; getting the direction wrong on a 200k-token cached document is a
+        five-figure reporting error in whichever direction was guessed.
+
+        ``cache_write_tokens`` IS READ, AND THE READING IS DERIVED RATHER THAN ASSUMED.
+        `openai==2.53.0` added `InputTokensDetails.cache_write_tokens`, which this module's
+        docstring and `openai-api/SKILL.md` both still say is never reported — both are stale.
+        Whether it is a subset of `input_tokens` (as `cached_tokens` is) or a sibling of it
+        decides whether populating the bucket must also subtract, and reading it under the
+        wrong assumption moves the billed total, which is the exact error the subtraction above
+        exists to prevent. So this method does not hold an opinion: the SDK declares both
+        fields inside a container it documents as "a detailed breakdown of the input tokens",
+        which is the subset reading, and the arithmetic below TESTS that reading against the
+        numbers in hand and falls back when it fails. `total_input_tokens` equals the vendor's
+        billed input on both branches, so the worst case is the under-attribution this module
+        already documented, never a wrong bill.
+
+        <!-- UNVERIFIED: that `cache_write_tokens` is a subset rather than a sibling is read
+        off the SDK's own field documentation, not off current official vendor documentation,
+        which this host cannot reach. The fallback below is what makes being wrong survivable
+        rather than silent. -->
+        """
+        if raw is None:
+            # `estimated` rows are never aggregated into invoiced cost, so an absent usage
+            # block degrades ATTRIBUTION and never the bill. Inventing a number here would be
+            # indistinguishable from a measurement.
+            return Usage(source="estimated")
+
+        input_tokens = getattr(raw, "input_tokens", None)
+        output_tokens = getattr(raw, "output_tokens", None)
+        if not isinstance(input_tokens, int) or not isinstance(output_tokens, int):
+            return Usage(source="estimated")
+
+        details = getattr(raw, "input_tokens_details", None)
+        cached = getattr(details, "cached_tokens", 0) or 0
+        written = getattr(details, "cache_write_tokens", 0) or 0
+        reasoning = getattr(getattr(raw, "output_tokens_details", None), "reasoning_tokens", 0) or 0
+
+        # SUBSET OR SIBLING, DECIDED FROM THE NUMBERS. Under the subset reading both cached and
+        # written are components of `input_tokens`, so their sum cannot exceed it. When that
+        # holds, subtract both and the three buckets partition the billed input exactly. When it
+        # does not, the subset reading is false for this response and taking it would report a
+        # `total_input_tokens` SMALLER than the vendor billed — so drop back to the reading that
+        # has always been verified (cached ⊆ input, writes left folded into uncached input),
+        # which under-attributes and never under-bills.
+        if cached + written <= input_tokens:
+            uncached, write_bucket = input_tokens - cached - written, written
+        else:
+            uncached, write_bucket = max(input_tokens - cached, 0), 0
+
+        return Usage(
+            # `max` above is a floor and not a correction — a vendor reporting more cached than
+            # input is a bug, and a negative bucket would make `total_input_tokens` smaller than
+            # the billed input rather than louder.
+            input_tokens=uncached,
+            cache_read_tokens=cached,
+            cache_write_tokens=write_bucket,
+            output_tokens=output_tokens,
+            # Billed INSIDE output_tokens. Adding it would double-bill every reasoning turn.
+            reasoning_tokens=reasoning,
+            source="provider_final",
+        )
 
     @staticmethod
     def _stop(response: Any) -> StopReason:
@@ -430,8 +1159,51 @@ class OpenAIAdapter:
         ``status == "incomplete"`` with ``reason == "content_filter"`` -> ``REFUSAL``; any
         other ``incomplete``, INCLUDING an empty ``incomplete_details`` -> ``MAX_OUTPUT``;
         ``status == "failed"`` -> ``ERROR``; only ``completed`` reaches ``COMPLETE``.
+
+        Two notes on what is NOT here.
+
+        ``CONTEXT_EXCEEDED`` is unreachable on this vendor: an over-window request is refused
+        at request time with 400 ``context_length_exceeded``, which ``classify()`` files as
+        ``PROVIDER_PERMANENT_REQUEST``. It never arrives as a status.
+
+        ``TOOL_USE`` is reached from ``completed`` and is the one addition to the enumeration
+        above. Responses has no ``finish_reason``; a model asking for a tool returns
+        ``completed`` with a ``function_call`` item in ``output`` and no text. Reporting that
+        as ``COMPLETE`` hands the router an empty answer with nothing to distinguish it from a
+        model that had nothing to say — and this adapter already emits ``tool_args`` deltas, so
+        a stop reason that cannot say so is incoherent with its own stream.
         """
-        raise NotImplementedError("openai-api: status + incomplete_details + refusal part")
+        status = getattr(response, "status", None)
+        output = getattr(response, "output", None) or []
+
+        # FIRST, because a refusal arrives as HTTP 200 with a `completed` status and would
+        # otherwise be filed as a successful empty answer — at which point a router seeing no
+        # text falls back and re-asks the banned question on another vendor, billing twice.
+        for item in output:
+            for part in getattr(item, "content", None) or []:
+                if getattr(part, "type", None) == "refusal":
+                    return StopReason.REFUSAL
+
+        if status == "incomplete":
+            reason = getattr(getattr(response, "incomplete_details", None), "reason", None)
+            if reason == "content_filter":
+                return StopReason.REFUSAL
+            # EVERY OTHER `incomplete`, INCLUDING AN EMPTY `incomplete_details`. The details
+            # object has been observed arriving empty while the output was genuinely truncated,
+            # so truncation is never decided from the presence of a reason. A truncated answer
+            # reported as COMPLETE is the worst failure this layer can cause: the user reads a
+            # confident half-sentence and nothing errors anywhere.
+            return StopReason.MAX_OUTPUT
+
+        if status == "completed":
+            if any(getattr(item, "type", None) == "function_call" for item in output):
+                return StopReason.TOOL_USE
+            return StopReason.COMPLETE
+
+        # `failed`, `cancelled`, `in_progress`, `queued`, a value OpenAI adds next quarter, or
+        # nothing at all. ERROR, with the vendor's own word preserved on
+        # `Diagnostics.native_stop_reason` by the caller — never a fall-through to COMPLETE.
+        return StopReason.ERROR
 
     def classify(self, exc: BaseException, *, tokens_emitted: int) -> ProviderCallFailed:
         """SDK exception plus the body's ``code`` — never the status alone.

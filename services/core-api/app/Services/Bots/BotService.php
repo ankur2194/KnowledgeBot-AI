@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Bots;
 
 use App\Enums\BotAnswerMode;
+use App\Enums\BotDeletion;
 use App\Enums\BotStatus;
 use App\Jobs\SyncBotAccessJob;
 use App\Models\Bot;
@@ -73,6 +74,28 @@ final readonly class BotService
      * that caused it. That is the late discovery this guard exists to remove, so the message names
      * the missing thing and the endpoint that supplies it.
      */
+    /**
+     * The 409 a delete gets when the bot has held a conversation.
+     *
+     * A CONSTANT BECAUSE THE SENTENCE IS THE WHOLE VALUE OF THE REFUSAL, as it is for the three
+     * publish guards below. An operator pressing "delete" has a goal — get this bot out of the way —
+     * and a bare "cannot delete" leaves them looking for a workaround, which in this schema is
+     * unpicking a transcript by hand. The message names the route that achieves the goal.
+     *
+     * A 409 AND NOT A 422, because there is no FIELD to key it on: the request is a bare DELETE.
+     * That is the distinction `ProviderModelController::destroy()` draws and the same one
+     * `duplicateSlug()` draws from the other side.
+     */
+    public const DELETE_BLOCKED_BY_CONVERSATIONS = 'This bot cannot be deleted because it has held '
+        .'at least one conversation. A transcript is an audit record: it is what answers a customer '
+        .'who disputes an answer, and it is what a provider invoice is reconciled against, so '
+        .'deleting the bot would take that history with it. Set the bot\'s status to `archived` '
+        .'instead — an archived bot answers nobody, is read-only, and keeps every conversation, '
+        .'citation and provider call resolvable.';
+
+    /** The closed token `bot.delete.refused` records, in the shape `source.upload.rejected` uses. */
+    public const DELETE_REFUSED_REASON_CONVERSATIONS = 'has_conversations';
+
     public const PUBLISH_NEEDS_MODEL = 'This bot cannot be published because it has no provider '
         .'connection and model. A published bot is reachable by end users, and one with no model '
         .'would accept a question and fail inside the data plane rather than here — which is a '
@@ -404,14 +427,25 @@ final readonly class BotService
      * catalog, never by `SCAN MATCH` — SCAN can miss a key written mid-iteration, which is
      * precisely the read-repopulate case.
      *
-     * TODO(phase-e): `conversations` will reference `bots`, and at that point this path has a
-     * decision to make that it does not have today — a hard delete would either orphan or cascade
-     * an organization's transcript history, and neither is acceptable silently. `BotStatus::Archived`
-     * already exists for the "permanently withdrawn, row survives so conversation history and audit
-     * entries resolve" case, so the likely answer is that DELETE becomes a refusal for a bot with
-     * conversations and archiving becomes the only route. It is named here rather than left to be
-     * discovered, because the wrong fix — adding `ON DELETE CASCADE` to the conversation key — is
-     * the one that makes the data loss invisible.
+     * ── CONVERSATIONS: DECIDED, AND THE DECISION IS A REFUSAL ────────────────────────────────
+     *
+     * This paragraph was `TODO(phase-e)` until `conversations` landed. It named three candidates and
+     * predicted the answer, and the answer is the one it predicted: A BOT THAT HAS HELD A
+     * CONVERSATION CANNOT BE DELETED. `conversations.bot_id` references `bots (organization_id, id)`
+     * with `ON DELETE RESTRICT`, `EloquentBotRepository::delete()` counts under the row lock and
+     * returns `BotDeletion::HasConversations`, and this method turns that into a 409 naming
+     * archiving. `BotStatus::Archived` already existed for exactly this — its own docblock reads
+     * "the row survives so conversation history and audit entries resolve".
+     *
+     * The two rejected alternatives, kept because the reasoning is what stops them coming back:
+     * CASCADE destroys every transcript, every provider call that billed for one and every piece of
+     * feedback, from a button labelled "delete bot" — the TODO's own words were that it "makes the
+     * data loss invisible" — and SET NULL keeps the transcript while losing what it was a transcript
+     * OF, so every §8.23 aggregate gains a bucket that appears in the totals and in no breakdown.
+     * Migration 2026_08_26_002800 carries the full argument.
+     *
+     * THE COST IS REAL AND IS ACCEPTED: a bot can never be fully removed once it has answered
+     * anybody, and the console has to say so rather than offering a delete button that 409s.
      *
      * The shape of the answer is two-phase and is already doctrine: the relational delete is
      * immediate and the derived stores are purged by a job that PROVES the removal. It is
@@ -441,6 +475,7 @@ final readonly class BotService
      * DELETE IS NOT IDEMPOTENT HERE, ON PURPOSE. An audit row exists for the first delete, and a
      * 200 for the second would claim this actor performed a deletion the trail does not record.
      *
+     * @throws ConflictHttpException 409 when the bot has held a conversation — see the block above
      * @throws NotFoundHttpException when the row disappeared between the binding and the write
      */
     public function delete(
@@ -451,7 +486,7 @@ final readonly class BotService
     ): void {
         $organizationId = $organization->organizationId();
 
-        $deleted = $this->bots->delete(
+        $outcome = $this->bots->delete(
             $organizationId,
             $bot->id,
             /** @param  list<RemovedSourceAssignment>  $assignments */
@@ -472,9 +507,25 @@ final readonly class BotService
             },
         );
 
-        if (! $deleted) {
-            throw new NotFoundHttpException;
-        }
+        match ($outcome) {
+            BotDeletion::Deleted => null,
+
+            // A TRANSCRIPT IS AN AUDIT RECORD. The repository counted under the row lock and
+            // refused; nothing was changed and no `bot.deleted` row was written. The 409 names
+            // archiving, because an operator pressing "delete" has a goal and "cannot delete" alone
+            // leaves them looking for a workaround.
+            BotDeletion::HasConversations => throw $this->refuseDelete(
+                $organizationId,
+                $bot,
+                $actorId,
+                $request,
+            ),
+
+            // Deleted between the binding and the transaction. DELETE is not idempotent here on
+            // purpose: an audit row exists for the first delete, and a 200 for the second would
+            // claim this actor performed a deletion the trail does not record.
+            BotDeletion::Missing => throw new NotFoundHttpException,
+        };
 
         // AFTER the commit, and outside the closure above: the closure runs INSIDE the repository's
         // transaction, and a job dispatched from there would be popped by a worker before the
@@ -496,6 +547,60 @@ final readonly class BotService
             ]);
             report($exception);
         }
+    }
+
+    /**
+     * Record the refused delete and build the 409.
+     *
+     * ── IT RETURNS THE EXCEPTION RATHER THAN THROWING IT ──────────────────────────────────────
+     *
+     * So the call site above reads `=> throw $this->refuseDelete(...)` inside the `match`, which is
+     * what keeps all three outcomes in one exhaustive expression a reader can check against
+     * `BotDeletion`'s three cases. A helper that threw would make the match arm `void` and the
+     * exhaustiveness would stop being visible.
+     *
+     * ── THE AUDIT ROW IS `ON_FAILURE_LOG`, SO IT IS WRITTEN OUTSIDE ANY TRANSACTION ───────────
+     *
+     * `AuditLogger`'s test is "can this still be rolled back", and the answer is no because there is
+     * nothing to roll back — the refusal is already decided and no row was written. Aborting on a
+     * failed audit write would turn a legitimate 409 into a 500: a lie to the caller AND still no
+     * audit row. That is `source.upload.rejected`'s reasoning, unmodified.
+     *
+     * ── `conversation_count` IS READ AFTER THE LOCK IS GONE, AND IS THEREFORE A FLOOR ─────────
+     *
+     * The count that CAUSED the refusal was taken under `lockForUpdate()`; this one is taken
+     * afterwards, so a conversation started in between is included. The interface states it. The
+     * field answers a question of MAGNITUDE — three test threads or four hundred thousand customer
+     * conversations — and the error direction is upwards, so it can never under-report what was at
+     * stake.
+     */
+    private function refuseDelete(
+        string $organizationId,
+        Bot $bot,
+        ?string $actorId,
+        ?Request $request,
+    ): ConflictHttpException {
+        $this->audit->record(
+            AuditLogger::BOT_DELETE_REFUSED,
+            organizationId: $organizationId,
+            actorId: $actorId,
+            details: [
+                // The same surviving identification `bot.deleted` carries — and here the bot is NOT
+                // gone, which is the point: a reader has a row to go and look at.
+                'name' => $bot->name,
+                'slug' => $bot->slug,
+                'status' => $bot->status->value,
+                'conversation_count' => $this->bots->conversationCount($organizationId, $bot->id),
+                // A CLOSED TOKEN, never an exception message or a constraint name. See the
+                // operation's docblock in AuditLogger.
+                'reason' => self::DELETE_REFUSED_REASON_CONVERSATIONS,
+            ],
+            subjectType: Bot::class,
+            subjectId: $bot->id,
+            request: $request,
+        );
+
+        return new ConflictHttpException(self::DELETE_BLOCKED_BY_CONVERSATIONS);
     }
 
     /**

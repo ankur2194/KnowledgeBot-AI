@@ -30,8 +30,21 @@ import { botPanelDefaults, botPanelKnownPaths, updateBot, type BotSettingsField 
  * where the boundary actually is, which is `bot-editor-screen.tsx`.
  */
 
-/** The three tab values, and the three panel identities. `Tabs` reads these as its `value`s. */
-export type BotEditorPanelId = 'identity' | 'model' | 'publishing';
+/**
+ * The FOUR tab values, and the four panel identities. `Tabs` reads these as its `value`s.
+ *
+ * ── `playground` IS THE FOURTH AND IT IS NOT A FORM, WHICH CHANGES WHAT IT OWES THE SHELL ───────
+ * The other three are field partitions over `botSettingsSchema` — disjoint tuples whose union is the
+ * schema's key set, asserted by `tests/unit/bot-editor.test.ts`. The playground has NO fields: it
+ * reads `bot` to say what a run uses and it sends chat messages, so it appears in NO partition and
+ * must not acquire one. It therefore never calls `useUnsavedBotEdits` either — there is nothing to
+ * discard, and reporting `false` for ever would be a claim the guard does not need.
+ *
+ * It is here rather than as a route because the playground is a VIEW OF ONE BOT rather than a place:
+ * it needs the saved configuration the three sibling tabs set, and a nav item would need a bot
+ * picker, which is the bot list with extra steps.
+ */
+export type BotEditorPanelId = 'identity' | 'model' | 'publishing' | 'playground';
 
 export interface BotEditorContextValue {
   /**

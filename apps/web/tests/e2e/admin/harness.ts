@@ -82,6 +82,61 @@ import { test, type Page } from '@playwright/test';
  *   `tests/unit/design-system.test.ts` proves the ratio, but no browser has scanned it. Say so
  *   rather than reading this run as covering every accent-as-text element in the console.
  *
+ * ── THE THIRD RUN, 2026-08-31: THE WHOLE `admin` PROJECT — 63 PASS, 29 SKIP, 0 RED ────────────
+ *
+ * Five new specs — `conversations`, `audit-logs`, `quotas`, `dashboard`, `playground` — for the
+ * surfaces D4–E4 added, executed for the first time, and then the whole project re-run to check
+ * nothing regressed. `--workers=1 --fail-on-flaky-tests`, exit 0. **13 admin specs, 91 tests: 62
+ * pass, 29 skip, 0 fail**, plus the `setup` project's one.
+ *
+ * ── THE "58 PASS, 24 SKIP" ABOVE IS NOT AN `admin`-PROJECT FIGURE, AND IT READS LIKE ONE ───────
+ *
+ * Measured on 2026-08-31 with `--list`: `admin` is **92** tests in 14 files (13 specs + the setup)
+ * and `public` is **30** in 3. The eight specs that predate Phase D contribute **51** of those, so
+ * 51 + 30 + 1 = **82 = 58 + 24**. The second run's headline was every project at once.
+ *
+ * **This matters because the note you are reading sits directly beneath it.** A reader comparing 33
+ * (the five new specs alone) or 63 (the admin project) against 58 would conclude coverage shrank; it
+ * grew by 40 tests. Neither of the two figures above says which projects it counted, and that is the
+ * defect — not the number. A figure in a docblock is a claim, and a claim that cannot be decomposed
+ * cannot be checked (ADR-036, and `docs/22` § T40 is what happens when one is believed).
+ *
+ * ── IT FOUND ONE REAL DEFECT, AND NOT IN THE NEW CODE PATHS ANYONE EXPECTED ───────────────────
+ *
+ * `/audit-logs` reported `definition-list` (serious) on **every** scan of the route, because the
+ * `Recorded` cell's "3 more fields" overflow note was a `<div>` sitting loose inside the `<dl>` it
+ * counts. Three of the four axe assertions in that file went red on one node.
+ * `tests/components/audit-screen.test.tsx` renders the same cell and asserts the same text and could
+ * not see it — a component test reads the DOM it was given and has no opinion about whether that DOM
+ * is a legal definition list. Fixed in `features/audit/audit-columns.tsx`; the regression is pinned
+ * by a DOM assertion in the spec rather than left to a scanner happening to reach the right row, and
+ * that assertion was verified by reintroducing the defect (4 of 4 notes loose) and removing it again
+ * (0 of 4). `docs/22` § T65.
+ *
+ * ONE OF THE SPEC'S OWN ASSERTIONS WAS WRONG FIRST, and the shape is worth carrying: the regression
+ * test used `closest('dl')`, which reported two legal notes as violations, because
+ * `ServerDataTable` renders BOTH layouts into the DOM — the real `<table>` above 768px and a stack
+ * of row-cards below it, whose cells sit inside a `<dd>` of the card's own `<dl>`. **Any spec on any
+ * `ServerDataTable` route matches every cell twice**, and a count assertion that does not expect
+ * that is off by a factor of two. `closest('dt, dd, dl')` is the predicate that distinguishes loose
+ * content from nested content.
+ *
+ * ── THE SKIPS MOVED, AND NOT BECAUSE ANY SPEC CHANGED ─────────────────────────────────────────
+ *
+ * 29 skips, and **the eight pre-existing specs own 21 of them** — up from what the second run saw,
+ * on identical files. The organization's DATA changed: it had 2 knowledge sources on 2026-08-25 and
+ * has **0** today, so `source-detail.spec.ts` skipped all 8 of its tests and `sources.spec.ts` skipped
+ * its row-dependent one. **That retires the "NOT VACUOUS on `/sources`" claim above for this run** —
+ * R1's per-row accent link was scanned in the second run and was not scanned in this one. Nothing
+ * regressed; the evidence simply is not the same evidence, which is the whole reason a pass/skip
+ * split is worth more than a pass count. `models.spec.ts` (0 pass, 5 skip) and `providers.spec.ts`
+ * (3 pass, 3 skip) skip for the same reason they always have: 0 provider connections.
+ *
+ * The five new specs own the other 8: five on `/conversations` (the organization has held no thread,
+ * and nothing in this repository creates one) and three on `/quotas` (the harness account is an
+ * **admin**, and `quotas.manage` is owner-only by design — so the ceilings form, its number input and
+ * its Unlimited switch have never been rendered in a browser by any run).
+ *
  * ── TWO HARNESS FACTS ADR-072 DOES NOT CARRY, AND ONE OF THEM COSTS AN HOUR ────────────────
  *
  * `CORS_ALLOWED_ORIGINS` must include `http://localhost:3000`. ADR-072 lists `SESSION_DOMAIN`,

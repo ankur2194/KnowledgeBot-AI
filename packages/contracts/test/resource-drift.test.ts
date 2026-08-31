@@ -21,7 +21,30 @@ import type {
   BotSourceAssignmentCollectionResource,
   BotSourceAssignmentResource,
 } from '../src/resources/bot-source-assignments.js';
+import type {
+  AnalyticsLatency,
+  AnalyticsModelUsage,
+  AnalyticsProviderCalls,
+  AnalyticsWindow,
+} from '../src/resources/analytics.js';
+import type { AuditLogResource } from '../src/resources/audit-logs.js';
+import type {
+  ConversationResource,
+  ConversationTranscriptResource,
+  ProviderCallResource,
+  RetrievalTraceResource,
+  TranscriptCitationResource,
+  TranscriptFeedbackResource,
+  TranscriptMessageResource,
+} from '../src/resources/conversations.js';
 import type { InvitationResource, MemberResource } from '../src/resources/members.js';
+import type { QuotaMetricUsage } from '../src/resources/quotas.js';
+import type {
+  RuntimeBotResource,
+  RuntimeCitationResource,
+  RuntimeConversationResource,
+  RuntimeMessageResource,
+} from '../src/resources/runtime.js';
 import type {
   ProviderModelCollectionResource,
   ProviderModelResource,
@@ -1298,6 +1321,32 @@ describe('every published component is mirrored here or exempt with a reason', (
     'purged_at',
   ] as const satisfies readonly (keyof SourceResource)[];
 
+  /**
+   * `ConversationResource`'s property set, LIFTED OUT FOR THE SAME REASON `SOURCE_RESOURCE_KEYS` is.
+   *
+   * `ConversationTranscriptResource` publishes every one of these plus `messages` and
+   * `messages_truncated` — the server composes the transcript from the list resource rather than
+   * transcribing it, and the TypeScript side says so with `extends`. Spreading it makes both entries
+   * move together, which is the same property `extends` gives the types; writing the fourteen names
+   * twice would give the transcript's entry a list that had simply agreed to stop looking.
+   */
+  const CONVERSATION_RESOURCE_KEYS = [
+    'id',
+    'bot_id',
+    'channel',
+    'status',
+    'user_id',
+    'anonymous_session_id',
+    'locale',
+    'consent_required',
+    'consent_granted_at',
+    'consent_text_snapshot',
+    'started_at',
+    'last_activity_at',
+    'retention_expires_at',
+    'updated_at',
+  ] as const satisfies readonly (keyof ConversationResource)[];
+
   const MIRRORED: Readonly<Record<string, readonly string[]>> = {
     SessionResource: ['user', 'current_organization_id', 'organizations'],
     SessionUser: ['id', 'name', 'email', 'email_verified', 'is_platform_owner'],
@@ -1571,6 +1620,194 @@ describe('every published component is mirrored here or exempt with a reason', (
       'source',
     ],
     BotSourceAssignmentCollectionResource: ['source_assignments', 'meta'],
+
+    // ══ PHASE 6a's TWENTY-SEVEN COMPONENTS, MIRRORED BY PHASE 6b ═════════════════════════════
+    //
+    // ALL TWENTY-SEVEN LANDED WITH THE ENDPOINTS AND NOT ONE WAS REGISTERED, so `the published set
+    // is exactly MIRRORED plus NO_CLIENT_TYPE` was RED on `main` before a line of 6b was written.
+    // That is the closure assertion doing the job it was added for: it does not care which batch
+    // left the gap, and it fails by naming the components rather than by going quietly green over
+    // twenty-seven shapes nobody had decided about.
+    //
+    // TWENTY-FIVE ARE MIRRORED HERE — the six screens of Phase 6b read every one of them — and two
+    // are NO_CLIENT_TYPE below.
+
+    // ── §8.23's dashboard, mirrored by src/resources/analytics.ts ─────────────────────────────
+    // Seven components for one endpoint, because the tiles are read together and the server refused
+    // to publish eleven flat keys. Every nullable field on them means NOT MEASURED and never zero,
+    // which is the property the dashboard's em dashes are rendering.
+    AnalyticsWindow: ['from', 'until', 'bot_id'],
+    AnalyticsLatency: [
+      'first_token_p50_ms',
+      'first_token_p95_ms',
+      'total_p50_ms',
+      'total_p95_ms',
+    ],
+    AnalyticsProviderCalls: [
+      'succeeded',
+      'failed',
+      'error_rate',
+      'primary_attempts',
+      'fallback_attempts',
+      'fallback_rate',
+    ],
+    AnalyticsFeedback: ['positive', 'negative'],
+    AnalyticsModelUsage: [
+      'provider',
+      'model',
+      'input_tokens',
+      'output_tokens',
+      'estimated_cost',
+      'currency',
+    ],
+    AnalyticsIngestion: ['succeeded', 'failed', 'in_flight'],
+    AnalyticsResource: [
+      'window',
+      'conversations',
+      'messages',
+      'unique_sessions',
+      'latency',
+      'provider_calls',
+      'feedback',
+      'insufficient_evidence_answers',
+      'usage_by_model',
+      'ingestion',
+      'storage_bytes_used',
+    ],
+
+    // ── the quota ceilings, mirrored by src/resources/quotas.ts ───────────────────────────────
+    QuotaMetricUsage: ['metric', 'used', 'limit', 'remaining', 'exceeded', 'source'],
+    QuotaResource: ['metrics'],
+
+    // ── the audit trail, mirrored by src/resources/audit-logs.ts ──────────────────────────────
+    AuditLogResource: [
+      'id',
+      'operation',
+      'outcome',
+      'actor_id',
+      'subject_type',
+      'subject_id',
+      'ip_address',
+      'user_agent',
+      'request_id',
+      'details',
+      'created_at',
+    ],
+    AuditLogCollectionResource: ['audit_logs', 'meta'],
+
+    // ── conversation review, mirrored by src/resources/conversations.ts ───────────────────────
+    // `CONVERSATION_RESOURCE_KEYS` is LIFTED OUT for the same reason `SOURCE_RESOURCE_KEYS` above
+    // is: the transcript publishes every one of these plus two of its own, the server composes it
+    // from the list resource rather than transcribing it, and the TypeScript side says so with
+    // `extends`. Writing the fourteen names a second time inside the transcript's entry would be
+    // the copy that goes stale — a field added to the list resource fails its own comparison and
+    // would be silently omitted from the transcript's, where nothing would fail.
+    ConversationResource: CONVERSATION_RESOURCE_KEYS,
+    ConversationCollectionResource: ['conversations', 'meta'],
+    ConversationTranscriptResource: [
+      ...CONVERSATION_RESOURCE_KEYS,
+      'messages',
+      'messages_truncated',
+    ],
+    TranscriptMessageResource: [
+      'id',
+      'role',
+      'content',
+      'status',
+      'parent_message_id',
+      'settling_provider_call_id',
+      'created_at',
+      'updated_at',
+      'citations',
+      'retrieval_trace',
+      'feedback',
+      'provider_calls',
+    ],
+    TranscriptCitationResource: [
+      'label',
+      'chunk_id',
+      'title',
+      'location',
+      'excerpt',
+      'created_at',
+    ],
+    TranscriptFeedbackResource: [
+      'rating',
+      'comment',
+      'submitted_by_user_id',
+      'submitted_by_session',
+      'created_at',
+      'updated_at',
+    ],
+    ProviderCallResource: [
+      'id',
+      'provider_connection_id',
+      'model_id',
+      'provider_request_id',
+      'status',
+      'error_class',
+      'input_tokens',
+      'cache_read_tokens',
+      'cache_write_tokens',
+      'output_tokens',
+      'reasoning_tokens',
+      'estimated_cost',
+      'estimated_cost_currency',
+      'first_token_latency_ms',
+      'total_latency_ms',
+      'fallback_metadata',
+      'created_at',
+    ],
+    // THE PERSISTED PROJECTION, and it is NOT the `retrieval.trace` SSE frame. The frame is the data
+    // plane's live record and lives behind `@kb/contracts/admin`, deliberately typed open because
+    // `RetrievalTraceFrame` declines to pin it. Two shapes, two audiences, neither derived from the
+    // other — which is why they are declared in different modules and why this entry does not
+    // "cover" the playground panel.
+    RetrievalTraceResource: [
+      'original_query',
+      'rewritten_query',
+      'filters',
+      'retrieval_configuration_version',
+      'candidate_summaries',
+      'selected_evidence',
+      'insufficient_evidence',
+      'timing_breakdown',
+      'created_at',
+    ],
+
+    // ── the public runtime, mirrored by src/resources/runtime.ts ──────────────────────────────
+    // The one 6a block apps/widget genuinely consumes as well as apps/web, which is why it is in the
+    // root entry rather than behind a subpath — it is types only and therefore free.
+    RuntimeBotResource: [
+      'public_bot_id',
+      'name',
+      'description',
+      'welcome_message',
+      'placeholder_text',
+      'theme',
+      'consent_required',
+      'consent_text',
+      'starter_questions',
+    ],
+    ChatSessionResource: ['token', 'expires_in'],
+    RuntimeConversationResource: [
+      'id',
+      'status',
+      'locale',
+      'consent_required',
+      'consent_text',
+      'consent_granted_at',
+      'started_at',
+      'last_activity_at',
+    ],
+    RuntimeMessageResource: ['id', 'role', 'content', 'status', 'created_at'],
+    RuntimeMessageCollectionResource: ['messages'],
+    // `RuntimeCitationResource` IS NOT A PUBLISHED COMPONENT — the server inlines the citation object
+    // inside this collection's `items` rather than `$ref`-ing a named schema — so only the wrapper
+    // appears here. The TS side declares both, because a client needs a name for the element type to
+    // render a list of them, and the element's five fields are pinned instead by the hand-written
+    // comparison in the runtime-citations suite below.
+    RuntimeCitationCollectionResource: ['citations'],
   };
 
   /**
@@ -1601,6 +1838,24 @@ describe('every published component is mirrored here or exempt with a reason', (
     // a condition, rather than an exemption on the merits. The condition was met by
     // apps/web/src/features/models, so the entry became a MIRRORED one above and this list shrank
     // rather than growing an explanation.
+
+    // ── THE TWO RERANK COMPONENTS, AND THIS IS AN ENTRY WITH A CLAIMANT ────────────────────────
+    // `GET|PUT .../rerank-configuration` shipped in an earlier phase and the closure assertion never
+    // saw it, because the assertion itself only landed with 6B — so these two have been unclassified
+    // for as long as they have existed, which is the second thing the Phase 6a run turned up.
+    //
+    // They are the exact shape of the model-catalogue entries that graduated: no credential, no
+    // security grammar, nothing that resists mirroring, and no reader. `rg "rerank" apps/web/src`
+    // is empty. A type mirrored for nobody is a declaration with no reader to notice it going wrong,
+    // which is the argument this list exists to make — and the one that got the model catalogue
+    // closed rather than forgotten.
+    //
+    // THE CLAIMANT IS `/settings/rerank`, and its FormRequest sits in form-drift.test.ts's
+    // NO_CLIENT_FORM as OWED with the same condition. Both graduate on the same day.
+    RerankConfigurationResource:
+      'the rerank designation screen is not built — `rg "rerank" apps/web/src` is empty — and a type mirrored for nobody is a declaration with no reader to notice it going wrong. Same shape and same argument as the model-catalogue entries that graduated when their screen landed; DesignateRerankConnectionRequest is OWED in form-drift.test.ts on the same condition',
+    RerankDesignation:
+      'nested inside RerankConfigurationResource, and exempt with it for the same reason',
   };
 
   it('the published set is exactly MIRRORED plus NO_CLIENT_TYPE', () => {
@@ -1847,6 +2102,229 @@ describe('every published component is mirrored here or exempt with a reason', (
         created_at: true,
         updated_at: true,
       } satisfies Record<NullableKeys<BotSourceAssignmentResource>, true>,
+
+      // ══ PHASE 6a's COMPONENTS ════════════════════════════════════════════════════════════════
+      //
+      // On these shapes the nullable half is where nearly all the meaning is, which is why the loop
+      // below iterating `MIRRORED` rather than this object matters more here than anywhere else: a
+      // dashboard field that GAINED a null is a tile that renders `NaN`, and one that LOST one is a
+      // client rendering `0` where the server means "not measured".
+
+      // NULL IS "NOT MEASURED" ON EVERY ONE OF THESE, AND IT IS NEVER ZERO. A percentile over a
+      // window with no successful streaming call, a rate over a window with no calls, a cost for a
+      // model with no recorded price. `0` would report health nobody measured.
+      AnalyticsWindow: {
+        // The one that is not "not measured": null means ALL BOTS, and it is echoed precisely so a
+        // client can tell that from "one bot with no traffic" — two pages of identical zeroes.
+        bot_id: true,
+      } satisfies Record<NullableKeys<AnalyticsWindow>, true>,
+
+      AnalyticsLatency: {
+        first_token_p50_ms: true,
+        first_token_p95_ms: true,
+        total_p50_ms: true,
+        total_p95_ms: true,
+      } satisfies Record<NullableKeys<AnalyticsLatency>, true>,
+
+      // The four COUNTS are deliberately absent and the omission is the assertion: zero calls is a
+      // real measurement and a nullable count is one no tile could do arithmetic with. Only the two
+      // derived RATES are nullable, because a ratio over an empty denominator has no value.
+      AnalyticsProviderCalls: {
+        error_rate: true,
+        fallback_rate: true,
+      } satisfies Record<NullableKeys<AnalyticsProviderCalls>, true>,
+
+      // `estimated_cost` is null when the model has no recorded price — a different fact from a cost
+      // of zero — and `currency` travels with it, because a number with no currency is one nobody may
+      // add to another number.
+      AnalyticsModelUsage: {
+        estimated_cost: true,
+        currency: true,
+      } satisfies Record<NullableKeys<AnalyticsModelUsage>, true>,
+
+      // `AnalyticsFeedback`, `AnalyticsIngestion` and `AnalyticsResource` are ABSENT ON PURPOSE,
+      // which the loop reads as "no nullable property". Every field on all three is a count, and
+      // `storage_bytes_used` is a LEVEL that is 0 for an empty organization rather than unknown.
+
+      // NULL MEANS UNLIMITED AND 0 MEANS NOTHING IS ALLOWED — opposite states, both rendering as "no
+      // number" on a form, which is exactly how they get conflated. `used` and `exceeded` are NOT
+      // nullable and that is load-bearing: an unlimited metric still has a usage figure, and
+      // `exceeded` is always answerable (false) for one.
+      QuotaMetricUsage: {
+        limit: true,
+        remaining: true,
+      } satisfies Record<NullableKeys<QuotaMetricUsage>, true>,
+
+      /**
+       * SIX OF ELEVEN, and every one of them is a real absence rather than an unset column:
+       *
+       *   `actor_id` is null for an UNAUTHENTICATED event — a failed login — and for anything the
+       *   platform did with no person behind it. There is no foreign key, so a non-null value is not
+       *   a promise that the actor still exists either.
+       *
+       *   `subject_type`/`subject_id` are null exactly together; the database refuses a
+       *   half-specified pair, which is what makes "the trail for this record" a two-term query.
+       *
+       *   `ip_address`/`user_agent` are null for anything raised by a queued job or a console
+       *   command, where there is no client to describe.
+       *
+       * `details` IS DELIBERATELY NOT HERE and the omission is the assertion: `{}` is the
+       * records-nothing state, so a null would be a second spelling of it — and a client reading it
+       * defensively would then need two absent-cases instead of one.
+       */
+      AuditLogResource: {
+        actor_id: true,
+        subject_type: true,
+        subject_id: true,
+        ip_address: true,
+        user_agent: true,
+        request_id: true,
+      } satisfies Record<NullableKeys<AuditLogResource>, true>,
+
+      /**
+       * SEVEN OF FOURTEEN, and the participant pair is the one that carries a rule rather than an
+       * absence: EXACTLY ONE of `user_id` and `anonymous_session_id` is populated, enforced by
+       * `conversations_participant_exclusive`. Both are nullable because either may be the empty one,
+       * and neither may be non-nullable because that would make the other unreachable.
+       *
+       * `consent_granted_at`/`consent_text_snapshot` are null when consent was never asked for, and
+       * the snapshot is PRESENT whenever `consent_required` is true — the pairing the database
+       * enforces and a client renders, not one this map can state.
+       *
+       * `bot_id` IS DELIBERATELY NOT HERE and the omission is load-bearing: the foreign key is
+       * `ON DELETE RESTRICT`, so a bot that has held a conversation is ARCHIVED rather than deleted
+       * and this can never be nulled. A screen may always name the bot.
+       */
+      ConversationResource: {
+        user_id: true,
+        anonymous_session_id: true,
+        locale: true,
+        consent_granted_at: true,
+        consent_text_snapshot: true,
+        retention_expires_at: true,
+        updated_at: true,
+      } satisfies Record<NullableKeys<ConversationResource>, true>,
+
+      // THE SAME SEVEN, INHERITED THROUGH `extends` — so this map is not free to disagree with the
+      // one above even if somebody wanted it to: `NullableKeys` reads the resolved interface, and a
+      // base field that gained or lost a `| null` moves both maps in the same commit or fails the
+      // typecheck in this file. `messages` and `messages_truncated` are the transcript's own and
+      // neither is nullable: an empty array is a thread with no turns, and the truncation flag is
+      // always answerable.
+      ConversationTranscriptResource: {
+        user_id: true,
+        anonymous_session_id: true,
+        locale: true,
+        consent_granted_at: true,
+        consent_text_snapshot: true,
+        retention_expires_at: true,
+        updated_at: true,
+      } satisfies Record<NullableKeys<ConversationTranscriptResource>, true>,
+
+      /**
+       * `content` is null when the turn produced no text — a `pending` turn, or one that failed
+       * before saying anything — and NEVER an empty string, which is what makes `content === null`
+       * the whole of the nothing-to-render test.
+       *
+       * `retrieval_trace` is the one nullable OBJECT here, published as `anyOf: [{$ref},{type:null}]`
+       * rather than a type array. Null on a user turn, a system notice, and any assistant turn whose
+       * retrieval never ran — which is itself diagnostic rather than missing.
+       *
+       * The four ARRAYS are deliberately absent: an empty array is the has-none state on all four,
+       * and a user turn legitimately has zero citations, zero feedback and zero provider calls.
+       */
+      TranscriptMessageResource: {
+        content: true,
+        parent_message_id: true,
+        settling_provider_call_id: true,
+        updated_at: true,
+        retrieval_trace: true,
+      } satisfies Record<NullableKeys<TranscriptMessageResource>, true>,
+
+      // ONE, and it is the record surviving its subject: `chunk_id` goes null once the chunk is
+      // purged, and the footnote stays. `title`, `location` and `excerpt` are denormalized at write
+      // time precisely so none of them can follow it.
+      TranscriptCitationResource: {
+        chunk_id: true,
+      } satisfies Record<NullableKeys<TranscriptCitationResource>, true>,
+
+      // The submitter pair is the same exclusive-or `ConversationResource` carries, for the same
+      // reason: a visitor's thumb and a reviewer's are two different rows and one of the two columns
+      // is always the empty one.
+      TranscriptFeedbackResource: {
+        comment: true,
+        submitted_by_user_id: true,
+        submitted_by_session: true,
+        updated_at: true,
+      } satisfies Record<NullableKeys<TranscriptFeedbackResource>, true>,
+
+      /**
+       * ELEVEN OF SEVENTEEN, and on the token counts null means THE PROVIDER TOLD US NOTHING, which
+       * is a different fact from zero — a turn that used no output tokens and a turn whose vendor
+       * reported no usage are indistinguishable if the type collapses them, and the second is the one
+       * that makes a cost figure wrong.
+       *
+       * `error_class` is null on a `succeeded` attempt and, deliberately, on `cancelled` and
+       * `pending` too: a caller going away is not a fault to attribute.
+       *
+       * `fallback_metadata` IS DELIBERATELY NOT HERE — it is `{}` on a primary attempt, and a null
+       * would be a second spelling of "no fallback" over a field whose whole job is to distinguish
+       * the two.
+       */
+      ProviderCallResource: {
+        provider_request_id: true,
+        error_class: true,
+        input_tokens: true,
+        cache_read_tokens: true,
+        cache_write_tokens: true,
+        output_tokens: true,
+        reasoning_tokens: true,
+        estimated_cost: true,
+        estimated_cost_currency: true,
+        first_token_latency_ms: true,
+        total_latency_ms: true,
+      } satisfies Record<NullableKeys<ProviderCallResource>, true>,
+
+      // ONE. `rewritten_query` null means the rewriting stage LEFT THE QUERY ALONE — a real outcome,
+      // and different from a rewrite that happened to produce the same string. The two arrays are
+      // absent on purpose: `candidate_summaries` empty is "matched nothing", and `selected_evidence`
+      // empty is required whenever `insufficient_evidence` is true, so a null on either would be a
+      // second spelling of a state a CHECK constraint already defines.
+      RetrievalTraceResource: {
+        rewritten_query: true,
+      } satisfies Record<NullableKeys<RetrievalTraceResource>, true>,
+
+      // FOUR, and every one of them means "the client renders its own default" rather than "unset in
+      // a way the client must report". `starter_questions` is absent on purpose: the empty array is
+      // the no-chips state, and a null would be a second spelling of it.
+      RuntimeBotResource: {
+        description: true,
+        welcome_message: true,
+        placeholder_text: true,
+        consent_text: true,
+      } satisfies Record<NullableKeys<RuntimeBotResource>, true>,
+
+      // The two timestamps are nullable only because an unsaved model has none. `status` is not, and
+      // that is load-bearing: `ended` and `expired` are refusals WITH A REASON rather than 404s, so a
+      // client must always be able to read one.
+      RuntimeConversationResource: {
+        locale: true,
+        consent_text: true,
+        consent_granted_at: true,
+        started_at: true,
+        last_activity_at: true,
+      } satisfies Record<NullableKeys<RuntimeConversationResource>, true>,
+
+      RuntimeMessageResource: {
+        content: true,
+        created_at: true,
+      } satisfies Record<NullableKeys<RuntimeMessageResource>, true>,
+
+      // `ChatSessionResource`, `QuotaResource`, `AuditLogCollectionResource`,
+      // `ConversationCollectionResource`, `RuntimeMessageCollectionResource` and
+      // `RuntimeCitationCollectionResource` are ABSENT ON PURPOSE — every field on them is a
+      // required scalar or a required array, and a nullable one would be a credential, a total or a
+      // page that a client could not act on.
     };
 
     for (const component of Object.keys(MIRRORED)) {
@@ -1897,6 +2375,56 @@ describe('every published component is mirrored here or exempt with a reason', (
     for (const [component, reason] of Object.entries(NO_CLIENT_TYPE)) {
       expect(reason.length, `${component}'s exemption must say why`).toBeGreaterThan(20);
     }
+  });
+});
+
+/**
+ * THE ONE 6a SHAPE THE CLOSURE ASSERTION CANNOT REACH, AND THEREFORE THE ONE THAT NEEDS A SUITE.
+ *
+ * `RuntimeCitationCollectionResource` is a published component; the citation OBJECT inside it is
+ * NOT — the server inlines it under `citations.items` rather than `$ref`-ing a named schema. So the
+ * five fields hosted chat renders for every footnote are invisible to `MIRRORED`, which compares
+ * component names, and a server-side rename of `excerpt` would fail nothing in this file.
+ *
+ * That is exactly the gap this suite exists to close, and it is the same shape as `MemberResource`
+ * being hand-written a second time in apps/web: a type, a fixture and a server agreeing by eye with
+ * no mechanical link. Here the link is that `RuntimeCitationResource`'s declared key set is compared
+ * with the document's inlined node.
+ */
+describe('the inlined runtime citation', () => {
+  const items = schemas['RuntimeCitationCollectionResource']?.properties?.['citations']?.items;
+
+  it('is published as an inlined object rather than a $ref — the premise of this suite', () => {
+    // The positive control. If the server ever promotes it to a named component the assertions below
+    // would compare against `undefined` and pass vacuously, and the right response is to add it to
+    // MIRRORED and delete this suite — not to leave a green check reading nothing.
+    expect(items, 'citations.items must be an inlined schema node').toBeDefined();
+    expect(Object.keys(items?.properties ?? {}).length).toBeGreaterThan(0);
+  });
+
+  it('declares exactly the five fields a client renders', () => {
+    const declared: Record<keyof RuntimeCitationResource, true> = {
+      label: true,
+      chunk_id: true,
+      title: true,
+      location: true,
+      excerpt: true,
+    };
+
+    expect(new Set(Object.keys(items?.properties ?? {}))).toEqual(new Set(Object.keys(declared)));
+    expect(new Set(items?.required ?? [])).toEqual(new Set(Object.keys(declared)));
+  });
+
+  it('agrees that only chunk_id may be null — the footnote outlives the chunk', () => {
+    // `chunk_id` goes null once the chunk is purged and the footnote STAYS, because it is the record
+    // of what was shown. `title`, `location` and `excerpt` are denormalized at write time precisely
+    // so none of them can follow it, and a nullable `excerpt` would be a citation that cites nothing.
+    const nullable = new Set(
+      Object.entries(items?.properties ?? {})
+        .filter(([, node]) => wireNullable(node))
+        .map(([key]) => key),
+    );
+    expect(nullable).toEqual(new Set(['chunk_id']));
   });
 });
 
@@ -2050,6 +2578,58 @@ describe('the root entry export list', () => {
     // plausibly be an envelope-key constant or a default sort, and either would emit this literal.
     expect(emitted).not.toContain('resources/bot-source-assignments');
     expect(emitted).not.toContain('source_assignments');
+
+    // ── PHASE 6a's FIVE MODULES, EACH WITH THE SECOND STRING CHOSEN THE SAME WAY ──────────────
+    // The dashboard's is `usage_by_model`, which is the key the server named for a reason
+    // (`tokens_by_model` is refused by its own credential sweep) — so a constant declared in that
+    // module would most plausibly be an envelope key or a tile-order tuple, and either emits it.
+    expect(emitted).not.toContain('resources/analytics');
+    expect(emitted).not.toContain('usage_by_model');
+    // The quotas module is the one 6a shape that DOES have a tuple sibling, and it lives behind
+    // `@kb/contracts/forms` (`QUOTA_METRICS`). `monthly_tokens` in the ROOT entry is exactly what
+    // that tuple migrating here would look like — the shape this pin exists to catch.
+    expect(emitted).not.toContain('resources/quotas');
+    expect(emitted).not.toContain('monthly_tokens');
+    // The audit module's is the strongest of the five: its `operation` vocabulary is 45 names, so a
+    // tuple declared there would be the single largest runtime value this package could accidentally
+    // ship to a widget. `provider.connection.credential_rotated` is one member of it.
+    expect(emitted).not.toContain('resources/audit-logs');
+    expect(emitted).not.toContain('provider.connection.credential_rotated');
+    // Conversation review declares SIX closed vocabularies as unions with no tuple siblings, which
+    // makes the pressure to declare one here the same as `sources.ts`'s. `anonymous_session_id` is
+    // also a second reason to refuse it: it is the participant handle, and a literal in a widget
+    // bundle would be the first byte of a client reasoning about a value it must not hold.
+    expect(emitted).not.toContain('resources/conversations');
+    expect(emitted).not.toContain('anonymous_session_id');
+    // The runtime module is the one apps/widget genuinely reads, which makes this pin the one most
+    // likely to be argued away: it is types only and therefore free, and the moment it emits a value
+    // it stops being free. `expires_in` sits beside a LIVE CREDENTIAL on `ChatSessionResource`.
+    expect(emitted).not.toContain('resources/runtime');
+    expect(emitted).not.toContain('expires_in');
+
+    // ── AND THE ADMIN-ONLY SSE UNION IS NOT IN THE ROOT ENTRY AT ALL ──────────────────────────
+    // This is the budget half of the SECURITY property `src/sse/admin-events.ts` is built around:
+    // `retrieval.trace` is behind `@kb/contracts/admin` so a widget build cannot NAME it, and the
+    // way that stops being true is somebody re-exporting `toKbAdminEvent` from `src/index.ts`
+    // "for convenience". That is a diff which compiles, typechecks, passes the export-list
+    // assertion above only if they forget to add the name — and fails HERE either way, because the
+    // emitted text would carry the event name.
+    expect(emitted).not.toContain('sse/admin-events');
+    expect(emitted).not.toContain('retrieval.trace');
+  });
+
+  it('keeps the admin SSE union out of the root entry, as its own emitted file', () => {
+    // The subpath is only a boundary if it is a separate BUILD ENTRY. A `dist/admin.js` that does
+    // not exist means `@kb/contracts/admin` resolves to nothing and apps/web fails to build; one
+    // that exists but was inlined into the root would mean the tsup entry map was edited without
+    // the package's `exports` map, which is the silently-passing half.
+    const adminEntry = join(dirname(distEntry), 'admin.js');
+    expect(
+      existsSync(adminEntry),
+      'dist/admin.js is missing. Run `pnpm contracts:build` — the ./admin subpath is a separate ' +
+        'tsup entry precisely so the root entry cannot carry retrieval.trace.',
+    ).toBe(true);
+    expect(readFileSync(adminEntry, 'utf8')).toContain('retrieval.trace');
   });
 
   it('keeps zod out of the root entry', () => {

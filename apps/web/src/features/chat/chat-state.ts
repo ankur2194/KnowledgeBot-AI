@@ -28,6 +28,19 @@ export interface AssistantTurn {
   readonly kind: 'assistant';
   /** The client-minted id of the user turn this answers, so the pair reconciles as one unit. */
   readonly id: string;
+  /**
+   * The SERVER's id for this answer, off `message.start`, and `null` until it arrives.
+   *
+   * TWO IDS, AND THEY ANSWER DIFFERENT QUESTIONS. `id` above is the client-minted UUID: it is the
+   * idempotency key, it reconciles the optimistic user turn with the server's echo, and it exists
+   * before the request does. This one is the row `POST /rt/v1/messages/{message}/feedback` addresses,
+   * and it cannot exist until the server has opened the turn.
+   *
+   * SO THE THUMBS ARE GATED ON IT, not on `settled`. A stream that failed before `message.start` —
+   * a 401, a refused origin, a dead socket on the first byte — has no row to rate, and offering a
+   * control that would 404 is worse than offering none.
+   */
+  readonly messageId: string | null;
   readonly text: string;
   readonly citations: readonly Citation[];
   readonly phase: Phase;
@@ -55,6 +68,7 @@ export function startAssistantTurn(id: string): AssistantTurn {
   return {
     kind: 'assistant',
     id,
+    messageId: null,
     text: '',
     citations: [],
     phase: 'sent',
@@ -71,7 +85,10 @@ export function startAssistantTurn(id: string): AssistantTurn {
 export function applyEvent(turn: AssistantTurn, event: KbEvent): AssistantTurn {
   switch (event.event) {
     case 'message.start':
-      return { ...turn, phase: 'working' };
+      // The server's row id arrives HERE and nowhere else — `message.complete` carries it again, and
+      // reading it only from there would leave a stopped or failed turn unratable even though its
+      // row exists.
+      return { ...turn, phase: 'working', messageId: event.data.message_id };
 
     case 'status':
       return {

@@ -187,6 +187,195 @@ enum Permission: string
      */
     case SourcesAssign = 'sources.assign';
 
+    /**
+     * Read §8.23's usage and quality dashboard: conversation and message volume, unique sessions,
+     * latency percentiles, provider error and fallback rates, the feedback split, the
+     * insufficient-evidence count, token and estimated-cost breakdowns, ingestion outcomes, and
+     * storage used.
+     *
+     * ── IT IS A DISTINCT COLUMN OF THE MATRIX, WHICH IS WHY IT EXISTS ─────────────────────────
+     *
+     * `BotsManage`'s rule — "a permission nobody grants differently is a permission that fails
+     * silently in both directions" — is the bar a new case has to clear, and this one clears it
+     * against every existing case: it is held by OWNER, ADMIN AND ANALYST and withheld from the
+     * KNOWLEDGE MANAGER, and no case in this catalog has that shape. `providers.view` and
+     * `sources.view` are Owner/Admin/KnowledgeManager; `bots.view` is all four; `members.view` is
+     * Owner/Admin. So it is not a rename of anything already here.
+     *
+     * ── THE THREE GRANTS, EACH FROM ITS OWN SENTENCE OF THE SPEC ──────────────────────────────
+     *
+     *   Owner        §6.2, verbatim: "Review conversations and analytics."
+     *   Admin        §6.3, "Review failures" and "Review conversations and evaluations". The
+     *                analytics surface IS where a failure is reviewed — provider error rate,
+     *                fallback rate and ingestion failures are three of its tiles — so an operator
+     *                who cannot open it cannot do the thing §6.3 names.
+     *   Analyst      §6.5 opens "A reviewer inspects chatbot quality" and lists "Compare retrieval
+     *                or model configurations". The feedback split, the insufficient-evidence count
+     *                and the latency percentiles are that comparison; withholding them would leave
+     *                the role its whole job and none of its instruments.
+     *
+     * ── AND THE ONE REFUSAL, WHICH IS THE PART THAT NEEDED DECIDING ───────────────────────────
+     *
+     * THE KNOWLEDGE MANAGER DOES NOT HOLD IT. §6.4's six items are all source operations and the
+     * closest one is "view source freshness" — which is a column on the source list, served by
+     * `sources.view`, and not this dashboard. The dashboard additionally carries TOKEN SPEND AND
+     * ESTIMATED PROVIDER COST, and §6.4 is the role the spec explicitly keeps away from the
+     * provider account: `providers.view` and not `providers.manage` is that same line. Granting
+     * analytics here would put the organization's spend on a screen for the one role whose
+     * exclusion from the credential side is stated rather than inferred.
+     *
+     * NO CREDENTIAL IS REACHABLE THROUGH IT. Every tile is an aggregate — counts, sums,
+     * percentiles — over `conversations`, `messages`, `provider_calls`, `retrieval_traces`,
+     * `feedback`, `usage_events` and `knowledge_sources`. `provider_calls` holds a
+     * `provider_connection_id`, which is a REFERENCE, and the aggregate projection never selects it.
+     */
+    case AnalyticsView = 'analytics.view';
+
+    /**
+     * Read the organization's stored conversations: the thread list, and one thread's full
+     * transcript with its citations, retrieval traces, feedback and provider attempts.
+     *
+     * ── IT IS A READING OF THE SPEC AND NOT AN EXTENSION, AND THREE SECTIONS SAY SO VERBATIM ──
+     *
+     *   Owner     §6.2, "Review conversations and analytics."
+     *   Admin     §6.3, "Review conversations and evaluations."
+     *   Analyst   §6.5, "Review conversations." — and, one line later, "Review source citations and
+     *             retrieval traces", which is why this permission covers the whole transcript
+     *             projection rather than only the message text.
+     *
+     * THE KNOWLEDGE MANAGER DOES NOT HOLD IT, and that is the row that needed deciding. §6.4 is a
+     * six-item list and every item is a source operation — upload, add websites, review PARSED
+     * CONTENT, trigger reprocessing, disable/archive/delete, view freshness. "Review parsed
+     * content" is the source detail projection (`sources.view`), not an end user's questions.
+     * Silence is not a grant, and the thing being withheld here is not configuration: it is
+     * verbatim end-user text, which is the most privacy-loaded data this platform stores.
+     *
+     * ── IT COLLIDES IN SHAPE WITH `analytics.view`, AND IT IS STILL A SEPARATE CASE ───────────
+     *
+     * Owner/Admin/Analyst is exactly `analytics.view`'s row. `Permission::BotsManage` states the
+     * bar — "a permission nobody grants differently is a permission that fails silently in both
+     * directions" — and `analytics.view`'s own docblock applies it as a scan of the whole catalog
+     * for a matching shape. READ THE BAR AS A TEST OF THE SUBJECT AND NOT OF THE ROW, because this
+     * catalog already contains a pair that the row-shape reading forbids: `quotas.manage` and
+     * `members.manage_owner` are both Owner-alone, and `quotas.manage` was added anyway, justified
+     * entirely on what it acts on. (`tests/Unit/RolePermissionMatrixTest.php` asserted the
+     * opposite in prose — "no case already here has either shape" — and that sentence was wrong
+     * about `quotas.manage` on the day it was written; it has been corrected in the same change
+     * that added this case.)
+     *
+     * On the subject test the two are not close. `analytics.view` is COUNTS, SUMS AND PERCENTILES,
+     * and its docblock leans on that: "Every tile is an aggregate", which is what licenses showing
+     * it to a role that may not read a bot's prompt. This permission is the ROWS — the questions
+     * customers asked, in their own words, and the answers they were given. Collapsing them would
+     * make that sentence false in exactly the way `bots.view`'s did about `system_instruction`, and
+     * there is nothing to narrow here: the transcript IS the content. It would also mean that the
+     * first person who wanted to give a Knowledge Manager the ingestion-outcomes tile would hand
+     * them every conversation in the organization, with nothing in the diff to say so.
+     *
+     * ── WHAT IT DOES NOT CARRY ───────────────────────────────────────────────────────────────
+     *
+     * No write. Feedback capture (§6.5, "Add feedback") is the runtime's own surface and is
+     * authorized by conversation ownership rather than by this permission. And there is one gate
+     * this permission is NOT a substitute for: §18.10 and docs/04 §8.22 require a per-organization
+     * switch for whether administrators may review conversations at all. No column exists for it —
+     * see `ConversationController`, which names the gap rather than inventing one.
+     */
+    case ConversationsView = 'conversations.view';
+
+    /**
+     * Read this organization's own audit trail: who did what, to which record, with what outcome.
+     *
+     * ── THIS ONE IS AN EXTENSION OF THE SPECIFICATION, AND THE DIRECTION MATTERS ──────────────
+     *
+     * Unlike `conversations.view` one block up, no org role is named. §6.1 gives "Access
+     * platform-level audit logs" to the PLATFORM OWNER — `users.is_platform_owner`, which is not an
+     * organization role and reaches no tenant data without an audited impersonation — and §6.2
+     * through §6.5 never mention audit logs in either direction. So the grant below is a decision,
+     * stated plainly here so that a silence somebody filled in does not read later as something the
+     * spec said.
+     *
+     * The distinction the extension rests on is SCOPE, not privilege: §6.1's grant is explicitly
+     * *platform-level*, i.e. across tenants. An organization's own trail is a different artifact,
+     * and §18.11 makes it a compliance obligation of the organization — credential changes, member
+     * and role changes, bot publish and configuration changes, source upload/disable/delete,
+     * exports, retention changes. An organization that cannot read its own trail cannot answer the
+     * questions that obligation exists to make answerable.
+     *
+     *   Owner    §6.2's "Manage organization settings" and "Configure retention and privacy
+     *            options". The trail is the evidence those two produce.
+     *   Admin    §6.3's "Review failures". `provider.connection.credential_rotation_failed`,
+     *            `bot.delete.refused` and `source.upload.rejected` are failure rows and exist
+     *            nowhere else; and an Administrator PERFORMS most of what this table records, so a
+     *            role that may rotate a credential and may not see that it was rotated is a hole in
+     *            the record rather than a restriction on it.
+     *
+     * ── THE TWO REFUSALS ─────────────────────────────────────────────────────────────────────
+     *
+     * KNOWLEDGE MANAGER. The tempting argument is that twelve of the operations are `source.*` and
+     * §6.4 owns sources. It is the same argument `Permission::SourcesView` refuses for the Analyst,
+     * in the same direction: this endpoint is ONE list over the whole vocabulary, so granting it to
+     * serve a source question hands over credential-rotation rows, member role changes, and login
+     * events carrying colleagues' email addresses and IP addresses. A source-scoped trail is a
+     * `subject_type`/`subject_id` filter on a surface somebody may read — not a reason to widen who
+     * may read the surface.
+     *
+     * ANALYST. §6.5 is "A reviewer inspects chatbot quality", and none of the five items under it
+     * is an administrative action. An audit row is about COLLEAGUES, not about answers.
+     *
+     * ── IT COLLIDES IN SHAPE WITH `members.view`, AND IT IS STILL A SEPARATE CASE ─────────────
+     *
+     * Owner/Admin is `members.view`'s row and `members.manage`'s. The subject test settles it the
+     * same way it settles `conversations.view` above: `members.view` reads `organization_users` and
+     * `organization_invitations`, this reads `audit_logs`, and the two are not one action under two
+     * names the way `bots.publish` would have been under `bots.manage`. Reusing `members.view` for
+     * an audit trail would also make that permission's one-line docblock — "List the organization's
+     * members and its invitations" — a description of half of what it gates, which is precisely the
+     * failure `bots.view` recorded about `system_instruction`.
+     *
+     * NO CREDENTIAL IS REACHABLE THROUGH IT, and that is a property of the WRITE path rather than a
+     * promise made here: `AuditLogger` allow-lists `details` per operation and fingerprints every
+     * bearer value, so the rows this permission reads never contained a key. The read path must not
+     * widen that, which is what `tests/Security/AuditTrailAccessTest.php` asserts over the
+     * serialized response body.
+     */
+    case AuditView = 'audit.view';
+
+    /**
+     * Read and set the organization's four quota limits: storage bytes, bots, users, monthly tokens.
+     *
+     * ── A SEPARATE CASE FROM `analytics.view`, AND THE SPLIT IS THE WHOLE POINT ───────────────
+     *
+     * Reading how much of a quota is used is a REPORT. Changing the ceiling is a PLAN CHANGE, and it
+     * is the one edit on the organization row that pays for itself: an actor who can raise a limit
+     * cannot be limited. Collapsing the two would hand the ceiling to every role that may read the
+     * dashboard, including the Analyst.
+     *
+     * ── OWNER ONLY, AND THE SPEC DOES NOT AGREE WITH ITSELF HERE ──────────────────────────────
+     *
+     * §6.1 gives "Control limits for storage, bots, users, and ingestion" to the PLATFORM OWNER —
+     * `users.is_platform_owner`, which is not an organization role at all and reaches no tenant data
+     * without an audited impersonation flow. §6.2 gives the Organization Owner "Manage organization
+     * settings". Those two sentences overlap on exactly these four columns and the specification
+     * never says which wins.
+     *
+     * THE CONTRADICTION IS REPORTED, NOT SILENTLY RESOLVED, and what ships is the narrow reading
+     * plus a guard that lives in the SERVICE because a permission has no argument position for it
+     * (the same structural reason `MembersManageOwner` exists as its own case rather than as logic
+     * inside a policy body):
+     *
+     *   * this permission is held by the Organization Owner alone among the four org roles, so an
+     *     Administrator cannot touch a quota at all;
+     *   * `App\Services\Quotas\QuotaLimitService` lets an owner LOWER a limit or set one where
+     *     there was none, and requires `users.is_platform_owner` to RAISE or REMOVE one.
+     *
+     * A quota an organization can raise is not a quota. Self-service tightening is safe and is
+     * something operators genuinely want (capping their own spend); self-service loosening is the
+     * plan change §6.1 assigns elsewhere. The gap a reviewer should look at first is that the
+     * platform owner's half has NO SCREEN — there is no platform-admin surface in this application —
+     * so raising a limit today is a console operation.
+     */
+    case QuotasManage = 'quotas.manage';
+
     /** List the organization's members and its invitations. */
     case MembersView = 'members.view';
 

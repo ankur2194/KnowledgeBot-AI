@@ -136,7 +136,27 @@ __all__ = [
 ALLOWED_TABLES: Final[tuple[str, ...]] = (
     "chunks",
     "document_elements",
-    "retrieval_traces",
+    # `retrieval_traces` WAS HERE AND CAME OFF ON 2026-08-27, before anything wrote it, and the
+    # reason is ADR-033 property 2 rather than a change of mind about the row. D5's diagnostics
+    # panel and D6's per-turn detail both *read* that table from an admin endpoint, which makes
+    # the public API a reader of it — the property's own words, and the one it says actually
+    # bites. A data-plane writer would then sit beside Laravel's reader with no policy, no audit
+    # row and no framework-applied scope.
+    #
+    # The decisive comparison is `citations`, not the property in the abstract. Citations and
+    # traces are the same thing — per-message diagnostics of one turn, written once when the
+    # turn finalizes — and `citations` has always been Laravel's. Splitting the pair across the
+    # planes was the anomaly; this removes it. `app/rag/runner.py` still *builds* the whole
+    # trace (`RetrievalTrace` is every field §8.24 requires) and emits it as the `retrieval.trace`
+    # frame; the relay's finalizer persists it in the same transaction as the message row, the
+    # citation rows and the usage row, so the trace can never outlive or precede the message it
+    # describes. Nothing was lost by the move: the frame was already on the wire, already
+    # forwarded to admin actors by `ClientEvents::allows`, and already parsed.
+    #
+    # Consequence, recorded because it is invisible from here: `erase_data_subject`'s in-place
+    # overwrite of `retrieval_traces.selected_evidence` is now a core-api-seam sweep like
+    # `citations.excerpt`, not a local statement. `app/deletion/tasks.py` says so at its own
+    # docstring; if that sentence and this one ever disagree, this tuple is the authority.
     "evaluation_results",
     # ── finding C2: the BM25 corpus statistics behind the restored sparse arm ──────────
     # Written in the SAME transaction as the version's `chunks` rows, against the new,

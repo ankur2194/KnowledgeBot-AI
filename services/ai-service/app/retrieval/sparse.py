@@ -60,8 +60,15 @@ corpus); ``tokenize`` carries a third, which is that the *segmentation* decision
 per-language one — whitespace segmentation makes an entire CJK sentence one term, and the
 sparse arm is then worth nothing for those languages while looking healthy in every metric.
 It was held open by dated ruling (``docs/22`` § G6) precisely so it would not be filled with a
-plausible default; **ADR-069 decided it** and ``tokenize``'s own docstring is the record of
-what was chosen and why the analyzer version did not have to move for it.
+plausible default; **the analyzer decision closed it** and ``tokenize``'s own docstring is
+the record of what was chosen and why the analyzer version did not have to move for it.
+
+**That decision is owed an ADR and does not have one.** Five sites in this service cited it as
+"ADR-069", which is taken — ``docs/19`` §2542 is *The Two Mutable Payload Terms Are Carried by
+Two Synchronous, Verified Internal Operations*. The highest allocated number is ADR-072, so the
+next free one is 073; it is not written here, because minting a number in a code comment is how
+two decisions end up sharing one and neither can be looked up. ``docs-adr-writer`` owns
+``docs/19``. Until it lands, name the decision rather than a number.
 
 THE FOUR FILTERS APPLY TO THIS BRANCH IDENTICALLY
 -------------------------------------------------
@@ -265,9 +272,10 @@ def _is_unsegmented(char: str) -> bool:
 def tokenize(text: str) -> Sequence[str]:
     """Text to analyzed terms: segmentation, case folding, Unicode normalization.
 
-    **Implemented, and this docstring is the record of what was chosen** (ADR-069, closing
-    ``docs/22`` § G6). The two rules that constrained the choice are identity rather than
-    tuning, and both are satisfied by construction here:
+    **Implemented, and this docstring is the record of what was chosen**, closing ``docs/22``
+    § G6. The decision has no ADR number yet and this docstring is deliberately not inventing
+    one — see the module docstring. The two rules that constrained the choice are identity
+    rather than tuning, and both are satisfied by construction here:
 
     * The same function analyzes passages and queries. ``encode_passage`` and ``encode_query``
       both call it and neither pre-processes its input, so a term that reaches the index and

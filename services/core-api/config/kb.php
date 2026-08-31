@@ -137,6 +137,33 @@ return [
          * change, so a redelivery after a lost response rewrites nothing and re-counts the proof.
          */
         'maintenance' => 45,
+
+        /*
+         * THE BODY READ ON THE CHAT STREAM, seconds — and it is the timeout with no working default.
+         *
+         * Guzzle's `read_timeout` is documented to fall back to `default_socket_timeout` and is in
+         * fact never set (guzzle#2783). With `'stream' => true` the client returns as soon as
+         * headers land, so `Http::timeout()` bounds nothing about the BODY: unset, one dead upstream
+         * holds an FPM child — a slot in `pm.max_children` — until the socket dies on its own.
+         *
+         * IT IS THE SAME NUMBER AS `heartbeat_seconds`, AND THAT IS THE DESIGN RATHER THAN A
+         * COINCIDENCE. A read timeout is what PRODUCES a heartbeat: `UpstreamStream::frames()` yields
+         * `null` when a read returns nothing before this elapses, and the relay answers that `null`
+         * with `: ping`. Set it higher and the heartbeat interval is silently this value instead —
+         * so a 15 s promise with a 20 s read timeout is a 20 s heartbeat, and the tightest hop we do
+         * not control (nginx defaults `proxy_read_timeout` to 60 s) gets four beats where it was
+         * promised four and a bit.
+         *
+         * THE RELAY MUST GENERATE ITS OWN BEAT AND NOT WAIT FOR THE UPSTREAM'S. FastAPI inserts its
+         * own `: ping` after 15 s of generator idleness, and relying on it would leave the silent
+         * window BEFORE the first upstream byte — Laravel's own validation, quota and configuration
+         * resolution — with no probe at all. PHP learns the client is gone only when a write FAILS,
+         * so a window with no writes is a window in which a departed client is invisible.
+         *
+         * Guzzle applies this with `stream_set_timeout()`, which takes WHOLE SECONDS, so there is no
+         * sub-second value to tune to.
+         */
+        'stream_read' => 15,
     ],
 
     /*
@@ -203,6 +230,158 @@ return [
      * (nginx defaults proxy_read_timeout to 60 s), not to match any one of them.
      */
     'heartbeat_seconds' => 15,
+
+    /*
+     * RETRIEVAL PARAMETERS THAT ARE PLATFORM DEFAULTS RATHER THAN PER-BOT CONFIGURATION.
+     *
+     * `bots` carries the six an operator tunes — the two top-Ks, the rerank pair, the answer mode and
+     * the retrieval configuration version — each with a CHECK-constrained band. These five have no
+     * column and are not the tenant's to set, so they live here and are shipped inside the snapshot
+     * anyway: `app/rag/runner.py::RetrievalConfig` defaults to the SAME values, so a body carrying
+     * them behaves exactly as a body that omitted them would, and sending them means one side's
+     * default can never drift from the other's unnoticed.
+     *
+     * `kb-rag-query-contract`'s standing instruction applies to every one of them: a changed top-K,
+     * threshold or window with no evaluation run attached is an unreviewable change.
+     */
+    'retrieval' => [
+
+        /*
+         * RRF's constant, and NEVER Qdrant's own default of 2.
+         *
+         * At k=2 the rank-1 hit of each branch dominates roughly thirty times more sharply than the
+         * literature's 60, and the symptom is hybrid search preferring whatever sparse returned
+         * first on queries where dense was obviously right — a ranking that is plausible, wrong, and
+         * moves no metric.
+         */
+        'fusion_k' => 60,
+
+        /*
+         * `diversity.max_per_document`. One document may contribute at most this many chunks to the
+         * packed context, so a single long manual cannot crowd out every other source. The adjacency
+         * exemption on the far side is what makes it safe to apply.
+         */
+        'max_per_document' => 3,
+
+        /* Stage 5's query rewrite. On by default; the far side records the skip when no rewrite
+         * connection is resolvable, so this being true is not a promise that it ran. */
+        'rewrite_enabled' => true,
+
+        /*
+         * `context.reserve_output` — tokens subtracted from the model's window BEFORE packing.
+         *
+         * It covers the answer and everything else the provider counts as output, THINKING TOKENS
+         * ABOVE ALL. Too small and a reasoning model produces its trace and then truncates
+         * mid-sentence, which reads as a bad answer rather than as a budget error.
+         */
+        'reserve_output' => 1024,
+
+        /* Stage 3's conversation window, in TURNS. It bounds both the prompt and the history this
+         * plane loads out of `messages`, and the two must agree or the packer budgets for a window
+         * this service never sent. */
+        'history_window_turns' => 8,
+
+        /*
+         * Stage 1's length cap on the question, in characters.
+         *
+         * DELIBERATELY LOWER THAN THE WIRE MAXIMUM AND BOUNDED BY IT. `ChatExecuteRequest.query`
+         * admits 32 000 characters — that is a transport ceiling — and this is the product rule. A
+         * value above the wire bound would be a cap that can never be reached.
+         */
+        'question_max_chars' => 4_000,
+    ],
+
+    /*
+     * THE PLATFORM'S OWN THROTTLING OF THE PUBLIC CHAT SURFACE — requests per minute per subject.
+     *
+     * These are the origin, session and IP scopes of `kb-security-baseline` §18.5. They are NOT the
+     * bot's `rate_limit_per_minute` / `rate_limit_per_day`, which are columns the ORGANIZATION sets
+     * on its own bot and which refuse as `tenant_quota` (403). These three are the PLATFORM speaking
+     * and refuse as `rate_limit` (429 + `Retry-After`), and they are configuration rather than
+     * columns precisely because they are not the tenant's to raise: a per-origin limit an operator
+     * could lift is not a defence against that operator's own site.
+     *
+     * All four scopes are evaluated in ONE `EVALSHA` (`BotRateLimiter::charge()`), so the composite
+     * decision is atomic — four separate calls would let a caller sit just under each individual
+     * limit while being over the combination.
+     *
+     * A value of 0 or less means UNCONFIGURED and produces no window and no Valkey key at all, which
+     * is the same shape a bot with both limit columns null already has.
+     *
+     * THE THREE NUMBERS ARE NOT INTERCHANGEABLE AND THE ORDERING BETWEEN THEM IS THE DESIGN:
+     * session is the tightest because one visitor typing is one conversation; ip is looser because a
+     * NAT'd office is many visitors behind one address; origin is loosest because it is one
+     * customer's whole site. Set them the other way round and the loosest scope decides everything
+     * and the other two never fire.
+     */
+    'chat_rate_limits' => [
+        'session_per_minute' => (int) env('KB_CHAT_LIMIT_SESSION_PER_MINUTE', 20),
+        'ip_per_minute' => (int) env('KB_CHAT_LIMIT_IP_PER_MINUTE', 60),
+        'origin_per_minute' => (int) env('KB_CHAT_LIMIT_ORIGIN_PER_MINUTE', 600),
+    ],
+
+    /*
+     * THE EMBEDDED WIDGET AND HOSTED CHAT.
+     *
+     * `session_ttl_seconds` is the `sess:` family's TTL from `valkey-keyspaces` — 30 minutes,
+     * SLIDING on every authorized request. The sliding is what makes an active conversation unable
+     * to cross it (the chat deadline is 60 s, three orders of magnitude inside the window) and it is
+     * applied only AFTER every check in `WidgetSessionService::resolve()` has passed, so it can
+     * never become a way to hold a revoked session warm.
+     *
+     * It is a lifetime and not a security boundary on its own: revocation is the live re-read of the
+     * bot's status and domain allow-list on every request, which stops a removed domain NOW rather
+     * than at the next TTL boundary.
+     */
+    'widget' => [
+        'session_ttl_seconds' => (int) env('KB_WIDGET_SESSION_TTL_SECONDS', 1800),
+
+        /*
+         * OUR OWN HOSTED-CHAT ORIGINS — `https://chat.<domain>` and its local-development twin.
+         *
+         * IT IS ANALYTICS AND NOT AUTHORIZATION. Hosted chat and the embedded widget use the SAME
+         * credential deliberately: one auth path keeps the 404 rule, the rate-limit keys and the
+         * abuse hooks identical across both public surfaces. This list only decides which
+         * `conversations.channel` a turn is recorded under, and neither channel grants anything the
+         * other does not — both are outside `ConversationChannel::authenticatedOnly()`.
+         *
+         * SO AN EMPTY OR WRONG LIST IS A REPORTING ERROR, NOT A SECURITY ONE, and that is why it can
+         * be configuration with a benign default. If it ever gains an authorization meaning, it
+         * stops being safe to default and has to fail closed instead.
+         *
+         * The origins are compared for BYTE EQUALITY against the origin the session was bound to at
+         * mint — the same discipline `BotDomainMatcher` uses, and for the same reason: there is no
+         * safe substring form of an origin check.
+         */
+        'hosted_origins' => array_values(array_filter(
+            array_map('trim', explode(',', (string) env('KB_HOSTED_CHAT_ORIGINS', ''))),
+        )),
+    ],
+
+    /*
+     * THE D5 ADMIN PLAYGROUND'S CHAT SESSION.
+     *
+     * The SAME `sess:` family and the SAME sliding rule as the widget above, with its OWN lifetime
+     * and its own key in this file — because `WidgetSessionService::ttl()` takes the kind as a
+     * REQUIRED argument specifically so a new session kind cannot inherit another's lifetime by
+     * omitting one.
+     *
+     * FIFTEEN MINUTES AND NOT THIRTY, and the difference is what the credential carries rather than
+     * who holds it. A playground session resolves to `actor_type: user` with diagnostics enabled, so
+     * it is the one chat bearer in the platform that can be handed `retrieval.trace` — candidate
+     * chunk ids, scores, and the resolved filter object naming the organization and every allowed
+     * version id. It is minted from an admin console tab that is open while somebody is using it and
+     * re-mintable in one request, so a shorter idle floor costs nothing and bounds the window in
+     * which a copied bearer is still a diagnostics credential.
+     *
+     * IT IS A LIFETIME AND NOT THE SECURITY BOUNDARY, exactly as the widget's is not. Revocation is
+     * `WidgetSessionService::playgroundStillPermitted()`, which re-reads the bot's status AND the
+     * actor's live membership and `bots.manage` grant on EVERY request — so a demoted administrator
+     * is refused on the next turn rather than at the next TTL boundary.
+     */
+    'playground' => [
+        'session_ttl_seconds' => (int) env('KB_PLAYGROUND_SESSION_TTL_SECONDS', 900),
+    ],
 
     /*
      * THE ADMIN SPA'S PUBLIC BASE URL — the base of every emailed link.

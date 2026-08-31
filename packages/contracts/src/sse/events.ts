@@ -36,7 +36,25 @@ export interface Citation {
   readonly chunk_id: string;
   readonly title: string;
   readonly url: string | null;
-  readonly score: number;
+  /**
+   * The rerank score, or NULL WHEN STAGE 11 DID NOT RUN.
+   *
+   * ── IT WAS `number`, AND THAT WAS A LIE IN EXACTLY THE MODE THE PIPELINE IS DESIGNED TO SERVE ──
+   * ADR-030 moved reranking onto the provider adapter layer, which made it CAPABILITY-GATED rather
+   * than guaranteed: a bot whose provider cannot `rerank()` still answers, over a fused candidate
+   * set selected by branch agreement instead of by a threshold (`bge-reranker`,
+   * `app/rag/stages.py::ExclusionReason::NO_BRANCH_AGREEMENT`). That is the DEGRADED path, it is a
+   * supported outcome rather than a failure, and on it there is no score to send — so a non-null
+   * type promised a number the wire cannot always carry.
+   *
+   * A client that read `score` as a `number` on that path got `null` typed as `number`, and the two
+   * ways that shows up are both silent: `score.toFixed(2)` throws inside a render, or
+   * `score > 0.5` is `false` and a sources panel quietly sorts every citation to the bottom.
+   *
+   * NULL IS "NOT MEASURED", NOT "MEASURED AS ZERO". Render an em dash or omit the column; never
+   * coerce it to 0, which is a real score on every scale this platform uses.
+   */
+  readonly score: number | null;
 }
 
 /** Emitted BEFORE the first token: citations are assigned from retrieved evidence pre-generation,
@@ -84,7 +102,17 @@ export function isKbEventName(name: unknown): name is KbEventName {
   return typeof name === 'string' && CLIENT_EVENT_SET.has(name);
 }
 
-export function isTerminalEvent(event: KbEvent): boolean {
+/**
+ * `{ readonly event: string }` AND NOT `KbEvent`, and the widening is deliberate rather than lax.
+ *
+ * The admin console consumes a SECOND, WIDER union (`@kb/contracts/admin`) that adds
+ * `retrieval.trace` to these six, and `KbAdminEvent` is a superset union rather than a subtype — so
+ * a parameter typed `KbEvent` would refuse it and the only repairs available would be a cast at the
+ * call site or a second copy of this predicate. Both are worse than one structural parameter: the
+ * question this answers is "is this frame's NAME one of the two terminal names", which is true of
+ * anything carrying an `event` string and is decided by the closed set below either way.
+ */
+export function isTerminalEvent(event: { readonly event: string }): boolean {
   return event.event === 'message.complete' || event.event === 'error';
 }
 

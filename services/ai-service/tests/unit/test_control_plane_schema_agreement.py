@@ -330,6 +330,12 @@ def test_every_qualified_column_reference_resolves() -> None:
     assert problems == [], "\n".join(problems)
 
 
+#: An identifier introduced by ``AS``, with the keyword immediately before it. Anchored at the
+#: end so it can be searched against the slice ending at the identifier, which keeps the scan
+#: O(1) per match rather than re-parsing the statement.
+_PRECEDED_BY_AS: Final = re.compile(r"\bAS\s+$", re.IGNORECASE)
+
+
 def test_every_bare_column_in_a_single_table_statement_exists() -> None:
     """The unqualified half — `WHERE knowledge_source_id = %s` against a table whose column is
     `source_id`. Only for statements naming ONE table, because a bare name in a join is
@@ -353,6 +359,23 @@ def test_every_bare_column_in_a_single_table_statement_exists() -> None:
             before = cleaned[max(0, match.start() - 1) : match.start()]
             if after == "(" or before == ".":
                 continue  # a function call, or the qualified half checked above
+            if _PRECEDED_BY_AS.search(cleaned, 0, match.start()):
+                # An OUTPUT ALIAS, which is a name being *introduced* rather than referenced —
+                # `sum(document_frequency) AS df`. Added 2026-08-27, when `app/retrieval/
+                # statistics.py` became the first data-plane statement to alias an aggregate and
+                # this check reported `sparse_term_frequencies.df does not exist` twice. Both
+                # reports were false and the statements were correct.
+                #
+                # It is worth being clear about which of the two failure directions this trades
+                # into, because a checker that stops reporting is the one nobody notices. The
+                # aliased EXPRESSION is still fully checked — `document_frequency` above is an
+                # ordinary bare column and goes through the loop like any other — so what is
+                # skipped is only the new name on the left of nothing, which by construction
+                # cannot resolve to a column and never could. The cost is that a statement which
+                # aliases something and then *references the alias* elsewhere gets no check on
+                # that reference; PostgreSQL does not permit that in WHERE anyway, and GROUP BY /
+                # ORDER BY are where it is legal, which is the narrow gap this leaves open.
+                continue
             problems.append(f"{where}:{line} {table}.{name} does not exist :: {sql[:110]}")
     assert problems == [], "\n".join(problems)
 

@@ -2,21 +2,37 @@
 
 declare(strict_types=1);
 
+use App\Enums\QuotaMetric;
 use App\Enums\UploadRejectionReason;
+use App\Exceptions\KbException;
+use App\Models\Organization;
+use App\Repositories\Contracts\UsageEventRepositoryInterface;
+use App\Services\Quotas\BotRateLimiter;
+use App\Services\Quotas\QuotaCounters;
+use App\Services\Quotas\QuotaGate;
 use App\Services\Sources\Upload\UploadIntake;
 use App\Services\Sources\Upload\UploadLimits;
+use App\Services\Usage\RecordedUsage;
+use Illuminate\Contracts\Cache\Factory as CacheFactory;
+use Illuminate\Contracts\Redis\Factory as RedisFactory;
 use Illuminate\Http\UploadedFile;
+use Psr\Log\NullLogger;
 
 /*
 |--------------------------------------------------------------------------
 | The upload intake gate — the STEPS, and above all the ORDER
 |--------------------------------------------------------------------------
 |
-| A Unit test on purpose: `UploadIntake` takes no constructor argument, touches no database and
-| opens no connection, so the gate is testable with no container, no fake disk and no HTTP round
-| trip — which is what makes it cheap enough to assert every branch rather than a representative
-| one. The endpoint's half — the storage key, the two audit operations, the all-or-nothing batch —
-| is tests/Feature/SourceUploadTest.php.
+| A Unit test on purpose: `UploadIntake` touches no database and opens no connection, so the gate is
+| testable with no container, no fake disk and no HTTP round trip — which is what makes it cheap
+| enough to assert every branch rather than a representative one. The endpoint's half — the storage
+| key, the two audit operations, the all-or-nothing batch — is tests/Feature/SourceUploadTest.php.
+|
+| IT NOW TAKES A `QuotaGate`, BECAUSE STEP 0 AND STEP 7 ARE THE STORAGE QUOTA. `intakeGate()` below
+| builds a real one over mocked collaborators, and `intakeOrganization()` returns an UNMETERED
+| organization — all four ceilings null — so every fixture in this file exercises the six steps
+| exactly as it did before, with the quota short-circuiting before it touches the counter. The one
+| test that DOES meter builds its own, so the quota branch is proven rather than assumed absent.
 |
 | WHAT THESE ASSERT IS THE `reason` TOKEN AND NOT MERELY "IT WAS REFUSED", AND THAT IS THE WHOLE
 | DESIGN OF THIS FILE. `kb-security-baseline`'s six steps are ordered, and every pair is ordered for
@@ -46,6 +62,135 @@ const OVER_LONG_UPLOAD_NAME = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     .'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     .'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     .'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pdf';
+
+/**
+ * The gate, over a real `QuotaGate` whose collaborators are HAND-WRITTEN FAKES rather than mocks.
+ *
+ * NOT `Mockery::mock()`, and the reason is analysis rather than taste: `Mockery::mock()` is declared
+ * `LegacyMockInterface&MockInterface`, PHPStan resolves only the legacy half, and every constructor
+ * argument built from one needs a per-line PHPStan suppression above it — eight of them, in a file
+ * whose whole subject is that the gate's ORDER is checkable. (Writing that suppression's literal
+ * tag inside THIS docblock is itself an error: PHPStan reads the directive out of a comment without
+ * caring that the comment is prose, and reports "no error to ignore on line N" against the function
+ * below. Measured, not guessed.) Two anonymous classes implementing one method each are shorter
+ * than the suppressions and they type-check.
+ *
+ * NOT A MOCKED `QuotaGate` EITHER. The real one is used because the thing worth proving is the
+ * ORDER — that an unmetered organization reaches the six steps and an over-quota one does not — and
+ * a double would prove only that a method was invoked. `QuotaLimits::fromOrganization()` returns
+ * four nulls for `intakeOrganization()`, and `QuotaGate::assertWithin()` returns on a null ceiling
+ * before it reads a counter or issues a query, so the ledger below RAISES if it is ever reached:
+ * "the quota was consulted for an unmetered organization" is a real defect and this is what makes it
+ * fail rather than pass quietly.
+ */
+function intakeGate(): UploadIntake
+{
+    return intakeGateOver(new class implements UsageEventRepositoryInterface
+    {
+        public function record(string $organizationId, RecordedUsage $usage): bool
+        {
+            throw new \RuntimeException('the intake gate must never WRITE to the usage ledger');
+        }
+
+        public function consumed(string $organizationId, QuotaMetric $metric, \DateTimeImmutable $at): int
+        {
+            throw new \RuntimeException(
+                'the quota was consulted for an UNMETERED organization: a null ceiling must cost no '
+                .'query and no cache read, which is what makes the migration that adds four '
+                .'nullable columns safe to deploy without a backfill',
+            );
+        }
+
+        public function tokensByModel(string $organizationId, \DateTimeImmutable $from, \DateTimeImmutable $until): array
+        {
+            throw new \RuntimeException('the intake gate does not read the per-model breakdown');
+        }
+    });
+}
+
+/**
+ * A gate over an organization that IS metered, with `$used` bytes already consumed.
+ *
+ * The cache factory below RAISES on `store()`, which is exactly the degraded path the suite runs on
+ * by default — `phpunit.xml` deliberately leaves `REDIS_CACHE_HOST` unset so the `ephemeral`
+ * connection refuses to connect, and `QuotaCounters` treats any cache failure as "no cached value"
+ * and routes to PostgreSQL. So this fixture proves the branch that matters most: Valkey is not
+ * there and the quota is still enforced, from the ledger.
+ */
+function intakeMeteredGate(int $used): UploadIntake
+{
+    return intakeGateOver(new class($used) implements UsageEventRepositoryInterface
+    {
+        public function __construct(private readonly int $used) {}
+
+        public function record(string $organizationId, RecordedUsage $usage): bool
+        {
+            throw new \RuntimeException('the intake gate must never WRITE to the usage ledger');
+        }
+
+        public function consumed(string $organizationId, QuotaMetric $metric, \DateTimeImmutable $at): int
+        {
+            return $this->used;
+        }
+
+        public function tokensByModel(string $organizationId, \DateTimeImmutable $from, \DateTimeImmutable $until): array
+        {
+            return [];
+        }
+    });
+}
+
+/**
+ * The wiring both gates share: a cache factory that is always unreachable and a Redis factory that
+ * is never reached at all.
+ *
+ * THE REDIS FACTORY RAISES rather than returning a null connection, because `BotRateLimiter` is the
+ * CHAT path's half of the gate and an upload must never touch it. If it is ever reached from here,
+ * that is a real defect — a per-bot rate limit charged against a file upload — and it fails loudly.
+ */
+function intakeGateOver(UsageEventRepositoryInterface $ledger): UploadIntake
+{
+    $cache = new class implements CacheFactory
+    {
+        public function store($name = null): never
+        {
+            throw new \RuntimeException('valkey-cache is unreachable');
+        }
+    };
+
+    $redis = new class implements RedisFactory
+    {
+        public function connection($name = null): never
+        {
+            throw new \RuntimeException(
+                'the upload path must not reach the per-bot rate limiter: that is the chat turn\'s '
+                .'half of the gate, and charging a file upload against a bot\'s per-minute window '
+                .'would be a limit applied to traffic it was not written for'
+            );
+        }
+    };
+
+    return new UploadIntake(new QuotaGate(
+        new QuotaCounters($ledger, $cache, new NullLogger),
+        new BotRateLimiter($redis),
+    ));
+}
+
+/**
+ * An UNMETERED organization by default: a model instance with no ceilings and no database behind it.
+ *
+ * `new Organization` opens no connection — Eloquent instantiation is a constructor and an attribute
+ * bag — which is what keeps this a Unit test. The id is set because `organizationId()` reads it; the
+ * quota column is left null unless a caller asks otherwise, and null means UNLIMITED.
+ */
+function intakeOrganization(?int $storageQuota = null): Organization
+{
+    $organization = new Organization;
+    $organization->id = '01JEXAMPLEORGIDAAAAAAAAAAA';
+    $organization->storage_bytes_quota = $storageQuota;
+
+    return $organization;
+}
 
 /**
  * An `UploadedFile` over real bytes, with the exact name the client offered.
@@ -213,7 +358,7 @@ it('reads the type out of the bytes, and every fixture below is the type it clai
 it('accepts a real document and describes it from what it established, not from what it was told', function (): void {
     $bytes = intakePdfBytes();
 
-    $screening = (new UploadIntake)->screen([0 => intakeFile('Employee Handbook.pdf', $bytes)]);
+    $screening = intakeGate()->screen(intakeOrganization(), [0 => intakeFile('Employee Handbook.pdf', $bytes)]);
 
     expect($screening->hasRejections())->toBeFalse();
 
@@ -240,7 +385,7 @@ it('refuses on the EXTENSION a file that would also fail the sniff, because step
     // MUTATION CHECK: moving `assertMimeIsAllowed()` above `assertExtensionIsAllowed()` in
     // UploadIntake::admit() turns this into `mime_sniff` and this test fails. Every refusal is still
     // a refusal — which is exactly why asserting "it was refused" would not have caught it.
-    $screening = (new UploadIntake)->screen([0 => intakeFile('payload.exe', intakeExecutableBytes())]);
+    $screening = intakeGate()->screen(intakeOrganization(), [0 => intakeFile('payload.exe', intakeExecutableBytes())]);
 
     expect($screening->accepted)->toBe([])
         ->and($screening->rejected[0]->reason)->toBe(UploadRejectionReason::Extension)
@@ -256,7 +401,7 @@ it('refuses on SIZE a file that would also fail the extension, because step 1 pr
     // MUTATION CHECK: moving the size check below the extension check turns this into `extension`.
     $oversized = UploadedFile::fake()->create('payload.exe', UploadLimits::MAX_FILE_KILOBYTES + 1);
 
-    $screening = (new UploadIntake)->screen([0 => $oversized]);
+    $screening = intakeGate()->screen(intakeOrganization(), [0 => $oversized]);
 
     expect($screening->rejected[0]->reason)->toBe(UploadRejectionReason::Size)
         // The size IS reported — step 1 established it — while the MIME is not.
@@ -273,7 +418,7 @@ it('accepts a file of exactly the published ceiling, so the comparison is not of
 
     // It still fails — on the SNIFF, because a fake file of zero bytes' worth of content is not a
     // PDF — and that is the assertion: the size step let it through.
-    $screening = (new UploadIntake)->screen([0 => $exact]);
+    $screening = intakeGate()->screen(intakeOrganization(), [0 => $exact]);
 
     expect($screening->rejected[0]->reason)->not->toBe(UploadRejectionReason::Size);
 });
@@ -289,7 +434,7 @@ it('normalizes the filename BEFORE validating it, so full-width traversal is ref
     // `../evil.pdf` into `display_name`, where `source_items_display_name_is_not_a_path` refuses it
     // as a 500 instead of a 422 — and where any consumer that joins a display name to a path has a
     // traversal.
-    $screening = (new UploadIntake)->screen([
+    $screening = intakeGate()->screen(intakeOrganization(), [
         0 => intakeFile("\u{FF0E}\u{FF0E}\u{FF0F}evil.pdf", intakePdfBytes()),
     ]);
 
@@ -303,7 +448,7 @@ it('refuses the malicious-filename fixture set from docs/17 §22.5', function (s
     // EVERY ONE OF THESE CARRIES REAL PDF BYTES, so the content is never what refuses them — the
     // name is, at step 2, before anything opens the file. That is what makes this a test of the name
     // gate rather than a test that hostile files happen to be hostile.
-    $screening = (new UploadIntake)->screen([0 => intakeFile($name, intakePdfBytes())]);
+    $screening = intakeGate()->screen(intakeOrganization(), [0 => intakeFile($name, intakePdfBytes())]);
 
     expect($screening->accepted)->toBe([])
         ->and($screening->rejected[0]->reason)->toBe(UploadRejectionReason::Extension);
@@ -356,7 +501,7 @@ it('refuses a filename that is not valid UTF-8, even though its extension is all
     // `$screening->accepted` is `[0 => …]` and `$screening->rejected[0]` is not set at all, so the
     // file was ADMITTED, which is the defect and not merely a different reason token. Restoring the
     // guard makes it pass. Recorded because a check whose test cannot fail is how this shipped.
-    $screening = (new UploadIntake)->screen([0 => intakeFile("\xFFreport.pdf", intakePdfBytes())]);
+    $screening = intakeGate()->screen(intakeOrganization(), [0 => intakeFile("\xFFreport.pdf", intakePdfBytes())]);
 
     expect($screening->accepted)->toBe([])
         // The `extension` token, because step 2 IS the name gate — the same argument
@@ -369,7 +514,7 @@ it('refuses a filename that is not valid UTF-8, even though its extension is all
     // AND THE CONTROL: the identical name in valid UTF-8 is accepted. Without this, the test above
     // would also pass against a gate that refused every `.pdf`, which is the failure shape
     // `pest-testing` non-negotiable 2 exists for.
-    $control = (new UploadIntake)->screen([0 => intakeFile('report.pdf', intakePdfBytes())]);
+    $control = intakeGate()->screen(intakeOrganization(), [0 => intakeFile('report.pdf', intakePdfBytes())]);
 
     expect($control->hasRejections())->toBeFalse();
 });
@@ -379,7 +524,7 @@ it('refuses a filename that is not valid UTF-8, even though its extension is all
 it('refuses a type it does not recognise as `mime_sniff`, with the extension allow-listed', function (): void {
     // `.md` IS accepted. The content is not, and libmagic answering `application/x-dosexec` is the
     // whole of the refusal: renaming the file changes nothing, which the message says.
-    $screening = (new UploadIntake)->screen([0 => intakeFile('notes.md', intakeExecutableBytes())]);
+    $screening = intakeGate()->screen(intakeOrganization(), [0 => intakeFile('notes.md', intakeExecutableBytes())]);
 
     expect($screening->rejected[0]->reason)->toBe(UploadRejectionReason::MimeSniff)
         // Reported, because step 3 established it. This is the row somebody greps for.
@@ -391,7 +536,7 @@ it('refuses a polyglot as `mime_mismatch`: content that sniffs as one type under
     // The DISAGREEMENT is the finding, and it is a rejection rather than a preference for either
     // one — trusting the sniff would store a PDF the parser is told is an image, and trusting the
     // extension is the check not happening.
-    $screening = (new UploadIntake)->screen([0 => intakeFile('diagram.png', intakePdfBytes())]);
+    $screening = intakeGate()->screen(intakeOrganization(), [0 => intakeFile('diagram.png', intakePdfBytes())]);
 
     expect($screening->rejected[0]->reason)->toBe(UploadRejectionReason::MimeMismatch)
         ->and($screening->rejected[0]->sniffedMime)->toBe('application/pdf');
@@ -401,7 +546,7 @@ it('refuses a macro-enabled Office extension outright, before it ever opens the 
     // A REAL, WELL-FORMED XLSX-SHAPED PACKAGE under an `.xlsm` name. Nothing about its contents is
     // wrong; the extension is refused by name, because "we do not need macros" is a decision made
     // once rather than a property inspected per file.
-    $screening = (new UploadIntake)->screen([
+    $screening = intakeGate()->screen(intakeOrganization(), [
         0 => intakeFile('budget.xlsm', intakeZipBytes([
             '[Content_Types].xml' => '<?xml version="1.0"?><Types/>',
             'xl/workbook.xml' => '<?xml version="1.0"?><workbook/>',
@@ -415,7 +560,7 @@ it('refuses a macro-enabled Office extension outright, before it ever opens the 
 // ── step 5: the package ──────────────────────────────────────────────────────────────────────────
 
 it('accepts a real OPC package', function (): void {
-    $screening = (new UploadIntake)->screen([0 => intakeFile('Handbook.docx', intakeZipBytes(intakeDocxParts()))]);
+    $screening = intakeGate()->screen(intakeOrganization(), [0 => intakeFile('Handbook.docx', intakeZipBytes(intakeDocxParts()))]);
 
     expect($screening->hasRejections())->toBeFalse()
         ->and($screening->accepted[0]->extension)->toBe('docx');
@@ -426,7 +571,7 @@ it('refuses a zip wearing an Office extension, because the root part is the real
     // OOXML parts". `application/zip` IS accepted for `.docx` — plenty of legitimate writers produce
     // packages libmagic cannot name more precisely — so the identity check has to happen inside the
     // package, and `word/document.xml` is it.
-    $screening = (new UploadIntake)->screen([
+    $screening = intakeGate()->screen(intakeOrganization(), [
         0 => intakeFile('invoice.docx', intakeZipBytes(['readme.txt' => 'nothing to see'])),
     ]);
 
@@ -435,7 +580,7 @@ it('refuses a zip wearing an Office extension, because the root part is the real
 });
 
 it('refuses an OPC package carrying vbaProject.bin, whatever the outer extension says', function (): void {
-    $screening = (new UploadIntake)->screen([
+    $screening = intakeGate()->screen(intakeOrganization(), [
         0 => intakeFile('Handbook.docx', intakeZipBytes(
             intakeDocxParts() + ['word/vbaProject.bin' => "\xD0\xCF\x11\xE0macro"],
         )),
@@ -446,7 +591,7 @@ it('refuses an OPC package carrying vbaProject.bin, whatever the outer extension
 });
 
 it('refuses an OPC package carrying an /embeddings/ part', function (): void {
-    $screening = (new UploadIntake)->screen([
+    $screening = intakeGate()->screen(intakeOrganization(), [
         0 => intakeFile('Report.docx', intakeZipBytes(
             intakeDocxParts() + ['word/embeddings/oleObject1.bin' => "\xD0\xCF\x11\xE0ole"],
         )),
@@ -470,7 +615,7 @@ it('refuses an embeddings part that has no parent directory, which a substring t
     // gate — `hasRejections()` false — while the `word/embeddings/…` row above keeps passing.
     $bytes = intakeZipBytes(intakeDocxParts() + ['embeddings/oleObject1.bin' => "\xD0\xCF\x11\xE0ole"]);
 
-    $screening = (new UploadIntake)->screen([0 => intakeFile('Handbook.docx', $bytes)]);
+    $screening = intakeGate()->screen(intakeOrganization(), [0 => intakeFile('Handbook.docx', $bytes)]);
 
     expect($screening->accepted)->toBe([])
         ->and($screening->rejected[0]->reason)->toBe(UploadRejectionReason::MacroPayload)
@@ -484,7 +629,7 @@ it('does not refuse a part merely NAMED embeddings, because the test is on segme
     // slashes at all.
     $bytes = intakeZipBytes(intakeDocxParts() + ['word/embeddings.xml' => '<x/>']);
 
-    $screening = (new UploadIntake)->screen([0 => intakeFile('Handbook.docx', $bytes)]);
+    $screening = intakeGate()->screen(intakeOrganization(), [0 => intakeFile('Handbook.docx', $bytes)]);
 
     expect($screening->rejected)->toBe([]);
 });
@@ -518,7 +663,7 @@ it('refuses the same two parts spelled with backslashes, because basename() does
 
     expect(intakeZipPartNames($bytes))->toContain(array_key_first($parts));
 
-    $screening = (new UploadIntake)->screen([0 => intakeFile('Handbook.docx', $bytes)]);
+    $screening = intakeGate()->screen(intakeOrganization(), [0 => intakeFile('Handbook.docx', $bytes)]);
 
     expect($screening->accepted)->toBe([])
         ->and($screening->rejected[0]->reason)->toBe(UploadRejectionReason::MacroPayload)
@@ -537,7 +682,7 @@ it('refuses an archive past the ENTRY cap', function (): void {
         $parts["word/media/image{$i}.bin"] = 'x';
     }
 
-    $screening = (new UploadIntake)->screen([0 => intakeFile('Deck.docx', intakeZipBytes($parts))]);
+    $screening = intakeGate()->screen(intakeOrganization(), [0 => intakeFile('Deck.docx', intakeZipBytes($parts))]);
 
     expect($screening->rejected[0]->reason)->toBe(UploadRejectionReason::ArchiveBomb)
         // WHICH cap, from the message, because all three share one audit token: `reason` groups
@@ -549,7 +694,7 @@ it('refuses an archive past the DECLARED-SIZE cap, read from the directory the a
     // 600 MiB declared per entry, past the 512 MiB total, in a file of a few hundred bytes. See
     // intakeZipDeclaring(): the central directory is self-reported, which is why the cap is on it
     // AND why the authoritative streamed-byte check belongs where the decompression happens.
-    $screening = (new UploadIntake)->screen([
+    $screening = intakeGate()->screen(intakeOrganization(), [
         0 => intakeFile('Handbook.docx', intakeZipDeclaring(intakeDocxParts(), 600 * 1024 * 1024)),
     ]);
 
@@ -561,7 +706,7 @@ it('refuses an archive past the RATIO cap, which is the one a nesting-depth chec
     // Declared 4 MB per entry — comfortably under the 512 MiB total — against a few dozen packed
     // bytes. Ratio in the thousands. Fifield's overlapping-entry bomb has exactly this signature and
     // expands fully in a single round, so a recursion cap sees nothing wrong with it.
-    $screening = (new UploadIntake)->screen([
+    $screening = intakeGate()->screen(intakeOrganization(), [
         0 => intakeFile('Handbook.docx', intakeZipDeclaring(intakeDocxParts(), 4 * 1024 * 1024)),
     ]);
 
@@ -572,7 +717,7 @@ it('refuses an archive past the RATIO cap, which is the one a nesting-depth chec
 // ── the batch ────────────────────────────────────────────────────────────────────────────────────
 
 it('screens every file rather than stopping at the first refusal, and keys each on the part index', function (): void {
-    $screening = (new UploadIntake)->screen([
+    $screening = intakeGate()->screen(intakeOrganization(), [
         0 => intakeFile('Handbook.pdf', intakePdfBytes()),
         1 => intakeFile('payload.exe', intakeExecutableBytes()),
         2 => intakeFile('diagram.png', intakePdfBytes()),
@@ -593,7 +738,7 @@ it('refuses the SECOND of two byte-identical files and keeps the first', functio
     // as a 500 for a request that is plainly a mistake.
     $bytes = intakePdfBytes();
 
-    $screening = (new UploadIntake)->screen([
+    $screening = intakeGate()->screen(intakeOrganization(), [
         0 => intakeFile('handbook.pdf', $bytes),
         1 => intakeFile('handbook-copy.pdf', $bytes),
     ]);
@@ -610,11 +755,63 @@ it('does not re-refuse a file that already failed its own step as a duplicate', 
     // than a true reason and a misleading one.
     $bytes = intakeExecutableBytes();
 
-    $screening = (new UploadIntake)->screen([
+    $screening = intakeGate()->screen(intakeOrganization(), [
         0 => intakeFile('a.exe', $bytes),
         1 => intakeFile('b.exe', $bytes),
     ]);
 
     expect($screening->rejected[0]->reason)->toBe(UploadRejectionReason::Extension)
         ->and($screening->rejected[1]->reason)->toBe(UploadRejectionReason::Extension);
+});
+
+it('refuses an organization that is already over its storage allowance, before it reads a file', function (): void {
+    // STEP 0, AND THE ASSERTION IS THAT IT RAN FIRST. The file below is a perfectly good PDF, so
+    // nothing in the six steps would refuse it — the only thing that can produce a failure here is
+    // the quota check that runs before any byte is read. `used === limit` is `exceeded()`, which is
+    // `>=` rather than `>`: an organization that has consumed exactly its allowance has none left.
+    $intake = intakeMeteredGate(used: 1_000);
+
+    expect(fn () => $intake->screen(
+        intakeOrganization(storageQuota: 1_000),
+        [0 => intakeFile('Handbook.pdf', intakePdfBytes())],
+    ))->toThrow(KbException::class);
+});
+
+it('refuses a batch that would take the organization over, and admits one that exactly fills it', function (): void {
+    // STEP 7. The two cases are asserted TOGETHER because the boundary is the whole content of the
+    // rule: `wouldExceed()` is `used + additional > limit`, so a batch that lands EXACTLY on the
+    // ceiling is inside it and one byte more is not. Asserting only the refusal would pass against
+    // an off-by-one that refuses every batch reaching the limit.
+    $bytes = intakePdfBytes();
+    $size = strlen($bytes);
+
+    $exact = intakeMeteredGate(used: 0);
+
+    expect($exact->screen(
+        intakeOrganization(storageQuota: $size),
+        [0 => intakeFile('Handbook.pdf', $bytes)],
+    )->hasRejections())->toBeFalse();
+
+    $over = intakeMeteredGate(used: 0);
+
+    expect(fn () => $over->screen(
+        intakeOrganization(storageQuota: $size - 1),
+        [0 => intakeFile('Handbook.pdf', $bytes)],
+    ))->toThrow(KbException::class);
+});
+
+it('leaves an unmetered organization completely unqueried', function (): void {
+    // THE NULL BRANCH, ASSERTED RATHER THAN ASSUMED. `intakeGate()`'s ledger RAISES on `consumed()`,
+    // so this test fails if the quota is consulted at all — which proves that a null ceiling costs
+    // no query and no cache read, the property that keeps the migration's "every existing
+    // organization is unmetered" safe to deploy without a backfill.
+    //
+    // It is also the reason every other test in this file still exercises exactly the six steps: all
+    // of them go through `intakeGate()`, so any of them reaching the quota would fail here too.
+    $screening = intakeGate()->screen(
+        intakeOrganization(),
+        [0 => intakeFile('Handbook.pdf', intakePdfBytes())],
+    );
+
+    expect($screening->hasRejections())->toBeFalse();
 });

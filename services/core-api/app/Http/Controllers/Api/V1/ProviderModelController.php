@@ -383,6 +383,21 @@ final class ProviderModelController extends Controller
             ProviderModelService::DESIGNATED_FOR_EMBEDDING,
         );
 
+        // AND THE RERANK DESIGNATION, which this check did not read (`docs/22` § T36). Both halves
+        // of THIS pair are compared for the same reason the embedding one compares both: a
+        // connection match alone refuses every model under the designated connection.
+        //
+        // This is the FAST readable error and not the authority. The authority is the repository's
+        // re-read inside the delete's transaction, under the `organizations` row lock the
+        // designation write takes — a designation landing between this line and the DELETE wins,
+        // and that caller gets the same sentence a millisecond later.
+        abort_if(
+            $organization->rerank_connection_id === $providerConnection->id
+                && $organization->rerank_model === $model->model,
+            409,
+            ProviderModelService::DESIGNATED_FOR_RERANK,
+        );
+
         $models->delete($organization, $providerConnection, $model, $this->actorId(), $request);
 
         // An acknowledgement and not the deleted resource: the only thing the caller learns is

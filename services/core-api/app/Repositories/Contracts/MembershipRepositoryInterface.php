@@ -34,4 +34,26 @@ interface MembershipRepositoryInterface
      * @return list<OrganizationUser> oldest membership first; `[]` for a user who belongs to nothing
      */
     public function forUser(string $userId): array;
+
+    /**
+     * ONE membership row — this user, in THIS organization — re-read from PostgreSQL.
+     *
+     * ── IT EXISTS SO A CREDENTIAL CAN BE RE-AUTHORIZED WITHOUT A USER MODEL IN HAND ─────────
+     *
+     * `User::membershipFor()` answers the same question and needs a hydrated `User`. The caller
+     * that needs this one — `WidgetSessionService::resolve()`, on the playground branch — holds a
+     * ULID out of a Valkey record and nothing else, and re-reading the row on EVERY request is the
+     * whole revocation story for a credential with no database row of its own
+     * (`laravel-sanctum-auth` NN1: neither a token row nor a session value is evidence of CURRENT
+     * membership). Hydrating a `User` first would add a query to answer a question this one
+     * answers.
+     *
+     * BOTH ARGUMENTS ARE REQUIRED AND THE ORGANIZATION IS FIRST, matching every other scoped read
+     * in this application. There is no shape of this method that answers "any organization".
+     *
+     * The returned row is not evidence of anything on its own: `OrganizationUser::grants()` ANDs
+     * the ACTIVE status with the role's permission set, and a suspended membership therefore grants
+     * nothing while still returning a row a caller could mistake for one.
+     */
+    public function find(string $organizationId, string $userId): ?OrganizationUser;
 }

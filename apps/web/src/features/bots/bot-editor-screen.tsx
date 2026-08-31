@@ -30,6 +30,7 @@ import {
 } from './bot-editor-context';
 import { BotIdentityPanel } from './bot-identity-panel';
 import { BotModelPanel } from './bot-model-panel';
+import { BotPlaygroundPanel } from './bot-playground-panel';
 import { BotPublishingPanel } from './bot-publishing-panel';
 
 /**
@@ -218,11 +219,18 @@ export function BotEditorScreen({ botId }: { readonly botId: string }) {
   return <BotEditorForOrganization orgId={orgId} botId={botId} viewerRole={viewerRole} />;
 }
 
-/** The tab strip, declared once. The `id`s are the `BotEditorPanelId` union and the Radix values. */
+/**
+ * The tab strip, declared once. The `id`s are the `BotEditorPanelId` union and the Radix values.
+ *
+ * PLAYGROUND IS LAST AND THAT IS THE ORDER RATHER THAN AN APPENDAGE: the first three configure the
+ * bot and the fourth exercises what they configured, so reading the strip left to right is the
+ * workflow. It is also the only one of the four that is not a form — see `BotEditorPanelId`.
+ */
 const TABS: readonly { readonly id: BotEditorPanelId; readonly label: string }[] = [
   { id: 'identity', label: 'Identity & voice' },
   { id: 'model', label: 'Model & retrieval' },
   { id: 'publishing', label: 'Publishing' },
+  { id: 'playground', label: 'Playground' },
 ];
 
 /**
@@ -469,6 +477,15 @@ function BotEditorTabs({
         </TabsContent>
         <TabsContent value="publishing">
           <BotPublishingPanel />
+        </TabsContent>
+        {/* THE FOURTH PANEL, AND IT BENEFITS FROM THE UNMOUNTING THE OTHER THREE HAVE TO GUARD
+            AGAINST. `TabsContent` renders `present && children`, so leaving this tab tears down the
+            chat surface — which aborts an in-flight stream through `<ChatSurface>`'s own
+            `AbortController`, settles the turn as `cancelled` server-side, and stops the provider
+            generating against the tenant's quota for an answer nobody will read. For a form that
+            unmount destroys work and needs the guard; here it is the correct behaviour. */}
+        <TabsContent value="playground">
+          <BotPlaygroundPanel />
         </TabsContent>
       </Tabs>
 

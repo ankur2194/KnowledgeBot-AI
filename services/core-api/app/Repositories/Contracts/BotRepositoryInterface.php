@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Repositories\Contracts;
 
+use App\Enums\BotDeletion;
 use App\Models\Bot;
 use App\Services\Bots\BotChildSummary;
 use App\Services\Bots\BotEdit;
@@ -164,7 +165,35 @@ interface BotRepositoryInterface
     ): ?Bot;
 
     /**
-     * Hard-delete one bot and the four child collections that exist only to describe it.
+     * Hard-delete one bot and the four child collections that exist only to describe it — OR REFUSE,
+     * when the bot has held a conversation.
+     *
+     * ── THE REFUSAL IS THE DECISION `BotService::delete()`'s `TODO(phase-e)` WAS WAITING FOR ────
+     *
+     * `conversations.bot_id` references `bots (organization_id, id)` with `ON DELETE RESTRICT`, so a
+     * bot that has ever answered anybody is undeletable — and `BotStatus::Archived`, whose docblock
+     * already reads "the row survives so conversation history and audit entries resolve", is what an
+     * operator does instead. The migration 2026_08_26_002800 carries the argument against the two
+     * alternatives; the short form is that CASCADE destroys every transcript, every provider call
+     * that billed for one and every piece of feedback, from a button labelled "delete bot", and SET
+     * NULL keeps the transcript while losing what it was a transcript of.
+     *
+     * SO WHY IS THERE A CHECK IN CODE AT ALL, given that the database guarantees it? Because the
+     * constraint's answer is SQLSTATE 23503, which the error envelope renders as a 500 for a request
+     * that is entirely legitimate. The check produces a 409 with a sentence naming archiving. That
+     * is the same division of labour `slugExists()` records above: the database is the guarantee,
+     * this is the good error message.
+     *
+     * IT RUNS INSIDE THE TRANSACTION, UNDER THE SAME ROW LOCK, and that is what makes it more than a
+     * nicer 500. A pre-flight check in the controller loses a race to a conversation starting
+     * between the read and the DELETE; the lock closes it, because an insert into `conversations`
+     * naming this bot takes `FOR KEY SHARE` on the referenced row to enforce its own foreign key and
+     * `FOR UPDATE` conflicts with that.
+     *
+     * NO AUDIT ROW IS WRITTEN ON A REFUSAL. The check runs BEFORE the audit closure, so a refused
+     * delete cannot leave a `bot.deleted` row describing a deletion that did not happen — the same
+     * property `update()` has for a PATCH that changed nothing. `AuditLogger::BOT_DELETE_REFUSED` is
+     * what records the attempt, and the service writes it.
      *
      * ── THE CHILDREN ARE REMOVED IN CODE BECAUSE THE FOREIGN KEYS ARE `ON DELETE RESTRICT` ─────
      *
@@ -209,7 +238,36 @@ interface BotRepositoryInterface
      *                                                                    same lock, so the rows it
      *                                                                    describes are the rows
      *                                                                    that go
-     * @return bool false when no such bot exists in THIS organization
+     * @return BotDeletion `Missing` when no such bot exists in THIS organization, and
+     *                     `HasConversations` when the bot holds a transcript — in which case
+     *                     NOTHING was changed and the audit closure was NOT invoked
      */
-    public function delete(string $organizationId, string $botId, Closure $audit): bool;
+    public function delete(string $organizationId, string $botId, Closure $audit): BotDeletion;
+
+    /**
+     * How many conversations this bot has held.
+     *
+     * ── IT EXISTS FOR ONE AUDIT FIELD, WHICH IS WHY IT IS ON THIS INTERFACE ───────────────────
+     *
+     * `AuditLogger::BOT_DELETE_REFUSED` carries `conversation_count` as the tripwire that tells a
+     * reader whether a refused delete protected three test threads or four hundred thousand
+     * customer conversations. `BotService` cannot count them itself — `Illuminate\Support\Facades\DB`
+     * and `App\Models` are both arch-pinned away from the service layer — and a repository method is
+     * what keeps the organization predicate a typed argument rather than an ambient assumption.
+     *
+     * ── IT IS READ OUTSIDE THE DELETE'S TRANSACTION, SO IT IS A FLOOR AND NOT AN EXACT FIGURE ─
+     *
+     * The count that CAUSED the refusal was taken under `lockForUpdate()` inside `delete()`; this
+     * one is taken afterwards, so a conversation started in between is included. That is stated
+     * rather than hidden because the difference is real and the field is still worth having: the
+     * question the audit row answers is one of MAGNITUDE, and the direction of the error is
+     * upwards — this can never under-report what was at stake. Making it exact would mean widening
+     * `delete()`'s callback contract to carry a refusal payload, which is a shared contract change
+     * for a number nobody compares for equality.
+     *
+     * DO NOT USE IT AS A PRE-FLIGHT GUARD. A check outside the lock loses the race to a conversation
+     * starting between the read and the DELETE, and the loser gets a 500 describing SQLSTATE 23503
+     * instead of the 409 they would have got a moment earlier. `delete()` is the authority.
+     */
+    public function conversationCount(string $organizationId, string $botId): int;
 }

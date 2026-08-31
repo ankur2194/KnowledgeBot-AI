@@ -129,6 +129,13 @@ test.describe('axe-core, WCAG 2.2 AA', () => {
     // `hidden`, so a violation in `Model & retrieval` is invisible to a scan of `Identity & voice` —
     // and the three panels are three different forms, which is where the label, the description
     // association and the error announcement live.
+    //
+    // THE FOURTH TAB IS ABSENT FROM THIS LIST ON PURPOSE, AND `playground.spec.ts` OWNS IT. The
+    // playground is not a form: it is a live chat surface with a composer, a stop control, an
+    // announcement region and a retrieval panel that only exists after a turn — none of which this
+    // loop would cover by clicking one more tab. Adding it here would read as coverage and buy a
+    // single extra scan. If a fifth tab lands, it belongs in this list unless it is likewise a
+    // surface rather than a form.
     for (const label of ['Identity & voice', 'Model & retrieval', 'Publishing']) {
       const tab = page.getByRole('tab', { name: label });
 

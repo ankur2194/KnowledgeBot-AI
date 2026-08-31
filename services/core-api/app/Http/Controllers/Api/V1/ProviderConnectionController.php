@@ -62,8 +62,8 @@ use Illuminate\Support\Facades\Gate;
  *    side is unavailable. Try again shortly." — which is false twice for a suspension; see that
  *    constant. `index` and `show` deliberately have NONE: reading which credentials exist and why
  *    ingestion is blocked is exactly what a suspended organization's operator needs to do, and it
- *    changes nothing. `destroy` carries a SECOND status check that is not about the organization
- *    at all — see the action.
+ *    changes nothing. `destroy` carries TWO FURTHER status checks that are not about the
+ *    organization at all — one per designation the connection may hold. See the action.
  *
  * 6. RATE LIMIT — `throttle:admin` on the group, plus `verified`, so an unverified address reaches
  *    no tenant data. Check 6 in the §18.3 sense — re-authentication for a destructive action — is
@@ -322,13 +322,26 @@ final class ProviderConnectionController extends Controller
             OrganizationStatus::SUSPENDED_REFUSAL,
         );
 
-        // CHECK 5, second half: the connection's role in the organization's configuration.
-        // Read from the bound organization row, which the tenant middleware and the scoped binding
-        // have already established belongs to this caller.
+        // CHECK 5, second half: the connection's role in the organization's configuration. TWO
+        // ARMS, ONE PER DESIGNATION, both read from the bound organization row — which the tenant
+        // middleware and the scoped binding have already established belongs to this caller.
+        //
+        // EMBEDDING IS CHECKED FIRST AND THE ORDER IS NOT ARBITRARY. A connection can be both, and
+        // then only one sentence can be returned; the embedding one names the worse consequence
+        // (an indexed corpus stranded in a vector space nothing can reproduce, versus reranking
+        // silently stopping), and it is the one that has to be cleared anyway. Clearing it and
+        // retrying then produces the rerank refusal, so the operator is told both — in the order
+        // that costs least to act on.
         abort_if(
             $organization->embedding_connection_id === $providerConnection->id,
             409,
             ProviderConnectionService::DESIGNATED_FOR_EMBEDDING,
+        );
+
+        abort_if(
+            $organization->rerank_connection_id === $providerConnection->id,
+            409,
+            ProviderConnectionService::DESIGNATED_FOR_RERANK,
         );
 
         $connections->delete($organization, $providerConnection, $this->actorId(), $request);

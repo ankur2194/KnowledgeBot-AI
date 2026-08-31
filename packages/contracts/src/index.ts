@@ -159,3 +159,87 @@ export type {
   BotSourceAssignmentCollectionResource,
   BotSourceAssignmentResource,
 } from './resources/bot-source-assignments.js';
+
+/**
+ * §8.23's dashboard. Same `export type` discipline and the same reason: `src/resources/analytics.ts`
+ * holds no runtime value, so this block is erased and the root entry's <=1 kB brotli budget is
+ * untouched. There is no tuple sibling behind `@kb/contracts/forms` either — nothing iterates a
+ * closed analytics vocabulary; the only enumerable thing on the shape is `usage_by_model`, which is
+ * data rather than a vocabulary.
+ */
+export type {
+  AnalyticsFeedback,
+  AnalyticsIngestion,
+  AnalyticsLatency,
+  AnalyticsModelUsage,
+  AnalyticsProviderCalls,
+  AnalyticsResource,
+  AnalyticsWindow,
+} from './resources/analytics.js';
+
+/**
+ * The quota ceilings. `QuotaMetricName` IS a closed vocabulary and DOES have a tuple sibling —
+ * `QUOTA_METRICS` behind `@kb/contracts/forms` — because the settings screen renders one row per
+ * metric in a fixed order and a `<form>` needs a list it can iterate. Same split as `ORG_ROLES` and
+ * `BOT_STATUSES`: the union narrows, the tuple iterates, and each is pinned to the server
+ * independently (this one against the published `enum`, that one against the dumped `rules()`).
+ */
+export type {
+  QuotaMetricName,
+  QuotaMetricUsage,
+  QuotaResource,
+  QuotaUsageSource,
+} from './resources/quotas.js';
+
+/**
+ * The audit trail. NO tuple sibling for `operation`, deliberately: the vocabulary is 45 names and is
+ * already published twice — as the resource's inlined `enum` and as `IndexAuditLogsRequest`'s `in:`
+ * rule — so a third transcription here is the copy nothing would compare to either. The console
+ * reads the rule manifest through `enumFromRule`, exactly as it does for a sortable set.
+ */
+export type {
+  AuditLogCollectionResource,
+  AuditLogResource,
+  AuditOutcome,
+} from './resources/audit-logs.js';
+
+/**
+ * Conversation review, and it is the widest block in this file because the transcript nests four
+ * child collections. Same `export type` discipline; the six closed vocabularies are UNIONS with no
+ * tuple siblings, because the conversation surface is READ-ONLY — there is no `<Select>` anywhere
+ * that needs to iterate a message status.
+ */
+export type {
+  ConversationChannel,
+  ConversationCollectionResource,
+  ConversationResource,
+  ConversationStatus,
+  ConversationTranscriptResource,
+  FeedbackRating,
+  MessageRole,
+  MessageStatus,
+  ProviderCallResource,
+  ProviderCallStatus,
+  RetrievalTraceResource,
+  TranscriptCitationResource,
+  TranscriptFeedbackResource,
+  TranscriptMessageResource,
+} from './resources/conversations.js';
+
+/**
+ * The PUBLIC runtime — the one block here `apps/widget` genuinely consumes, which is why it is in
+ * the root entry rather than behind a subpath. It is types only and therefore free.
+ *
+ * `RetrievalTraceResource` above and the `retrieval.trace` FRAME behind `@kb/contracts/admin` are
+ * different shapes for different audiences and neither is exported from the other's home. Nothing
+ * about the diagnostic frame reaches this entry.
+ */
+export type {
+  ChatSessionResource,
+  RuntimeBotResource,
+  RuntimeCitationCollectionResource,
+  RuntimeCitationResource,
+  RuntimeConversationResource,
+  RuntimeMessageCollectionResource,
+  RuntimeMessageResource,
+} from './resources/runtime.js';

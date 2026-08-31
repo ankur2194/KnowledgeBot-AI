@@ -126,8 +126,62 @@ export async function browserFetchData<T>(request: BrowserRequest): Promise<T> {
   return body.data;
 }
 
-/** One request, built from the credential union and nothing ambient. */
-function send(request: BrowserRequest, credential: Credential): Promise<Response> {
+/**
+ * A request that carries NO CREDENTIAL AT ALL, for the two `sdk/v1` routes.
+ *
+ * ── WHY THIS IS NOT A THIRD MEMBER OF THE `Credential` UNION ────────────────────────────────────
+ * `Credential` is a union of things that PROVE something, and `streamAnswer` branches on it with an
+ * `if/else` — session gets the cookie plus `X-XSRF-TOKEN`, everything else gets a bearer. A third
+ * `{kind: 'anonymous'}` member would fall into the else arm and send `Authorization: Bearer
+ * undefined`, which is a 401 whose cause is invisible in the diff that introduced it. Worse, it
+ * would make "send a chat message with no credential" a type-checkable expression, and the runtime
+ * surface has exactly one credential by design.
+ *
+ * So the union stays closed at two and the credential-less case is its own function. `send()` below
+ * takes `Credential | null`, so there is still ONE request builder and one place `cache: 'no-store'`
+ * and the error envelope are handled.
+ *
+ * ── WHAT AUTHORIZES THESE REQUESTS INSTEAD: THE `Origin` HEADER, WHICH WE CANNOT SET ────────────
+ * `POST /sdk/v1/bootstrap` and `POST /sdk/v1/session` are origin-validated: Laravel compares the
+ * REQUEST's `Origin` header, byte for byte, against the bot's ACTIVE `bot_domains` rows
+ * (`BotDomainMatcher`, `hash_equals`, no wildcard grammar, no substring form). The browser sets that
+ * header on a cross-origin POST and JavaScript cannot forge it — which is the entire security value
+ * of the handshake, and the reason the bot id travels in the BODY where page script may put it.
+ *
+ * `credentials: 'omit'` is therefore not an omission but a control, exactly as it is on the
+ * `chat_session` arm: these routes sit outside `api/*`, they must not acquire the admin session
+ * stack, and a cookie sent here would be one the server would have to decide to ignore.
+ *
+ * EVERY REJECTION IS A BYTE-IDENTICAL 404 — unknown bot id, a bot in another organization, a bot
+ * that is not live, an absent `Origin`, `Origin: null`, an unlisted origin — so a caller must not
+ * try to tell them apart and must not write copy that guesses which one happened.
+ */
+export type PublicBrowserRequest = Omit<BrowserRequest, 'credential'>;
+
+export async function browserFetchPublic<T>(request: PublicBrowserRequest): Promise<T> {
+  const response = await send(request, null);
+  if (!response.ok) throw await toKbError(response);
+  if (response.status === 204 || response.status === 205) return undefined as T;
+  return (await response.json()) as T;
+}
+
+/** The `data` unwrap, for the same reason `browserFetchData` exists: read the envelope once, at the
+ *  fetch boundary, never at a render site. */
+export async function browserFetchPublicData<T>(request: PublicBrowserRequest): Promise<T> {
+  const body = await browserFetchPublic<ApiEnvelope<T>>(request);
+  return body.data;
+}
+
+/**
+ * One request, built from the credential union and nothing ambient.
+ *
+ * `Credential | null` — `null` is the unauthenticated `sdk/v1` case and NOT a default. It exists so
+ * there is one request builder rather than two; see `browserFetchPublic`.
+ */
+function send(
+  request: PublicBrowserRequest,
+  credential: Credential | null,
+): Promise<Response> {
   const headers: Record<string, string> = { Accept: 'application/json' };
 
   if (request.body !== undefined) headers['Content-Type'] = 'application/json';
@@ -136,7 +190,13 @@ function send(request: BrowserRequest, credential: Credential): Promise<Response
   // THE WHOLE DESIGN IS THIS SWITCH. `credentials` is decided by the credential, never by the
   // surface the code happens to be running on.
   let credentials: RequestCredentials;
-  if (credential.kind === 'session') {
+  if (credential === null) {
+    // The `sdk/v1` handshake. No cookie, no bearer, and 'omit' rather than 'same-origin': the API is
+    // a different origin from both surfaces, so 'same-origin' would send nothing anyway and would
+    // start sending something the day the hostnames collapse in a development environment. What
+    // authorizes this request is the `Origin` header, which the browser sets and we cannot.
+    credentials = 'omit';
+  } else if (credential.kind === 'session') {
     credentials = 'include';
     // Already URL-DECODED by refreshCsrfToken(). Laravel compares the header to the decrypted
     // cookie value, and `%3D` padding echoed verbatim never matches.

@@ -140,6 +140,47 @@ Schedule::onOneServer()->group(function (): void {
         ->withoutOverlapping(10);
 
     /*
+     * ════════════════════════════════════════════════════════════════════════════════════════════
+     * THE SAME ENTRY FOR THE OTHER PARTITIONED TABLE, AND ITS FAILURE IS THE QUIET ONE.
+     * ════════════════════════════════════════════════════════════════════════════════════════════
+     *
+     * `usage_events` is `PARTITION BY RANGE (occurred_at)`, monthly, with NO DEFAULT PARTITION, for
+     * exactly the reason `audit_logs` has none. Past the runway every ledger INSERT fails with
+     * SQLSTATE 23514 — and where the audit failure is TOTAL AND LOUD (every ON_FAILURE_ABORT action
+     * returns 500 and somebody is paged within minutes), this one is SILENT:
+     *
+     *   `App\Services\Usage\UsageRecorder` is called from `SourceService::recordStorageUsage()`,
+     *   which swallows and logs — because failing an upload over a meter reading would turn a
+     *   healthy 201 into a 500 for a source that WAS created. So metering stops, every quota reads
+     *   low, `QuotaGate` admits everything, and the platform serves perfectly while nobody is
+     *   billed. The first symptom is an invoice.
+     *
+     * DAILY, and for the same reason its twin is: the command is idempotent by construction and
+     * costs one catalogue query on the 30 days out of 31 when there is nothing to do, while a
+     * monthly entry has ONE firing per month to lose — to a stranded lock, a maintenance-mode
+     * deploy, or a scheduler container that died in September.
+     *
+     * hourlyAt is not used and the tick is 00:00 UTC alongside kb:create-audit-partitions, which is
+     * fine for the same reason it is fine there: with three months of runway no single firing is
+     * load-bearing. withoutOverlapping(10) against a handful of DDL statements whose p99 is well
+     * under a second.
+     */
+    Schedule::command('kb:create-usage-partitions')
+        ->name('kb:create-usage-partitions')
+        ->daily()
+        ->withoutOverlapping(10);
+
+    /*
+     * AND NOT ITS SIBLING, TWICE OVER. `kb:prune-usage-partitions` EXISTS AND IS DELIBERATELY NOT
+     * SCHEDULED, and it has a REASON OF ITS OWN on top of the retention-policy argument below:
+     * `QuotaMetric::StorageBytes` is summed over ALL TIME with no period lower bound, so dropping
+     * the month an organization's oldest objects were uploaded REDUCES its computed storage usage
+     * while the bytes are still in the bucket — the organization silently gains allowance it did
+     * not buy. `monthly_tokens` is unaffected, because its period is the calendar month, which is
+     * what makes the hazard easy to miss: the tile most people look at keeps reading correctly.
+     * Scheduling it needs the storage metric period-bounded or snapshotted FIRST. The command's own
+     * docblock carries this.
+     *
      * AND NOT ITS SIBLING. `kb:prune-audit-partitions` EXISTS AND IS DELIBERATELY NOT SCHEDULED: it
      * DETACHes and DROPs whole months of the compliance record, and no retention decision stands
      * behind it yet. An unattended DROP of audit data is not a maintenance task, it is a deletion
@@ -224,6 +265,47 @@ Schedule::onOneServer()->group(function (): void {
         ->withoutOverlapping(30);
 
     /*
+     * USAGE AND QUOTA RECONCILIATION — LIVE, and it moved out of the pending block together with the
+     * command class, because an entry naming a class that does not exist is the `sanctum:prune-
+     * expired` shape: it lists cleanly, exits 0 under `schedule:test`, and then writes one
+     * `internal_dependency` error per tick forever against a dependency that was never coming.
+     *
+     * WHAT IT DOES, since the name undersells it and oversells it at the same time. It builds NO
+     * aggregate table — §8.23's tiles are computed from `conversations`, `messages`,
+     * `provider_calls`, `retrieval_traces`, `feedback` and `knowledge_sources`, which are the truth
+     * for each of those facts, and a mirrored copy would be a second number with no statement of
+     * which is right. It does two things instead:
+     *
+     *   1. DERIVES the `usage_events` rows nothing recorded — a stream finalized on the abort path,
+     *      a worker OOM-killed after the `provider_calls` row committed, the post-commit storage
+     *      write that `SourceService` deliberately swallows. Every derivation is idempotent against
+     *      `usage_events_dedupe`, because the dedupe key is the SOURCE ROW'S OWN ULID and
+     *      `occurred_at` is the SOURCE ROW'S OWN TIMESTAMP.
+     *   2. RECONCILES the `quota:{org}:{period}:{metric}` counters by re-reading the primary, which
+     *      refreshes each key with the exact value. The counter is allowed to be LOW and never high;
+     *      this is what makes a drift self-heal within the hour rather than at the next natural miss.
+     *
+     * IT DOES THE WORK INLINE RATHER THAN DISPATCHING, which is the one place this entry departs
+     * from the header's rule. The justification is the bound: a three-hour lookback times a
+     * per-organization row cap, over indexed reads, with no network call anywhere. If that stops
+     * being true it becomes a dispatcher and the work moves to the `maintenance` queue, which
+     * `config/queue.php` already names for "reconciliation sweeps, quota rollups".
+     *
+     * hourlyAt(7) staggers it off the hour and off the other three hourly entries (:17, :29, :41,
+     * :43), so one tick stays one task. withoutOverlapping(30) is far above the measured cost of a
+     * pass over a development-sized tenant set and costs half an hour if a SIGKILL strands the lock
+     * — against a three-hour lookback, so nothing becomes unreachable while it is held.
+     *
+     * IT RETURNS FAILURE IF ANY ORGANIZATION FAILED, deliberately, so the global
+     * ScheduledTaskFailed listener sees it: a command that catches its own exception and returns
+     * SUCCESS is indistinguishable from success.
+     */
+    Schedule::command('kb:rollup-usage')
+        ->name('kb:rollup-usage')
+        ->hourlyAt(7)
+        ->withoutOverlapping(30);
+
+    /*
      * PENDING ENTRIES — uncomment each one together with its command class. The cadence beside each
      * is the intended schedule, not a suggestion (laravel-scheduler).
      *
@@ -232,6 +314,12 @@ Schedule::onOneServer()->group(function (): void {
      * "uncomment once the table exists", which is a to-do whose blocking half nobody owned. The
      * table's absence was found by a real upload failing, not by this comment. A pending entry that
      * names a missing artifact should be read as a defect report, not as a plan.
+     *
+     * `kb:rollup-usage` LEFT THIS BLOCK, and it left it in the same change that wrote its command
+     * class — which is the rule the block exists to state. It sat here commented out while the
+     * class did not exist; uncommenting it alone would have produced the `sanctum:prune-expired`
+     * shape, one `internal_dependency` error per tick forever against a dependency that was never
+     * coming, with `schedule:list` displaying the entry as though its work were handled.
      *
      * `sanctum:prune-expired` at the bottom is NOT one of these: it is a PERMANENT omission under
      * decision D11, not a pending entry. Read its comment before adding it back.
@@ -253,10 +341,6 @@ Schedule::onOneServer()->group(function (): void {
     // start phase 2 (kb-deletion-and-verification).
     // Schedule::command('kb:apply-retention-deletes')
     //     ->name('kb:apply-retention-deletes')->hourlyAt(11)->withoutOverlapping(30);
-
-    // Usage and quota aggregates.
-    // Schedule::command('kb:rollup-usage')
-    //     ->name('kb:rollup-usage')->hourlyAt(7)->withoutOverlapping(30);
 
     // ════════════════════════════════════════════════════════════════════════════════════════════
     // PERMANENTLY OMITTED UNDER DECISION D11 — NOT PENDING, NOT WAITING FOR A TABLE.

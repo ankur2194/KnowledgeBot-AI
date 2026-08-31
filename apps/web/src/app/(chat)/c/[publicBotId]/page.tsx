@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 
-import { ChatSurface } from '@/features/chat/chat-surface';
+import { HostedChat } from '@/features/chat/hosted-chat';
 
 /**
  * Hosted chat for one public bot.
@@ -60,18 +60,23 @@ export default async function HostedChatPage({
 
       <h1 className="sr-only">Chat</h1>
 
-      {/* <ChatSurface> is 'use client', and the boundary sits at the first thing that varies per
-          visitor. It owns the transcript, the composer, the AbortController behind the
-          stop-generation action, and streamAnswer() straight to Laravel. Never back through Next,
-          and never a Server Action.
-        
-          `conversation={null}` is HONEST, not a placeholder: a send needs a conversation id and a
-          chat-session credential, both minted by the `sdk/v1` bootstrap, which is deliberately out
-          of scope for this repo. The surface renders its real first-run state and states the
-          condition in place rather than offering a composer that silently does nothing. The bot
-          name and suggestions come from the public bot configuration on the same `rt/v1` surface as
-          the palette; until it exists they are the generic defaults below. */}
-      <ChatSurface botName="this assistant" conversation={null} />
+      {/* <HostedChat> is 'use client', and the boundary sits at the first thing that varies per
+          visitor. It owns the `sdk/v1` handshake, the chat-session bearer, the conversation, the
+          transcript, the composer, the AbortController behind the stop-generation action, and
+          streamAnswer() straight to Laravel. Never back through Next, and never a Server Action.
+
+          THIS PROP IS THE WHOLE OF WHAT THE SERVER HANDS IT, and that is the property rather than a
+          coincidence: `publicBotId` came out of the URL, so nothing crossing this boundary varies by
+          anything the URL does not name. A server component that fetched the bot configuration here
+          would put it in the RSC payload — the WHOLE object, not the fields anybody reads — and
+          would make this route's cacheability a question about a body instead of about a path.
+
+          `conversation={null}` USED TO LIVE HERE with a note saying the runtime was out of scope.
+          The runtime landed (`sdk/v1` bootstrap and mint, `rt/v1` conversations, messages, history,
+          citations and feedback), so the note is gone and the surface connects. What did NOT land is
+          a way to record consent, and `HostedChat` states that in place for a bot that needs it —
+          see the paragraph headed A CONSENT-REQUIRED BOT there. */}
+      <HostedChat publicBotId={publicBotId} />
     </main>
   );
 }

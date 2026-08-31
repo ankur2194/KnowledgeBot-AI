@@ -90,20 +90,48 @@ final readonly class ListQuery
      * binds it as a parameter and escapes the `LIKE` metacharacters itself — and what bounds it is
      * the length cap. A pattern rule would be security theatre that also breaks apostrophes.
      *
+     * ── `$freeText` IS FALSE FOR AN ENDPOINT WHOSE EVERY FILTER IS TYPED ──────────────────────
+     *
+     * Not every list wants a `%term%` search. `audit_logs` filters on actor, operation, outcome,
+     * subject and a date range — all equality or range predicates over indexed columns — and the
+     * only free-text targets it has are `user_agent` and the `details` jsonb, where an `ILIKE` is a
+     * sequential scan of a partitioned append-only table. `conversations` is the same shape: the
+     * columns a reviewer narrows by are the bot, the channel, the status and the window, and the
+     * only prose in the thread lives one table down in `messages`.
+     *
+     * THE PARAMETER EXISTS SO THE ENDPOINT DOES NOT PUBLISH ONE IT IGNORES. The alternative was to
+     * accept `filter` everywhere and drop it in the repository, which puts a parameter in
+     * `packages/contracts/` that a generated client will send and nothing will honour — a silent
+     * no-op is worse than an absence, because the absence is discoverable and the no-op is not.
+     * `meta.filter` still exists on those endpoints and is always null: it is a field of the SHARED
+     * `ListMetaResource` component, and a client that had to branch on its presence would be
+     * branching on which endpoint it called.
+     *
      * @param  list<string>  $sortable  the columns this endpoint permits an ORDER BY on
+     * @param  bool  $freeText  whether this endpoint accepts a `filter` term at all
      * @return array<string, mixed>
      */
-    public static function rules(array $sortable, int $maxPerPage = self::MAX_PER_PAGE): array
-    {
-        return [
+    public static function rules(
+        array $sortable,
+        int $maxPerPage = self::MAX_PER_PAGE,
+        bool $freeText = true,
+    ): array {
+        $rules = [
             'page' => ['bail', 'sometimes', 'integer', 'min:1'],
             'per_page' => ['bail', 'sometimes', 'integer', 'min:1', 'max:'.$maxPerPage],
             // No default in the RULE, because a validation rule cannot express one; the default
             // sort is `fromValidated()`'s argument, and it is the endpoint's decision.
             'sort' => ['bail', 'sometimes', 'string', Rule::in($sortable)],
             'dir' => ['bail', 'sometimes', 'string', Rule::in(SortDirection::values())],
-            'filter' => ['bail', 'sometimes', 'nullable', 'string', 'max:'.self::MAX_FILTER_LENGTH],
         ];
+
+        if (! $freeText) {
+            return $rules;
+        }
+
+        $rules['filter'] = ['bail', 'sometimes', 'nullable', 'string', 'max:'.self::MAX_FILTER_LENGTH];
+
+        return $rules;
     }
 
     /**
@@ -140,6 +168,10 @@ final readonly class ListQuery
      *                                  list passed to `rules()`, and it becomes the published enum
      * @param  string  $defaultSort  the column `fromValidated()` falls back to, which is the
      *                               endpoint's decision and is unexpressible as a rule
+     * @param  bool  $freeText  whether this endpoint accepts a `filter` term at all. MUST equal the
+     *                          argument passed to `rules()` — the two describe one contract to two
+     *                          audiences, and publishing a parameter the rules reject is a 422 a
+     *                          generated client cannot see coming
      * @return list<array<string, mixed>>
      */
     public static function openApiQueryParameters(
@@ -148,8 +180,9 @@ final readonly class ListQuery
         SortDirection $defaultDirection = SortDirection::Asc,
         int $defaultPerPage = self::DEFAULT_PER_PAGE,
         int $maxPerPage = self::MAX_PER_PAGE,
+        bool $freeText = true,
     ): array {
-        return [
+        $parameters = [
             [
                 'name' => 'page',
                 'in' => 'query',
@@ -193,17 +226,24 @@ final readonly class ListQuery
                 ],
                 'description' => 'Sort direction.',
             ],
-            [
-                'name' => 'filter',
-                'in' => 'query',
-                'required' => false,
-                'schema' => ['type' => 'string', 'maxLength' => self::MAX_FILTER_LENGTH],
-                'description' => 'Free-text search term. Deliberately unconstrained in character '
-                    .'class — it is a string a human types — and bounded only in length; the '
-                    .'endpoint documents which columns it searches. An empty or whitespace-only '
-                    .'value is treated as no filter at all, and `meta.filter` comes back null.',
-            ],
         ];
+
+        if (! $freeText) {
+            return $parameters;
+        }
+
+        $parameters[] = [
+            'name' => 'filter',
+            'in' => 'query',
+            'required' => false,
+            'schema' => ['type' => 'string', 'maxLength' => self::MAX_FILTER_LENGTH],
+            'description' => 'Free-text search term. Deliberately unconstrained in character '
+                .'class — it is a string a human types — and bounded only in length; the '
+                .'endpoint documents which columns it searches. An empty or whitespace-only '
+                .'value is treated as no filter at all, and `meta.filter` comes back null.',
+        ];
+
+        return $parameters;
     }
 
     /**

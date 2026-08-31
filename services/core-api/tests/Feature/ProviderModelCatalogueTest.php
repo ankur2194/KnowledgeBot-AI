@@ -140,6 +140,22 @@ function designateCatalogueModel(Organization $organization, ProviderModelEntry 
 }
 
 /**
+ * The same, for the RERANK designation (`docs/22` § T36).
+ *
+ * A SEPARATE HELPER RATHER THAN A PARAMETER, so a test that means "rerank" cannot read as "embedding"
+ * at a glance. The two designations protect the same catalog row against the same delete and produce
+ * two different remedies, and a boolean argument at the call site is exactly how a test ends up
+ * asserting the wrong one of them.
+ */
+function designateCatalogueRerankModel(Organization $organization, ProviderModelEntry $model): void
+{
+    $organization->forceFill([
+        'rerank_connection_id' => $model->provider_connection_id,
+        'rerank_model' => $model->model,
+    ])->save();
+}
+
+/**
  * A complete, valid PUT body — the endpoint replaces the whole mutable state, so every test that
  * edits one field still has to send the rest.
  *
@@ -870,6 +886,77 @@ it('409s a delete of the designated embedding model, and changes nothing', funct
         'operation' => AuditLogger::PROVIDER_MODEL_DELETED,
         'subject_id' => $fixture['embedA']->id,
     ]);
+});
+
+it('409s a delete of the designated RERANK model, and changes nothing', function (): void {
+    /*
+     * ═══ THE GUARD EXISTED AND CHECKED ONE OF THE TWO DESIGNATIONS (`docs/22` § T36) ══════════
+     *
+     * Until this test, deleting the row the rerank designation named SUCCEEDED. The failure is the
+     * quiet one: `organizations.rerank_model` is a bare `text` column with no foreign key to
+     * `provider_models`, so nothing in the database refuses it, and nothing downstream reports it
+     * either — reranking simply stops. No error, no metric movement, answers gradually worse. That
+     * is the failure mode § T25 rejected `SET NULL` for, arriving through a different door.
+     *
+     * The embedding twin above is the same assertion and is NOT redundant with this one: they read
+     * two different column pairs, and the whole defect was a check that read one of them.
+     */
+    $fixture = catalogueOrgPair();
+
+    designateCatalogueRerankModel($fixture['orgA'], $fixture['embedA']);
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    $response = currentTest()->deleteJson(
+        "/api/v1/organizations/{$fixture['orgA']->id}/provider-connections/{$fixture['connectionA']->id}/models/{$fixture['embedA']->id}",
+        [],
+        spaHeaders(),
+    );
+
+    // THE RERANK SENTENCE, NOT THE EMBEDDING ONE. Asserting only the status would pass with the
+    // two constants swapped, and a swapped constant sends the operator to
+    // `PUT /embedding-configuration` — where clearing the designation triggers a re-index of the
+    // whole corpus to fix a problem that is not there.
+    $response->assertStatus(409)
+        ->assertJsonPath('message', ProviderModelService::DESIGNATED_FOR_RERANK)
+        ->assertJsonPath('error_class', 'internal_dependency')
+        ->assertJsonPath('retryable', false);
+
+    assertDatabaseHas('provider_models', [
+        'id' => $fixture['embedA']->id,
+        'organization_id' => $fixture['orgA']->id,
+        'display_name' => 'ALPHA embedding row',
+    ]);
+
+    $organization = Organization::query()->findOrFail($fixture['orgA']->id);
+
+    expect($organization->rerank_connection_id)->toBe($fixture['connectionA']->id)
+        ->and($organization->rerank_model)->toBe(CATALOGUE_SHARED_MODEL);
+
+    assertDatabaseMissing('audit_logs', [
+        'operation' => AuditLogger::PROVIDER_MODEL_DELETED,
+        'subject_id' => $fixture['embedA']->id,
+    ]);
+});
+
+it('still deletes a NON-designated row under the rerank-designated connection', function (): void {
+    // THE RERANK ARM COMPARES A PAIR TOO. Without this, the 409 above passes just as well for a
+    // check that refused every model under the designated connection — which would make a dozen
+    // rows undeletable because one of their siblings is in use.
+    $fixture = catalogueOrgPair();
+
+    designateCatalogueRerankModel($fixture['orgA'], $fixture['embedA']);
+
+    SpaSession::establish(currentTest(), $fixture['ownerA']);
+
+    currentTest()->deleteJson(
+        "/api/v1/organizations/{$fixture['orgA']->id}/provider-connections/{$fixture['connectionA']->id}/models/{$fixture['chatA']->id}",
+        [],
+        spaHeaders(),
+    )->assertOk();
+
+    assertDatabaseMissing('provider_models', ['id' => $fixture['chatA']->id]);
+    assertDatabaseHas('provider_models', ['id' => $fixture['embedA']->id]);
 });
 
 it('still deletes a NON-designated row under the designated connection', function (): void {

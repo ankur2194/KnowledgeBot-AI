@@ -137,11 +137,20 @@ it('has no outbound foreign key, on the parent or on any partition', function ()
 
 it('is writable the moment it exists, with the current month and the next partitioned', function (): void {
     $partitions = app(EloquentAuditLogPartitionRepository::class);
-    $now = CarbonImmutable::now('UTC');
+
+    // `startOfMonth()` BEFORE `addMonth()`, WHICH IS THE ORDER THE PRODUCT USES AND THE ORDER THIS
+    // TEST USED NOT TO. PHP's calendar arithmetic overflows rather than clamping: from the 31st of
+    // August, `addMonth()` is 1 October, because 31 September does not exist. This test asserted
+    // `audit_logs_2026_10` on 2026-08-31 while the migration had created 08 and 09 — a red suite
+    // for seven or eight days a year, on a partition scheme that was working correctly the whole
+    // time. Every site in `app/` and `database/migrations/` already anchors first
+    // (CreatePartitionsCommand.php:104, MonthlyPartitionRepository.php:116, the two migrations), so
+    // the defect was the test disagreeing with the code about what "the next month" means.
+    $month = CarbonImmutable::now('UTC')->startOfMonth();
 
     expect($partitions->partitionNames())
-        ->toContain(EloquentAuditLogPartitionRepository::nameFor($now))
-        ->toContain(EloquentAuditLogPartitionRepository::nameFor($now->addMonth()));
+        ->toContain(EloquentAuditLogPartitionRepository::nameFor($month))
+        ->toContain(EloquentAuditLogPartitionRepository::nameFor($month->addMonth()));
 });
 
 it('records the UPDATE/DELETE revoke in the ACL of the parent and of every partition', function (): void {
@@ -391,7 +400,13 @@ it('resolves the logger with no service-provider binding', function (): void {
 
 it('creates future partitions idempotently', function (): void {
     $partitions = app(EloquentAuditLogPartitionRepository::class);
-    $now = CarbonImmutable::now('UTC');
+
+    // Anchored, for the reason the first partition test states. This loop was GREEN on 2026-08-31
+    // and still wrong: from the 31st, offsets 0..4 name 08, 10, 10, 12, 12 — so it asserted two
+    // months twice, never checked 09 or 11, and passed only because the command had created those
+    // anyway. A test that skips half the runway it exists to measure is the more dangerous of the
+    // two, because nothing goes red to say so.
+    $month = CarbonImmutable::now('UTC')->startOfMonth();
 
     expect(Artisan::call('kb:create-audit-partitions', ['--months' => 4]))->toBe(0, Artisan::output());
 
@@ -401,7 +416,7 @@ it('creates future partitions idempotently', function (): void {
     $expected = [];
 
     for ($offset = 0; $offset <= 4; $offset++) {
-        $expected[] = EloquentAuditLogPartitionRepository::nameFor($now->addMonths($offset));
+        $expected[] = EloquentAuditLogPartitionRepository::nameFor($month->addMonths($offset));
     }
 
     foreach ($expected as $name) {
@@ -461,7 +476,11 @@ it('refuses to prune for real inside an open transaction', function (): void {
 
 it('refuses a retention window below the floor without --force', function (): void {
     expect(Artisan::call('kb:prune-audit-partitions', ['--months' => 1, '--dry-run' => true]))->toBe(1);
-    expect(str_contains(Artisan::output(), 'Refusing a 1-month audit retention window'))->toBeTrue();
+    // THE RELATION IS IN THE MESSAGE, and asserting it here is what keeps the two prune commands
+    // distinguishable in a terminal. `kb:prune-usage-partitions` shares this command's whole
+    // mechanism through PrunePartitionsCommand, so a refusal that named neither table would read
+    // identically whichever one an operator had just aimed at their production database.
+    expect(str_contains(Artisan::output(), 'Refusing a 1-month audit_logs retention window'))->toBeTrue();
 });
 
 it('refuses to drop a partition that is still attached', function (): void {

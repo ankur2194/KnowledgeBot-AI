@@ -72,6 +72,15 @@ export function FailureNote({ error, onRetry }: { readonly error: KbError; reado
  *
  * Thumbs-down opens a reason picker, because an unqualified downvote is not usable signal for
  * evaluation. The reasons are the fixed four.
+ *
+ * ── THE THUMBS ARE NOT RENDERED WITHOUT AN `onFeedback` HANDLER ─────────────────────────────────
+ * They used to render unconditionally, calling `onFeedback?.(…)` — so on every surface that had not
+ * wired the endpoint they were a pair of buttons that swallowed a click. A rating control that does
+ * nothing is worse than an absent one twice over: the reader believes they have told us something,
+ * and the satisfaction figure is missing exactly the opinions somebody bothered to give.
+ *
+ * The gate is the handler and not a boolean, so a surface cannot render them and forget to wire one.
+ * Copy and Regenerate are unaffected — copying is client-side, and Regenerate has its own prop.
  */
 export function AnswerActions({
   text,
@@ -106,21 +115,30 @@ export function AnswerActions({
             Regenerate
           </Button>
         ) : null}
-        <Button variant="ghost" size="icon-sm" aria-label="Good answer" onClick={() => onFeedback?.('up')}>
-          <ThumbsUpIcon aria-hidden />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Bad answer"
-          aria-expanded={askingWhy}
-          onClick={() => setAskingWhy((open) => !open)}
-        >
-          <ThumbsDownIcon aria-hidden />
-        </Button>
+        {onFeedback === undefined ? null : (
+          <>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Good answer"
+              onClick={() => onFeedback('up')}
+            >
+              <ThumbsUpIcon aria-hidden />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Bad answer"
+              aria-expanded={askingWhy}
+              onClick={() => setAskingWhy((open) => !open)}
+            >
+              <ThumbsDownIcon aria-hidden />
+            </Button>
+          </>
+        )}
       </div>
 
-      {askingWhy ? (
+      {askingWhy && onFeedback !== undefined ? (
         <fieldset className="flex flex-wrap items-center gap-2">
           <legend className="mb-1 text-caption text-muted-foreground">What was wrong?</legend>
           {REASONS.map((reason) => (

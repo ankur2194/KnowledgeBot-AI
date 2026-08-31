@@ -74,6 +74,45 @@ final class KbException extends RuntimeException
     }
 
     /**
+     * The organization is over one of its plan allowances: 403, NEVER retried, NEVER fallback-
+     * eligible.
+     *
+     * ── ALL THREE OF THOSE ARE LOAD-BEARING AND TWO OF THEM ARE FREE ──────────────────────────
+     *
+     * `tenant_quota`'s row in `ErrorTaxonomy::RETRYABLE` is `false`, so `retryable` is already
+     * correct on the envelope and nothing here has to say so. `kb-error-taxonomy`'s table gives the
+     * status as **403** with the client-visible code `tenant_quota_exceeded`.
+     *
+     * FALLBACK IS THE ONE THAT NEEDS SAYING, and it is enforced by WHERE this is raised rather than
+     * by a flag. §8.7 lists "tenant quota exceeded" among the classes that may never fall back, and
+     * the reason is arithmetic: a fallback is a SECOND provider call, so falling back on a quota
+     * breach spends the budget twice on the request that was refused for spending too much. This
+     * exception is raised in Laravel BEFORE the internal call is built, so there is no provider
+     * attempt to fall back FROM — the eligibility question never arises, which is the strongest
+     * form of "no" available.
+     *
+     * ── 403 AND NOT 429, WHICH IS THE MISTAKE THIS FACTORY EXISTS TO PREVENT ─────────────────
+     *
+     * Both are "you may not do this right now" and they tell a client opposite things. 429 is
+     * `rate_limit`, which IS retryable — a client waits out `Retry-After` and succeeds. A quota
+     * breach does not clear on a timer a client can wait for: it clears when the period rolls over,
+     * or when somebody changes the plan. Returning 429 would send every over-quota organization
+     * down a full backoff ladder against a guaranteed failure, and `apps/web`'s query client runs
+     * that ladder automatically.
+     *
+     * ── THE MESSAGE IS OPERATOR-FACING AND NAMES THE METRIC, NEVER THE NUMBER OF ANOTHER TENANT ──
+     *
+     * It says which allowance was reached and what to do. It carries no `errors` map because there
+     * is no field to key it on — the body was well-formed and the refusal is a fact about the
+     * organization, which is the same shape as the ADR-031 resolver refusal `validation()` above
+     * records at length.
+     */
+    public static function tenantQuota(string $message): self
+    {
+        return new self('tenant_quota', $message, 403, ErrorTaxonomy::ORIGIN_SELF);
+    }
+
+    /**
      * The AI service could not be reached, or answered in a shape we cannot read.
      *
      * DOWNSTREAM, not SELF: something we depend on is briefly unavailable, so 503 and retryable.

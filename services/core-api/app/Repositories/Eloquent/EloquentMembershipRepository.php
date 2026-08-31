@@ -38,4 +38,24 @@ final class EloquentMembershipRepository implements MembershipRepositoryInterfac
 
         return array_values($memberships);
     }
+
+    public function find(string $organizationId, string $userId): ?OrganizationUser
+    {
+        // tenancy-exempt: `organization_users` carries no OrganizationScope by construction — it is
+        // the table that ESTABLISHES the tenant scope, so scoping it by the context it produces is
+        // circular (App\Models\OrganizationUser). BOTH narrowing predicates are supplied here and
+        // both are positional arguments rather than ambient state, which is stricter than the
+        // global scope would have been: `organization_id` comes from the credential's own stored
+        // record and `user_id` from the same record, and neither is reachable from request input.
+        //
+        // NO `->with('organization')`: the caller wants the membership FACT — status and role — and
+        // eager-loading a row nobody reads would be a second query per chat turn on the request
+        // path this method exists to guard.
+        $membership = OrganizationUser::query()
+            ->where('organization_id', $organizationId)
+            ->where('user_id', $userId)
+            ->first();
+
+        return $membership;
+    }
 }

@@ -9,6 +9,9 @@ use App\Models\Organization;
 use App\Models\OrganizationUser;
 use App\Models\User;
 use App\Services\Embedding\EmbeddingDesignation;
+use App\Services\Quotas\QuotaLimits;
+use App\Services\Rerank\RerankDesignation;
+use Closure;
 use LogicException;
 use SensitiveParameter;
 
@@ -48,6 +51,31 @@ interface OrganizationRepositoryInterface
      * explicit argument: $organizationId remains the mechanism and the scope remains the backstop.
      * It only says that this method's caller must not have put the two in disagreement.
      *
+     * ── IT CARRIES AN AUDIT CLOSURE, AND IT DID NOT USED TO ─────────────────────────────────
+     *
+     * The parameter was added when the gap it left was closed. Before it, this method wrote
+     * `embedding_connection_id` / `embedding_model` with NO audit row and no way to pass one
+     * through — so "who moved the vector space, and from what" had no answer in `audit_logs`, on the
+     * one column pair whose `(provider, model)` value IS the vector space (ADR-031): re-designating
+     * it renames the Qdrant collection and strands every indexed chunk until a re-index at a
+     * provider's per-token price.
+     *
+     * The closure is REQUIRED rather than optional, and it is required for the same mechanical
+     * reason `designateRerankConnection()`'s is: both `organization.embedding_designation.*`
+     * operations are ON_FAILURE_ABORT, so a failed audit write must roll the designation back —
+     * and `AuditLogger` opens no transaction of its own while `DB` is arch-pinned to
+     * `App\Repositories\Eloquent`. It therefore has to run INSIDE this method's transaction, which
+     * means it has to arrive as an argument.
+     *
+     * It is called with the organization row as it stands AFTER the write and with the PREVIOUS
+     * pair, because neither half is recoverable from the other afterwards — and here the previous
+     * pair is the only record of which vector space the existing corpus is in.
+     *
+     * @param  Closure(Organization, ?EmbeddingDesignation): void  $audit  invoked inside the
+     *                                                                     transaction with the
+     *                                                                     written row and the
+     *                                                                     PREVIOUS pair
+     *
      * @throws KbException `validation` (422) when the designation names a (connection, model) pair
      *                     this organization's catalog does not contain
      * @throws LogicException when the ambient tenant context is unbound or names another
@@ -56,6 +84,109 @@ interface OrganizationRepositoryInterface
     public function designateEmbeddingConnection(
         string $organizationId,
         ?EmbeddingDesignation $designation,
+        Closure $audit,
+    ): Organization;
+
+    /**
+     * Write (or clear) the rerank designation for ONE organization, and audit the change.
+     *
+     * Returns the refreshed organization.
+     *
+     * ── IT CARRIES AN AUDIT CLOSURE, AND SO DOES ITS EMBEDDING TWIN NOW ──────────────────────
+     *
+     * This paragraph used to record an asymmetry — "and `designateEmbeddingConnection()` does not"
+     * — as a real gap: the embedding designation was written with no audit row at all. That gap is
+     * closed and both methods take the closure for the identical mechanical reason. Both
+     * `organization.*_designation.*` operations are ON_FAILURE_ABORT, so a failed audit write must
+     * roll the designation back — and AuditLogger opens no transaction of its own while `DB` is
+     * arch-pinned to App\Repositories\Eloquent. The closure is therefore REQUIRED and runs inside
+     * this method's transaction, exactly as the four `provider.connection.*` operations do.
+     *
+     * It is called with the organization row as it stands AFTER the write and with the PREVIOUS
+     * pair, because "who changed the reranker, from what, to what" is the whole content of the
+     * record and neither half is recoverable from the other afterwards.
+     *
+     * ── THE CATALOG RE-VERIFICATION IS PART OF THE CONTRACT ───────────────────────────────────
+     *
+     * An implementation MUST re-verify the pair inside its own transaction. Nothing in the database
+     * ties `(rerank_connection_id, rerank_model)` to a `provider_models` row — the composite
+     * foreign key covers the CONNECTION only — so a catalog delete committing between the caller's
+     * pre-flight check and this write would leave the organization naming a row that no longer
+     * exists, with both requests returning 200. That failure is quieter than its embedding twin: it
+     * does not break an upload, it turns reranking off, and the only symptom is answer quality.
+     *
+     * ── PRECONDITION: THE AMBIENT TENANT CONTEXT MUST BE BOUND AND MUST EQUAL $organizationId ───
+     *
+     * Identical to `designateEmbeddingConnection()`'s and for the identical reason: the
+     * re-verification reads a `#[ScopedBy(OrganizationScope::class)]` model, and that scope fails
+     * closed — no context appends `1 = 0`, a disagreeing context appends a predicate that conflicts
+     * with the explicit one. Either way the query answers "empty" for a reason that has nothing to
+     * do with the catalog, and a 422 built on that answer would tell the operator something false
+     * about a table nobody touched. An implementation asserts the precondition and raises rather
+     * than interpreting an empty result. `App\Http\Middleware\TenantContext` already satisfies it
+     * for every request; a job or a console command wraps the call in
+     * `TenantContext::runFor($organizationId, fn () => …)`.
+     *
+     * @param  Closure(Organization, ?RerankDesignation): void  $audit  invoked inside the
+     *                                                                  transaction with the written
+     *                                                                  row and the PREVIOUS pair
+     *
+     * @throws KbException `validation` (422) when the designation names a (connection, model) pair
+     *                     this organization's catalog does not contain
+     * @throws LogicException when the ambient tenant context is unbound or names another
+     *                        organization — a caller defect, rendered 500 / `internal`
+     */
+    public function designateRerankConnection(
+        string $organizationId,
+        ?RerankDesignation $designation,
+        Closure $audit,
+    ): Organization;
+
+    /**
+     * Write all four quota ceilings for ONE organization, and audit the change.
+     *
+     * Returns the refreshed organization.
+     *
+     * ── ALL FOUR AT ONCE, ALWAYS, EVEN WHEN THE CALLER ONLY MEANT TO CHANGE ONE ──────────────
+     *
+     * `QuotaLimits` is a complete set and this method writes all four columns from it. A per-metric
+     * variant would make "raise the storage limit" a read-modify-write in the CALLER, which is write
+     * skew on a value another administrator can change between the read and the write — the same
+     * hazard `designateEmbeddingConnection()` takes `lockForUpdate` for, with money attached instead
+     * of a vector space. An implementation MUST take the row lock and read the PREVIOUS four values
+     * under it.
+     *
+     * ── `null` IS UNLIMITED AND `0` IS "NOTHING IS ALLOWED" ─────────────────────────────────
+     *
+     * The distinction survives all the way down: an implementation writes nulls as nulls and never
+     * coalesces them, because `QuotaGate` skips a null metric entirely and refuses everything on a
+     * zero. Coalescing a null to zero here would freeze an unmetered organization, and coalescing a
+     * zero to null would silently remove a ceiling somebody set deliberately.
+     *
+     * ── THE AUDIT CLOSURE IS REQUIRED, FOR THE SAME REASON THE TWO DESIGNATIONS' ARE ────────
+     *
+     * `organization.quota_limits.updated` is ON_FAILURE_ABORT — a ceiling that moved with nothing
+     * recording who moved it is the one state that row exists to prevent — so it must be written
+     * inside this method's transaction, before the COMMIT.
+     *
+     * ── PRECONDITION: THE AMBIENT TENANT CONTEXT MUST BE BOUND AND MUST EQUAL $organizationId ──
+     *
+     * Same as the two designation methods and for a related reason. There is no scoped catalog read
+     * here, so the failure mode is different — but clearing or raising a quota under a context
+     * naming ANOTHER organization is the stale-pooled-worker shape, on the row that decides what a
+     * tenant may spend. An implementation asserts it and raises rather than proceeding.
+     *
+     * @param  Closure(Organization, QuotaLimits): void  $audit  invoked inside the transaction with
+     *                                                           the written row and the PREVIOUS
+     *                                                           four ceilings
+     *
+     * @throws LogicException when the ambient tenant context is unbound or names another
+     *                        organization — a caller defect, rendered 500 / `internal`
+     */
+    public function setQuotaLimits(
+        string $organizationId,
+        QuotaLimits $limits,
+        Closure $audit,
     ): Organization;
 
     /**

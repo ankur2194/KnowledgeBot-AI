@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace App\Repositories\Eloquent;
 
+use App\Enums\BotDeletion;
 use App\Enums\BotStatus;
 use App\Models\Bot;
 use App\Models\BotDomain;
 use App\Models\BotFallbackEntry;
 use App\Models\BotSourceAssignment;
 use App\Models\BotStarterQuestion;
+use App\Models\Conversation;
 use App\Models\KnowledgeSource;
 use App\Repositories\Contracts\BotRepositoryInterface;
 use App\Services\Bots\BotChildSummary;
@@ -317,13 +319,48 @@ final class EloquentBotRepository implements BotRepositoryInterface
     /**
      * @param  Closure(Bot, list<RemovedSourceAssignment>): void  $audit
      */
-    public function delete(string $organizationId, string $botId, Closure $audit): bool
+    public function delete(string $organizationId, string $botId, Closure $audit): BotDeletion
     {
-        return DB::transaction(function () use ($organizationId, $botId, $audit): bool {
+        return DB::transaction(function () use ($organizationId, $botId, $audit): BotDeletion {
             $bot = $this->lock($organizationId, $botId);
 
             if ($bot === null) {
-                return false;
+                return BotDeletion::Missing;
+            }
+
+            // THE REFUSAL, AND IT IS THE FIRST THING AFTER THE LOCK — BEFORE THE AUDIT CLOSURE.
+            //
+            // A transcript is an audit record: `conversations.bot_id` is ON DELETE RESTRICT, so this
+            // bot is undeletable and the database would say so as SQLSTATE 23503, rendered by the
+            // error envelope as a 500. This check is what turns that into a 409 naming archiving —
+            // the same division of labour `slugExists()` records, where the database is the
+            // guarantee and the application is the good error message.
+            //
+            // IT IS COUNTED, NOT MERELY TESTED FOR EXISTENCE, because the count is what the refusal
+            // row reports: `AuditLogger::BOT_DELETE_REFUSED` carries `conversation_count` as the
+            // tripwire that tells a reader whether three test threads or four hundred thousand
+            // customer conversations were at stake. `exists()` would be marginally cheaper and would
+            // leave that field unanswerable.
+            //
+            // IT RUNS UNDER THE ROW LOCK, WHICH IS THE WHOLE REASON IT IS HERE AND NOT IN THE
+            // SERVICE. An insert into `conversations` naming this bot takes `FOR KEY SHARE` on the
+            // referenced `bots` row to enforce its own foreign key, and `FOR UPDATE` conflicts with
+            // `FOR KEY SHARE` — so while this transaction holds the row, no new conversation for
+            // this bot can commit. A check outside the lock loses that race and the loser gets a
+            // 500 describing a constraint instead of the 409 they would have got a moment earlier.
+            //
+            // BOTH PREDICATES, as on every other query in this class. The organization term is
+            // redundant against `conversations_bot_same_org` and is written out anyway: this
+            // layer's property is that it is correct on its own.
+            $conversationCount = Conversation::query()
+                ->where('organization_id', '=', $organizationId)
+                ->where('bot_id', '=', $botId)
+                ->count();
+
+            if ($conversationCount > 0) {
+                // NOTHING HAS BEEN CHANGED AND `$audit` HAS NOT RUN, so no `bot.deleted` row exists
+                // describing a deletion that did not happen. The service writes the refusal row.
+                return BotDeletion::HasConversations;
             }
 
             // READ BEFORE ANYTHING GOES. The grants have to be described while they still exist,
@@ -363,8 +400,18 @@ final class EloquentBotRepository implements BotRepositoryInterface
 
             $bot->delete();
 
-            return true;
+            return BotDeletion::Deleted;
         });
+    }
+
+    public function conversationCount(string $organizationId, string $botId): int
+    {
+        // BOTH PREDICATES, as on every other query in this class. Redundant against
+        // `conversations_bot_same_org` and written out anyway.
+        return Conversation::query()
+            ->where('organization_id', '=', $organizationId)
+            ->where('bot_id', '=', $botId)
+            ->count();
     }
 
     /**

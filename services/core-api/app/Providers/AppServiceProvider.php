@@ -6,10 +6,13 @@ namespace App\Providers;
 
 use App\Enums\Surface;
 use App\Models\User;
+use App\Repositories\Contracts\AnalyticsRepositoryInterface;
 use App\Repositories\Contracts\BotDomainRepositoryInterface;
 use App\Repositories\Contracts\BotRepositoryInterface;
 use App\Repositories\Contracts\BotSourceAssignmentRepositoryInterface;
 use App\Repositories\Contracts\BotStarterQuestionRepositoryInterface;
+use App\Repositories\Contracts\ChatConfigurationRepositoryInterface;
+use App\Repositories\Contracts\ConversationRepositoryInterface;
 use App\Repositories\Contracts\EmbeddingCandidateRepositoryInterface;
 use App\Repositories\Contracts\KnowledgeSourceRepositoryInterface;
 use App\Repositories\Contracts\MembershipRepositoryInterface;
@@ -17,11 +20,16 @@ use App\Repositories\Contracts\OrganizationRepositoryInterface;
 use App\Repositories\Contracts\PendingSourceObjectRepositoryInterface;
 use App\Repositories\Contracts\ProviderConnectionRepositoryInterface;
 use App\Repositories\Contracts\ProviderModelRepositoryInterface;
+use App\Repositories\Contracts\RetrievalScopeRepositoryInterface;
 use App\Repositories\Contracts\SparseCorpusStatisticsRepositoryInterface;
+use App\Repositories\Contracts\UsageEventRepositoryInterface;
+use App\Repositories\Eloquent\EloquentAnalyticsRepository;
 use App\Repositories\Eloquent\EloquentBotDomainRepository;
 use App\Repositories\Eloquent\EloquentBotRepository;
 use App\Repositories\Eloquent\EloquentBotSourceAssignmentRepository;
 use App\Repositories\Eloquent\EloquentBotStarterQuestionRepository;
+use App\Repositories\Eloquent\EloquentChatConfigurationRepository;
+use App\Repositories\Eloquent\EloquentConversationRepository;
 use App\Repositories\Eloquent\EloquentEmbeddingCandidateRepository;
 use App\Repositories\Eloquent\EloquentKnowledgeSourceRepository;
 use App\Repositories\Eloquent\EloquentMembershipRepository;
@@ -29,7 +37,9 @@ use App\Repositories\Eloquent\EloquentOrganizationRepository;
 use App\Repositories\Eloquent\EloquentPendingSourceObjectRepository;
 use App\Repositories\Eloquent\EloquentProviderConnectionRepository;
 use App\Repositories\Eloquent\EloquentProviderModelRepository;
+use App\Repositories\Eloquent\EloquentRetrievalScopeRepository;
 use App\Repositories\Eloquent\EloquentSparseCorpusStatisticsRepository;
+use App\Repositories\Eloquent\EloquentUsageEventRepository;
 use App\Services\Internal\InternalRequestSigner;
 use App\Support\Crypto\CredentialVault;
 use App\Support\Tenancy\TenantContext;
@@ -46,6 +56,7 @@ use Illuminate\Support\Facades\ParallelTesting;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
+use Symfony\Component\HttpFoundation\Response as SymfonyResponse;
 
 final class AppServiceProvider extends ServiceProvider
 {
@@ -184,6 +195,35 @@ final class AppServiceProvider extends ServiceProvider
         $this->app->bind(
             SparseCorpusStatisticsRepositoryInterface::class,
             EloquentSparseCorpusStatisticsRepository::class,
+        );
+
+        // The quota ledger. ONE WRITER (App\Services\Usage\UsageRecorder) and three readers, and
+        // the interface exists for the same reason every other one here does — so a unit test can
+        // assert what a service DOES with a number without standing up a partitioned table.
+        $this->app->bind(
+            UsageEventRepositoryInterface::class,
+            EloquentUsageEventRepository::class,
+        );
+
+        // §8.23's aggregates. A SEPARATE interface from the ledger's rather than more methods on it,
+        // for the reason the provider-model split records: the ledger owns one table and one write,
+        // and eleven read-only aggregates over six other tables have no business sharing a seam with
+        // the thing that writes billing rows.
+        $this->app->bind(
+            AnalyticsRepositoryInterface::class,
+            EloquentAnalyticsRepository::class,
+        );
+        $this->app->bind(
+            ChatConfigurationRepositoryInterface::class,
+            EloquentChatConfigurationRepository::class,
+        );
+        $this->app->bind(
+            ConversationRepositoryInterface::class,
+            EloquentConversationRepository::class,
+        );
+        $this->app->bind(
+            RetrievalScopeRepositoryInterface::class,
+            EloquentRetrievalScopeRepository::class,
         );
     }
 
@@ -416,6 +456,62 @@ final class AppServiceProvider extends ServiceProvider
          * which does not happen three times an hour; the mail itself is queued on `notify` and a
          * recipient's provider will greylist long before a person asks a fourth time.
          */
+        /*
+         * ── THE TWO PUBLIC-RUNTIME LIMITERS, AND WHAT THEY ARE *NOT* ────────────────────────
+         *
+         * NEITHER OF THESE GUARDS THE MESSAGE-SUBMISSION ROUTE. That one carries no `throttle:`
+         * middleware at all: its limiter is the four-scope sliding window inside
+         * `ChatGate -> QuotaGate -> BotRateLimiter`, evaluated in one EVALSHA, keyed on bot, origin,
+         * session and IP. Laravel's `RateLimiter` is FIXED-WINDOW — it lets 2x the limit through
+         * across a boundary, which is exactly the shape a burst-shaped abuser uses and on a metered
+         * surface is the bill — and it keys on values that only exist once the credential has been
+         * resolved, which is after the middleware has already decided. `valkey-keyspaces` puts the
+         * boundary plainly: the framework limiter "stays only on coarse admin routes".
+         *
+         * These two ARE those coarse routes. The runtime reads spend nothing and are backed by an
+         * indexed query, so the 2x slop costs nothing and a fixed window is the right tool; what
+         * they defend against is an unauthenticated caller looping a transcript read.
+         *
+         * KEYED ON THE BEARER'S DIGEST AND ON THE IP TOGETHER. Per-IP alone punishes one NAT'd
+         * office for one abuser; per-session alone is defeated by discarding the session, which on
+         * this surface costs one mint. The bearer is HASHED and never used raw: it is a live
+         * credential, and a rate-limit key lands in a Valkey keyspace we may dump during an
+         * incident. `sess:` is prefixed for the same reason every other `by()` in this method is —
+         * identical values inside one array collide.
+         */
+        RateLimiter::for('runtime-read', static fn (Request $request): array => [
+            Limit::perMinute(120)->by('sess:'.hash('sha256', (string) $request->bearerToken())),
+            Limit::perMinute(300)->by('ip:'.((string) $request->ip())),
+        ]);
+
+        /*
+         * The non-streaming WRITES — opening a conversation, submitting feedback. Tighter than the
+         * reads because each one inserts a row, and looser than nothing because neither spends a
+         * provider token. The submission route is deliberately absent; see above.
+         */
+        RateLimiter::for('runtime-write', static fn (Request $request): array => [
+            Limit::perMinute(30)->by('sess:'.hash('sha256', (string) $request->bearerToken())),
+            Limit::perMinute(60)->by('ip:'.((string) $request->ip())),
+        ]);
+
+        /*
+         * ── THE SDK BOOTSTRAP LIMITER COUNTS MISSES ONLY, AND THAT IS THE WHOLE DESIGN ──────
+         *
+         * `after()` (new in Laravel 13) makes the limiter count a request ONLY when it 404s. Both
+         * SDK routes answer 404 for every rejection — unknown bot id, unlisted origin, a bot that is
+         * not live — so probing costs the prober and legitimate traffic pays nothing. That is the
+         * enumeration cover that makes the 404 rule affordable: `botByPublicId()` is deliberately
+         * unscoped by organization (there is none to scope by yet), so unlimited attempts at it is
+         * the one thing that would make the identifier's 128 bits of entropy worth attacking.
+         *
+         * Per IP only, and per IP is the honest axis here: there is no session and no account, and
+         * the bot id is precisely the value being guessed — keying on it would give an attacker a
+         * fresh budget for every guess.
+         */
+        RateLimiter::for('sdk-bootstrap', static fn (Request $request): Limit => Limit::perMinute(10)
+            ->by('boot:'.((string) $request->ip()))
+            ->after(static fn (SymfonyResponse $response): bool => $response->getStatusCode() === 404));
+
         RateLimiter::for('invitation-resend', static fn (Request $request): array => [
             Limit::perMinutes(60, 3)->by('inv:'.((string) $request->route('invitation'))),
             Limit::perMinute(10)->by(

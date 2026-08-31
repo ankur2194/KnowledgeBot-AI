@@ -1,0 +1,12 @@
+{
+    "class": "App\\Http\\Requests\\StoreRuntimeConversationRequest",
+    "rules": {
+        "locale": [
+            "sometimes",
+            "nullable",
+            "string",
+            "max:35",
+            "regex:/^[a-z]{2,3}(-[A-Za-z0-9]{2,8}){0,3}$/"
+        ]
+    }
+}

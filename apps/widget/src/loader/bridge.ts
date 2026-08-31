@@ -1,4 +1,4 @@
-import type { LoaderOptions, SdkErrorPayload } from '../bridge/protocol.js';
+import type { LoaderOptions, SdkErrorPayload, SessionGrant } from '../bridge/protocol.js';
 import { KB, parse } from '../bridge/protocol.js';
 
 /**
@@ -46,8 +46,8 @@ const FROM_FRAME: ReadonlySet<string> = new Set([
  * neither wants the customer's analytics driving a retry loop.
  *
  * KNOWN IMPRECISION, flagged rather than silently widened: `mint()` collapses a 404 rejection and a
- * `TypeError` from a `connect-src` that omits `api.<domain>` into the same `null`. The second is
- * arguably a transient transport failure. It is reported as `authentication`/not-retryable anyway,
+ * `TypeError` from a `connect-src` that omits `api.<domain>` into the same `'rejected'`. The second
+ * is arguably a transient transport failure. It is reported as `authentication`/not-retryable anyway,
  * because guessing the other way hands a hostile page a retry ladder against our mint endpoint, and
  * because the taxonomy's own rule is that an unknown failure classifies as permanent, never
  * temporary. Splitting them needs `mint()` to distinguish a status from a throw, which is a
@@ -74,6 +74,138 @@ export const REFRESH_FAILED: SdkErrorPayload = Object.freeze({
   retryable: false,
   reason: 'refresh_failed',
 });
+
+/**
+ * THE MINT ANSWERED, AND THIS BUILD CANNOT READ WHAT IT SAID.
+ *
+ * A 200 whose body does not satisfy the contract in `readSessionGrant` below. It is emitted for the
+ * `ready` mint and for the `session-expiring` refresh alike, deliberately as ONE constant: the
+ * remedy is identical (fix the server, or ship a loader that understands the new body) and it is
+ * ours in both cases, whereas `mint_failed`/`refresh_failed` are the customer's embedding
+ * configuration. Timing already distinguishes the two for anyone who cares — one arrives before the
+ * widget ever works, the other about fifteen minutes in.
+ *
+ * WHY `authentication`, walking `kb-error-taxonomy`'s 18 rows rather than picking a plausible name:
+ *
+ *   - The OUTCOME is exactly the row's: the widget holds no valid session credential. Client status
+ *     401, retryable NO, fallback no, page no — all four columns are right, and they are the same
+ *     four the two constants above already claim for the same outcome reached another way.
+ *   - `internal_dependency` is the tempting one and it is wrong for the reasons degrade.ts already
+ *     wrote out at length: its row is about a dependency being UNREACHABLE, and this one answered
+ *     200 in time. It is `bounded` retryable, which is a backoff ladder against a request that
+ *     cannot succeed on any attempt. And after ADR-029 it is the single class name that no longer
+ *     answers "may I retry" at all — `self` renders 500/not-retryable, `downstream` 503/retryable —
+ *     so it is simultaneously the wrong class and the most ambiguous one available.
+ *   - `validation` (422) claims the REQUEST was malformed. The request was fine; the response was
+ *     not, and telling a customer their loader sent something invalid would send them hunting in
+ *     the one place there is nothing to find.
+ *
+ * The taxonomy stays at 18. What is new is the `reason`, which is what `reason` is for.
+ *
+ * Frozen for the same reason as its neighbours: `emitSdkEvent` hands this object BY REFERENCE to
+ * every handler the host page registered, and `readonly` erases at compile time.
+ */
+export const SESSION_MALFORMED: SdkErrorPayload = Object.freeze({
+  error_class: 'authentication',
+  retryable: false,
+  reason: 'session_malformed',
+});
+
+/**
+ * ═══ THE MINT RESPONSE IS WRAPPED, AND THIS IS THE ONLY PLACE IT IS UNWRAPPED ═══════════════
+ *
+ * `POST sdk/v1/session` answers `{"data": {"token": "kbw_…", "expires_in": 900}}`. The wrapper is
+ * not this endpoint's quirk and is not negotiable from the client: `DumpOpenApiCommand` refuses to
+ * publish an operation whose response has no `data` key, so EVERY published operation on that
+ * surface is wrapped. The client is the side that adapts.
+ *
+ * IT IS STRICT, AND IN PARTICULAR IT DOES NOT ALSO ACCEPT THE UNWRAPPED SHAPE.
+ *
+ * `data.token ?? body.token` is the tempting "be liberal" version and it is how this defect returns:
+ * a client that silently accepts both shapes can never tell anyone the server moved, so the next
+ * envelope change is silent too — and it would make the regression test below untestable, because
+ * the old body would keep passing. A body that does not match is a REFUSAL with a named reason.
+ *
+ * WHY EVERY FIELD IS CHECKED HERE, AT THE BOUNDARY. The original defect read `token` at the top
+ * level and got `undefined`, and `undefined` DOES NOT THROW. It travelled: over the bridge, into
+ * the frame, toward a header reading the literal `Bearer undefined` — 401 on every request
+ * afterwards, with nothing in the host page's console and nothing in the frame's. That is
+ * indistinguishable from a wrong bot id and from an unlisted origin, both of which are deliberately
+ * silent 404s on this surface, so there was nothing to tell the three cases apart. A value that
+ * cannot be validated must not leave this function.
+ *
+ * `expires_in` is validated as strictly as the token, and it is not decoration. The frame's `init`
+ * handler substitutes `0` for a non-number, which sets its expiry to "now": `isExpiringSoon()` is
+ * then true on the first tick and the proactive refresh becomes a loop against the `sdk-bootstrap`
+ * composite limiter. `NaN` is the mirror image — every comparison against it is false, so the token
+ * is never renewed at all and the conversation dies at the real expiry.
+ *
+ * Exported so the unit layer asserts THIS function against a wrapped fixture and against the
+ * unwrapped one, rather than a re-typed copy of the parser it is checking.
+ */
+export function readSessionGrant(body: unknown): SessionGrant | null {
+  if (typeof body !== 'object' || body === null) return null;
+  const data = (body as { data?: unknown }).data;
+  if (typeof data !== 'object' || data === null) return null;
+  const grant = data as { token?: unknown; expires_in?: unknown };
+  // Non-EMPTY string: `''` passes a `typeof` check and yields `Bearer ` with nothing after it,
+  // which is the same silent 401 wearing a different costume.
+  if (typeof grant.token !== 'string' || grant.token === '') return null;
+  if (
+    typeof grant.expires_in !== 'number' ||
+    !Number.isFinite(grant.expires_in) ||
+    grant.expires_in <= 0
+  ) {
+    return null;
+  }
+  // A fresh object literal, so nothing else the body carried — a field we do not understand, a
+  // prototype-shaped key — crosses the bridge with it.
+  return { token: grant.token, expires_in: grant.expires_in };
+}
+
+/**
+ * ONE `console.warn` per document, and the console it lands in is the CUSTOMER's — which is exactly
+ * why it is latched. `no-console` in eslint.config.mjs allows `warn` and nothing else, and this
+ * matches the two existing uses (`[kb] already loaded …`, `[kb] ignoring envelope version …`).
+ *
+ * It is the SECOND channel, not the first: the §8.20 `error` event carrying `SESSION_MALFORMED` is
+ * what the customer's analytics acts on. This line exists because the failure it names is the one
+ * where a human opening devtools previously saw nothing at all, on either side of the frame.
+ *
+ * Module scope rather than per-bridge: one message per document is the promise, and a page that
+ * tore down and re-created the widget in a loop would otherwise get one per instance.
+ */
+let warnedMalformed = false;
+
+function malformedSession(): 'malformed' {
+  if (!warnedMalformed) {
+    warnedMalformed = true;
+    console.warn('[kb] session mint returned a body this loader cannot read; chat is unavailable');
+  }
+  return 'malformed';
+}
+
+/** Test seam for the module-level latch above, which is per-document and has no natural reset in a
+ *  Node unit run. Never called by the loader. */
+export function resetMalformedWarningForTest(): void {
+  warnedMalformed = false;
+}
+
+/**
+ * WHY A MINT PRODUCED NO SESSION. Two values, because they have two different owners.
+ *
+ * `rejected` — the server said no, or the request never arrived. Every SDK rejection is a 404 with
+ * a byte-identical body, and a `connect-src` that omits api.<domain> is a `TypeError` with no
+ * status at all; both are folded here, and the KNOWN IMPRECISION note on MINT_FAILED explains why
+ * that fold is deliberate. The remedy is the customer's embedding configuration.
+ *
+ * `malformed` — the server answered 200 and this build could not read the body. The remedy is ours.
+ *
+ * A string union rather than a discriminated object: `typeof outcome === 'string'` narrows
+ * `SessionGrant | MintFailure` in one comparison, and this file is billed against a 5 kB budget the
+ * customer's page pays on every navigation.
+ */
+type MintFailure = 'rejected' | 'malformed';
 
 export interface BridgeHandle {
   open(): void;
@@ -148,9 +280,10 @@ export function attachBridge(
    * "confidently wrong" — the harness faked the wrong path too, so the whole e2e suite was green
    * over it.
    */
-  const mint = async (): Promise<{ token: string; expires_in: number } | null> => {
+  const mint = async (): Promise<SessionGrant | MintFailure> => {
+    let response: Response;
     try {
-      const response = await fetch(`${__KB_API_ORIGIN__}/sdk/v1/session`, {
+      response = await fetch(`${__KB_API_ORIGIN__}/sdk/v1/session`, {
         method: 'POST',
         mode: 'cors',
         // No cookie is wanted or usable here, and `include` would make the CORS check stricter for
@@ -159,12 +292,37 @@ export function attachBridge(
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ bot_id: options.botId, user_token: options.userToken ?? null }),
       });
-      if (!response.ok) return null;
-      return (await response.json()) as { token: string; expires_in: number };
     } catch {
       // A customer whose `connect-src` omits api.<domain> gets a TypeError here, not a status.
-      return null;
+      return 'rejected';
     }
+
+    if (!response.ok) return 'rejected';
+
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      // A 200 that is not JSON at all: a captive portal, an intercepting proxy, an HTML error page
+      // from something sitting in front of Laravel. Unreadable is unreadable — same treatment as a
+      // wrong shape, and emphatically not "rejected", which would send the customer looking at
+      // their allow-list for a problem that is not there.
+      return malformedSession();
+    }
+
+    // THE ONE UNWRAP, reached by BOTH call sites below. Doing it at only one of them yields a
+    // widget that works until the first renewal and then dies just as quietly as before.
+    const grant = readSessionGrant(body);
+    return grant ?? malformedSession();
+  };
+
+  /**
+   * Emit the right `error` payload for a mint that produced no session, WITHOUT re-deciding
+   * anything: the failure mode was already determined at the boundary, and `whenRejected` is only
+   * which of the two customer-facing constants applies at this call site.
+   */
+  const reportMintFailure = (failure: MintFailure, whenRejected: SdkErrorPayload): void => {
+    options.onEvent?.('error', failure === 'malformed' ? SESSION_MALFORMED : whenRejected);
   };
 
   const onMessage = (event: MessageEvent): void => {
@@ -196,13 +354,16 @@ export function attachBridge(
       // attacker would enjoy.
       if (initialised) return;
       initialised = true;
-      void mint().then((session) => {
+      void mint().then((outcome) => {
         if (destroyed) return;
-        if (session === null) {
-          options.onEvent?.('error', MINT_FAILED);
+        if (typeof outcome === 'string') {
+          reportMintFailure(outcome, MINT_FAILED);
           return;
         }
-        send('init', { session, locale: navigator.language });
+        // A validated grant, or nothing. `outcome` is a fresh object this file built field by
+        // field, so what crosses the bridge is exactly `{token, expires_in}` and never whatever
+        // else the response body happened to carry.
+        send('init', { session: outcome, locale: navigator.language });
       });
       return;
     }
@@ -226,14 +387,17 @@ export function attachBridge(
       // fresh from the customer's page so the `Origin` is produced AT REFRESH TIME rather than
       // replayed from mint time.
       if (refreshing !== null) return;
-      refreshing = mint().then((session) => {
+      refreshing = mint().then((outcome) => {
         refreshing = null;
         if (destroyed) return;
-        if (session === null) {
-          options.onEvent?.('error', REFRESH_FAILED);
+        if (typeof outcome === 'string') {
+          reportMintFailure(outcome, REFRESH_FAILED);
           return;
         }
-        send('session', { session });
+        // THE SECOND CALL SITE, and the reason the unwrap lives inside `mint()` rather than beside
+        // the first one. A fix applied only at `ready` produces a widget that works for the length
+        // of one grant and then dies exactly as silently as it used to.
+        send('session', { session: outcome });
       });
       return;
     }

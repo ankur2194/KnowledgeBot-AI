@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 use App\Enums\OrganizationStatus;
 use App\Enums\OrgRole;
+use App\Models\AuditLog;
 use App\Models\Organization;
 use App\Models\ProviderConnection;
 use App\Models\User;
+use App\Services\Audit\AuditLogger;
 use Database\Factories\ProviderConnectionFactory;
 use Illuminate\Http\Client\Request as ClientRequest;
 use Illuminate\Support\Facades\Http;
@@ -899,5 +901,144 @@ it('refuses to move an organization by over-posting the ownership column', funct
     assertDatabaseHas('organizations', [
         'id' => $fixture['org']->id,
         'embedding_connection_id' => $fixture['connection']->id,
+    ]);
+});
+
+it('audits who moved the vector space, and what it replaced', function (): void {
+    /*
+     * ── THE GAP THIS CLOSES, AND WHY IT IS THE BIGGER OF THE TWO DESIGNATIONS ────────────────
+     *
+     * Until this landed, `EloquentOrganizationRepository::designateEmbeddingConnection()` wrote
+     * `embedding_connection_id` / `embedding_model` with NO audit call and NO CLOSURE TO PASS ONE
+     * THROUGH, so "who moved the vector space, and from what" had no answer in `audit_logs`. The
+     * rerank pair beside it was audited and this one was not, which AuditLogger recorded as a
+     * finding rather than fixing — and it is the MORE consequential of the two: `(provider, model)`
+     * IS the vector space (ADR-031), so re-designating it renames the Qdrant collection and strands
+     * every indexed chunk until somebody re-embeds the whole corpus at a provider's per-token price.
+     *
+     * `previous_*` IS THE HALF THAT MAKES THE ROW USEFUL. After the write the old pair exists
+     * nowhere, and it is the only record of WHICH SPACE THE EXISTING CORPUS IS IN — i.e. the answer
+     * to "what would a re-index have to go back to", which on this pair has a price attached.
+     */
+    $fixture = orgWithEmbeddingConnection();
+    $url = "/api/v1/organizations/{$fixture['org']->id}/embedding-configuration";
+
+    // FIRST DESIGNATION: `set`, with the two keys and NO `previous_*`. The absence is the statement
+    // — a null is dropped by the sanitizer without being reported, so "there was no previous
+    // designation" is the ABSENCE of the pair rather than two nulls.
+    fakeReadiness(readyVerdict($fixture['connection']->id));
+
+    currentTest()->actingAs($fixture['actor'])->putJson($url, [
+        'connection_id' => $fixture['connection']->id,
+        'model' => 'text-embedding-3-large',
+    ])->assertOk();
+
+    $set = AuditLog::query()
+        ->where('operation', '=', AuditLogger::EMBEDDING_DESIGNATION_SET)
+        ->firstOrFail();
+
+    expect($set->details['connection_id'])->toBe($fixture['connection']->id)
+        ->and($set->details['model'])->toBe('text-embedding-3-large')
+        ->and($set->details)->not->toHaveKey('previous_connection_id')
+        ->and($set->actor_id)->toBe($fixture['actor']->id)
+        ->and($set->organization_id)->toBe($fixture['org']->id)
+        ->and($set->subject_type)->toBe(Organization::class)
+        ->and($set->subject_id)->toBe($fixture['org']->id);
+
+    // RE-DESIGNATED TO A SECOND MODEL ON THE SAME CONNECTION: still `set`, and NOW the previous pair
+    // is present. This is the row that answers "what was the corpus indexed under".
+    // THE SECOND CATALOGUE ROW IS BUILT DIRECTLY rather than through the factory, because
+    // `ProviderConnectionFactory::withModel()` is an `afterCreating` hook on a NEW connection and
+    // there is no seam for adding a row to one that already exists. Every column is assigned
+    // explicitly, which is what `ProviderModelService` does — `$fillable` is empty on that model.
+    // It is written under a bound tenant context because `ProviderModelEntry` is `#[ScopedBy]` and
+    // the re-verification inside the write reads it back through that scope.
+    app(\App\Support\Tenancy\TenantContext::class)->runFor($fixture['org']->id, function () use ($fixture): void {
+        $row = new \App\Models\ProviderModelEntry;
+        $row->organization_id = $fixture['org']->id;
+        $row->provider_connection_id = $fixture['connection']->id;
+        $row->model = 'text-embedding-3-small';
+        $row->display_name = 'text-embedding-3-small';
+        $row->capability_flags = ['supported' => ['embedding']];
+        $row->context_window = 8192;
+        $row->max_output_tokens = 0;
+        $row->enabled = true;
+        $row->save();
+    });
+
+    fakeReadiness(readyVerdict($fixture['connection']->id, 'text-embedding-3-small'));
+
+    currentTest()->actingAs($fixture['actor'])->putJson($url, [
+        'connection_id' => $fixture['connection']->id,
+        'model' => 'text-embedding-3-small',
+    ])->assertOk();
+
+    $moved = AuditLog::query()
+        ->where('operation', '=', AuditLogger::EMBEDDING_DESIGNATION_SET)
+        // ORDERED BY `id` AND NOT BY `created_at`, and it is the same microsecond-truncation fact
+        // `App\Services\Analytics\AnalyticsWindow` records: Laravel formats a bound date with the
+        // grammar's `'Y-m-d H:i:s'`, so two audit rows written in the same SECOND carry the same
+        // `created_at` and `orderByDesc('created_at')` is a coin flip. `id` is a ULID whose leading
+        // 48 bits are a millisecond timestamp, and the column is `COLLATE "C"` — so byte order IS
+        // creation order, with no ties.
+        ->orderByDesc('id')
+        ->firstOrFail();
+
+    expect($moved->details['model'])->toBe('text-embedding-3-small')
+        ->and($moved->details['previous_model'])->toBe('text-embedding-3-large')
+        ->and($moved->details['previous_connection_id'])->toBe($fixture['connection']->id);
+
+    // CLEARED: a SEPARATE OPERATION, and the whole content of the row is what it used to be. Two
+    // operations rather than one `changed` for `source.disabled`/`source.enabled`'s reason, and it
+    // bites harder here: clearing does not turn embedding off, it hands the choice to the resolution
+    // rule in embedding_selection.py — which may pick a DIFFERENT connection, or refuse outright and
+    // block ingestion for the whole organization. "Did anybody clear the embedding designation, and
+    // when" is the first question asked when uploads start failing, so it has to be a QUERY rather
+    // than a scan of every `changed` row's details.
+    currentTest()->actingAs($fixture['actor'])->putJson($url, [
+        'connection_id' => null,
+        'model' => null,
+    ])->assertOk();
+
+    $cleared = AuditLog::query()
+        ->where('operation', '=', AuditLogger::EMBEDDING_DESIGNATION_CLEARED)
+        ->firstOrFail();
+
+    expect($cleared->details['previous_model'])->toBe('text-embedding-3-small')
+        // NO `connection_id`/`model` PAIR after a clear: writing them as nulls would be
+        // indistinguishable from a `set` row whose sanitizer dropped them.
+        ->and($cleared->details)->not->toHaveKey('connection_id')
+        ->and($cleared->details)->not->toHaveKey('model');
+});
+
+it('rolls the designation back when its audit row cannot be written', function (): void {
+    // BOTH OPERATIONS ARE ON_FAILURE_ABORT, and the real test of that policy is "can this still be
+    // rolled back" rather than "is the event interesting". It can: the closure runs INSIDE
+    // `designateEmbeddingConnection()`'s transaction, after the UPDATE and before the COMMIT.
+    //
+    // A change to which credential embeds an entire corpus — and therefore to the vector space every
+    // future chunk lands in — is not a state this table may reach with nothing recording who made
+    // it.
+    $fixture = orgWithEmbeddingConnection();
+    fakeReadiness(readyVerdict($fixture['connection']->id));
+
+    // THE CONCRETE CLASS AND NOT THE INTERFACE. `#[Give(EloquentAuditLogRepository::class)]` on
+    // AuditLogger's constructor pins the concrete repository, so binding the interface has no
+    // effect at all and the test would pass for the wrong reason — a 200 that looks like the audit
+    // succeeded. tests/Feature/AuditAtomicityTest.php records the same trap.
+    app()->instance(
+        \App\Repositories\Eloquent\EloquentAuditLogRepository::class,
+        new \Tests\Support\AuditLogRepositorySpy(new \RuntimeException('the audit row would not commit')),
+    );
+
+    currentTest()->actingAs($fixture['actor'])->putJson(
+        "/api/v1/organizations/{$fixture['org']->id}/embedding-configuration",
+        ['connection_id' => $fixture['connection']->id, 'model' => 'text-embedding-3-large'],
+    )->assertStatus(500);
+
+    assertDatabaseHas('organizations', [
+        'id' => $fixture['org']->id,
+        'embedding_connection_id' => null,
+        'embedding_model' => null,
     ]);
 });

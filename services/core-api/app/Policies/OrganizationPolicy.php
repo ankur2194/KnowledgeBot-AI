@@ -17,6 +17,9 @@ use Illuminate\Auth\Access\Response;
  * call and which vector space every future corpus lands in. A Knowledge Manager may read it
  * (§6.4 needs to know why an upload is blocked) and may not change it (§6.4 excludes provider
  * credentials).
+ *
+ * The two RERANK abilities beside them carry the identical permissions for the identical reason —
+ * see their own docblock for why no new `Permission` case was minted.
  */
 final class OrganizationPolicy extends OrgScopedPolicy
 {
@@ -26,6 +29,35 @@ final class OrganizationPolicy extends OrgScopedPolicy
     }
 
     public function designateEmbeddingConnection(?User $user, Organization $organization): Response
+    {
+        return $this->permit($user, $organization, Permission::ProvidersManage);
+    }
+
+    /**
+     * The two rerank abilities carry the SAME permissions as the two embedding ones, and no new
+     * `Permission` case was added for them.
+     *
+     * That is a decision rather than a shortcut, and it follows the rule `Permission::BotsManage`
+     * states: a permission nobody grants differently is a permission that fails silently in both
+     * directions. A `providers.designate_rerank` case would be granted to exactly the roles that
+     * hold `providers.manage` today and refused to exactly the roles that do not — the designation
+     * selects which credential pays for the rerank call and which provider account sees this
+     * organization's end-user questions, which is the same kind of fact as the embedding
+     * designation and the credential itself. §6.4 puts a Knowledge Manager on the read side of that
+     * line and not the write side, which is what `providers.view` versus `providers.manage` already
+     * expresses.
+     *
+     * The consequence worth naming: tests/Unit/RolePermissionMatrixTest.php is UNCHANGED by this
+     * surface, because it pins the role x permission matrix and no permission moved. What proves
+     * these two abilities are wired to the right side of that line is the endpoint test, which
+     * asserts a Knowledge Manager reads the designation and is refused the write.
+     */
+    public function viewRerankConfiguration(?User $user, Organization $organization): Response
+    {
+        return $this->permit($user, $organization, Permission::ProvidersView);
+    }
+
+    public function designateRerankConnection(?User $user, Organization $organization): Response
     {
         return $this->permit($user, $organization, Permission::ProvidersManage);
     }
@@ -187,6 +219,110 @@ final class OrganizationPolicy extends OrgScopedPolicy
     public function manageSources(?User $user, Organization $organization): Response
     {
         return $this->permit($user, $organization, Permission::SourcesManage);
+    }
+
+    /**
+     * Read §8.23's usage and quality dashboard.
+     *
+     * The record is the ORGANIZATION because the dashboard is an aggregate over it — there is no
+     * per-row subject, exactly as there is none for `viewBots` or `viewSources`. `Organization`
+     * already implements OrgOwned, so `Gate::authorize('viewAnalytics', $organization)` resolves
+     * here with no OrgContext shim and permit() still resolves membership of THE RECORD'S
+     * organization.
+     *
+     * `Permission::AnalyticsView` and not `BotsView`, even though the dashboard filters by bot: the
+     * two are held by different role sets on purpose (a Knowledge Manager may read a bot and may not
+     * read the organization's spend), and that difference is the whole reason the permission was
+     * added rather than reused.
+     */
+    public function viewAnalytics(?User $user, Organization $organization): Response
+    {
+        return $this->permit($user, $organization, Permission::AnalyticsView);
+    }
+
+    /**
+     * LIST the organization's stored conversations.
+     *
+     * Here and not on `ConversationPolicy` because a list has no row to take an organization from —
+     * the same reason `viewBots`, `viewSources` and `viewMembers` live here.
+     * `ConversationPolicy::view()` is the per-row half and carries the identical permission, so the
+     * two never disagree about who may read a thread; what differs is only which record supplied
+     * the organization.
+     *
+     * `Permission::ConversationsView` and not `AnalyticsView`, even though the two are held by the
+     * same three roles today: one reads counts and percentiles and the other reads the questions
+     * customers asked in their own words. The case's own docblock carries the argument, including
+     * why an identical role row is not by itself a reason to reuse.
+     *
+     * ── THE §18.10 PRIVACY SWITCH IS NOT CHECKED HERE, AND IT CANNOT BE ──────────────────────
+     *
+     * docs/04 §8.22 and docs/13 §18.10 both require a per-organization setting for whether
+     * administrators may review conversations at all. It is CHECK 5 (entity status) rather than a
+     * permission — `permit()` has no argument position for it — and no column exists for it yet.
+     * `ConversationController` names that gap where an operator can see it.
+     */
+    public function viewConversations(?User $user, Organization $organization): Response
+    {
+        return $this->permit($user, $organization, Permission::ConversationsView);
+    }
+
+    /**
+     * Read this organization's own audit trail.
+     *
+     * THE RECORD IS THE ORGANIZATION AND THERE IS NO PER-ROW HALF, deliberately. `AuditLog`
+     * implements `OrgOwned` but `organizationId()` THROWS on a platform-scope row — a failed login
+     * for an address that belongs to no user has no organization — so a per-row policy would be
+     * unreachable for exactly the rows an intrusion investigation opens with, and reachable only
+     * through an exception. There is no `AuditLogPolicy` for that reason, and the list endpoint is
+     * the only reader: `EloquentAuditLogRepository::paginate()` takes `organization_id` as a
+     * required positional argument and that filter is the whole of this table's tenancy.
+     *
+     * `Permission::AuditView` is an EXTENSION of the specification — §6.1 assigns "Access
+     * platform-level audit logs" to the platform owner and §6.2-§6.5 name no org role — and the
+     * case's own docblock says so rather than letting a filled-in silence read as a grant.
+     */
+    public function viewAuditLog(?User $user, Organization $organization): Response
+    {
+        return $this->permit($user, $organization, Permission::AuditView);
+    }
+
+    /**
+     * Read the four quota ceilings and how much of each is used.
+     *
+     * `Permission::AnalyticsView` AND NOT `QuotasManage`, deliberately. Reading how much of an
+     * allowance is left is a REPORT, and it is the same figure `AnalyticsResource`'s
+     * `storage_bytes_used` already publishes to every holder of `analytics.view`. Gating the read
+     * behind the WRITE permission would mean only the Organization Owner could see a number that is
+     * already on the dashboard — a difference nobody could act on, and a rule the next reader would
+     * delete as inconsistent.
+     */
+    public function viewQuotas(?User $user, Organization $organization): Response
+    {
+        return $this->permit($user, $organization, Permission::AnalyticsView);
+    }
+
+    /**
+     * Set the four quota ceilings.
+     *
+     * `Permission::QuotasManage`, which the Organization Owner alone holds among the four org roles
+     * — an Administrator cannot touch a quota at all. That grant is the narrow reading of a
+     * specification that does not agree with itself: §6.1 gives "control limits for storage, bots,
+     * users, and ingestion" to the PLATFORM owner while §6.2 gives the Organization Owner "manage
+     * organization settings". `Permission::QuotasManage` records the contradiction rather than
+     * resolving it.
+     *
+     * ── THIS ABILITY DOES NOT DECIDE WHETHER A LIMIT MAY BE *RAISED* ────────────────────────
+     *
+     * `App\Services\Quotas\QuotaLimitService` does, and it must, because `permit()` takes
+     * `(user, record, permission)` and has NO ARGUMENT POSITION for the direction of the change —
+     * the same structural reason `Permission::MembersManageOwner` is its own case rather than logic
+     * inside a policy body. Here the missing argument is not a role, it is a comparison between the
+     * submitted numbers and the persisted ones, which only the service can make. An org owner may
+     * LOWER a ceiling; raising or removing one needs `users.is_platform_owner`.
+     */
+    public function manageQuotas(?User $user, Organization $organization): Response
+    {
+        return $this->permit($user, $organization, Permission::QuotasManage);
     }
 
     /**

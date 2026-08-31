@@ -36,9 +36,22 @@ import { safeThemeDeclarations } from '@/lib/theme';
  * palette on a GET whose entire response is a function of `publicBotId` is what keeps the cache key
  * honest.
  *
- * THIS ENDPOINT DOES NOT EXIST YET (`rt/v1` is out of scope — plan-status §9). The URL now names
- * the surface it will live on instead of one that never will, and the failure is logged instead of
- * swallowed. Until it lands, every hosted-chat page renders the platform default AND says so.
+ * ── THIS ENDPOINT STILL DOES NOT EXIST, AND THE REASON THIS COMMENT USED TO GIVE IS NOW FALSE ──
+ *
+ * It read: *"THIS ENDPOINT DOES NOT EXIST YET (`rt/v1` is out of scope — plan-status §9)"*. **`rt/v1`
+ * landed in Phase D** — `php artisan route:list --path=rt` shows six routes — and the theme route was
+ * simply not among them. So the group is no longer out of scope, the sentence explaining the absence
+ * stopped being true, and what remains is an ordinary gap with no owner. `GET
+ * /rt/v1/bots/{publicBotId}/theme` answers **404** (measured 2026-08-31), so every hosted-chat page
+ * load makes a doomed round trip and writes a `[kb] bot theme unavailable` line, and **no tenant's
+ * palette has ever reached hosted chat.**
+ *
+ * The fail-open is still right and is not the finding: a theme is decoration, and an error page is
+ * not a better answer than a bot in the platform's colours. The finding is that the sentence a reader
+ * uses to decide whether this is a to-do said "blocked, by design" for four days after it stopped
+ * being blocked. `docs/22` § T68 carries it, with what the endpoint has to be careful about — it is
+ * public, unauthenticated, cached by URL, and must 404 identically for an unknown id, an unpublished
+ * bot and a private one, or it becomes an existence oracle for bot ids.
  */
 const themeEndpoint = (publicBotId: string): string =>
   `${API_ORIGIN}/rt/v1/bots/${publicBotId}/theme`;

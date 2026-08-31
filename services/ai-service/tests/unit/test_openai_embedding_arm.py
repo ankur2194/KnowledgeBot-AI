@@ -1,9 +1,12 @@
 """The OpenAI embedding arm — the half of the adapter ADR-030 made load-bearing.
 
-Only the embedding surface is implemented in ``openai_adapter``; the chat half is still a
-skeleton, deliberately, because the 2026-08-10 line puts the five wire adapters out of scope
-and ``run_version`` cannot embed a chunk without exactly one of them. Every test here is about
-a failure that produces a **fully populated, fully wrong index** rather than an error:
+The embedding arm crossed the 2026-08-10 line alone, because ``run_version`` cannot index a
+chunk without exactly one adapter. **That line was redrawn on 2026-08-26** — the chat arm is
+implemented too, and its tests are ``test_openai_chat_arm.py``. A test here asserting that
+``_usage`` and ``_stop`` still raise was deleted with the change it existed to catch; the
+scope it made visible is the scope that was taken, which is the outcome a tripwire is for.
+Every test that remains here is about a failure that produces a **fully populated, fully
+wrong index** rather than an error:
 
 * **Response order is not input order.** OpenAI documents an ``index`` on every entry.
   ``EmbeddingResult.vectors[i]`` is contractually the embedding of ``texts[i]``, so a
@@ -408,15 +411,3 @@ def test_the_sdk_client_is_built_with_retries_disabled() -> None:
     alone that is 27 billed calls from one click."""
     client = OpenAIAdapter()._client(SecretStr("sk-test"))
     assert client.max_retries == 0
-
-
-def test_the_chat_half_is_still_a_skeleton_and_says_so() -> None:
-    """Not an oversight. The 2026-08-10 line puts the five wire adapters out of scope; the
-    embedding arm crossed it only because `run_version` cannot index a chunk without one. This
-    test is what makes the remaining scope visible rather than a surprise at the first chat
-    request."""
-    adapter = OpenAIAdapter()
-    with pytest.raises(NotImplementedError):
-        adapter._usage(object())
-    with pytest.raises(NotImplementedError):
-        adapter._stop(object())

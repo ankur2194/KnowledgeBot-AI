@@ -98,7 +98,11 @@ def translate_in(req: ChatRequest, caps: ModelCapabilities) -> tuple[dict, list[
         warn.append(CapabilityWarning(option="cache_hint", action="ignored",
                                       detail="DeepSeek caching is automatic and cannot be steered"))
     if req.images:
-        warn.append(CapabilityWarning(option="images", action="rejected", detail="text-only"))
+        # `rejected` is not a louder `ignored`. contract.py:522 defines it as "the request did
+        # NOT go out", so appending it and then returning the body is the one thing the two-value
+        # enum exists to make impossible — a silent drop wearing the label of a refusal. Corrected
+        # 2026-08-27; the sketch returned `body, warn` here and the caller sent it.
+        raise KbError("validation", detail="this model is text-only; images cannot be sent")
     return body, warn
 
 
@@ -138,12 +142,25 @@ async def stream(self, req, caps, api_key):
                     native = fr
     except APIStatusError as exc:
         raise classify(exc, tokens_emitted=emitted) from None   # never chains the key-bearing request
-    finally:
+    except asyncio.CancelledError:
         diag.native_stop_reason = native
-        yield ChatResult(text="".join(text), usage=usage, diagnostics=diag,
-                         stop_reason=_STOP.get(native, StopReason.ERROR),
-                         provider_request_id=None, total_ms=...)   # no request-id header exists
+        yield _result(text, usage, diag, StopReason.CANCELLED)  # the cancelled turn's usage row
+        raise                                                   # NEVER swallow the cancellation
+    else:
+        diag.native_stop_reason = native
+        yield _result(text, usage, diag, _STOP.get(native, StopReason.ERROR))
 ```
+
+**Read the two terminal arms above rather than the one this sketch used to have.** It ended with
+a `finally:` that yielded the `ChatResult`, and that is the shape `kb-provider-adapter-contract`
+forbids by name — a `yield` reached during `GeneratorExit` raises `RuntimeError`, ASGI swallows
+it, and the symptom is **a usage row that silently does not exist** rather than an error anyone
+sees. It was written that way to guarantee exactly one terminal result on every path, which is the
+right goal; `except asyncio.CancelledError: … raise` plus `else:` reaches it without ever yielding
+during teardown. The shipped `app/providers/deepseek.py` uses the two-arm form, as do its four
+siblings — this sketch was the last copy of the old shape, corrected 2026-08-27. `_result` is a
+local helper for the fields the two arms share: `provider_request_id=None` (DeepSeek publishes no
+request-id header) and the elapsed `total_ms`.
 
 **Error map into `kb-error-taxonomy`:** 400 Invalid Format and 422 Invalid Parameters → `provider_permanent_request`; 401 → `provider_auth`; 402 Insufficient Balance → `provider_permanent_request`, never retried and never fallen back (operator action); 429 → `provider_rate_limit`; 500 → `provider_temporary`; 503 Server Overloaded → `provider_temporary`; a 200 with `finish_reason: insufficient_system_resource` → `provider_temporary`. Only the last three are fallback-eligible.
 
@@ -154,7 +171,7 @@ async def stream(self, req, caps, api_key):
 - **A request hangs for the entire 45 s provider budget and no 429 appears anywhere in the logs.** When you exceed the model's concurrency limit DeepSeek does **not** reject — it keeps the HTTP request connected while it waits for a slot, emitting blank lines on non-streaming calls and `: keep-alive` SSE comments on streaming ones, and closing only after 10 minutes if inference never starts. Three consequences: the SSE reader must skip comment lines before JSON-parsing or it crashes on the first keep-alive under load; the 20 s first-token timeout is the *only* thing that detects saturation, so it classifies as `provider_temporary` and a connection configured to fall back on `provider_rate_limit` never triggers; and TTFT measured on "first chunk received" reads as instant while the user waits (`kb-observability-conventions` — count only chunks with non-empty content).
 - **`temperature=0` produces a differently-worded answer on every run, and no error is raised.** Thinking mode is on by default and ignores `temperature`, `top_p`, `presence_penalty` and `frequency_penalty` — DeepSeek's docs say setting them "will not trigger an error but will also have no effect". `frequency_penalty` and `presence_penalty` are additionally marked deprecated-and-ignored on *every* request, thinking or not. Send `thinking: {"type": "disabled"}` explicitly whenever the bot wants deterministic-ish output; leaving the field off gets you thinking mode, which is the reverse of every other provider's default.
 - **A tool-calling turn loses the model's plan halfway through and the second tool call is nonsense.** `reasoning_content` has two opposite rules: with no tool call in the turn, echoing it back is silently discarded by the API; with a tool call, the assistant's `reasoning_content` **must** be passed back in every subsequent request of that turn or the model reasons from a hole. So the adapter cannot have one policy — it strips `reasoning_content` when replaying prior conversation turns from PostgreSQL, and preserves it verbatim inside an in-flight tool loop. Never persist it into conversation history that later turns replay.
-- **A bot configured for structured output starts returning empty strings a few times a day.** DeepSeek documents that JSON output mode "may occasionally return empty content". Empty content means `tokens_emitted == 0`, so this is one of the rare cases where a retry is legitimately safe — retry once inside the adapter, then surface `provider_permanent_request`. Also: `json_object` requires the literal word "json" plus an example of the shape in the prompt, and there is no `json_schema` form, so `STRUCTURED_OUTPUT` is false and `JSON_MODE` is true for every DeepSeek model. Validate the schema on our side.
+- **A bot configured for structured output starts returning empty strings a few times a day.** DeepSeek documents that JSON output mode "may occasionally return empty content". Empty content means `tokens_emitted == 0`, so this is one of the rare cases where a retry is legitimately **safe** — which is not the same as saying this layer performs it. This bullet said "retry once inside the adapter" until 2026-08-27 and that contradicted `kb-error-taxonomy`'s retry-ownership rule two bullets away in this same file: **exactly one tier retries a given call**, and since 2026-08-27 that tier is `app/providers/router.py`, which owns same-connection retry (`may_retry_same_connection`) and next-connection fallback as two separate decisions. An adapter that also retries multiplies against it — the precise arithmetic this file's own `max_retries=0` bullet exists to prevent, one layer up instead of one layer down. So the adapter **classifies and returns**: surface it as `provider_permanent_request` with `tokens_emitted == 0`, and let the router decide. The safety of the retry is a fact about the vendor and belongs in this skill; performing it is not. Also: `json_object` requires the literal word "json" plus an example of the shape in the prompt, and there is no `json_schema` form, so `STRUCTURED_OUTPUT` is false and `JSON_MODE` is true for every DeepSeek model. Validate the schema on our side.
 - **A typo in a model id bills the cheap model and answers plausibly instead of failing.** On the Anthropic-shaped endpoint (`/anthropic`) DeepSeek maps `claude-opus*` → `deepseek-v4-pro`, `claude-sonnet*`/`claude-haiku*` → `deepseek-v4-flash`, and **anything unrecognised → `deepseek-v4-flash`**. It also ignores `anthropic-version`, `anthropic-beta`, `top_k`, and all `cache_control` fields. This is why we use only the OpenAI-shaped base URL and why a DeepSeek connection must never be configured through the Anthropic adapter. <!-- UNVERIFIED: whether the OpenAI-shaped endpoint rejects an unknown model id with 400 rather than remapping is not documented; assert it with a live fixture before trusting model-id validation to the provider. -->
 - **Cache hit rate sits near zero against an unchanging knowledge base, and cost is 50× the projection.** Caching is automatic, on-disk, prefix-match only, and cannot be requested — so anything volatile at the front of the prompt destroys it. Order every request as system instruction → `context_blocks` in a stable, deterministic sort → conversation → the new question, and keep timestamps, trace ids, and request ids out of the prompt entirely. The cache is also best-effort with a construction delay of seconds and a TTL "from a few hours to a few days", so a cold cache is normal and never an error.
 - **A `provider_connection` that worked in July returns an error for every request in August.** `deepseek-chat` and `deepseek-reasoner` were fully retired on 2026-07-24. Worse than the hard failure is what preceded it: from 2026-04-24 those ids silently routed to V4-Flash, so cost and answer quality changed under stable configuration months before anything broke. Any model id we accept must be validated against a pinned catalog at connection-save time; `kb-observability-conventions` already maps unrecognised model labels to `other`, which would hide this in metrics.

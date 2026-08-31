@@ -885,6 +885,436 @@
                 ]
             }
         },
+        "/api/v1/organizations/{organization}/analytics": {
+            "get": {
+                "operationId": "admin.analytics.show",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "from",
+                        "in": "query",
+                        "required": false,
+                        "description": "Inclusive start of the window, as an ISO-8601 instant. Defaults to 30 days before `until`. The window is half-open [from, until), so two adjacent windows partition the timeline exactly.",
+                        "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                        }
+                    },
+                    {
+                        "name": "until",
+                        "in": "query",
+                        "required": false,
+                        "description": "Exclusive end of the window, as an ISO-8601 instant. Defaults to now. Must be strictly after `from`; the window may not exceed 366 days.",
+                        "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                        }
+                    },
+                    {
+                        "name": "bot_id",
+                        "in": "query",
+                        "required": false,
+                        "description": "Restrict every tile to one bot. A bot id belonging to another organization is not an error and is not a leak: every query carries the organization AND the bot together, so it matches nothing and the page reads zero.",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Every §8.23 tile for one organization and one window, wrapped in `data` because the action returns the Resource itself and Laravel wraps it. A nonexistent `{organization}` 404s at binding time, before this action runs.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/AnalyticsResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/ShowAnalyticsRequest.json"
+            }
+        },
+        "/api/v1/organizations/{organization}/audit-logs": {
+            "get": {
+                "operationId": "admin.audit-logs.index",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 1
+                        },
+                        "description": "1-based page number, matching `meta.page` in the response and Laravel's own paginator. There is no page 0."
+                    },
+                    {
+                        "name": "per_page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 100,
+                            "default": 25
+                        },
+                        "description": "Rows per page. A value above the maximum is REFUSED with a 422 rather than clamped silently, so a client asking for more than the platform serves finds out rather than paginating against a size it did not choose. The applied value is echoed as `meta.per_page`."
+                    },
+                    {
+                        "name": "sort",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "created_at"
+                            ],
+                            "default": "created_at"
+                        },
+                        "description": "Column to order by, from this endpoint's closed set. The set is closed because a caller-chosen sort reaches an `ORDER BY`, so every member here is a column with an index behind it."
+                    },
+                    {
+                        "name": "dir",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "asc",
+                                "desc"
+                            ],
+                            "default": "desc"
+                        },
+                        "description": "Sort direction."
+                    },
+                    {
+                        "name": "actor_id",
+                        "in": "query",
+                        "required": false,
+                        "description": "Restrict to the actions of one member — \"what did this person do\". Rows with no actor (an unauthenticated event, or a platform action) are excluded by the predicate itself. An actor id belonging to another organization is not an error and is not a leak: the query carries the organization AND the actor together, so it matches nothing.",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "operation",
+                        "in": "query",
+                        "required": false,
+                        "description": "Restrict to one audited operation. THE SET IS CLOSED: the writer refuses an operation outside it, so a value outside it cannot match any row that will ever exist and is answered with 422 rather than with an empty page a caller would read as \"this never happened\".",
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "auth.login.succeeded",
+                                "auth.login.failed",
+                                "auth.logout",
+                                "auth.password_reset.requested",
+                                "auth.password_reset.completed",
+                                "auth.email.verified",
+                                "organization.invitation.created",
+                                "organization.invitation.revoked",
+                                "organization.invitation.accepted",
+                                "organization.invitation.resent",
+                                "organization.member.role_changed",
+                                "provider.connection.created",
+                                "provider.connection.updated",
+                                "provider.connection.deleted",
+                                "provider.connection.credential_rotated",
+                                "provider.connection.credential_rotation_failed",
+                                "provider.model.created",
+                                "provider.model.updated",
+                                "provider.model.deleted",
+                                "organization.rerank_designation.set",
+                                "organization.rerank_designation.cleared",
+                                "organization.embedding_designation.set",
+                                "organization.embedding_designation.cleared",
+                                "organization.quota_limits.updated",
+                                "bot.created",
+                                "bot.updated",
+                                "bot.deleted",
+                                "bot.delete.refused",
+                                "bot.playground_session.minted",
+                                "bot.domain.created",
+                                "bot.domain.status_changed",
+                                "bot.domain.deleted",
+                                "bot.starter_question.created",
+                                "bot.starter_question.updated",
+                                "bot.starter_question.deleted",
+                                "source.created",
+                                "source.updated",
+                                "source.deleted",
+                                "source.disabled",
+                                "source.enabled",
+                                "source.reprocess.requested",
+                                "source.upload.accepted",
+                                "source.upload.rejected",
+                                "source.version.activated",
+                                "source.version.retired",
+                                "bot.source_assignment.created",
+                                "bot.source_assignment.deleted"
+                            ]
+                        }
+                    },
+                    {
+                        "name": "outcome",
+                        "in": "query",
+                        "required": false,
+                        "description": "Restrict to successes or to failures. The outcome is DERIVED from the operation and never submitted, so no row can claim `auth.login.failed` with `outcome = success`; filtering on both at once is therefore a redundant but harmless narrowing.",
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "success",
+                                "failure"
+                            ]
+                        }
+                    },
+                    {
+                        "name": "subject_type",
+                        "in": "query",
+                        "required": false,
+                        "description": "Restrict to actions against one KIND of record, as the fully-qualified model class the trail stores — for example `App\\Models\\Bot`. THE SET IS OPEN, unlike `operation`: a new kind of subject needs no schema change, so an unknown value is an empty result rather than a 422. Read the value off `subject_type` on any row rather than composing it. Required when `subject_id` is given.",
+                        "schema": {
+                            "type": "string",
+                            "maxLength": 255
+                        }
+                    },
+                    {
+                        "name": "subject_id",
+                        "in": "query",
+                        "required": false,
+                        "description": "Restrict to one record — \"the audit trail for THIS bot\". MUST be sent with `subject_type`: an id with no type is ambiguous across every table, and the pair is what makes the read an index range rather than a scan.",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "from",
+                        "in": "query",
+                        "required": false,
+                        "description": "Inclusive start of the window, as an ISO-8601 instant. Absent means \"from always\"; there is no default window and no maximum width, because a list is bounded by its page size rather than by its range.",
+                        "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                        }
+                    },
+                    {
+                        "name": "until",
+                        "in": "query",
+                        "required": false,
+                        "description": "Exclusive end of the window, as an ISO-8601 instant. The window is half-open [from, until), so two adjacent windows partition the timeline exactly. Must be strictly after `from`.",
+                        "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "One page of this organization's audit trail, with `meta` beside the array inside `data`. NEWEST FIRST by default — an audit trail is read from the present backwards, and every index on the table is built `created_at DESC` for exactly that. PLATFORM-SCOPE ROWS ARE NEVER RETURNED: an event that belongs to no organization (a failed login for an address that is not a user) is outside this surface whatever the filters say, because it describes somebody who may not be a member here. `details` is rendered whole and is allow-listed PER OPERATION at write time, so no credential, token or key fragment can appear in it — a bearer value is admitted only as `<name>_fingerprint`. 422 for an `operation` or `outcome` outside its closed vocabulary, and for a `subject_id` sent without a `subject_type`. `meta.filter` is always null: this endpoint takes no free-text term.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/AuditLogCollectionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/IndexAuditLogsRequest.json"
+            }
+        },
         "/api/v1/organizations/{organization}/bots": {
             "get": {
                 "operationId": "admin.bots.index",
@@ -2124,6 +2554,135 @@
                 "x-kb-request-rules": "../rules/UpdateBotDomainRequest.json"
             }
         },
+        "/api/v1/organizations/{organization}/bots/{bot}/playground-session": {
+            "post": {
+                "operationId": "admin.bots.playground-session.store",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "bot",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {bot} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "A short-lived chat-session token for the admin playground, bound to one bot and to the acting administrator. It is the SAME `kbw_` credential the public chat runtime already resolves — `POST /rt/v1/conversations` and `POST /rt/v1/conversations/{conversation}/messages` accept it unchanged — and it differs only in what its server-side record says: the turn is recorded on the `playground` channel against the acting user, and `retrieval.trace` is forwarded on the stream. The other three internal frames (`provider.usage`, `provider.fallback`, `heartbeat`) stay refused to it exactly as they are to every other client. THIS BODY CONTAINS A LIVE CREDENTIAL: never log it, never put it in a URL. 403 when the caller may view the bot but not manage it — `bots.view` is not enough, because a playground turn spends the organization's provider quota. 409 when the organization is not active, or when the bot is `draft`, `paused` or `archived`: only `testing` and `published` are reachable from the playground.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/ChatSessionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "The organization is not active. Its configuration may be read but not changed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            }
+        },
         "/api/v1/organizations/{organization}/bots/{bot}/source-assignments": {
             "get": {
                 "operationId": "admin.bots.source-assignments.index",
@@ -3272,6 +3831,375 @@
                     }
                 ],
                 "x-kb-request-rules": "../rules/UpdateBotStatusRequest.json"
+            }
+        },
+        "/api/v1/organizations/{organization}/conversations": {
+            "get": {
+                "operationId": "admin.conversations.index",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 1
+                        },
+                        "description": "1-based page number, matching `meta.page` in the response and Laravel's own paginator. There is no page 0."
+                    },
+                    {
+                        "name": "per_page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 100,
+                            "default": 25
+                        },
+                        "description": "Rows per page. A value above the maximum is REFUSED with a 422 rather than clamped silently, so a client asking for more than the platform serves finds out rather than paginating against a size it did not choose. The applied value is echoed as `meta.per_page`."
+                    },
+                    {
+                        "name": "sort",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "last_activity_at",
+                                "started_at"
+                            ],
+                            "default": "last_activity_at"
+                        },
+                        "description": "Column to order by, from this endpoint's closed set. The set is closed because a caller-chosen sort reaches an `ORDER BY`, so every member here is a column with an index behind it."
+                    },
+                    {
+                        "name": "dir",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "asc",
+                                "desc"
+                            ],
+                            "default": "desc"
+                        },
+                        "description": "Sort direction."
+                    },
+                    {
+                        "name": "bot_id",
+                        "in": "query",
+                        "required": false,
+                        "description": "Restrict to one bot. A bot id belonging to another organization is not an error and is not a leak: the query carries the organization AND the bot together, so it matches nothing and the page reads empty. Supplying it also makes the default sort an exact index range.",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "user_id",
+                        "in": "query",
+                        "required": false,
+                        "description": "Restrict to the threads held by one AUTHENTICATED participant. This is the subject-access query — \"everything this person said to us\" — and it matches nothing for an anonymous visitor, who is identified by `session_id` instead. Exactly one of the two columns is populated on any conversation.",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "session_id",
+                        "in": "query",
+                        "required": false,
+                        "description": "Restrict to the threads held by one ANONYMOUS session. The token is opaque and platform-minted; a value outside its stored grammar simply matches nothing.",
+                        "schema": {
+                            "type": "string",
+                            "maxLength": 128
+                        }
+                    },
+                    {
+                        "name": "status",
+                        "in": "query",
+                        "required": false,
+                        "description": "Restrict to one lifecycle state.",
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "active",
+                                "ended",
+                                "expired"
+                            ]
+                        }
+                    },
+                    {
+                        "name": "channel",
+                        "in": "query",
+                        "required": false,
+                        "description": "Restrict to one channel: hosted chat, the embedded widget, the mobile app, the API, or the admin playground.",
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "hosted",
+                                "embedded",
+                                "mobile",
+                                "playground",
+                                "api"
+                            ]
+                        }
+                    },
+                    {
+                        "name": "from",
+                        "in": "query",
+                        "required": false,
+                        "description": "Inclusive start of the window, as an ISO-8601 instant, applied to `started_at`. THE WINDOW SELECTS THREADS THAT STARTED IN IT and not threads that were active in it — the first partitions the timeline exactly and the second does not, and the analytics surface makes the same choice so the two count one population. Absent means \"from always\"; there is no default window and no maximum width, because a list is bounded by its page size.",
+                        "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                        }
+                    },
+                    {
+                        "name": "until",
+                        "in": "query",
+                        "required": false,
+                        "description": "Exclusive end of the window, as an ISO-8601 instant. The window is half-open [from, until), so two adjacent windows partition the timeline exactly. Must be strictly after `from`.",
+                        "schema": {
+                            "type": "string",
+                            "format": "date-time"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "One page of this organization's conversation threads, with `meta` beside the array inside `data`. EVERY lifecycle state is included, including threads still in flight and threads the retention sweeper has marked `expired`. `page` is 1-based; `per_page`, `sort` and `dir` are echoed AS APPLIED, which may differ from what was asked for because the platform clamps the page size and falls back to the endpoint default sort — which here is `last_activity_at` DESCENDING, the most recently active thread first. `meta.filter` is always null: this endpoint takes no free-text term. A `bot_id`, `user_id` or `session_id` belonging to another organization is not an error and not a leak — every predicate carries the organization AND the filtered column together, so it matches nothing and the page reads empty.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/ConversationCollectionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/IndexConversationsRequest.json"
+            }
+        },
+        "/api/v1/organizations/{organization}/conversations/{conversation}": {
+            "get": {
+                "operationId": "admin.conversations.show",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    },
+                    {
+                        "name": "conversation",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {conversation} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "One conversation and everything that was said in it, wrapped in `data`: every field of the list row, plus the messages with their citations RESOLVED TO THE EXCERPT the model read, their retrieval traces, their feedback, and every provider attempt behind each turn — which is where per-turn latency, token counts and fallback events live. UNSETTLED TURNS ARE INCLUDED, unlike the public runtime transcript: a turn that died mid-stream is what an operator opens this screen to find. The read is bounded and `messages_truncated` says when the bound bit. EVERYTHING BELOW THE HEADER IS UNTRUSTED TEXT — visitor questions, model output, quoted document passages and feedback comments — and must render through the same sanitizer the widget uses. A foreign or unknown `{conversation}` 404s at binding time, before this action runs, and the body is byte-identical to the 404 for a path with no route.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/ConversationTranscriptResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A dependency was briefly unavailable, or the data plane assigned its own class. `retryable` is the authority, never the status.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
             }
         },
         "/api/v1/organizations/{organization}/embedding-configuration": {
@@ -5545,6 +6473,444 @@
                 "x-kb-request-rules": "../rules/UpdateProviderModelRequest.json"
             }
         },
+        "/api/v1/organizations/{organization}/quotas": {
+            "get": {
+                "operationId": "admin.quotas.show",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Every quota metric for one organization: used, limit, remaining. Wrapped in `data` because the action returns the Resource itself and Laravel wraps it. A nonexistent `{organization}` 404s at binding time, before this action runs.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/QuotaResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            },
+            "put": {
+                "operationId": "admin.quotas.update",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The ceilings AFTER they were applied, with usage recomputed. Wrapped in `data`. A nonexistent `{organization}` 404s at binding time.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/QuotaResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "The organization is not active. Its configuration may be read but not changed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/UpdateQuotaLimitsRequest.json"
+            }
+        },
+        "/api/v1/organizations/{organization}/rerank-configuration": {
+            "get": {
+                "operationId": "admin.rerank-configuration.show",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The organization's rerank designation. Wrapped in `data` because the action returns the Resource itself and Laravel wraps it. A nonexistent `{organization}` 404s at binding time, before this action runs.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/RerankConfigurationResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ]
+            },
+            "put": {
+                "operationId": "admin.rerank-configuration.update",
+                "parameters": [
+                    {
+                        "name": "organization",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the organization. The tenant scope for everything below this path; a value the caller is not a current member of is denied, never served."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The designation AFTER it was applied, wrapped in `data`. A nonexistent `{organization}` 404s at binding time, before this action runs.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/RerankConfigurationResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "The organization is not active. Its configuration may be read but not changed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "An unmapped exception in this service. `error_class` is `internal_dependency` and `retryable` is FALSE — a bug is not a brownout (ADR-029).",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "sanctumSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/DesignateRerankConnectionRequest.json"
+            }
+        },
         "/api/v1/organizations/{organization}/sources": {
             "get": {
                 "operationId": "admin.sources.index",
@@ -6741,6 +8107,636 @@
                 ],
                 "x-kb-request-rules": "../rules/SwitchOrganizationRequest.json"
             }
+        },
+        "/rt/v1/bot": {
+            "get": {
+                "operationId": "runtime.bot.show",
+                "parameters": [],
+                "responses": {
+                    "200": {
+                        "description": "The bot the calling session is bound to, as an anonymous visitor sees it.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/RuntimeBotResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "chatSession": []
+                    }
+                ]
+            }
+        },
+        "/rt/v1/conversations": {
+            "post": {
+                "operationId": "runtime.conversations.store",
+                "parameters": [],
+                "responses": {
+                    "201": {
+                        "description": "The conversation that was opened.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/RuntimeConversationResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "chatSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/StoreRuntimeConversationRequest.json"
+            }
+        },
+        "/rt/v1/conversations/{conversation}/messages": {
+            "get": {
+                "operationId": "runtime.conversations.messages.index",
+                "parameters": [
+                    {
+                        "name": "conversation",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {conversation} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The settled entries of one conversation, oldest first.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/RuntimeMessageCollectionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "chatSession": []
+                    }
+                ]
+            },
+            "post": {
+                "operationId": "runtime.conversations.messages.store",
+                "parameters": [
+                    {
+                        "name": "conversation",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {conversation} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "A stream of the six client-facing frames, in order, with exactly one terminal frame (`message.complete` or `error`) and `: ping` comments in between. A FAILURE MAY ARRIVE EITHER WAY: before the first byte it is the ordinary JSON error envelope with a real status; afterwards the status is spent and it can only be an `error` frame on a 200. Branch on the CONTENT TYPE, never on the status.",
+                        "content": {
+                            "text/event-stream": {
+                                "schema": {
+                                    "type": "string",
+                                    "contentMediaType": "text/event-stream",
+                                    "description": "Server-sent events. The frame union is published as `packages/contracts/src/sse/events.ts` and is not duplicated here: six client-facing names, exactly one terminal frame per stream, and `: ping` comments that dispatch no event. Read the stream with `fetch` and a reader — `EventSource` cannot set an Authorization header and is GET-only."
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Denied. `error_class` is `authorization`. The admin surface answers 403 by design — a member is already entitled to know the record exists. Public and SDK surfaces render the same class as 404.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "chatSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/SendChatMessageRequest.json"
+            }
+        },
+        "/rt/v1/messages/{message}/citations": {
+            "get": {
+                "operationId": "runtime.messages.citations.index",
+                "parameters": [
+                    {
+                        "name": "message",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {message} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The citations attached to one answer, in label order.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/RuntimeCitationCollectionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "chatSession": []
+                    }
+                ]
+            }
+        },
+        "/rt/v1/messages/{message}/feedback": {
+            "post": {
+                "operationId": "runtime.messages.feedback.store",
+                "parameters": [
+                    {
+                        "name": "message",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "ULID of the bound {message} record, scoped to the organization above it."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The verdict was recorded, or the existing one for this submitter was replaced.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/AcknowledgementResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Not authenticated. `error_class` is `authentication`.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "chatSession": []
+                    }
+                ],
+                "x-kb-request-rules": "../rules/StoreChatFeedbackRequest.json"
+            }
+        },
+        "/sdk/v1/bootstrap": {
+            "post": {
+                "operationId": "sdk.bootstrap",
+                "parameters": [],
+                "responses": {
+                    "200": {
+                        "description": "The public configuration of one bot, for a loader on an allow-listed origin.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/RuntimeBotResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [],
+                "x-kb-origin-validated": true,
+                "x-kb-request-rules": "../rules/MintChatSessionRequest.json"
+            }
+        },
+        "/sdk/v1/session": {
+            "post": {
+                "operationId": "sdk.session.store",
+                "parameters": [],
+                "responses": {
+                    "201": {
+                        "description": "A chat-session token bound to one bot and one embedder origin.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "data"
+                                    ],
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/components/schemas/ChatSessionResource"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Error.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "The request was rejected. `error_class` is `validation`; `errors` is present only when a FormRequest produced per-field messages, and absent when the refusal came from the data plane's resolver.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ValidationErrorEnvelope"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limited. `error_class` is `rate_limit`; wait for `Retry-After`, which is a floor and not a hint.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorEnvelope"
+                                }
+                            }
+                        },
+                        "headers": {
+                            "Retry-After": {
+                                "description": "Seconds to wait. A floor, not a hint: retrying inside the window keeps consuming the rejection.",
+                                "schema": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    }
+                },
+                "security": [],
+                "x-kb-origin-validated": true,
+                "x-kb-request-rules": "../rules/MintChatSessionRequest.json"
+            }
         }
     },
     "components": {
@@ -6750,6 +8746,11 @@
                 "in": "cookie",
                 "name": "kb_session",
                 "description": "The Sanctum SPA session cookie, issued by GET /sanctum/csrf-cookie and sent by the browser. NOT a bearer token: a bearer token in a browser SPA must live where JavaScript can read it, so one XSS becomes a stolen, long-lived, replayable credential. Requests also carry the XSRF header the same endpoint sets."
+            },
+            "chatSession": {
+                "type": "http",
+                "scheme": "bearer",
+                "description": "The opaque, origin-bound chat-session token minted by POST /sdk/v1/session, sent as `Authorization: Bearer kbw_...`. It is NOT a Sanctum token: an anonymous visitor is not a User, and a chat session must die in minutes and be droppable in bulk when a domain leaves a bot's allow-list, which a Valkey key with a TTL does and a database row does not. It carries no readable claims and grants exactly three abilities against exactly one bot; it can never carry an admin ability, because it is minted with no human authentication at all. Never put it in a URL — not a query string, not a path segment, not a fragment."
             }
         },
         "schemas": {
@@ -6764,6 +8765,430 @@
                     "acknowledged": {
                         "type": "boolean",
                         "description": "Always true. Present so the success response has a body at all — a 204 would publish `properties: []`, which is not valid JSON Schema."
+                    }
+                }
+            },
+            "AnalyticsFeedback": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "The thumbs, split. Two counts and not a ratio: 1/0 and 40000/0 are both \"100%\" and only one of them is evidence. Comments are deliberately absent — free text from a stranger does not belong in an aggregate.",
+                "required": [
+                    "positive",
+                    "negative"
+                ],
+                "properties": {
+                    "positive": {
+                        "type": "integer",
+                        "description": "Positive ratings in the window."
+                    },
+                    "negative": {
+                        "type": "integer",
+                        "description": "Negative ratings in the window."
+                    }
+                }
+            },
+            "AnalyticsIngestion": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Ingestion outcomes over source VERSIONS created in the window — not sources. A source is ingested many times; counting sources would answer a different question that never changes when an ingestion fails.",
+                "required": [
+                    "succeeded",
+                    "failed",
+                    "in_flight"
+                ],
+                "properties": {
+                    "succeeded": {
+                        "type": "integer",
+                        "description": "Versions that reached `ready` or `ready_with_warnings`. A version with warnings IS searchable, so filing it as a failure would report an outage that is not happening."
+                    },
+                    "failed": {
+                        "type": "integer",
+                        "description": "Versions that reached `failed`."
+                    },
+                    "in_flight": {
+                        "type": "integer",
+                        "description": "Versions still moving. Published so succeeded + failed + in_flight accounts for every version created in the window."
+                    }
+                }
+            },
+            "AnalyticsLatency": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Percentiles over SUCCEEDED provider attempts. Percentiles and not a mean: one 55-second timeout among ninety-nine 900 ms answers averages to a number no user experienced. Discrete percentiles, so each value belongs to a real request and can be found in the log.",
+                "required": [
+                    "first_token_p50_ms",
+                    "first_token_p95_ms",
+                    "total_p50_ms",
+                    "total_p95_ms"
+                ],
+                "properties": {
+                    "first_token_p50_ms": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ],
+                        "description": "Median time to first token. NULL means nothing to measure — no successful streaming call in the window — and is a different fact from 0."
+                    },
+                    "first_token_p95_ms": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ],
+                        "description": "95th percentile time to first token."
+                    },
+                    "total_p50_ms": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ],
+                        "description": "Median total answer time."
+                    },
+                    "total_p95_ms": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ],
+                        "description": "95th percentile total answer time."
+                    }
+                }
+            },
+            "AnalyticsModelUsage": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One (provider, model, currency) row of the token and cost tile. Input and output stay apart because they are priced apart; a single total cannot be costed.",
+                "required": [
+                    "provider",
+                    "model",
+                    "input_tokens",
+                    "output_tokens",
+                    "estimated_cost",
+                    "currency"
+                ],
+                "properties": {
+                    "provider": {
+                        "type": "string",
+                        "description": "The vendor the call was billed to."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "The vendor model id, verbatim."
+                    },
+                    "input_tokens": {
+                        "type": "integer",
+                        "description": "Total input tokens, CACHE READS AND WRITES INCLUDED — `provider_calls.input_tokens` is already the normalized total and the two cache columns are a breakdown of it, so adding them would double-count every cached token."
+                    },
+                    "output_tokens": {
+                        "type": "integer",
+                        "description": "Output tokens INCLUDING reasoning tokens. Every vendor here bills reasoning at the output rate, so a figure over bare `output_tokens` under-reports a reasoning turn silently."
+                    },
+                    "estimated_cost": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "Estimated cost as an exact decimal STRING, or null when the model has no recorded price — which is a different fact from a cost of zero. A string and not a number: a JSON number is a double."
+                    },
+                    "currency": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "ISO 4217 code the cost is expressed in. It travels WITH the number because summing two currencies is a silent wrong answer, which is also why there is no organization-wide cost total."
+                    }
+                }
+            },
+            "AnalyticsProviderCalls": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Provider outcomes. `cancelled` and `pending` attempts are in NEITHER outcome count: a user closing the tab is not a provider error, and counting it as one hides real outages behind ordinary behaviour.",
+                "required": [
+                    "succeeded",
+                    "failed",
+                    "error_rate",
+                    "primary_attempts",
+                    "fallback_attempts",
+                    "fallback_rate"
+                ],
+                "properties": {
+                    "succeeded": {
+                        "type": "integer",
+                        "description": "Attempts that returned an answer."
+                    },
+                    "failed": {
+                        "type": "integer",
+                        "description": "Attempts that returned an error class."
+                    },
+                    "error_rate": {
+                        "type": [
+                            "number",
+                            "null"
+                        ],
+                        "description": "failed / (succeeded + failed), or null when nothing finished. Null and not 0: \"no calls\" and \"no failures\" are different facts, and rendering 0% for an organization that made no calls reports health nobody measured."
+                    },
+                    "primary_attempts": {
+                        "type": "integer",
+                        "description": "Attempts with empty `fallback_metadata` — one per turn, so this IS the turn count and it does not shrink when retention sweeps the conversations."
+                    },
+                    "fallback_attempts": {
+                        "type": "integer",
+                        "description": "Attempts reached after a primary attempt failed."
+                    },
+                    "fallback_rate": {
+                        "type": [
+                            "number",
+                            "null"
+                        ],
+                        "description": "fallback_attempts / primary_attempts, or null when there were no turns. It may legitimately exceed 1.0 — a turn that fell back twice writes two attempts — and is deliberately not clamped, because clamping hides exactly the configuration worth looking at."
+                    }
+                }
+            },
+            "AnalyticsResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "The organization's usage and quality dashboard (§8.23). Every tile is one org-scoped aggregate over PostgreSQL; there is no warehouse and no second datastore.",
+                "required": [
+                    "window",
+                    "conversations",
+                    "messages",
+                    "unique_sessions",
+                    "latency",
+                    "provider_calls",
+                    "feedback",
+                    "insufficient_evidence_answers",
+                    "usage_by_model",
+                    "ingestion",
+                    "storage_bytes_used"
+                ],
+                "properties": {
+                    "window": {
+                        "$ref": "#/components/schemas/AnalyticsWindow"
+                    },
+                    "conversations": {
+                        "type": "integer",
+                        "description": "Threads STARTED in the window. A thread started last month and answered today belongs to last month, so two months' totals never exceed the year's."
+                    },
+                    "messages": {
+                        "type": "integer",
+                        "description": "Turns in the window, both roles, all statuses."
+                    },
+                    "unique_sessions": {
+                        "type": "integer",
+                        "description": "Distinct participants — the anonymous session token or the signed-in user, whichever the thread carries. A conversation may hold exactly one of the two, which is what stops a signed-in visitor being counted twice."
+                    },
+                    "latency": {
+                        "$ref": "#/components/schemas/AnalyticsLatency"
+                    },
+                    "provider_calls": {
+                        "$ref": "#/components/schemas/AnalyticsProviderCalls"
+                    },
+                    "feedback": {
+                        "$ref": "#/components/schemas/AnalyticsFeedback"
+                    },
+                    "insufficient_evidence_answers": {
+                        "type": "integer",
+                        "description": "Answers that refused for want of evidence. This measures a CORRECT refusal rather than a failure, which is why it is its own number: a bot whose count is climbing needs sources, not an engineer."
+                    },
+                    "usage_by_model": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/AnalyticsModelUsage"
+                        },
+                        "description": "One row per (provider, model, currency)."
+                    },
+                    "ingestion": {
+                        "$ref": "#/components/schemas/AnalyticsIngestion"
+                    },
+                    "storage_bytes_used": {
+                        "type": "integer",
+                        "description": "Bytes currently occupied — a LEVEL, not a flow, so it is NOT windowed. It is the same ledger figure the quota gate refuses against, so this page and the quota screen cannot disagree about whether the organization is over its storage limit."
+                    }
+                }
+            },
+            "AnalyticsWindow": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "The RESOLVED window every number on this page describes. Echoed because `from` and `until` both have server-side defaults, so a caller that sent neither would not know what period it is looking at.",
+                "required": [
+                    "from",
+                    "until",
+                    "bot_id"
+                ],
+                "properties": {
+                    "from": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "Inclusive start. The window is half-open [from, until)."
+                    },
+                    "until": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "Exclusive end."
+                    },
+                    "bot_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "The bot every tile was restricted to, or null for the whole organization. Present so a client can tell \"all bots\" from \"one bot with no traffic\"."
+                    }
+                }
+            },
+            "AuditLogCollectionResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One page of an organization's audit trail, newest first by default, with the pagination and applied-query state beside it. `meta.filter` is always null: this endpoint accepts no free-text term, and the key remains because `meta` is one shared component across every list in this API.",
+                "required": [
+                    "audit_logs",
+                    "meta"
+                ],
+                "properties": {
+                    "audit_logs": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/AuditLogResource"
+                        },
+                        "description": "The audited events on this page. SCOPED TO THE ORGANIZATION IN THE PATH AND TO NOTHING ELSE — platform-scope rows, which carry no organization (a failed login for an address that belongs to no user, a platform action), are never returned here whatever the filters say. §6.1 assigns those to the platform owner, on a surface that does not exist yet."
+                    },
+                    "meta": {
+                        "$ref": "#/components/schemas/ListMetaResource",
+                        "description": "Pagination and applied-query state for this page."
+                    }
+                }
+            },
+            "AuditLogResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One audited event from this organization's trail. Rows are APPEND-ONLY — the application role holds no UPDATE and no DELETE on the table, and retention is a partition drop rather than a row delete — so an id read here names a row that will never change. THERE IS NO ROW-LEVEL ENDPOINT: the list is the whole surface, because a per-row read would be a second query shape over a table whose only tenancy is an explicit organization predicate.",
+                "required": [
+                    "id",
+                    "operation",
+                    "outcome",
+                    "actor_id",
+                    "subject_type",
+                    "subject_id",
+                    "ip_address",
+                    "user_agent",
+                    "request_id",
+                    "details",
+                    "created_at"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "ULID of the audit row."
+                    },
+                    "operation": {
+                        "type": "string",
+                        "enum": [
+                            "auth.login.succeeded",
+                            "auth.login.failed",
+                            "auth.logout",
+                            "auth.password_reset.requested",
+                            "auth.password_reset.completed",
+                            "auth.email.verified",
+                            "organization.invitation.created",
+                            "organization.invitation.revoked",
+                            "organization.invitation.accepted",
+                            "organization.invitation.resent",
+                            "organization.member.role_changed",
+                            "provider.connection.created",
+                            "provider.connection.updated",
+                            "provider.connection.deleted",
+                            "provider.connection.credential_rotated",
+                            "provider.connection.credential_rotation_failed",
+                            "provider.model.created",
+                            "provider.model.updated",
+                            "provider.model.deleted",
+                            "organization.rerank_designation.set",
+                            "organization.rerank_designation.cleared",
+                            "organization.embedding_designation.set",
+                            "organization.embedding_designation.cleared",
+                            "organization.quota_limits.updated",
+                            "bot.created",
+                            "bot.updated",
+                            "bot.deleted",
+                            "bot.delete.refused",
+                            "bot.playground_session.minted",
+                            "bot.domain.created",
+                            "bot.domain.status_changed",
+                            "bot.domain.deleted",
+                            "bot.starter_question.created",
+                            "bot.starter_question.updated",
+                            "bot.starter_question.deleted",
+                            "source.created",
+                            "source.updated",
+                            "source.deleted",
+                            "source.disabled",
+                            "source.enabled",
+                            "source.reprocess.requested",
+                            "source.upload.accepted",
+                            "source.upload.rejected",
+                            "source.version.activated",
+                            "source.version.retired",
+                            "bot.source_assignment.created",
+                            "bot.source_assignment.deleted"
+                        ],
+                        "description": "What happened, from a CLOSED vocabulary: the writer refuses an operation that is not in its map, because an unmapped name means nobody has decided what that event may record. The same set is accepted by `?operation=`."
+                    },
+                    "outcome": {
+                        "type": "string",
+                        "enum": [
+                            "success",
+                            "failure"
+                        ],
+                        "description": "DERIVED FROM THE OPERATION and never submitted, so no row can claim `auth.login.failed` with `outcome = success`. Two operations rather than one with a varying outcome is the pattern this trail uses wherever both endings are auditable."
+                    },
+                    "actor_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "ULID of the member who acted. NULL for an unauthenticated event — a failed login — and for anything the platform did with no person behind it. There is no foreign key: the actor may be deleted and the row must remain, which is what \"append-only and outlives the record it describes\" means."
+                    },
+                    "subject_type": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "What was acted ON, as the fully-qualified model class — for example `App\\Models\\Bot`. THE SET IS OPEN, unlike `operation`: auditing a new kind of record needs no schema change, so a client should treat this as an opaque discriminator and read values off rows rather than composing them. Null exactly when `subject_id` is null; the database refuses a half-specified pair."
+                    },
+                    "subject_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "ULID of the record acted on. Pair it with `subject_type` in `?subject_type=&subject_id=` to get that record's own trail."
+                    },
+                    "ip_address": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "Where the request came from, as an IPv4 or IPv6 literal. Stored as a network type rather than text so a trail can be read with network predicates. PII ABOUT A COLLEAGUE, which is part of why this surface is withheld from the reporting and ingestion roles. Null for anything raised by a queued job or a console command."
+                    },
+                    "user_agent": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "The client's declared user agent, truncated at 512 characters. ATTACKER-CONTROLLED FREE TEXT on the unauthenticated paths: escape it at render."
+                    },
+                    "request_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "The bridge to telemetry, and the only one. This row and the log lines for the same request carry the same value, which is what lets an investigator move between two stores that must never be one store."
+                    },
+                    "details": {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "description": "What the operation recorded, ALLOW-LISTED PER OPERATION AT WRITE TIME. The key set differs by operation and is not enumerated here — read defensively. NO CREDENTIAL, TOKEN OR KEY FRAGMENT CAN APPEAR: an unlisted field never reaches the table, and every bearer value is admitted only as `<name>_fingerprint`, a keyed HMAC that answers \"was THIS the value\" without being derivable back to it. `{}` when the operation records nothing beyond its columns, which is the honest shape for something like a logout."
+                    },
+                    "created_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "When the event was recorded. Also the PARTITION KEY, which is why the default sort and every index on this table are built around it."
                     }
                 }
             },
@@ -7248,6 +9673,296 @@
                     }
                 }
             },
+            "ChatSessionResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "A minted chat-session token. THIS BODY CONTAINS A LIVE CREDENTIAL: never log it, never put it in a URL or a fragment, never store it in localStorage. It belongs in memory and in an `Authorization` header.",
+                "required": [
+                    "token",
+                    "expires_in"
+                ],
+                "properties": {
+                    "token": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Opaque bearer, prefixed `kbw_`. It carries no readable claims — everything about the session is server-side under a key this value derives. It grants exactly three abilities against exactly one bot and can never carry an admin one: it is minted with no human authentication at all, so anyone who can put the loader on an allow-listed page gets one."
+                    },
+                    "expires_in": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Seconds from now. A DURATION and not an instant, because an absolute expiry would be compared against a client clock that may be badly wrong. The TTL slides on every authorized request, so this is the floor for an idle frame rather than a promise about an active conversation."
+                    }
+                }
+            },
+            "ConversationCollectionResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One page of an organization's conversation threads, with the pagination and applied-query state beside it. `meta.filter` is always null here: this endpoint accepts no free-text term, and the key remains because `meta` is one shared component across every list in this API.",
+                "required": [
+                    "conversations",
+                    "meta"
+                ],
+                "properties": {
+                    "conversations": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/ConversationResource"
+                        },
+                        "description": "The threads on this page, in the applied order — by default the most recently active first, which is what a reviewer opens the screen to see. EVERY status is included, including `expired` threads whose retention sweep has marked them and threads still in flight. The set is scoped to the organization in the path and to nothing else."
+                    },
+                    "meta": {
+                        "$ref": "#/components/schemas/ListMetaResource",
+                        "description": "Pagination and applied-query state for this page."
+                    }
+                }
+            },
+            "ConversationResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One conversation thread — the header, without its messages. A thread belongs to exactly one bot and to exactly one participant, who is either an authenticated user or an anonymous session and never both.",
+                "required": [
+                    "id",
+                    "bot_id",
+                    "channel",
+                    "status",
+                    "user_id",
+                    "anonymous_session_id",
+                    "locale",
+                    "consent_required",
+                    "consent_granted_at",
+                    "consent_text_snapshot",
+                    "started_at",
+                    "last_activity_at",
+                    "retention_expires_at",
+                    "updated_at"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "ULID of the conversation."
+                    },
+                    "bot_id": {
+                        "type": "string",
+                        "description": "ULID of the bot that answered. NEVER NULL and never nulled: the foreign key is `ON DELETE RESTRICT`, so a bot that has held a conversation cannot be deleted and is ARCHIVED instead — which is what keeps a transcript interpretable after the bot is withdrawn."
+                    },
+                    "channel": {
+                        "type": "string",
+                        "enum": [
+                            "hosted",
+                            "embedded",
+                            "mobile",
+                            "playground",
+                            "api"
+                        ],
+                        "description": "Which surface the visitor used. Derived server-side from how the caller authenticated, never from a request field — a body field naming the channel would let a widget claim `playground`, which is the actor type that unlocks retrieval diagnostics on the relay."
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "active",
+                            "ended",
+                            "expired"
+                        ],
+                        "description": "Lifecycle state of the thread."
+                    },
+                    "user_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "ULID of the authenticated participant, or null for an anonymous visitor. EXACTLY ONE of this and `anonymous_session_id` is populated: a signed-in visitor on hosted chat also carries a session cookie, so \"both\" is reachable and is the state that would make one person count twice in the unique-session figure."
+                    },
+                    "anonymous_session_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "The anonymous visitor's session handle, or null for an authenticated participant. IT IS NOT A CREDENTIAL: what is stored is a one-way digest of the session bearer — derivable from the token, useless without it — and the token itself never reaches a column. It is the value `?session_id=` filters on."
+                    },
+                    "locale": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "BCP-47 tag the client declared. Null means \"we were not told\", which is a different fact from `en`."
+                    },
+                    "consent_required": {
+                        "type": "boolean",
+                        "description": "Whether this bot was collecting end-user data at the moment the thread opened."
+                    },
+                    "consent_granted_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "When the visitor agreed. Null when consent was never asked for; it can never be set while `consent_required` is false."
+                    },
+                    "consent_text_snapshot": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "The exact wording the visitor was shown, copied at the moment they were shown it. Present whenever `consent_required` is true. The bot's live consent text is editable, so recording only the boolean would make the record mean \"they agreed to whatever it says today\". OPERATOR-AUTHORED TEXT: escape it at render."
+                    },
+                    "started_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "When the thread was opened. THIS IS THE CREATION TIME — there is no separate `created_at` on this record, because two columns holding one fact is how they end up disagreeing."
+                    },
+                    "last_activity_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "When a turn was last TAKEN. A different fact from `updated_at`, which also moves on a status flip or a consent record; this is the column the idle sweeper and the list's default sort read, and it is never before `started_at`."
+                    },
+                    "retention_expires_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "When the retention sweeper may remove this thread and everything under it. Resolved from the bot's retention setting at CREATION, so a later edit cannot retroactively shorten or extend a conversation somebody has already had. Null means the organization's own policy decides."
+                    },
+                    "updated_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "ISO 8601 with offset. Moves on any column change."
+                    }
+                }
+            },
+            "ConversationTranscriptResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One conversation and everything that was said in it: every field of the list row, plus the messages with their citations, retrieval traces, feedback and provider attempts. EVERYTHING BELOW THE HEADER IS UNTRUSTED TEXT — visitor questions, model output and quoted document passages — and renders through the same sanitizer as the widget's, because an administrator reads it in a session with real privileges.",
+                "required": [
+                    "id",
+                    "bot_id",
+                    "channel",
+                    "status",
+                    "user_id",
+                    "anonymous_session_id",
+                    "locale",
+                    "consent_required",
+                    "consent_granted_at",
+                    "consent_text_snapshot",
+                    "started_at",
+                    "last_activity_at",
+                    "retention_expires_at",
+                    "updated_at",
+                    "messages",
+                    "messages_truncated"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "ULID of the conversation."
+                    },
+                    "bot_id": {
+                        "type": "string",
+                        "description": "ULID of the bot that answered. NEVER NULL and never nulled: the foreign key is `ON DELETE RESTRICT`, so a bot that has held a conversation cannot be deleted and is ARCHIVED instead — which is what keeps a transcript interpretable after the bot is withdrawn."
+                    },
+                    "channel": {
+                        "type": "string",
+                        "enum": [
+                            "hosted",
+                            "embedded",
+                            "mobile",
+                            "playground",
+                            "api"
+                        ],
+                        "description": "Which surface the visitor used. Derived server-side from how the caller authenticated, never from a request field — a body field naming the channel would let a widget claim `playground`, which is the actor type that unlocks retrieval diagnostics on the relay."
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "active",
+                            "ended",
+                            "expired"
+                        ],
+                        "description": "Lifecycle state of the thread."
+                    },
+                    "user_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "ULID of the authenticated participant, or null for an anonymous visitor. EXACTLY ONE of this and `anonymous_session_id` is populated: a signed-in visitor on hosted chat also carries a session cookie, so \"both\" is reachable and is the state that would make one person count twice in the unique-session figure."
+                    },
+                    "anonymous_session_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "The anonymous visitor's session handle, or null for an authenticated participant. IT IS NOT A CREDENTIAL: what is stored is a one-way digest of the session bearer — derivable from the token, useless without it — and the token itself never reaches a column. It is the value `?session_id=` filters on."
+                    },
+                    "locale": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "BCP-47 tag the client declared. Null means \"we were not told\", which is a different fact from `en`."
+                    },
+                    "consent_required": {
+                        "type": "boolean",
+                        "description": "Whether this bot was collecting end-user data at the moment the thread opened."
+                    },
+                    "consent_granted_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "When the visitor agreed. Null when consent was never asked for; it can never be set while `consent_required` is false."
+                    },
+                    "consent_text_snapshot": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "The exact wording the visitor was shown, copied at the moment they were shown it. Present whenever `consent_required` is true. The bot's live consent text is editable, so recording only the boolean would make the record mean \"they agreed to whatever it says today\". OPERATOR-AUTHORED TEXT: escape it at render."
+                    },
+                    "started_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "When the thread was opened. THIS IS THE CREATION TIME — there is no separate `created_at` on this record, because two columns holding one fact is how they end up disagreeing."
+                    },
+                    "last_activity_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "When a turn was last TAKEN. A different fact from `updated_at`, which also moves on a status flip or a consent record; this is the column the idle sweeper and the list's default sort read, and it is never before `started_at`."
+                    },
+                    "retention_expires_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "When the retention sweeper may remove this thread and everything under it. Resolved from the bot's retention setting at CREATION, so a later edit cannot retroactively shorten or extend a conversation somebody has already had. Null means the organization's own policy decides."
+                    },
+                    "updated_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "ISO 8601 with offset. Moves on any column change."
+                    },
+                    "messages": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/TranscriptMessageResource"
+                        },
+                        "description": "The thread, oldest first, in a total order — `(created_at, id)`. The tie-break is not decoration: a user turn and the pending assistant row it opens are written in one transaction and can share a microsecond, so without it a second read may legally return the answer before the question. EVERY status is included, including turns still in flight."
+                    },
+                    "messages_truncated": {
+                        "type": "boolean",
+                        "description": "True when the thread is longer than one transcript read returns and the tail was left unread. It is published rather than inferred from the array length, because a client cannot tell a capped read from a conversation that happened to be exactly that long — and a transcript that ends mid-argument reads as a conversation that ended there."
+                    }
+                }
+            },
             "EmbeddingCandidate": {
                 "type": "object",
                 "additionalProperties": false,
@@ -7721,6 +10436,167 @@
                     }
                 }
             },
+            "ProviderCallResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One attempt against a provider for one turn. A turn normally has exactly one; it has more when a fallback was reached, and the extra rows are the record of what was tried first and why it was not enough.",
+                "required": [
+                    "id",
+                    "provider_connection_id",
+                    "model_id",
+                    "provider_request_id",
+                    "status",
+                    "error_class",
+                    "input_tokens",
+                    "cache_read_tokens",
+                    "cache_write_tokens",
+                    "output_tokens",
+                    "reasoning_tokens",
+                    "estimated_cost",
+                    "estimated_cost_currency",
+                    "first_token_latency_ms",
+                    "total_latency_ms",
+                    "fallback_metadata",
+                    "created_at"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "ULID of the attempt."
+                    },
+                    "provider_connection_id": {
+                        "type": "string",
+                        "description": "Which of this organization's provider connections was billed. A REFERENCE and never a credential: the key behind the connection never leaves the vault, and no endpoint in this API can read it back."
+                    },
+                    "model_id": {
+                        "type": "string",
+                        "description": "Which `provider_models` row answered. A reference to a row this organization owns; the composite foreign key makes naming another tenant's model a database error rather than a mis-attributed cost."
+                    },
+                    "provider_request_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "The vendor's own identifier for the request, echoed from their response. The one field here that lets somebody else reproduce a failure — it is what a support ticket to the provider quotes. Null when the vendor sent none, which a failed connection usually does."
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "pending",
+                            "succeeded",
+                            "failed",
+                            "cancelled"
+                        ],
+                        "description": "`cancelled` is a NORMAL outcome — a closed tab — and is not a failure: the tokens generated before it were still billed, and counting it as a provider error makes the error-rate figure unusable."
+                    },
+                    "error_class": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "enum": [
+                            "validation",
+                            "authentication",
+                            "authorization",
+                            "tenant_quota",
+                            "rate_limit",
+                            "provider_auth",
+                            "provider_rate_limit",
+                            "provider_billing",
+                            "provider_temporary",
+                            "provider_permanent_request",
+                            "retrieval",
+                            "parsing",
+                            "ocr",
+                            "crawl",
+                            "vector_indexing",
+                            "storage",
+                            "internal_dependency",
+                            "user_cancellation",
+                            null
+                        ],
+                        "description": "The normalized class from the platform's taxonomy, never the provider's own message. Always present on a `failed` attempt and always absent on a `succeeded` one; `cancelled` and `pending` are deliberately free, because a caller going away is not a fault to attribute."
+                    },
+                    "input_tokens": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ],
+                        "minimum": 0,
+                        "description": "TOTAL input tokens, cache included — the two cache columns are a breakdown of this number and never an addition to it. Null means the provider told us nothing, which is different from zero."
+                    },
+                    "cache_read_tokens": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ],
+                        "minimum": 0,
+                        "description": "Part of `input_tokens` served from the provider's prompt cache."
+                    },
+                    "cache_write_tokens": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ],
+                        "minimum": 0,
+                        "description": "Part of `input_tokens` written into the provider's prompt cache."
+                    },
+                    "output_tokens": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ],
+                        "minimum": 0
+                    },
+                    "reasoning_tokens": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ],
+                        "minimum": 0,
+                        "description": "Tokens spent on hidden reasoning, where the provider reports them separately."
+                    },
+                    "estimated_cost": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "A FIXED-SCALE DECIMAL AS A STRING — `numeric(16, 8)` does not survive a round trip through a double, and an error in the eighth decimal per call is an error in the second by the end of a month. Never parse it into a float to add it up."
+                    },
+                    "estimated_cost_currency": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "ISO 4217. Present whenever `estimated_cost` is: a cost with no currency is a number nobody may add to another number."
+                    },
+                    "first_token_latency_ms": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ],
+                        "minimum": 0,
+                        "description": "Time to the first streamed token — the latency a user feels. Null on a non-streaming call and on one that never produced a token."
+                    },
+                    "total_latency_ms": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ],
+                        "minimum": 0,
+                        "description": "Wall clock for the whole attempt. Never less than `first_token_latency_ms` when both are present."
+                    },
+                    "fallback_metadata": {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "description": "EMPTY `{}` ON A PRIMARY ATTEMPT. On a fallback it carries the attempt ordinal, the call and model that were tried first, and the error class that made them ineligible — which is the whole reason the column exists, because a fallback row with an empty object is indistinguishable from a first attempt."
+                    },
+                    "created_at": {
+                        "type": "string",
+                        "format": "date-time"
+                    }
+                }
+            },
             "ProviderConnectionCollectionResource": {
                 "type": "object",
                 "additionalProperties": false,
@@ -7892,6 +10768,449 @@
                         ],
                         "format": "date-time",
                         "description": "ISO 8601 with offset. Null only for a record whose timestamp was never set."
+                    }
+                }
+            },
+            "QuotaMetricUsage": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One metric: how much is used, what the ceiling is, and which store answered.",
+                "required": [
+                    "metric",
+                    "used",
+                    "limit",
+                    "remaining",
+                    "exceeded",
+                    "source"
+                ],
+                "properties": {
+                    "metric": {
+                        "type": "string",
+                        "enum": [
+                            "storage_bytes",
+                            "bots",
+                            "users",
+                            "monthly_tokens"
+                        ],
+                        "description": "Which allowance. `storage_bytes` and `monthly_tokens` accumulate over a period and are summed from the usage ledger; `bots` and `users` are point-in-time counts that go DOWN when a row is deleted."
+                    },
+                    "used": {
+                        "type": "integer",
+                        "description": "Consumption in the metric's current period. `monthly_tokens` resets on the first of the calendar month, UTC; the other three never reset."
+                    },
+                    "limit": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ],
+                        "description": "The ceiling. NULL MEANS UNLIMITED and 0 MEANS NOTHING IS ALLOWED — they are opposite states and both render as \"no number\" on a form, so do not conflate them."
+                    },
+                    "remaining": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ],
+                        "description": "limit − used, floored at 0, or null when unlimited. An over-quota organization has zero left, never less."
+                    },
+                    "exceeded": {
+                        "type": "boolean",
+                        "description": "True when used has reached the ceiling. Always false for an unlimited metric, whatever `used` says."
+                    },
+                    "source": {
+                        "type": "string",
+                        "enum": [
+                            "database",
+                            "cache"
+                        ],
+                        "description": "Which store produced `used`. This endpoint always reads PostgreSQL, so a healthy response is `database` on every row; a `cache` value would mean the primary read was skipped and the number is a lower bound."
+                    }
+                }
+            },
+            "QuotaResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Every quota metric for one organization. The list is TOTAL — one entry per metric, always, in enum order — so a client rendering four rows never has to decide what a missing one means.",
+                "required": [
+                    "metrics"
+                ],
+                "properties": {
+                    "metrics": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/QuotaMetricUsage"
+                        },
+                        "description": "One entry per QuotaMetric case, in declaration order."
+                    }
+                }
+            },
+            "RerankConfigurationResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Which connection reranks this organization's retrieval candidates. Reranking is OPTIONAL: no designation is a supported mode in which stage 11 is skipped and candidates are served in fused order, unlike the embedding designation, whose absence blocks ingestion entirely.",
+                "required": [
+                    "designated",
+                    "degrades_to_fused_order"
+                ],
+                "properties": {
+                    "designated": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/RerankDesignation"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "description": "The pair this organization has stored, or null when it has designated nothing. Null is a CHOICE here — there is no resolve-by-rule for reranking — so it means \"do not rerank\" and not \"somebody else decides\"."
+                    },
+                    "degrades_to_fused_order": {
+                        "type": "boolean",
+                        "description": "True exactly when `designated` is null, named for what the operator sees. ITS TRUTH IS ASYMMETRIC: true is a certainty (with no model there is nothing for the rerank stage to call), while false says only that a pair is stored — whether the data plane can use it is decided per query and reported as `rerank_skip_reason` on the retrieval trace."
+                    }
+                }
+            },
+            "RerankDesignation": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "The (connection, model) pair this organization has STORED as its reranker, read from `organizations.rerank_connection_id` and `organizations.rerank_model`. A PAIR and not a bare connection id: one connection can carry several ranking models, and their scores are different distributions with different thresholds.",
+                "required": [
+                    "connection_id",
+                    "model"
+                ],
+                "properties": {
+                    "connection_id": {
+                        "type": "string",
+                        "description": "ULID of the designated provider connection, whose credential pays for the rerank call. It may name a connection this platform cannot rerank with — this is what was stored, not a verdict on it."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "The official vendor model id of the ranking model, verbatim. It must be a row in this connection's catalogue; whether that row can actually rerank is decided by the data plane at query time."
+                    }
+                }
+            },
+            "RetrievalTraceResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "The retrieval diagnostics behind one answer. At most one per message, written in the same transaction as the message it explains, so it can neither outlive nor precede it.",
+                "required": [
+                    "original_query",
+                    "rewritten_query",
+                    "filters",
+                    "retrieval_configuration_version",
+                    "candidate_summaries",
+                    "selected_evidence",
+                    "insufficient_evidence",
+                    "timing_breakdown",
+                    "created_at"
+                ],
+                "properties": {
+                    "original_query": {
+                        "type": "string",
+                        "description": "What the visitor actually typed. UNTRUSTED END-USER TEXT."
+                    },
+                    "rewritten_query": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "The query the retriever ran, when it differed. NULL means the rewriting stage left the query alone, which is a real outcome and is different from a rewrite that happened to produce the same string. MODEL OUTPUT: untrusted."
+                    },
+                    "filters": {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "description": "The RESOLVED tenant filter this query ran under — real organization, real bot, real active-version ids. All four mandatory terms are always named (`org_id`, `bot_ids`, `source_status`, `source_version_id`); the column's CHECK refuses a row that omits one. It is the record that lets an incident bound which past answers were affected — and it proves the trace RECORDED four terms, not that the query carried them."
+                    },
+                    "retrieval_configuration_version": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "The bot's retrieval configuration version at query time, copied here so a later edit cannot rewrite the explanation of an answer that has already been given. Without it the trace cannot be replayed, which is what the evaluation regression gate needs."
+                    },
+                    "candidate_summaries": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": true
+                        },
+                        "description": "What retrieval returned, IN RANKED ORDER — the order IS the ranking, which is why it is an array and not an object. Empty on a query that matched nothing. CONTAINS TENANT SOURCE TEXT: untrusted."
+                    },
+                    "selected_evidence": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": true
+                        },
+                        "description": "The subset that survived the threshold and the packer and was actually shown to the model, in packed order — the same order the citation labels are assigned in. Always empty when `insufficient_evidence` is true; the column's CHECK enforces it, because a refusal made while holding evidence is a stored contradiction."
+                    },
+                    "insufficient_evidence": {
+                        "type": "boolean",
+                        "description": "Whether the bot declined to answer for want of evidence. This is a NORMAL outcome and not an error — it is the refusal behaviour working — and it is the figure §8.23 counts."
+                    },
+                    "timing_breakdown": {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "description": "Per-stage milliseconds. THE KEY SET IS THE DATA PLANE'S and is not enumerated on this side, so read defensively: a stage that did not run is an absent KEY rather than a zero."
+                    },
+                    "created_at": {
+                        "type": "string",
+                        "format": "date-time"
+                    }
+                }
+            },
+            "RuntimeBotResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "The public projection of a bot, as an anonymous visitor sees it. It carries no configuration: no provider connection, no model, no retrieval parameters, no limits, and not the internal ULID.",
+                "required": [
+                    "public_bot_id",
+                    "name",
+                    "description",
+                    "welcome_message",
+                    "placeholder_text",
+                    "theme",
+                    "consent_required",
+                    "consent_text",
+                    "starter_questions"
+                ],
+                "properties": {
+                    "public_bot_id": {
+                        "type": "string",
+                        "description": "The public identifier from the embed snippet. It identifies the bot and authorizes nothing: whether the bot answers is the AND of its status, its access mode and the origin allow-list."
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "TENANT-AUTHORED TEXT. Escape at render, in every client."
+                    },
+                    "description": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "Tenant-authored. Null means unset, never an empty string."
+                    },
+                    "welcome_message": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "Shown before the first question. Null means the client renders its own default, which is a real state and not a missing one."
+                    },
+                    "placeholder_text": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "The composer placeholder. Null means the client default."
+                    },
+                    "theme": {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "description": "The bot palette, from a closed key set the database enforces. Empty object when the tenant set none."
+                    },
+                    "consent_required": {
+                        "type": "boolean",
+                        "description": "True only when the bot collects end-user data AND has consent text to show. A flag with no text is not a consent record, so the two are reported as one fact."
+                    },
+                    "consent_text": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "Exactly what must be shown. It is snapshotted onto the conversation at creation, so a later edit cannot rewrite what a visitor agreed to."
+                    },
+                    "starter_questions": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Suggested chips, in the order the operator set. Tenant-authored; escape at render."
+                    }
+                }
+            },
+            "RuntimeCitationCollectionResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "The evidence behind one answer, in label order. Every row was written under the turn's own organization and active-version scope, so a citation can never name evidence the bot was not permitted to search.",
+                "required": [
+                    "citations"
+                ],
+                "properties": {
+                    "citations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                                "label",
+                                "chunk_id",
+                                "title",
+                                "location",
+                                "excerpt"
+                            ],
+                            "properties": {
+                                "label": {
+                                    "type": "string",
+                                    "description": "The marker in the answer text — `1`, `2`. Unique within the message, and 1-based in PACKED order, which is the order the model read the evidence in and is NOT reranked order. Assigned before generation from retrieved evidence, never parsed out of model output."
+                                },
+                                "chunk_id": {
+                                    "type": [
+                                        "string",
+                                        "null"
+                                    ],
+                                    "description": "Null once the chunk has been purged. The footnote survives deliberately: it is the record of what was shown, and losing it would rewrite history."
+                                },
+                                "title": {
+                                    "type": "string",
+                                    "description": "The chunk's heading path, its URL, or a fixed fallback — in that order. It is NOT the source's name: the retrieval payload carries no source title, and this is the closest true statement the index can make about where the sentence came from."
+                                },
+                                "location": {
+                                    "type": "object",
+                                    "additionalProperties": true,
+                                    "description": "Whichever locators the chunk had — page, slide, sheet, row range, url, anchor, heading path. THE KEY SET DIFFERS BY SOURCE TYPE and an absent locator is an absent KEY, never a null: a null `page` on a slide is indistinguishable from page zero."
+                                },
+                                "excerpt": {
+                                    "type": "string",
+                                    "description": "The passage the model read. UPLOADED OR CRAWLED CONTENT, which is hostile data permanently — render it through the same sanitizer as model output, on every surface including the admin console."
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "RuntimeConversationResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One conversation, as its own participant sees it. Neither participant column is published: the session id is a component of a bearer credential, and the user id would confirm an account exists.",
+                "required": [
+                    "id",
+                    "status",
+                    "locale",
+                    "consent_required",
+                    "consent_text",
+                    "consent_granted_at",
+                    "started_at",
+                    "last_activity_at"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "ULID. It addresses the conversation on the message and transcript routes, and it authorizes nothing on its own — every read re-checks that the calling session owns it."
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "active",
+                            "ended",
+                            "expired"
+                        ],
+                        "description": "Only `active` accepts messages. `ended` and `expired` are refusals with a reason rather than 404s: the caller owns the row and is entitled to be told it is over."
+                    },
+                    "locale": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "BCP-47, as the client reported it. Null means \"we were not told\", which is different from `en`."
+                    },
+                    "consent_required": {
+                        "type": "boolean"
+                    },
+                    "consent_text": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "The wording shown at creation, snapshotted. A later edit to the bot cannot change it."
+                    },
+                    "consent_granted_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "Null when consent was never asked for or not yet given."
+                    },
+                    "started_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time"
+                    },
+                    "last_activity_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "Moves when a message is SENT, not only when a turn settles, so an abandoned mid-answer conversation does not age as though nobody had touched it."
+                    }
+                }
+            },
+            "RuntimeMessageCollectionResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "The settled entries of one conversation, oldest first. Entries still in flight are omitted: a `pending` row has no content and would render as a bubble that never fills, because this endpoint is a poll and not a stream.",
+                "required": [
+                    "messages"
+                ],
+                "properties": {
+                    "messages": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/RuntimeMessageResource"
+                        },
+                        "description": "Ordered by creation, then by id — deterministic, so two reads of an unchanged conversation are byte-identical."
+                    }
+                }
+            },
+            "RuntimeMessageResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One transcript entry. Carries no provider call, no retry parent and no cost data — those stop at Laravel.",
+                "required": [
+                    "id",
+                    "role",
+                    "content",
+                    "status",
+                    "created_at"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "ULID. For an assistant turn it is the same id the `message.start` and `message.complete` SSE frames carried, so a streamed answer and its re-read entry are the same row."
+                    },
+                    "role": {
+                        "type": "string",
+                        "enum": [
+                            "user",
+                            "assistant",
+                            "system"
+                        ]
+                    },
+                    "content": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "MODEL OUTPUT, downstream of retrieved source content, which is attacker-controlled. Render it through the shared sanitizer — the same one on every surface including the admin console — and never auto-load an image it names. Null when the turn produced no text; never an empty string."
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "pending",
+                            "streaming",
+                            "complete",
+                            "failed",
+                            "cancelled"
+                        ],
+                        "description": "Only settled entries appear in a transcript. `cancelled` is a normal outcome — a closed tab — and is not an error; the tokens generated before it were still billed."
+                    },
+                    "created_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time"
                     }
                 }
             },
@@ -8492,6 +11811,214 @@
                         "type": "integer",
                         "minimum": 1,
                         "description": "How many of this source's LIVE versions reported this code. It is a count of VERSIONS and not of occurrences — how many pages inside a version were affected is inside the value this shape does not read — so for a single-file source it is always 1 and for a crawl it says how many pages carry the problem."
+                    }
+                }
+            },
+            "TranscriptCitationResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One footnote behind one answer, as an admin reviewer sees it. Every field but `chunk_id` is denormalized onto the citation row at write time, so a transcript stays readable after the source it cited has been purged.",
+                "required": [
+                    "label",
+                    "chunk_id",
+                    "title",
+                    "location",
+                    "excerpt",
+                    "created_at"
+                ],
+                "properties": {
+                    "label": {
+                        "type": "string",
+                        "description": "The marker in the answer text — `1`, `2`. Unique within the message, and 1-based in PACKED order, which is the order the model read the evidence in and is NOT reranked order. Assigned before generation from retrieved evidence, never parsed out of model output."
+                    },
+                    "chunk_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "The retrievable chunk this footnote pointed at, or null once that chunk has been purged. The footnote survives deliberately: it is the record of what was shown, and losing it would rewrite history."
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "The chunk's heading path, its URL, or a fixed fallback — in that order, as it was when the answer was given. It is NOT the source's name: the retrieval payload carries no source title, and this is the closest true statement the index can make about where the sentence came from."
+                    },
+                    "location": {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "description": "Whichever locators the chunk had — page, slide, sheet, row range, url, anchor, heading path. THE KEY SET DIFFERS BY SOURCE TYPE and an absent locator is an absent KEY, never a null: a null `page` on a slide is indistinguishable from page zero."
+                    },
+                    "excerpt": {
+                        "type": "string",
+                        "description": "The passage the model read. UPLOADED OR CRAWLED CONTENT, which is hostile data permanently — render it through the same sanitizer as model output, on every surface including the admin console, and never auto-load an image it names."
+                    },
+                    "created_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "When the footnote was persisted, which is when the turn finalized rather than when the evidence was retrieved."
+                    }
+                }
+            },
+            "TranscriptFeedbackResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One verdict on one answer. At most one per submitter per message — a visitor who changes their mind UPDATES rather than appending, so a thumbs-down that became a thumbs-up is one row and the satisfaction figure counts one opinion.",
+                "required": [
+                    "rating",
+                    "comment",
+                    "submitted_by_user_id",
+                    "submitted_by_session",
+                    "created_at",
+                    "updated_at"
+                ],
+                "properties": {
+                    "rating": {
+                        "type": "string",
+                        "enum": [
+                            "positive",
+                            "negative"
+                        ]
+                    },
+                    "comment": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "Free text from the submitter, or null — most thumbs carry none, and an empty string is refused by the column so there is only one spelling of \"no comment\". UNTRUSTED END-USER TEXT: escape it at render, through the same sanitizer as model output."
+                    },
+                    "submitted_by_user_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "ULID of the member who rated the answer — an administrator or analyst reviewing a transcript — or null when the verdict came from the visitor. EXACTLY ONE of this and `submitted_by_session` is populated."
+                    },
+                    "submitted_by_session": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "The anonymous visitor's session handle, or null for a member's verdict. Not a credential: a one-way digest of the session bearer, the same value `conversations.anonymous_session_id` carries."
+                    },
+                    "created_at": {
+                        "type": "string",
+                        "format": "date-time"
+                    },
+                    "updated_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "Later than `created_at` when the submitter changed their mind, which is an UPDATE rather than a second row."
+                    }
+                }
+            },
+            "TranscriptMessageResource": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "One transcript entry with its citations, its retrieval trace, its feedback and every provider attempt behind it. Wider than the runtime's message shape in three directions — cost, the retry graph, and the diagnostics — because the audience is the party that is billed for the call and accountable for the answer.",
+                "required": [
+                    "id",
+                    "role",
+                    "content",
+                    "status",
+                    "parent_message_id",
+                    "settling_provider_call_id",
+                    "created_at",
+                    "updated_at",
+                    "citations",
+                    "retrieval_trace",
+                    "feedback",
+                    "provider_calls"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "ULID. For an assistant turn it is the same id the `message.start` and `message.complete` SSE frames carried, so a streamed answer and its stored entry are the same row."
+                    },
+                    "role": {
+                        "type": "string",
+                        "enum": [
+                            "user",
+                            "assistant",
+                            "system"
+                        ]
+                    },
+                    "content": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "MODEL OUTPUT, downstream of retrieved source content, which is attacker-controlled. Render it through the shared sanitizer — the same one on every surface INCLUDING THIS ONE — and never auto-load an image it names. Null when the turn has not produced text: a `pending` turn, or one that failed before saying anything. Never an empty string."
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "pending",
+                            "streaming",
+                            "complete",
+                            "failed",
+                            "cancelled"
+                        ],
+                        "description": "EVERY status appears on this surface, unlike the runtime transcript: `pending` and `streaming` are turns still in flight, and a stuck one is what an operator opens this screen to find. `cancelled` is a normal outcome — a closed tab — and the tokens generated before it were still billed."
+                    },
+                    "parent_message_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "Set when this turn is a RETRY of an earlier one, and null otherwise. It means retry and nothing else — it is NOT \"the question this answers\", which is deliberately not a column: overloading it would make a resend indistinguishable from a retry in every later read. The parent is always in this same conversation, by composite foreign key."
+                    },
+                    "settling_provider_call_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "Which of the attempts in `provider_calls` actually settled this turn — the last one, when a fallback was reached. Null on a user or system turn, which cost nothing, and on an assistant turn that never reached a provider."
+                    },
+                    "created_at": {
+                        "type": "string",
+                        "format": "date-time"
+                    },
+                    "updated_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "description": "An assistant row is written three times in a normal streaming turn — pending, streaming, settled — so this is \"when the answer finished\" and `created_at` is \"when the turn opened\". The gap between them is the wall clock the visitor waited."
+                    },
+                    "citations": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/TranscriptCitationResource"
+                        },
+                        "description": "The evidence behind this answer, in label order. Empty for a user turn, for a system notice, and for an answer given with no retrieval."
+                    },
+                    "retrieval_trace": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/RetrievalTraceResource"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "description": "Why this answer said what it said. At most one per message. Null on a user turn, a system notice, and any assistant turn whose retrieval never ran — a turn that failed before the pipeline reached the trace-writing stage has none, which is itself diagnostic."
+                    },
+                    "feedback": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/TranscriptFeedbackResource"
+                        },
+                        "description": "Verdicts left on this answer, oldest first. At most one per submitter; a thread can carry the visitor's thumb and a reviewer's separately."
+                    },
+                    "provider_calls": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/ProviderCallResource"
+                        },
+                        "description": "Every attempt behind this turn, oldest first — one on a normal answer, more when a fallback was reached. This is where the turn's latency, its token counts and its fallback events live. Empty for a user turn and for a system notice, both of which cost nothing."
                     }
                 }
             },

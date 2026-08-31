@@ -202,3 +202,23 @@ export type {
  */
 export { uploadDefaults, uploadSchema } from './upload.js';
 export type { OrgUploadLimits, UploadIn, UploadOut, UploadSchema } from './upload.js';
+
+/**
+ * The quota ceilings. `QUOTA_METRICS` is the ninth runtime value in this barrel that is not a schema
+ * or a defaults factory, and it is here for the identical reason as the eight before it:
+ * `src/resources/quotas.ts` declares `QuotaMetricName` as a UNION with zero runtime values, because
+ * that module is re-exported from the ROOT entry and budgeted at <=1 kB brotli inside apps/widget's
+ * app shell. The settings screen renders one row per metric in a fixed order and needs a list it can
+ * iterate; the resource type needs a union it can narrow.
+ *
+ * `quotaFieldFor` is the tenth, and it is a FUNCTION rather than a second tuple on purpose: the four
+ * request keys are the four metric names plus a suffix, and spelling them out twice is how a fifth
+ * metric lands with three of its four spellings updated.
+ */
+export {
+  QUOTA_METRICS,
+  quotaFieldFor,
+  quotaLimitsFormDefaults,
+  quotaLimitsSchema,
+} from './quota-limits.js';
+export type { QuotaLimitsIn, QuotaLimitsOut } from './quota-limits.js';

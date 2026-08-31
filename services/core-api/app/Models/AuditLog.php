@@ -38,15 +38,34 @@ use LogicException;
  * predicate is FALSE for a NULL — so with the scope attached, every org-less row becomes
  * unreachable through Eloquent by construction, from every surface, forever, with no error. On top
  * of that the scope fails closed with no bound TenantContext (OrganizationScope:53-58) and these
- * rows are written on the guest path where no context exists — inserts are unaffected, but any
- * future read-back would return nothing and render as "no audit history", which is the most
+ * rows are written on the guest path where no context exists — inserts are unaffected, but a
+ * read-back would return nothing and render as "no audit history", which is the most
  * plausible-looking wrong answer this table could give. Safety comes from the other direction, the
  * same one OrganizationUser relies on: every org-scoped read of this table goes through a repository
  * method that takes `organization_id` as a required positional argument.
  *
- * CONSEQUENCE TO CARRY FORWARD: the reflection test sketched in tests/Arch/DoctrineTest.php ("every
- * org-owned model carries the organization scope") will fail on this class the day it is enabled.
- * It needs an explicit exemption there naming this docblock, exactly as OrganizationUser does.
+ * THAT PARAGRAPH USED TO SAY "any FUTURE read-back", AND THE FUTURE ARRIVED IN PHASE 6a.
+ * AuditLogRepositoryInterface::paginate() is the read side, App\Services\Audit\AuditTrailReader is
+ * its use case, and GET /api/v1/organizations/{organization}/audit-logs is the surface. Three
+ * consequences follow and each is enforced somewhere rather than promised here:
+ *
+ *   * THE EXEMPTION IS NOW A LIVE ASSERTION. This docblock used to end "the reflection test sketched
+ *     in tests/Arch/DoctrineTest.php will fail on this class the day it is enabled; it needs an
+ *     explicit exemption there naming this docblock". That general rule is still commented out —
+ *     it still cannot be enabled unqualified — so the exemption was written as its own file instead:
+ *     tests/Arch/AuditTrailDoctrineTest.php, in the construction ConversationDoctrineTest and
+ *     SourceCascadeDoctrineTest use, naming this class explicitly so no `->ignoring(...)` is needed
+ *     and none can be acquired by accident.
+ *   * WHAT AN ORG-SCOPED READER SEES FOR A PLATFORM ROW IS NOW A DECISION AND NOT A LATENT
+ *     QUESTION: nothing. `organization_id = ?` already excludes a NULL, so the answer happens
+ *     whether or not anybody chose it — which is precisely why it is stated at the interface, at the
+ *     predicate, and in tests/Security/AuditTrailAccessTest.php, where a platform row is planted on
+ *     purpose. §6.1 assigns platform-level audit logs to the platform owner, on a surface that does
+ *     not exist yet; audit_logs_platform_created is the partial index waiting for it.
+ *   * `performUpdate()` AND `delete()` BELOW ARE NOW REACHABLE. Until there was a reader, nothing in
+ *     this application loaded an AuditLog through Eloquent, so a `save()` on a LOADED row was
+ *     unreachable by construction. A reader is one `->update()` away from making it reachable, which
+ *     is why both refusals are asserted rather than merely written.
  *
  * @property string $id
  * @property \Carbon\CarbonImmutable $created_at

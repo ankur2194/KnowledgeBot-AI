@@ -566,6 +566,38 @@ it('declares a complete, well-formed rule for every operation constant', functio
         'provider.model.created',
         'provider.model.updated',
         'provider.model.deleted',
+        // THE RERANK DESIGNATION, AND IT IS THE FIRST DESIGNATION IN THIS TABLE AT ALL. These two
+        // columns decide which of an organization's credentials sees its END USERS' QUESTIONS and
+        // its retrieved chunk text at rerank time, and which provider account is billed for it.
+        // Nothing else records a change to that: `organizations` has no history table, `updated_at`
+        // moves for a rename too, and the pair is on no resource a reader can diff afterwards. TWO
+        // OPERATIONS AND NOT ONE `changed`, for `source.disabled`/`source.enabled`'s reason —
+        // clearing the designation turns stage 11 off for the whole organization with no error, no
+        // metric jump on any single request and nothing on any response to say so, which makes "did
+        // anybody turn reranking off, and when" a question that has to be a query rather than a
+        // scan of every row's details.
+        //
+        // THE ASYMMETRY THIS BLOCK USED TO RECORD AS OPEN IS CLOSED BY THE NEXT TWO LINES. It read
+        // "there is no `organization.embedding_designation.*` beside them, so who moved the vector
+        // space has no answer in this table, and that change is strictly more consequential than
+        // this one." Both halves were true; the pair below is the repair.
+        'organization.rerank_designation.set',
+        'organization.rerank_designation.cleared',
+        // THE EMBEDDING DESIGNATION, WHICH IS THE MORE CONSEQUENTIAL OF THE TWO. That
+        // `(provider, model)` pair IS the vector space (ADR-031) — it is part of the Qdrant
+        // collection name — so re-designating it strands every chunk already indexed until somebody
+        // re-embeds the whole corpus at a provider's per-token price, and CLEARING it hands the
+        // choice to the resolution rule in embedding_selection.py, which may pick a different
+        // connection or refuse outright and block ingestion for the organization. `previous_*` is
+        // the half that says what a re-index would have to go back to.
+        'organization.embedding_designation.set',
+        'organization.embedding_designation.cleared',
+        // THE FOUR QUOTA CEILINGS. One operation and not four, because a quota write is one act
+        // applied to four numbers — unlike a designation, whose two acts have opposite consequences.
+        // `raised` is the field an audit of this surface reads first: QuotaLimitService lets an
+        // organization owner LOWER a limit and requires users.is_platform_owner to RAISE or REMOVE
+        // one, so a `raised: true` row whose actor is not a platform owner is the finding.
+        'organization.quota_limits.updated',
         // THE BOT SURFACE, AUDITED ON THE SAME TEST AS THE CATALOG ABOVE: what the row DECIDES. A
         // bot carries no secret either — its `provider_connection_id` is a ULID and the key behind
         // it is never reachable from the row — but `access_mode` moving to `public` makes it
@@ -578,6 +610,12 @@ it('declares a complete, well-formed rule for every operation constant', functio
         'bot.created',
         'bot.updated',
         'bot.deleted',
+        // THE ONE OPERATION D1 (the conversation tables) ADDED, AND IT RECORDS A NON-EVENT. A
+        // transcript is an audit record, so `conversations.bot_id` is ON DELETE RESTRICT and a bot
+        // that has answered anybody cannot be deleted. The attempt is what this row records: the
+        // request 409s, the response body is not retained, and `updated_at` does not move on a row
+        // nothing wrote — so nothing else in the platform knows it happened.
+        'bot.delete.refused',
         // THE ORIGIN ALLOW-LIST, AND THESE THREE ARE FINDING L2 BEING CLOSED RATHER THAN A GENERAL
         // PRINCIPLE. A bot delete is a HARD delete that destroys `bot_domains` with it, and that
         // table justifies its own ON DELETE RESTRICT by saying a security review may later need to
@@ -587,6 +625,17 @@ it('declares a complete, well-formed rule for every operation constant', functio
         // actor and the time; they are append-only and they outlive the bot, so they are what
         // actually answers "what could embed this, and who allowed it". The scalar summaries added
         // to the three `bot.*` allow-lists above are the tripwire that sends a reader here.
+        // THE D5 PLAYGROUND CREDENTIAL, and it is the only row in this table that records an
+        // ISSUANCE on the bot surface. A playground turn already writes a `conversations` row, a
+        // `provider_calls` row and a `usage_events` row, which describe what was SPENT far better
+        // than an audit line could — so this row exists for the one fact none of them carries: that
+        // a bearer resolving to `actor_type: user` WITH DIAGNOSTICS ENABLED was handed out, to whom,
+        // for which bot and for how long. It is the only credential in the platform a
+        // `retrieval.trace` frame can be forwarded to, and that frame carries candidate chunk ids,
+        // per-branch scores and the resolved filter object naming the organization and every allowed
+        // version id. One mint can produce many conversations or none, so the conversation rows
+        // cannot answer "was a diagnostics credential issued for this bot, and when".
+        'bot.playground_session.minted',
         'bot.domain.created',
         'bot.domain.status_changed',
         'bot.domain.deleted',
@@ -689,6 +738,24 @@ it('declares a complete, well-formed rule for every operation constant', functio
         'provider.model.created' => AuditLogger::ON_FAILURE_ABORT,
         'provider.model.updated' => AuditLogger::ON_FAILURE_ABORT,
         'provider.model.deleted' => AuditLogger::ON_FAILURE_ABORT,
+        // BOTH ABORT, on the real test — "can this still be rolled back" — and the answer is yes:
+        // each is written inside EloquentOrganizationRepository::designateRerankConnection()'s
+        // transaction, before the COMMIT, with nothing irreversible having happened. `cleared` is
+        // the one where a LOG policy would be a defect rather than an inconsistency: it is the
+        // change with no other trace anywhere.
+        'organization.rerank_designation.set' => AuditLogger::ON_FAILURE_ABORT,
+        'organization.rerank_designation.cleared' => AuditLogger::ON_FAILURE_ABORT,
+        // BOTH ABORT, same test, same answer, and for the embedding pair `cleared` is the one where
+        // a LOG policy would be a defect rather than an inconsistency — clearing hands the choice
+        // to the resolution rule, which may refuse and block ingestion for the whole organization,
+        // and there is no other trace of it anywhere. Written inside
+        // EloquentOrganizationRepository::designateEmbeddingConnection()'s transaction.
+        'organization.embedding_designation.set' => AuditLogger::ON_FAILURE_ABORT,
+        'organization.embedding_designation.cleared' => AuditLogger::ON_FAILURE_ABORT,
+        // ABORT: written inside EloquentOrganizationRepository::setQuotaLimits()'s transaction,
+        // before the COMMIT, so a failed audit write takes the quota change with it. A ceiling that
+        // moved with nothing recording who moved it is the one state this row exists to prevent.
+        'organization.quota_limits.updated' => AuditLogger::ON_FAILURE_ABORT,
         // ALL THREE ARE ABORT, on the same test and with the same answer: each is written inside
         // EloquentBotRepository's transaction, so the change can still be rolled back when the row
         // cannot be written. `deleted` matters most, and slightly more than it does one block up:
@@ -698,6 +765,21 @@ it('declares a complete, well-formed rule for every operation constant', functio
         'bot.created' => AuditLogger::ON_FAILURE_ABORT,
         'bot.updated' => AuditLogger::ON_FAILURE_ABORT,
         'bot.deleted' => AuditLogger::ON_FAILURE_ABORT,
+        // LOG, AND IT IS THE SECOND ROW IN THE FILE TO BE SO FOR `source.upload.rejected`'s REASON:
+        // the test is "can this still be rolled back" and the answer is no, because there is
+        // nothing to roll back. The refusal is already decided and no row was written, so aborting
+        // would turn a legitimate 409 into a 500 — a lie to the caller AND still no audit row.
+        'bot.delete.refused' => AuditLogger::ON_FAILURE_LOG,
+        // LOG, AND IT IS THE THIRD ROW IN THE FILE TO BE SO — but for the OPPOSITE half of the "can
+        // this still be rolled back" test from the two above it. Those two have nothing to roll
+        // back because nothing was written. This one has something that CANNOT be rolled back: the
+        // session record is already in Valkey and the bearer is already on its way to the caller by
+        // the time the row is written, and there is no transaction spanning a Valkey EVAL and a
+        // PostgreSQL INSERT. An ABORT here would 500 a request that HAD ISSUED A LIVE CREDENTIAL,
+        // which is strictly worse than the missing row it was trying to prevent — and it would
+        // leave the credential live anyway. `auth.login.succeeded` is the precedent: both are the
+        // ISSUANCE of a session credential rather than a change to a stored one.
+        'bot.playground_session.minted' => AuditLogger::ON_FAILURE_LOG,
         // ALL SIX CHILD OPERATIONS ARE ABORT, on the same test with the same answer: each is
         // written inside its repository's transaction, so the change can still be rolled back when
         // the row cannot be written. `bot.domain.created` is the one where a LOG policy would be a
@@ -814,8 +896,16 @@ function namesABearerCapability(string $field): bool
     // Words that make a plural `tokens` a MEASUREMENT rather than a bag of credentials. A closed
     // vocabulary of magnitudes and never a list of field names — allow-listing `max_output_tokens`
     // itself is exactly the shortcut this function exists instead of.
+    //
+    // `quota` JOINED THE LIST WHEN THE FOUR CEILING COLUMNS LANDED, and it is a magnitude in exactly
+    // the sense `limit` and `budget` already are — `organizations.monthly_tokens_quota` is a number
+    // of tokens an organization may spend, not a bag of bearer tokens. It is added to the VOCABULARY
+    // rather than allow-listing the field name, which is the shortcut this whole function exists
+    // instead of: the next `*_tokens_quota` column is then correct with no further edit, and a
+    // hypothetical `token_quota` (singular) is still refused, because the singular rule below runs
+    // first and no magnitude word rescues it.
     $quantities = ['max', 'min', 'total', 'count', 'used', 'limit', 'remaining', 'per', 'window',
-        'budget', 'size', 'length'];
+        'budget', 'size', 'length', 'quota'];
 
     $segments = explode('_', mb_strtolower($field));
 
@@ -846,11 +936,20 @@ it('recognises a bearer-capability field name, and does not mistake a token COUN
         // PLURAL WITH NO MAGNITUDE — a bag of capabilities, not a count. This is the case that
         // stops "plural means quantity" from being a hole.
         'tokens', 'access_tokens', 'refresh_tokens',
-        // Singular beats the quantity vocabulary: `count` does not rescue `token`.
-        'token_count'];
+        // Singular beats the quantity vocabulary: `count` does not rescue `token`, and neither
+        // does `quota` — `token_quota` and `monthly_token_quota` are refused, which is why the
+        // column is spelled `monthly_tokens_quota` rather than the singular that reads more
+        // naturally. That is the guard doing its job on a real field name, not an inconvenience
+        // worked around.
+        'token_count', 'token_quota', 'monthly_token_quota'];
 
     $measurements = ['max_output_tokens', 'total_tokens', 'tokens_used', 'prompt_tokens_count',
-        'tokens_per_minute', 'context_window', 'display_name', 'email', 'role', 'capabilities'];
+        'tokens_per_minute', 'context_window', 'display_name', 'email', 'role', 'capabilities',
+        // THE FOUR QUOTA CEILINGS, and the one that exercises the `quota` magnitude is the first.
+        // The other three carry no token-shaped segment at all and are here so the row for this
+        // surface is complete rather than partial.
+        'monthly_tokens_quota', 'previous_monthly_tokens_quota', 'storage_bytes_quota',
+        'bots_quota', 'users_quota'];
 
     foreach ($capabilities as $name) {
         expect(namesABearerCapability($name))->toBeTrue("'{$name}' is a bearer capability and must be refused as ECHOED");

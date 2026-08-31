@@ -69,6 +69,19 @@ require_once __DIR__.'/Support/tenancy.php';
 */
 require_once __DIR__.'/Support/spa.php';
 
+/*
+| chatFixture(), chatSessionToken() and chatHeaders(). Autoloaded for the same reason the two above
+| are: a public-runtime request needs a bot that is published AND public AND has an ACTIVE origin
+| row AND names an enabled model AND has an assigned source with a PUBLISHED version — five separate
+| facts, and a fixture missing any one of them fails with a 404 or a `validation` refusal that reads
+| as a product defect rather than as a missing row.
+|
+| The helper writes the ingestion rows directly and says at length why that is not the thing
+| `KnowledgeSourceFactory::indexed()` refuses to do: it writes the rows the SCOPE QUERY reads, and
+| nothing that stands in for an index.
+*/
+require_once __DIR__.'/Support/chat.php';
+
 /**
  * The running test case.
  *

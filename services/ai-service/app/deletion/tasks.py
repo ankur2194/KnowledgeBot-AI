@@ -450,8 +450,12 @@ def erase_data_subject(
     scores and retrieval metrics because of a compliance action, and nobody would ever
     reconcile the shift against the reason for it.
 
-    Only two of those three tables are this service's to write. `citations` is Laravel's, so
-    that column is swept over the core-api seam, the same way the version and item rows are.
+    Only **one** of those three tables is this service's to write, and the count moved on
+    2026-08-27 rather than being wrong when written. `citations` was always Laravel's;
+    `retrieval_traces` came off `db/writes.ALLOWED_TABLES` under ADR-033 property 2 when the
+    admin playground and the conversation transcript became readers of it. So two of the three
+    columns are swept over the core-api seam, the same way the version and item rows are, and
+    only `evaluation_results.retrieved_evidence` is overwritten locally.
 
     Scope is one of user, conversation, source, organization. The source scope reaches these
     columns **only when the request was explicitly raised as an erasure** — an `erasure: true`

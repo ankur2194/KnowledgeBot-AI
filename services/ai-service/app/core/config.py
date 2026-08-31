@@ -375,6 +375,29 @@ class Settings(BaseSettings):
     #: A mismatch is a 409, never a best-effort guess at what the caller meant.
     contract_version: int = 1
 
+    # ── provider attribution ──────────────────────────────────────────────────
+    #: THIS DEPLOYMENT'S OWN PUBLIC URL, and the only place it may come from.
+    #:
+    #: One provider needs it and it is not optional there: OpenRouter's `HTTP-Referer` and
+    #: `X-OpenRouter-Title` name the CALLING APPLICATION, and this deployment is the calling
+    #: application. Every other adapter is credential-free to construct because it carries no
+    #: identity of ours; `app/providers/registry.py` builds the OpenRouter one from this field.
+    #:
+    #: **It must never be derived from an inbound request, and that is the whole reason it is a
+    #: setting rather than a value the adapter could compute.** The widget runs inside customer
+    #: sites, so an adapter filling `HTTP-Referer` from the request — or a proxy forwarding the
+    #: browser's own `Referer` — publishes every customer domain that embeds a bot onto a third
+    #: party's public app-rankings page. The header is optional for the call and matters only
+    #: for attribution, so the safe failure is having no app page rather than a leak.
+    #:
+    #: The default is Laravel's own `FrontendUrl` fallback for the same host, so a local stack
+    #: agrees across both planes without configuration. It is the SPA's origin (app.<domain>,
+    #: `FRONTEND_URL` in `infrastructure/docker/env/core-api.env`) and NOT the API's own host —
+    #: the two planes hold this identity in separate files with no interpolation between them,
+    #: so keeping them in step is a deployment step. A wrong value here is never an error: it
+    #: sends wrong attribution on every OpenRouter call and nothing raises.
+    public_app_url: str = "http://localhost:3000"
+
     # ── local model weights: PARSING AND OCR ONLY ─────────────────────────────
     # ADR-030 moved embedding and reranking to provider APIs. This path is NOT dead as a
     # result: Docling's layout and TableFormer models and RapidOCR's ONNX weights still live

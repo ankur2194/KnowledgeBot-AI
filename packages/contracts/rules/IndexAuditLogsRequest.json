@@ -1,0 +1,70 @@
+{
+    "class": "App\\Http\\Requests\\IndexAuditLogsRequest",
+    "rules": {
+        "actor_id": [
+            "sometimes",
+            "nullable",
+            "string",
+            "ulid"
+        ],
+        "dir": [
+            "bail",
+            "sometimes",
+            "string",
+            "in:\"asc\",\"desc\""
+        ],
+        "from": [
+            "sometimes",
+            "date"
+        ],
+        "operation": [
+            "sometimes",
+            "nullable",
+            "string",
+            "in:\"auth.login.succeeded\",\"auth.login.failed\",\"auth.logout\",\"auth.password_reset.requested\",\"auth.password_reset.completed\",\"auth.email.verified\",\"organization.invitation.created\",\"organization.invitation.revoked\",\"organization.invitation.accepted\",\"organization.invitation.resent\",\"organization.member.role_changed\",\"provider.connection.created\",\"provider.connection.updated\",\"provider.connection.deleted\",\"provider.connection.credential_rotated\",\"provider.connection.credential_rotation_failed\",\"provider.model.created\",\"provider.model.updated\",\"provider.model.deleted\",\"organization.rerank_designation.set\",\"organization.rerank_designation.cleared\",\"organization.embedding_designation.set\",\"organization.embedding_designation.cleared\",\"organization.quota_limits.updated\",\"bot.created\",\"bot.updated\",\"bot.deleted\",\"bot.delete.refused\",\"bot.playground_session.minted\",\"bot.domain.created\",\"bot.domain.status_changed\",\"bot.domain.deleted\",\"bot.starter_question.created\",\"bot.starter_question.updated\",\"bot.starter_question.deleted\",\"source.created\",\"source.updated\",\"source.deleted\",\"source.disabled\",\"source.enabled\",\"source.reprocess.requested\",\"source.upload.accepted\",\"source.upload.rejected\",\"source.version.activated\",\"source.version.retired\",\"bot.source_assignment.created\",\"bot.source_assignment.deleted\""
+        ],
+        "outcome": [
+            "sometimes",
+            "nullable",
+            "string",
+            "in:\"success\",\"failure\""
+        ],
+        "page": [
+            "bail",
+            "sometimes",
+            "integer",
+            "min:1"
+        ],
+        "per_page": [
+            "bail",
+            "sometimes",
+            "integer",
+            "min:1",
+            "max:100"
+        ],
+        "sort": [
+            "bail",
+            "sometimes",
+            "string",
+            "in:\"created_at\""
+        ],
+        "subject_id": [
+            "sometimes",
+            "nullable",
+            "string",
+            "ulid"
+        ],
+        "subject_type": [
+            "bail",
+            "required_with:subject_id",
+            "nullable",
+            "string",
+            "max:255"
+        ],
+        "until": [
+            "sometimes",
+            "date",
+            "after:from"
+        ]
+    }
+}

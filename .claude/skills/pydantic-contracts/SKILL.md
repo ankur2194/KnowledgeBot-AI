@@ -30,7 +30,7 @@ The per-model `extra` table — with its **two** exceptions, raw provider respon
 
 `Inbound` (strict + forbid + frozen, and why each of the three does a different job), `ReasoningEffort`'s seven members, `ProviderConnection`, `RetrievalConfig`, `ConfigSnapshot`, `ChatExecuteRequest`, and `parse_request()`'s redaction of `ValidationError.errors()` → **[references/internal-chat-request.md](references/internal-chat-request.md)**. They share the module below and the `Ulid` declared in it. It carries ADR-011's shape: `provider_credentials` is a sibling of `config` on `ChatExecuteRequest`, and `ProviderConnection` has **no** `api_key` field — the comment there records why, because moving it back inside is the reflexive tidy-up.
 
-**None of that module exists yet.** `services/ai-service/app/contracts/internal/` holds an `__init__.py` and a `.gitkeep` and nothing else — the chat router and the five provider wire adapters are out of the current scope by explicit ruling, so `ChatExecuteRequest`, `ConfigSnapshot` and `parse_request` are a specification for whoever writes them, not a description of code. The models that *do* exist are the adapter-internal ones in `app/providers/contract.py` (`ChatRequest`, `EmbeddingRequest`, `RerankRequest`), and they are the opposite case on credentials: each carries **no credential field at all**, because the decrypted key is a per-call argument to `stream()` / `embed()` / `rerank()`. Both facts are the same rule seen from two sides — a credential is never a member of an object that gets held, hashed, replayed, or put in a span.
+**That module now exists**, alongside `app/api/internal/v1/chat.py` and the `chatStream` operation in `app/contracts/internal/openapi.json`. This sentence used to say the directory held only an `__init__.py` and a `.gitkeep`; measure it rather than trusting either version — `grep -n 'ChatExecuteRequest' services/ai-service/app/contracts/internal/chat.py`. Read the reference for the specification the shipped module was written from, and read the module for the eight fields the specification does not list, each forced by a rule stated elsewhere. The models that *do* exist are the adapter-internal ones in `app/providers/contract.py` (`ChatRequest`, `EmbeddingRequest`, `RerankRequest`), and they are the opposite case on credentials: each carries **no credential field at all**, because the decrypted key is a per-call argument to `stream()` / `embed()` / `rerank()`. Both facts are the same rule seen from two sides — a credential is never a member of an object that gets held, hashed, replayed, or put in a span.
 
 ### The credential, and the two places it is not
 
@@ -75,7 +75,12 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapte
 
 # ULIDs, not UUIDs (kb-internal-api-contracts, kb-observability-conventions).
 # `uuid.UUID("01J8...")` raises — a `UUID`-typed id field 422s every real request.
-Ulid = Annotated[str, StringConstraints(pattern=r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$")]
+# IMPORTED, NOT DECLARED. `Ulid` is `app/providers/contract.py:127`'s and is exported; a second
+# Annotated[str, StringConstraints(...)] here is drift, not independence. It also accepts LOWER
+# case, which this line did not: Laravel's `HasUlids` lowercases every model key while
+# `Str::ulid()` upper-cases, and one body carries both — a case-sensitive pattern agreed with
+# every fixture in the repo and refused every real submission (`docs/22` § R6).
+from app.providers.contract import Ulid
 
 
 # Every field below reaches a browser, a widget and a phone unaltered: Laravel's relay forwards

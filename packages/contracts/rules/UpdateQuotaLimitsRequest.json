@@ -1,0 +1,33 @@
+{
+    "class": "App\\Http\\Requests\\UpdateQuotaLimitsRequest",
+    "rules": {
+        "bots_quota": [
+            "present",
+            "nullable",
+            "integer",
+            "min:0",
+            "max:9007199254740991"
+        ],
+        "monthly_tokens_quota": [
+            "present",
+            "nullable",
+            "integer",
+            "min:0",
+            "max:9007199254740991"
+        ],
+        "storage_bytes_quota": [
+            "present",
+            "nullable",
+            "integer",
+            "min:0",
+            "max:9007199254740991"
+        ],
+        "users_quota": [
+            "present",
+            "nullable",
+            "integer",
+            "min:0",
+            "max:9007199254740991"
+        ]
+    }
+}

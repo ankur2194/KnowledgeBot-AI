@@ -147,3 +147,47 @@ describe('what the live region announces', () => {
     expect(announcementFor(run([start, complete('insufficient_evidence')]))).toContain('sources');
   });
 });
+
+describe('the two ids, and why the thumbs are gated on the second', () => {
+  it('starts with no server message id at all', () => {
+    // The client-minted id exists before the request does — it is the idempotency key and it
+    // reconciles the optimistic user turn with the server's echo. The SERVER's row id cannot exist
+    // until the server has opened the turn.
+    const turn = startAssistantTurn('m1');
+    expect(turn.id).toBe('m1');
+    expect(turn.messageId).toBeNull();
+  });
+
+  it('takes the server id from message.start and not from message.complete', () => {
+    // BOTH frames carry it. Reading it only from the terminal one would leave a STOPPED or FAILED
+    // turn unratable even though its row exists — and stopping is a first-class outcome that keeps
+    // its partial answer, so it is exactly the turn a reader might want to rate down.
+    expect(run([start]).messageId).toBe('s1');
+    expect(run([start, token('Hi')]).messageId).toBe('s1');
+
+    const stopped = run([start, token('Hi'), complete('cancelled')]);
+    expect(stopped.outcome).toBe('stopped');
+    expect(stopped.messageId).toBe('s1');
+  });
+
+  it('leaves it null on a stream that failed before the first frame', () => {
+    // A 401, a refused origin or a dead socket on the first byte. There is no row to rate, and
+    // `<ChatSurface>` gates the thumbs on this being non-null for that reason: a control that would
+    // 404 is worse than an absent one.
+    const failed = applyEvent(startAssistantTurn('m1'), {
+      event: 'error',
+      data: { error_class: 'authentication', message: 'operator detail', retryable: false },
+    });
+    expect(failed.outcome).toBe('failed');
+    expect(failed.messageId).toBeNull();
+  });
+
+  it('keeps the client id stable across every event, because it is the idempotency key', () => {
+    // A per-render id would mean two conversations, two provider calls and two bills for one submit;
+    // a per-event one would break the pairing with the user turn.
+    const events: KbEvent[] = [start, token('a'), token('b'), complete('stop')];
+    expect(events.reduce((turn, event) => applyEvent(turn, event), startAssistantTurn('m1')).id).toBe(
+      'm1',
+    );
+  });
+});

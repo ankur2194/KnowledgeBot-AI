@@ -52,6 +52,45 @@ enum BotStatus: string
     }
 
     /**
+     * Whether an ADMINISTRATOR of this bot's organization may run it from the D5 playground.
+     *
+     * ── IT IS A SECOND, NARROWER METHOD AND NEVER A WIDENING OF `isRetrievable()` ──────────────
+     *
+     * The warning above — "a single `isUsable()` consulted by both is how a draft bot becomes
+     * answerable on a customer's website" — is about ONE method serving TWO surfaces. This is the
+     * opposite shape: two methods, each naming its own surface, each written as a POSITIVE list, so
+     * widening one cannot widen the other and neither has a `!==` that admits whatever is added
+     * next.
+     *
+     * ── THE ENUM CONTRADICTS ITSELF ABOUT THIS AND THE CONTRADICTION IS RESOLVED FAIL-CLOSED ──
+     *
+     * `isRetrievable()`'s paragraph says the playground/public split "is a property of the SURFACE,
+     * not of this enum, so … the playground authorizes through `BotPolicy::view()` instead" — i.e.
+     * a permission check and no status check at all. `Draft`'s own case comment says the opposite
+     * and says it more specifically: *"Never reachable from any channel, including the admin
+     * playground."* Both cannot hold: authorization by policy alone admits a `draft` bot.
+     *
+     * The specific statement wins, and it is also the fail-closed one, so this method refuses
+     * `Draft`. It refuses `Paused` and `Archived` for the reason those two cases give directly —
+     * *"Neither answers."* `Testing` is admitted because its case comment exists for exactly this
+     * surface: *"Reachable from the admin playground only, by a member of the owning organization."*
+     *
+     * ── AND THE PERMISSION IS `bots.manage`, NOT `bots.view` ───────────────────────────────────
+     *
+     * A second divergence from `isRetrievable()`'s paragraph, decided the same way and recorded
+     * here rather than left to be discovered. `Testing`'s case comment says "by a member of the
+     * owning organization", which is `bots.view` — held by all four roles. A playground turn spends
+     * the organization's provider quota and writes a `conversations` row, so it is a WRITE wearing
+     * a chat control, and an analyst who may only READ a bot's settings must not be able to spend
+     * tokens from that screen. The mint therefore authorizes `BotPolicy::update()`. This method
+     * decides the STATUS half only; the permission half is the policy's.
+     */
+    public function isPlaygroundReachable(): bool
+    {
+        return $this === self::Testing || $this === self::Published;
+    }
+
+    /**
      * Whether the bot's configuration may still be edited.
      *
      * This is CHECK 5 of the six (kb-security-baseline §18.4) for every write on a bot, and it is

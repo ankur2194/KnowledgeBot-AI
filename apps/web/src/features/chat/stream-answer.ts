@@ -11,7 +11,11 @@ import {
   toKbError,
   toKbEvent,
 } from '@kb/contracts';
-import type { ChatSendBody, KbEvent } from '@kb/contracts';
+import type { ChatSendBody, KbEvent, SseFrame } from '@kb/contracts';
+// The ADMIN union, from the subpath apps/widget does not import. It is a type here and nothing
+// more: this module's default decoder is still `toKbEvent`, so a caller that does not ask for the
+// wider union cannot receive a `retrieval.trace` frame even if Laravel forwarded one.
+import type { KbAdminEvent } from '@kb/contracts/admin';
 
 import type { Credential } from '@/lib/api/browser';
 import { API_ORIGIN } from '@/lib/env';
@@ -55,7 +59,7 @@ import { API_ORIGIN } from '@/lib/env';
  * REFERENCES only, so a computed `globalThis[...]` lookup, a string, or a comment all pass it — and
  * know that nothing runs it: `.github/` was deleted on 2026-08-17 and this repo has no CI.
  */
-export interface StreamAnswerOptions {
+export interface StreamAnswerOptions<TEvent extends KbAdminEvent = KbEvent> {
   readonly conversationId: string;
   /** Exactly `{client_message_id, content}`. `text` is the token EVENT's field; posting it 422s
    *  every send. `client_message_id` is a stable per-message UUID so Laravel's idempotency key
@@ -69,6 +73,23 @@ export interface StreamAnswerOptions {
   readonly apiOrigin?: string;
   /** Test seam only: shortens the idle watchdog so a test need not wait 45 seconds. */
   readonly idleGapMs?: number;
+  /**
+   * THE FRAME DECODER, DEFAULTING TO `toKbEvent` — and this is the ONE way the playground reads a
+   * wider union without a second copy of anything.
+   *
+   * `packages/contracts` owns the frame parser and there must not be a second one; what a caller may
+   * choose is which EVENT NAME ALLOW-LIST runs on top of it. `toKbEvent` admits the six public
+   * names, `toKbAdminEvent` (from `@kb/contracts/admin`) admits those six plus `retrieval.trace` and
+   * composes `toKbEvent` internally rather than reimplementing it. Both return `null` for anything
+   * else, and the read loop below drops a `null` silently — which is what keeps an internal frame
+   * unrenderable here even if a relay bug forwarded one.
+   *
+   * OMITTING IT IS THE SAFE DEFAULT AND IS WHAT HOSTED CHAT DOES. A surface that has not asked for
+   * the wider union cannot be handed a trace by accident: `TEvent` defaults to `KbEvent`, so the
+   * generator's yield type is the public six and a `retrieval.trace` frame is not merely unrendered,
+   * it is unrepresentable.
+   */
+  readonly decode?: (frame: SseFrame) => TEvent | null;
 }
 
 /**
@@ -107,9 +128,15 @@ const path = (conversationId: string): string =>
  *  - Buffer tokens and flush on requestAnimationFrame. One setState per token is one React render
  *    per token over a growing transcript, and the composer starts dropping keystrokes.
  */
-export async function* streamAnswer(options: StreamAnswerOptions): AsyncGenerator<KbEvent> {
+export async function* streamAnswer<TEvent extends KbAdminEvent = KbEvent>(
+  options: StreamAnswerOptions<TEvent>,
+): AsyncGenerator<TEvent> {
   const origin = options.apiOrigin ?? API_ORIGIN;
   const idleGapMs = options.idleGapMs ?? IDLE_GAP_MS;
+  // The DEFAULT is the public allow-list, and the cast is confined to this one line: `toKbEvent`
+  // returns `KbEvent | null`, which is `TEvent | null` exactly when `TEvent` is its default. A
+  // caller that widened `TEvent` supplied its own decoder, so this branch is unreachable for them.
+  const decode = options.decode ?? (toKbEvent as (frame: SseFrame) => TEvent | null);
 
   const response = await fetch(`${origin}${path(options.conversationId)}`, {
     method: 'POST', // exactly why the browser's built-in SSE client is unusable: GET-only, no headers
@@ -206,12 +233,13 @@ export async function* streamAnswer(options: StreamAnswerOptions): AsyncGenerato
       bumpWatchdog();
 
       for (const frame of frames.push(decoder.decode(chunk.value, { stream: true }))) {
-        // Returns null for anything this client has no business rendering: an unrecognised event
+        // Returns null for anything THIS CALLER has no business rendering: an unrecognised event
         // name, a frame with no `event:` field, unparseable JSON. The name allow-list is the part
         // with a security consequence — it is what keeps the internal-only events (`provider.usage`
-        // token costs, `retrieval.trace` internal topology, `provider.fallback`) from ever being
-        // renderable here even if a relay bug forwarded one.
-        const event = toKbEvent(frame);
+        // token costs and `provider.fallback` routing topology) from ever being renderable here even
+        // if a relay bug forwarded one, on EVERY caller including the playground: `toKbAdminEvent`
+        // widens by exactly one name and refuses the other three.
+        const event = decode(frame);
         if (event === null) continue;
 
         if (event.event === 'error') {
@@ -265,6 +293,101 @@ export async function* streamAnswer(options: StreamAnswerOptions): AsyncGenerato
     // has to close the socket, or the provider keeps generating against the tenant's quota for an
     // answer nobody will read.
     await reader.cancel().catch(() => {});
+  }
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════
+ *  THE SAME STREAM, WITH ONE CHANCE TO REPLACE A CREDENTIAL THE SERVER HAS REJECTED
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * A chat-session bearer is short-lived: `expires_in` is 900 s and it SLIDES on every authorized
+ * request, so it is the floor for an IDLE tab rather than a promise about an active conversation. A
+ * tab left open over lunch therefore holds a dead bearer, and the send the operator makes on their
+ * return fails with `error_class: authentication` — whose copy, "Your session has ended. Sign in
+ * again to continue.", is FALSE about the credential that has actually expired on the admin
+ * playground and sends the operator round a sign-out loop they cannot fix anything with.
+ *
+ * ── IT IS A REPLACEMENT, NOT A RETRY, AND THAT DISTINCTION IS THE WHOLE DESIGN ──────────────────
+ * A retry re-posts against the dead token and fails identically; `apps/widget/src/app/stream.ts`
+ * makes the same point in the same words. What runs here is: obtain a NEW credential, then send
+ * exactly once more with the SAME `client_message_id` — which is Laravel's idempotency key, so a
+ * genuine duplicate collapses into one conversation, one provider call and one bill.
+ *
+ * ── FOUR GUARDS, AND EACH ONE HAS A DIFFERENT WAY OF GOING WRONG ────────────────────────────────
+ *
+ *  1. ONLY `authentication`. `isReMintable` reads `error_class` and never a status: one class
+ *     renders several statuses per surface (`kb-error-taxonomy` footnote 1), and `KbError`
+ *     deliberately does not carry the status at all. `authorization` (the bot left `testing`/
+ *     `published`, or the administrator lost `bots.manage`) must NOT re-mint — the mint endpoint
+ *     enforces both and would refuse, so retrying it just spends a second request to reach the same
+ *     answer with a worse message. `error_class: null` means unknown, and unknown is permanently
+ *     non-retryable; never invent a class to fill the slot.
+ *  2. ONLY ONCE. A server that answers `authentication` to a freshly minted bearer is telling us
+ *     something a loop cannot fix, and a loop over a paid endpoint is the one bug that gets
+ *     expensive while looking like resilience.
+ *  3. ONLY BEFORE THE FIRST EVENT. A failure after `message.start` means a turn EXISTS server-side,
+ *     so a second post with the same id replays the persisted state rather than generating — right,
+ *     but it would hand the surface a duplicate of an answer it already rendered. The 401 this
+ *     exists for is raised by `ResolveChatSession`, before routing and therefore before any row is
+ *     written, so it always lands with nothing yielded.
+ *  4. NEVER WHEN THERE IS NO `reMint`. Hosted chat, the widget and mobile pass none, so their
+ *     behaviour is byte-identical to calling `streamAnswer` directly. Cancellation needs no guard of
+ *     its own: `streamAnswer` RETURNS on an `AbortError` rather than throwing, so an aborted stream
+ *     never reaches the catch below.
+ */
+export interface OpenedConversation {
+  readonly conversationId: string;
+  readonly credential: Credential;
+}
+
+/**
+ * Whether a failed send is one a fresh credential could fix.
+ *
+ * `instanceof KbError` against the ONE class from `@kb/contracts` — a per-app copy would make this
+ * `false` for every error and the re-mint silently dead, which is the same failure mode
+ * `lib/query/client.ts`'s retry predicate has.
+ */
+export function isReMintable(cause: unknown): boolean {
+  return cause instanceof KbError && cause.error_class === 'authentication';
+}
+
+/**
+ * Run a stream, and if the credential is refused before the first event arrives, replace it and run
+ * once more.
+ *
+ * `run` is a FUNCTION OF THE OPENED PAIR rather than a prepared generator, because the second
+ * attempt must be built from the second credential — a generator captured before the failure would
+ * re-post the dead bearer and fail identically, which is the exact bug this shape prevents from
+ * being expressible.
+ */
+export async function* streamWithReMint<TEvent extends KbAdminEvent = KbEvent>(options: {
+  readonly open: () => Promise<OpenedConversation>;
+  /** Absent on every surface but the playground. Absent means: no second attempt, ever. */
+  readonly reMint?: () => Promise<OpenedConversation>;
+  readonly run: (opened: OpenedConversation) => AsyncGenerator<TEvent>;
+}): AsyncGenerator<TEvent> {
+  let opened = await options.open();
+  let replaced = false;
+
+  for (;;) {
+    let yielded = false;
+
+    try {
+      for await (const event of options.run(opened)) {
+        yielded = true;
+        yield event;
+      }
+      return;
+    } catch (cause) {
+      if (replaced || yielded || options.reMint === undefined || !isReMintable(cause)) throw cause;
+      replaced = true;
+      // A FAILURE HERE PROPAGATES UNCHANGED and is the better error to show: the mint route is the
+      // one that knows why — 403 for a lost `bots.manage`, 409 for a bot moved back to `draft`, 401
+      // for a console session that really has ended. Swallowing it to re-raise the stream's
+      // `authentication` would replace a diagnosable answer with the misleading one.
+      opened = await options.reMint();
+    }
   }
 }
 

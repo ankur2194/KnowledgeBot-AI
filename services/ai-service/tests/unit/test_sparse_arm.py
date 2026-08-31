@@ -96,7 +96,7 @@ def stats_for(
 # THE `whitespace_tokenize` STAND-IN IS GONE, AND ITS REMOVAL IS THE POINT.
 #
 # It existed because `tokenize` raised, and every composition test below monkeypatched it in.
-# ADR-069 implemented the real analyzer, so these tests now exercise the analyzer that ships —
+# The analyzer decision implemented the real one, so these tests now exercise what ships —
 # the only version of them that can fail for a real reason. A stand-in that splits on whitespace
 # agrees with the real analyzer on ASCII prose and disagrees with it on every case the real one
 # exists to handle, so keeping it would have meant a green suite proving the composition around
@@ -344,7 +344,7 @@ def test_a_term_id_outside_the_index_space_is_refused() -> None:
         as_sparse_vector({TERM_ID_MODULUS: 1.0})
 
 
-# ── the analyzer: ADR-069, and the four ways it fails silently ────────────────
+# ── the analyzer, and the four ways it fails silently ────────────────────────
 
 
 def test_the_same_function_analyzes_passages_and_queries() -> None:

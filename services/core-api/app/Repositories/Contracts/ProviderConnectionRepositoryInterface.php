@@ -86,6 +86,38 @@ interface ProviderConnectionRepositoryInterface
     public function existsForOrg(string $organizationId, string $connectionId): bool;
 
     /**
+     * The SEALED credential material for a named set of connections in ONE organization.
+     *
+     * ── IT RETURNS CIPHERTEXT, AND THAT IS THE WHOLE OF THE SEPARATION ───────────────────────
+     *
+     * Nothing here decrypts. The KEK lives in `CredentialVault` and the only caller permitted to
+     * open one of these envelopes is `InternalAiClient::openChatStream()`, which does it per entry,
+     * into the request body, in a local that dies with the method. A repository that returned
+     * plaintext would put a decrypted key inside an Eloquent result — an object that is dumped by
+     * every debugger, serialized into every queue payload that touches it, and rendered by
+     * `QueryException::formatMessage()` if the next statement on the same connection fails.
+     *
+     * ── SCOPED BY ARGUMENT, AND THE ORGANIZATION IS THE FIRST ONE ────────────────────────────
+     *
+     * `$connectionIds` is caller-supplied and is resolved from the BOT'S OWN configuration, not from
+     * request input — but it is still an id list, so the organization predicate is what makes a
+     * mistake there a miss rather than a cross-tenant read. An id belonging to another organization
+     * is simply absent from the result, and the caller refuses (`kb-tenancy-isolation`).
+     *
+     * ── AN ABSENT ID IS AN ABSENT KEY, NEVER AN EMPTY STRING ─────────────────────────────────
+     *
+     * A connection that does not exist, or belongs elsewhere, produces NO entry. It must never
+     * produce an entry with empty ciphertext: the caller's "is this surface's credential present"
+     * check is an `isset`, and an empty envelope would pass it and then fail inside the vault with
+     * a decryption error that names no surface.
+     *
+     * @param  list<string>  $connectionIds
+     * @return array<string, array{credential_ciphertext: string, data_key_ciphertext: string}>
+     *                                                                                          keyed by connection id; a subset of the input
+     */
+    public function sealedFor(string $organizationId, array $connectionIds): array;
+
+    /**
      * Apply a label and/or status edit under a row lock.
      *
      * NO CREDENTIAL PATH EXISTS HERE BY CONSTRUCTION: `ProviderConnectionEdit` has no member that

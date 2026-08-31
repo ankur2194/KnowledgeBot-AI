@@ -1,0 +1,69 @@
+{
+    "class": "App\\Http\\Requests\\IndexConversationsRequest",
+    "rules": {
+        "bot_id": [
+            "sometimes",
+            "nullable",
+            "string",
+            "ulid"
+        ],
+        "channel": [
+            "sometimes",
+            "nullable",
+            "string",
+            "in:\"hosted\",\"embedded\",\"mobile\",\"playground\",\"api\""
+        ],
+        "dir": [
+            "bail",
+            "sometimes",
+            "string",
+            "in:\"asc\",\"desc\""
+        ],
+        "from": [
+            "sometimes",
+            "date"
+        ],
+        "page": [
+            "bail",
+            "sometimes",
+            "integer",
+            "min:1"
+        ],
+        "per_page": [
+            "bail",
+            "sometimes",
+            "integer",
+            "min:1",
+            "max:100"
+        ],
+        "session_id": [
+            "sometimes",
+            "nullable",
+            "string",
+            "max:128"
+        ],
+        "sort": [
+            "bail",
+            "sometimes",
+            "string",
+            "in:\"last_activity_at\",\"started_at\""
+        ],
+        "status": [
+            "sometimes",
+            "nullable",
+            "string",
+            "in:\"active\",\"ended\",\"expired\""
+        ],
+        "until": [
+            "sometimes",
+            "date",
+            "after:from"
+        ],
+        "user_id": [
+            "sometimes",
+            "nullable",
+            "string",
+            "ulid"
+        ]
+    }
+}

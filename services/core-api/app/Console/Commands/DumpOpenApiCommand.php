@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
+use App\Enums\Surface;
 use App\Support\Contracts\ProvidesOpenApiQueryParameters;
 use App\Support\Contracts\ProvidesOpenApiSchema;
+use App\Support\Contracts\PublicSurfaceGuard;
 use App\Support\Contracts\ResponseShape;
 use App\Support\Kb\ErrorTaxonomy;
 use Illuminate\Console\Command;
@@ -86,8 +88,28 @@ final class DumpOpenApiCommand extends Command
 
     protected $description = 'Dump the public control-plane API to packages/contracts/openapi as OpenAPI 3.1.';
 
+    /**
+     * The router's middleware GROUPS, captured once per run.
+     *
+     * `Route::gatherMiddleware()` returns what the route and its group DECLARED — which for every
+     * route outside `routes/api_admin.php` is a group NAME (`runtime`, `sdk`) rather than the class
+     * list that name expands to. `securityFor()` has to reason about the classes, because the group
+     * name is a label and the stack is the fact, so it expands them through this map.
+     *
+     * A property rather than a parameter threaded through four methods: `handle()` is the only place
+     * with a `Router`, and passing it down would put the router in the signature of methods whose
+     * job is to describe one route.
+     *
+     * @var array<string, list<mixed>>
+     */
+    private array $middlewareGroups = [];
+
     public function handle(Router $router): int
     {
+        /** @var array<string, list<mixed>> $groups */
+        $groups = $router->getMiddlewareGroups();
+        $this->middlewareGroups = $groups;
+
         $target = (string) ($this->option('path') ?? '') ?: dirname(base_path(), 2).'/packages/contracts/openapi/core-api.openapi.json';
 
         try {
@@ -269,7 +291,11 @@ final class DumpOpenApiCommand extends Command
         // reads it. AcknowledgementResource exists precisely so the fix is one line at the call
         // site. If a bodyless success is ever genuinely wanted, this guard is what has to be
         // deleted deliberately, together with the `content` omission and the client's unwrap.
-        if ($shape->properties === []) {
+        // SCOPED TO THE JSON CASE. A streamed action publishes a media type and no property object at
+        // all — see `ResponseShape::$mediaType` — so the guard that exists to stop `"properties": []`
+        // reaching the document does not apply to it. Widening it to every action would refuse the
+        // SSE relay, whose body genuinely has no JSON shape.
+        if ($shape->properties === [] && $shape->mediaType === 'application/json') {
             throw new RuntimeException(
                 "{$label} ({$controller}::{$method}) declares #[ResponseShape] with no properties. A "
                 .'bodyless success would publish `"properties": []`, which is not a JSON Schema '
@@ -337,15 +363,31 @@ final class DumpOpenApiCommand extends Command
 
         ksort($properties, SORT_STRING);
 
+        // A STREAM PUBLISHES ITS MEDIA TYPE AND A POINTER, NOT A BODY SCHEMA. The SSE frame union is
+        // `packages/contracts/src/sse/events.ts`, which every client already parses and which
+        // `app/contracts/internal/chat.py` mirrors field for field; transcribing it here would be a
+        // third copy of one contract and the third copy is always the one that drifts.
+        $successBody = $shape->mediaType === 'application/json'
+            ? ['application/json' => ['schema' => [
+                'type' => 'object',
+                'additionalProperties' => false,
+                'required' => array_keys($properties),
+                'properties' => $properties,
+            ]]]
+            : [$shape->mediaType => ['schema' => [
+                'type' => 'string',
+                'contentMediaType' => $shape->mediaType,
+                'description' => 'Server-sent events. The frame union is published as '
+                    .'`packages/contracts/src/sse/events.ts` and is not duplicated here: six '
+                    .'client-facing names, exactly one terminal frame per stream, and `: ping` '
+                    .'comments that dispatch no event. Read the stream with `fetch` and a reader — '
+                    .'`EventSource` cannot set an Authorization header and is GET-only.',
+            ]]];
+
         $responses = [
             (string) $shape->status => [
                 'description' => $shape->description !== '' ? $shape->description : 'Success.',
-                'content' => ['application/json' => ['schema' => [
-                    'type' => 'object',
-                    'additionalProperties' => false,
-                    'required' => array_keys($properties),
-                    'properties' => $properties,
-                ]]],
+                'content' => $successBody,
             ],
         ];
 
@@ -365,6 +407,16 @@ final class DumpOpenApiCommand extends Command
             'security' => $this->securityFor($route),
             'responses' => $responses,
         ];
+
+        // THE SDK SURFACE'S ACTUAL BOUNDARY, PUBLISHED. `security: []` there is the truthful answer
+        // to "which credential" and is silent about the thing that does the work, so the fact is
+        // stated as an extension rather than left for a reader to infer from an empty array. It is
+        // `x-`-prefixed because OpenAPI has no vocabulary for "a browser-set header the caller
+        // cannot forge", and modelling it as a `securityScheme` of type `apiKey` would tell a
+        // generator to SEND it — which page script cannot do and which the browser does anyway.
+        if (str_starts_with(ltrim($route->uri(), '/'), 'sdk/')) {
+            $operation['x-kb-origin-validated'] = true;
+        }
 
         $manifest = $this->requestRulesManifest($route);
 
@@ -529,6 +581,55 @@ final class DumpOpenApiCommand extends Command
         $uri = ltrim($route->uri(), '/');
         $label = $route->methods()[0].' /'.$uri;
 
+        // ── `rt/` — THE PUBLIC CHAT RUNTIME. One mechanism, and it is not `auth:` middleware ──
+        //
+        // The credential is the opaque chat-session bearer, resolved by
+        // `App\Http\Middleware\ResolveChatSession` — NOT by Laravel's `auth:` guard, because the
+        // subject is not a `User` and there is no guard that could produce one. So the derivation
+        // used for `api/` (read the `auth:` middleware off the stack) cannot answer here, and the
+        // rule is the GROUP: every route in `routes/api_public.php` is mounted on the `runtime`
+        // group, whose first entry is that middleware. A route added to the group without it does
+        // not exist — the group IS the requirement.
+        //
+        // Derived from the middleware stack rather than declared on the attribute for the same
+        // reason the `api/` branch is: an argument on #[ResponseShape] would be a second statement
+        // of "does this need a credential", and the two could disagree.
+        if (str_starts_with($uri, 'rt/')) {
+            if ($this->guardsSurface($route, Surface::PublicRuntime)) {
+                return [['chatSession' => []]];
+            }
+
+            throw new RuntimeException(
+                "{$label} is on the public chat runtime and does not resolve a chat session. Every "
+                .'route in that group carries ResolveChatSession; publishing this one would '
+                .'describe an unauthenticated chat endpoint.',
+            );
+        }
+
+        // ── `sdk/` — UNAUTHENTICATED BY DESIGN, AND `[]` HERE IS AN ASSERTION ─────────────────
+        //
+        // The caller is a loader script on a page we do not control and there is nothing it could
+        // present: the public bot id is printed into that page's source and authorizes nothing. What
+        // stands in for a credential is the browser-set `Origin`, which page script cannot forge —
+        // and an origin is not a security scheme in OpenAPI's vocabulary, so it cannot be modelled
+        // as one without inventing a fiction a generator would try to satisfy.
+        //
+        // THE REQUIREMENT IS THEREFORE THE ORIGIN CHECK, AND IT IS ASSERTED RATHER THAN ASSUMED: a
+        // route in this group without `ValidateEmbedOrigin` would be genuinely open, and publishing
+        // `[]` for it would be true and terrible. `x-kb-origin-validated` on the operation is where
+        // the fact is published; `security: []` is the honest answer to "which credential".
+        if (str_starts_with($uri, 'sdk/')) {
+            if ($this->guardsSurface($route, Surface::Sdk)) {
+                return [];
+            }
+
+            throw new RuntimeException(
+                "{$label} is on the SDK surface and does not validate its Origin. That group's only "
+                .'boundary is the browser-set Origin header; publishing this route would describe '
+                .'an endpoint anything on the internet may call.',
+            );
+        }
+
         if (! str_starts_with($uri, 'api/')) {
             throw new RuntimeException(
                 "{$label} is on a surface this command declares no security scheme for. Teach "
@@ -540,7 +641,7 @@ final class DumpOpenApiCommand extends Command
 
         $authenticators = [];
 
-        foreach ($route->gatherMiddleware() as $middleware) {
+        foreach ($this->stackFor($route) as $middleware) {
             // `auth`, `auth:<guard>`, `auth.basic`, `auth.session` — and nothing that merely starts
             // with those letters, which is why the boundary is anchored rather than a prefix match.
             if (is_string($middleware) && preg_match('/^auth($|[:.])/', $middleware) === 1) {
@@ -564,6 +665,62 @@ final class DumpOpenApiCommand extends Command
     }
 
     /**
+     * Does this route's stack contain the credential boundary of `$surface`?
+     *
+     * ASKED THROUGH `PublicSurfaceGuard` RATHER THAN BY NAMING THE MIDDLEWARE CLASS. Naming it would
+     * create an `App\Console\Commands -> App\Http\Middleware` edge, which
+     * `arch()->preset()->laravel()` refuses — correctly, because a console command reaching into the
+     * HTTP layer is how a command ends up depending on request state. Matching a class-name STRING
+     * would silence that rule by making the dependency invisible to it, and a rename would then break
+     * the dump at runtime with a message about a route instead of about a rename. The interface's own
+     * docblock carries the argument.
+     */
+    private function guardsSurface(Route $route, Surface $surface): bool
+    {
+        foreach ($this->stackFor($route) as $middleware) {
+            if (! is_string($middleware) || ! is_a($middleware, PublicSurfaceGuard::class, true)) {
+                continue;
+            }
+
+            /** @var class-string<PublicSurfaceGuard> $middleware */
+            if ($middleware::guardedSurface() === $surface) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Every middleware that will actually run for one route, with group names expanded.
+     *
+     * ONE LEVEL OF EXPANSION IS ENOUGH AND IS ALSO ALL THAT IS TRUE. Laravel resolves nested groups
+     * recursively, and none of the four groups in this application nests another; a recursive
+     * expansion here would be machinery for a case that does not exist and would loop on a
+     * self-referential group, which the framework itself guards against separately.
+     *
+     * @return list<mixed>
+     */
+    private function stackFor(Route $route): array
+    {
+        $stack = [];
+
+        foreach ($route->gatherMiddleware() as $middleware) {
+            if (is_string($middleware) && array_key_exists($middleware, $this->middlewareGroups)) {
+                foreach ($this->middlewareGroups[$middleware] as $expanded) {
+                    $stack[] = $expanded;
+                }
+
+                continue;
+            }
+
+            $stack[] = $middleware;
+        }
+
+        return $stack;
+    }
+
+    /**
      * @return array<string, mixed>
      */
     private function securitySchemes(): array
@@ -580,6 +737,19 @@ final class DumpOpenApiCommand extends Command
                     .'must live where JavaScript can read it, so one XSS becomes a stolen, '
                     .'long-lived, replayable credential. Requests also carry the XSRF header the '
                     .'same endpoint sets.',
+            ],
+            'chatSession' => [
+                'type' => 'http',
+                'scheme' => 'bearer',
+                'description' => 'The opaque, origin-bound chat-session token minted by '
+                    .'POST /sdk/v1/session, sent as `Authorization: Bearer kbw_...`. It is NOT a '
+                    .'Sanctum token: an anonymous visitor is not a User, and a chat session must die '
+                    .'in minutes and be droppable in bulk when a domain leaves a bot\'s allow-list, '
+                    .'which a Valkey key with a TTL does and a database row does not. It carries no '
+                    .'readable claims and grants exactly three abilities against exactly one bot; it '
+                    .'can never carry an admin ability, because it is minted with no human '
+                    .'authentication at all. Never put it in a URL — not a query string, not a path '
+                    .'segment, not a fragment.',
             ],
         ];
     }

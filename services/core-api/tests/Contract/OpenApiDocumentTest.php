@@ -18,6 +18,7 @@ use App\Http\Resources\ProviderConnectionCollectionResource;
 use App\Http\Resources\ProviderConnectionResource;
 use App\Http\Resources\ProviderModelCollectionResource;
 use App\Http\Resources\ProviderModelResource;
+use App\Http\Resources\RerankConfigurationResource;
 use App\Models\Bot;
 use App\Models\BotDomain;
 use App\Models\BotStarterQuestion;
@@ -28,6 +29,7 @@ use App\Services\Embedding\EmbeddingCandidate;
 use App\Services\Embedding\EmbeddingDesignation;
 use App\Services\Embedding\EmbeddingReadiness;
 use App\Services\Embedding\EmbeddingRejection;
+use App\Services\Rerank\RerankDesignation;
 use App\Support\Contracts\ProvidesOpenApiSchema;
 use App\Support\Http\ListQuery;
 use Database\Factories\ProviderConnectionFactory;
@@ -403,6 +405,51 @@ it('renders a stored-but-unresolvable designation as a null `selected` AND a pop
     expect($undesignated['designated'])->toBeNull()
         ->and($undesignated['selected'])->toBe($rendered['selected'])
         ->and($undesignated['explanation'])->toBe($rendered['explanation']);
+});
+
+it('publishes exactly the keys RerankConfigurationResource emits, on both branches', function (): void {
+    // BOTH BRANCHES, BECAUSE ONE FIXTURE CANNOT DISTINGUISH THEM. `designated: null` and
+    // `designated: {…}` are the two states this resource exists to tell apart, and a schema proved
+    // against only the populated one would let the null branch drift silently — which is precisely
+    // the failure the whole declaration-versus-execution split in this file is for.
+    $org = Organization::factory()->create();
+    $connection = ProviderConnection::factory()->recycle($org)->create();
+
+    $components = RerankConfigurationResource::openApiSchemas();
+    $request = Request::create("/api/v1/organizations/{$org->id}/rerank-configuration");
+
+    $designated = (new RerankConfigurationResource(
+        $org,
+        new RerankDesignation($connection->id, 'nvidia/llama-3.2-nv-rerankqa-1b-v2'),
+    ))->toArray($request);
+
+    expect(schemaViolations($designated, $components['RerankConfigurationResource'], $components))
+        ->toBe([], 'the published schema disagrees with toArray() for a designated organization');
+
+    $undesignated = (new RerankConfigurationResource($org, null))->toArray($request);
+
+    expect(schemaViolations($undesignated, $components['RerankConfigurationResource'], $components))
+        ->toBe([], 'the published schema disagrees with toArray() for an undesignated organization');
+
+    // AND THE ONE INVARIANT THE SCHEMA CANNOT STATE: `degrades_to_fused_order` is the negation of
+    // "a pair is stored". A boolean that agreed with the schema while disagreeing with `designated`
+    // would tell the configuration screen that reranking is on when it is off.
+    expect($designated['degrades_to_fused_order'])->toBeFalse()
+        ->and($designated['designated'])->toBe([
+            'connection_id' => $connection->id,
+            'model' => 'nvidia/llama-3.2-nv-rerankqa-1b-v2',
+        ])
+        ->and($undesignated['degrades_to_fused_order'])->toBeTrue()
+        ->and($undesignated['designated'])->toBeNull();
+
+    // NO CREDENTIAL FIELD IS REPRESENTABLE, and it is asserted rather than argued: the fixture
+    // connection really is sealed with a distinctive plaintext, so this cannot pass because nothing
+    // was ever encrypted.
+    $rendered = json_encode($designated, JSON_THROW_ON_ERROR);
+
+    expect(str_contains($rendered, ProviderConnectionFactory::FIXTURE_CREDENTIAL))
+        ->toBeFalse('the rerank configuration rendered the provider credential')
+        ->and(str_contains($rendered, 'last_four'))->toBeFalse();
 });
 
 it('publishes exactly the keys ProviderConnectionResource emits', function (): void {
@@ -1187,21 +1234,53 @@ it('names no credential anywhere in the document', function (): void {
     // The published document is read by generators, by reviewers, and by anyone with the repo. A
     // `credential` property on a RESPONSE schema would be a leak; `x-kb-request-rules` naming the
     // manifest file is the only permitted occurrence of the word, and it is a path, not a field.
+    //
+    // ── THE ONE EXEMPTION, AND WHY IT IS SCOPED TO ONE COMPONENT RATHER THAN TO ONE WORD ─────
+    //
+    // `ChatSessionResource` publishes a property called `token`, and it genuinely IS one: that
+    // endpoint is the only response in the system that returns a live credential, because minting a
+    // chat session is what it does. Removing the word would not remove the credential — it would
+    // remove the DESCRIPTION of it from the document three clients generate their types from, which
+    // is strictly worse.
+    //
+    // The exemption is by COMPONENT NAME and not by word, so `token` appearing on any other schema
+    // still fails. `apps/widget/src/loader/bridge.ts` pins the field name, so it is not ours to
+    // rename either.
+    $exempt = ['ChatSessionResource' => ['token']];
+
     $document = dumpDocument()['document'];
 
     $schemas = $document['components']['schemas'] ?? [];
 
     assert(is_array($schemas));
 
-    foreach (flattenStrings($schemas) as $fragment) {
-        // Property names and enum members only — descriptions legitimately discuss credentials.
-        if (str_contains($fragment, ' ')) {
-            continue;
-        }
+    foreach ($schemas as $component => $schema) {
+        assert(is_string($component));
 
-        expect((bool) preg_match('/^(credential|api_key|apiKey|secret|token|password|ciphertext|kek)/i', $fragment))
-            ->toBeFalse("the published document names a credential-shaped schema key: {$fragment}");
+        $allowed = $exempt[$component] ?? [];
+
+        foreach (flattenStrings($schema) as $fragment) {
+            // Property names and enum members only — descriptions legitimately discuss credentials.
+            if (str_contains($fragment, ' ') || in_array($fragment, $allowed, true)) {
+                continue;
+            }
+
+            expect((bool) preg_match('/^(credential|api_key|apiKey|secret|token|password|ciphertext|kek)/i', $fragment))
+                ->toBeFalse("the published document names a credential-shaped schema key: {$component}.{$fragment}");
+        }
     }
+
+    // THE EXEMPTION IS NOT VACUOUS. If `ChatSessionResource` ever stops publishing `token`, this
+    // allow-list is an entry nobody is watching, and the next credential-shaped field added to that
+    // component inherits it.
+    //
+    // `in_array(...)` INSIDE THE EXPECTATION, not `->toContain('token', $message)`: this file's own
+    // header records that `toContain()`'s second parameter is ANOTHER EXPECTED VALUE, so a message
+    // passed there is silently asserted as a member of the array. Same trap as the `toHaveKey()`
+    // note above, and it fires here as a failure claiming the sentence is missing from the property
+    // list.
+    expect(in_array('token', array_keys((array) ($schemas['ChatSessionResource']['properties'] ?? [])), true))
+        ->toBeTrue('the ChatSessionResource exemption above no longer applies to anything');
 });
 
 // ── query parameters: the half `$route->parameterNames()` cannot see ──────────────────────────────
@@ -1331,11 +1410,35 @@ it('publishes query parameters only where a request declares them', function ():
     // paginated list fails identically to the block leaking onto an operation that never asked.
     // ADDING A NAME HERE IS THE EXPECTED COST OF SHIPPING A NEW LIST, and it is the same shape as
     // ScheduleTest's pinned entry set — the failure is the reviewer's cue that a new operation now
-    // publishes `page`, `per_page`, `sort`, `dir` and `filter`, and therefore that its sortable set
-    // is closed and its page size is capped. Sorted by path, which is the order `dumpDocument()`
-    // emits and therefore the order this array arrives in.
+    // publishes a query string, and therefore that its sortable set is closed and its page size is
+    // capped. Sorted by path, which is the order `dumpDocument()` emits and therefore the order
+    // this array arrives in.
+    //
+    // THIS COMMENT USED TO SAY THE CUE WAS "`page`, `per_page`, `sort`, `dir` AND `filter`", AND
+    // PHASE 6a MADE THAT FALSE. `ListQuery::rules()` and `openApiQueryParameters()` both take a
+    // `freeText` flag now, and the two names added below pass `false`: on `audit_logs` the only
+    // free-text targets are `user_agent` and the `details` jsonb, where an ILIKE is a sequential
+    // scan of a partitioned append-only table, and on `conversations` the only prose lives one
+    // table down in `messages`. So the reviewer's question is now three: is the sortable set
+    // closed, is the page size capped, and — for an endpoint WITHOUT `filter` — is every filter it
+    // does publish an equality or a range over an indexed column.
     expect(array_values(array_unique($withQuery)))
         ->toBe([
+            // ADDED WITH PHASE E1, AND IT IS THE FIRST NAME HERE THAT IS NOT A PAGINATED LIST.
+            // `ShowAnalyticsRequest` implements the same interface for a different reason: its
+            // query string is a half-open WINDOW plus an optional bot, not a page. What a reviewer
+            // is being asked to confirm is therefore different too — that the window is bounded in
+            // both directions (`ShowAnalyticsRequest::MAX_WINDOW_DAYS`), because every tile behind
+            // it is an aggregate and an unbounded `from` is a full-table scan on a screen that
+            // renders on every dashboard load.
+            'GET /api/v1/organizations/{organization}/analytics',
+            // ADDED WITH PHASE 6a, AND IT IS THE FIRST NAME HERE THAT PUBLISHES NO `filter`.
+            // `IndexAuditLogsRequest` closes `operation` and `outcome` against
+            // `AuditLogger::OPERATIONS` — the writer refuses anything outside that map, so a value
+            // outside it is a 422 rather than an empty page — and deliberately leaves
+            // `subject_type` OPEN, because the column has no CHECK and closing it would 422 a
+            // legitimate query the day a new kind of record is first audited.
+            'GET /api/v1/organizations/{organization}/audit-logs',
             'GET /api/v1/organizations/{organization}/bots',
             // ADDED WITH PHASE C6. The bot's source assignments are this repository's second
             // paginated CHILD list, and the name is here because
@@ -1343,6 +1446,11 @@ it('publishes query parameters only where a request declares them', function ():
             // its page size — which is the property a reviewer is being asked to confirm rather
             // than a line to keep the array green.
             'GET /api/v1/organizations/{organization}/bots/{bot}/source-assignments',
+            // ADDED WITH PHASE 6a. `IndexConversationsRequest` publishes seven filters and every
+            // one of them is backed by an org-leading index; `bot_id` and `user_id` carry NO
+            // `exists:` rule, deliberately, because an unscoped one would answer "does this id
+            // exist anywhere in the platform" to any member of any organization.
+            'GET /api/v1/organizations/{organization}/conversations',
             'GET /api/v1/organizations/{organization}/sources',
         ]);
 });
@@ -1368,12 +1476,36 @@ it('is byte-identical across two runs and --check is a real gate', function (): 
 // AGAIN as of 2026-08-17: `.github/` was deleted, and with it the only thing that ran
 // `php artisan kb:dump-openapi --check` against the real committed artifact.
 //
-// SO THERE IS NOW A REAL GAP, AND IT IS NAMED HERE RATHER THAN LEFT TO BE REDISCOVERED. The test
-// above proves the GENERATOR is deterministic and that `--check` CAN fail, using `--path` into a
-// temp dir. Nothing proves the COMMITTED document is current. A stale packages/contracts/openapi/
-// artifact is therefore invisible until someone runs the command by hand. Restoring the deleted
-// default-path variant of this test is the cheapest way to close it, and it is deliberately not
-// done here: it would have to be a decision about what the suite guarantees, not a drive-by edit.
+// THAT GAP WAS NAMED HERE FOR TWO WEEKS AND IS CLOSED BELOW, ON 2026-08-31. The paragraph above
+// ended by declining to restore the test, on the grounds that it "would have to be a decision about
+// what the suite guarantees, not a drive-by edit." That was the right call at the time and the
+// decision has since been forced twice, so it is taken here rather than deferred a third time.
+//
+// WHAT FORCED IT. `docs/22` § T37: `kb:dump-openapi` emitted `x-kb-request-rules` pointers to files
+// that did not exist, published, for part of a day, invisible to everything. § T54: Phase 6a landed
+// nine FormRequests and twenty-seven components and the committed artifacts went stale while both
+// `--check` dumpers passed — because they verify the dump is current with respect to the code only
+// when someone runs them. Both are the same defect, which is that the artifact is a build output
+// committed by hand with no gate. `.github/` is not coming back (see CLAUDE.md); review and this
+// suite are the whole control.
+//
+// WHAT THE SUITE NOW GUARANTEES, STATED PLAINLY BECAUSE THAT WAS THE OPEN QUESTION: that the
+// committed document equals what this code generates. The cost is real and is the intended cost —
+// a change to any response shape turns this test red until the author runs `php artisan
+// kb:dump-openapi`, in the same commit. That is one command, and the alternative is a published
+// contract that describes a server nobody is running.
+//
+// IT NEEDS THE REPOSITORY ROOT MOUNTED, which is the same requirement `dumpDocument()`'s default
+// path has and the reason the Pest invocation in CLAUDE.md insists on it: the default resolves
+// through `dirname(base_path(), 2)`, so a container with only `services/core-api` mounted writes
+// the comparison against `//packages/contracts/...` and fails for a reason that has nothing to do
+// with the document.
+it('keeps the committed document current', function (): void {
+    expect(Artisan::call('kb:dump-openapi', ['--check' => true]))
+        ->toBe(0, "The committed packages/contracts/openapi/core-api.openapi.json is stale.\n"
+            .'Run `php artisan kb:dump-openapi` and commit the result with this change.'
+            ."\n\n".Artisan::output());
+});
 
 // ── security: which routes require the session cookie, and which are reachable by a stranger ──────
 
@@ -1441,11 +1573,48 @@ it('states a security requirement on every operation, and the guest set is pinne
         }
     }
 
+    // ── TWO KINDS OF `security: []`, AND CONFLATING THEM WOULD MAKE THIS ASSERTION USELESS ───
+    //
+    // The SDK surface publishes an empty requirement too, and it is the truthful answer to "which
+    // credential": there is none. Its boundary is the browser-set `Origin`, which page script cannot
+    // forge and which OpenAPI has no vocabulary for — modelling it as an `apiKey` scheme would tell a
+    // generator to SEND it, which no client can do and the browser does anyway. The document says so
+    // with `x-kb-origin-validated`, and that extension is what this test partitions on.
+    //
+    // Folding the two together would mean an admin route that lost `auth:sanctum` could be "fixed"
+    // by adding it to one list, and the list would stop meaning "reachable with no credential at
+    // all".
+    $originValidated = [];
+    $unguarded = [];
+
+    foreach ($guest as $label) {
+        [$method, $path] = explode(' ', $label, 2);
+        $operation = $document['paths'][$path][strtolower($method)] ?? [];
+
+        assert(is_array($operation));
+
+        if (($operation['x-kb-origin-validated'] ?? false) === true) {
+            $originValidated[] = $label;
+
+            continue;
+        }
+
+        $unguarded[] = $label;
+    }
+
+    // routes/api_sdk.php, both routes. Neither can carry a credential — the caller is a loader script
+    // on a page we do not control — and both refuse an absent, `null` or malformed `Origin` with the
+    // same 404 as every other rejection on that surface.
+    expect($originValidated)->toEqualCanonicalizing([
+        'POST /sdk/v1/bootstrap',
+        'POST /sdk/v1/session',
+    ], 'an SDK route gained or lost its origin validation, or a non-SDK route acquired the extension');
+
     // routes/api_auth.php GROUP A, and nothing else anywhere. Each of the six is guest-reachable for
     // a reason written at its route: the credential does not exist yet (login, register), it is being
     // re-established (forgot-password, reset-password), or the link is opened from a mail client in
     // another browser (email/verify, invitations/preview).
-    expect($guest)->toEqualCanonicalizing([
+    expect($unguarded)->toEqualCanonicalizing([
         'POST /api/v1/auth/login',
         'POST /api/v1/auth/register',
         'POST /api/v1/auth/forgot-password',
@@ -1462,6 +1631,12 @@ it('states a security requirement on every operation, and the guest set is pinne
         'POST /api/v1/auth/logout',
         'POST /api/v1/session/organization',
         'GET /api/v1/organizations/{organization}/members',
+        // THE PUBLIC CHAT RUNTIME IS AUTHENTICATED TOO, by a different scheme. Its credential is the
+        // opaque chat-session bearer, and a route there that published `security: []` would be an
+        // unauthenticated chat endpoint — which is why the dumper REFUSES to publish one rather than
+        // describing it.
+        'POST /rt/v1/conversations/{conversation}/messages',
+        'GET /rt/v1/bot',
     );
 });
 

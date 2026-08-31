@@ -8260,3 +8260,1325 @@ no verdict at all, which reads as five broken specs rather than one missing cont
 `admin` project's evidence value depends on the organization having rows: an axe scan is evidence
 only about elements that were on screen, so a green `/sources` scan against an empty table would have
 proved nothing about the per-row link that is § R1's whole point.
+
+## Found while building the adapters, the RAG stages and the conversation schema — T1–T41, 2026-08-26/27
+
+**Why `T`.** `S1`–`S2` is § *Found while closing the register*, so `T` is the next free letter, and it
+is also what the working register used while these were being written. Taking the same letter rather
+than renumbering is deliberate: § L1's preamble records what it cost this file the last time an ADR
+amendment cited a finding letter that meant something else, and the code comments written during this
+effort already say `T`.
+
+**Where they came from.** Four passes over two days, and the grouping matters more than the order:
+T1–T21 are the five provider wire adapters and the RAG stage modules; T22–T31 are the conversation
+schema and the two rulings taken on it; T32–T34 came from scoping the admin playground and the SSE
+relay; T35–T39 from the fallback router and the rerank designation; T40–T41 from verifying the chat
+seam. **Each row's own status line is the authority**, and
+`grep -n '^### .*(OPEN' docs/22-spec-findings-and-decisions.md` is the measure — do not read a state
+from this preamble (ADR-036).
+
+**Three of these are closed by ADR rather than by a fix**, and they are the ones to read for the
+argument rather than the outcome: § T41 → **ADR-073** (the BM25 analyzer, which had been decided in
+code and cited five times against a number that meant something else), § T28 → **ADR-074**
+(`retrieval_traces` leaves the write allow-list), § T23 → **ADR-075** (`messages` and `provider_calls`
+stay unpartitioned).
+
+**Read § T40 first, and § T27 immediately after it, because they are a matched pair.** T40 is a stale
+sentence in `CLAUDE.md` that was read by an agent, believed, implemented as a defect, pinned by a
+passing test, and then reported upward as a property of the repository. T27 is the opposite outcome on
+the same day: a self-expiring mechanism this repository built for exactly that class of decay fired on
+the day the thing it watched changed. **The difference between them is what each one watches.** Every
+mechanism in this file — § Q5's AST scan, § Q6's tripwire, § T27's excuse list — watches a claim made
+in *code*. Nothing watches `CLAUDE.md`'s claims *about* code, and `CLAUDE.md` is the file every agent
+reads first.
+
+**One convention carried forward from § *The rulings of 2026-08-12*, deliberately.** Several rows below
+record an investigation that went a different way from the brief that asked for it — § T8 (the
+documented crash was unreachable and the real hazard was its opposite), § T21 (a reading that is
+correct today for a reason that is invisible today), § T26 (a correction to a wrong claim that was
+itself wrong), § T38 (a brief overridden by the code it described). Those are written down as
+reversals rather than as outcomes, because a ruling recorded only as its result invites the same
+question next quarter.
+
+**A note on evidence, and it is the same note § T40 is about.** These entries were transcribed from a
+working register and then **re-verified against the tree on 2026-08-27**. Where the two disagree the
+tree wins and the disagreement is stated inside the row — because a register that went stale in the days
+it took to be written down is itself an instance of the thing § T40 records, and a finding transcribed
+without re-measurement is testimony presented as evidence.
+
+**Do not read from this preamble how many rows carry such a note** (ADR-036) — each row states it in
+its own text. What is worth stating is the **direction**, because it was not the one expected:
+every disagreement found was the tree having moved *ahead* of the register — a gap closed, a
+citation corrected, an artifact regenerated — except one, § T32, where reading the tree turned a
+one-line fix into a decision nobody has taken. Two rows (§ T35, § T37) were closed by work in flight
+*while this section was being written*, and § T37 was measured three times in one day and read
+differently each time. That is the argument for a command over a verdict, made by this section against
+itself.
+
+### T1 — OpenAI now reports a cache-write amount, and two documents still say it never does *(OPEN — the arithmetic is fixed; `openai_adapter.py`'s own module docstring and `openai-api/SKILL.md` still deny the field)*
+
+`openai==2.53.0` carries `InputTokensDetails.cache_write_tokens` ("The number of input tokens that were
+written to the cache") and `PromptTokensDetails.cache_write_tokens`. The adapter's `_usage` reads it,
+and reads it **without taking a position that could not be checked**: both fields sit in a container the
+SDK documents as "a detailed breakdown of the input tokens", which is the subset reading, so the
+arithmetic *tests* that reading against the numbers in hand — subtract both when
+`cached + written <= input`, fall back to the always-verified reading otherwise. `total_input_tokens`
+equals the vendor's billed input on both branches, so a wrong guess costs attribution and never the
+bill. Two tests pin both branches.
+
+**What is still open is the shape this file keeps finding: a corrected function inside an uncorrected
+file.** `services/ai-service/app/providers/openai_adapter.py` says at its module docstring that *"the
+API returns no write amount at all — only reads"* and instructs the reader never to synthesize one,
+while the same file's `_usage` docstring says `cache_write_tokens` **is** read and explains the
+derivation. `.claude/skills/openai-api/SKILL.md` carries the same denial in its Gotchas. Neither is
+`docs/`'s to edit — the adapter belongs to `provider-adapter-engineer` and the skill to its owner —
+and both are recorded here rather than resolved. This is § Q16's shape (a sweep that corrected a file's
+neighbours and missed one instance) with the two halves in the same file, which is the version that
+reads as authoritative to whoever gets there first.
+
+### T2 — a tripwire fired exactly as designed and was discharged *(CLOSED — recorded as the good outcome)*
+
+`tests/unit/test_openai_embedding_arm.py::test_the_chat_half_is_still_a_skeleton_and_says_so` asserted
+that `_usage` and `_stop` raise `NotImplementedError`, and existed *"so the remaining scope is visible
+rather than a surprise at the first chat request"*. Implementing the chat arm is the event it was built
+to catch; it went red, and was deleted along with the module docstring's stale second paragraph.
+
+Recorded because the register is otherwise a list of mechanisms that were missing. This one existed,
+it made a scope boundary visible, and the scope it made visible is the scope that was taken.
+
+### T3 — `.venv/bin/mypy` is broken on this box *(RECORDED — a host fact, not a repository defect)*
+
+`bad interpreter: /w/.venv/bin/python`, the same root cause as the pytest console scripts. Three
+separate agents hit it independently, which is the only reason it is written down at all.
+`.venv/bin/python -m mypy` is the working invocation. Belongs to the environment notes rather than to
+this file; it is here so the fourth agent finds it.
+
+### T4 — Anthropic thinking-block signatures are unrepresentable in `ChatResult` *(OPEN — a real future gap, not a present defect)*
+
+`Delta.kind` has no `signature` member and `ChatResult` has no field for one, so the adapter drops
+`signature_delta`. **Correct today**, because no tool-use loop exists. The day one runs on Anthropic
+*with thinking on*, signed thinking blocks must be replayed into the next turn or the model reasons
+from a hole — and there is nowhere in this contract to carry them. Recorded now because the cost of
+discovering it later is a contract change in the middle of a feature, and because "correct today" is
+the state that stops being examined.
+
+### T5 — `Capability.EARLY_INPUT_USAGE` cannot be asserted by an adapter *(OPEN, MINOR)*
+
+It is a `provider_models` row flag, and adapters read capabilities rather than writing them.
+Anthropic's adapter expresses the behaviour as `usage.source == "provider_partial"` on the cancel path
+instead. If the flag is meant to be **asserted** rather than merely described, it has to arrive on the
+row — which is a catalogue and migration question for the control plane, not an adapter one, and is
+recorded here so it is not solved twice in the adapter layer.
+
+### T6 — `classify()` cannot reclassify an Anthropic `permission_error` *(RULED — no change)*
+
+The skeleton's comment asked for reclassification to `provider_permanent_request` when
+`models.retrieve(req.model)` 404s under the same credential. `classify` is synchronous and receives only
+an exception, and **a classifier must not make a network call while classifying a network failure.**
+Left at `provider_auth`: both readings are terminal, neither is fallback-eligible, so the only thing the
+distinction buys is which team gets paged. Recorded as a ruling rather than deleted, because the
+comment asking for it reads as an unfinished to-do.
+
+### T7 — cross-adapter agreement on the cancel path, two of five *(SUPERSEDED BY § T31 — kept because it was the correct reading at the time)*
+
+`openai_adapter.py` and `anthropic.py` were written independently by different agents and both set
+`error_class=ErrorClass.USER_CANCELLATION.value` on the terminal `ChatResult`. The
+`kb-provider-adapter-contract` sketch leaves it `None`, which would read as **success** to a consumer
+branching on `error_class`. Two independent implementations agreeing against a sketch is evidence about
+the sketch; T11 and T31 are the same observation at three and at five.
+
+### T8 — "skip SSE comment lines" was already true, and was never the hazard *(CLOSED — fixed in `deepseek.py`; the two skills describe a crash that was never reachable)*
+
+`kb-provider-adapter-contract` and `deepseek-api` both say a reader that does not skip `: keep-alive`
+crashes on the first one under load. The `openai` SDK's `SSEDecoder.decode` already returns `None` for a
+line starting with `:`, so **the documented crash was never reachable.**
+
+**The real consequence is the opposite shape and neither document states it.** A skipped comment yields
+no chunk at all *and the bytes still reset httpx's read timeout* — so under DeepSeek saturation, which
+holds the connection open for roughly ten minutes emitting keep-alives rather than returning 429,
+**no transport timer and no per-chunk check can ever fire.** The documented "the first-token timeout is
+the only saturation detector" was describing a detector that did not exist. Fixed with an explicit
+`asyncio.wait_for` around `__anext__`.
+
+**The second-order part is the one to copy.** The first-token **timer** and the TTFT **metric** had to
+be split. Latching both on the first *text* delta kills a genuinely slow thinking phase as "saturation"
+after twenty seconds and fires a fallback behind it — a correct-looking timeout that is wrong about
+what it measured. The timer is released by any generated delta, reasoning included; `first_token_ms` is
+still the first text delta. Both are tested.
+
+### T9 — `deepseek-api/SKILL.md` instructs an in-adapter retry *(OPEN — needs a ruling; a skill divergence documented rather than resolved)*
+
+Its Gotchas tell the implementer to retry once **inside the adapter** for the documented "json mode may
+return empty content" case. That contradicts `kb-provider-adapter-contract`'s retry-ownership rule and
+`ProviderAdapter.stream`'s own docstring. The adapter did not implement it, which is right:
+`kb-error-taxonomy` gives retry to the tier that owns the adapter — the data plane — but that means
+**the router loop, one place, not five copies inside five `stream()` methods.**
+
+Recommendation, and it is a recommendation rather than a decision: the skill's gotcha is corrected to
+name the router, and the empty-content case becomes a router-visible `error_class`. Neither half is
+`docs/`'s to make.
+
+### T10 — `ChatResult` cannot carry ADR-029's `Origin` *(OPEN)*
+
+`ChatResult.error_class` is a bare class name with no origin axis, so an adapter's own defect — *our
+bug, do not retry* — renders as `internal_dependency`/DOWNSTREAM at the envelope layer rather than SELF.
+**This is ADR-029's split failing to survive one hop**, the same shape as the Phase A relay defect one
+tier lower, and it is not fixable inside an adapter: the field would have to grow an axis, which is a
+contract change across five implementations and the router.
+
+### T11 — the same agreement, three of five *(SUPERSEDED BY § T31)*
+
+OpenAI, Anthropic and DeepSeek, written independently, all three setting `USER_CANCELLATION`. Kept for
+the same reason T7 is: the three snapshots are the record of a claim getting stronger, and collapsing
+them into the final one hides that nobody coordinated it.
+
+### T12 — `CapabilityWarning(action="rejected")` misused for image input *(OPEN — fixed in `deepseek.py`; the other four are unchecked and the skill example still shows the misuse)*
+
+`contract.CapabilityWarning`'s `rejected` means *the request did not go out*. The skill's example —
+`.claude/skills/deepseek-api/SKILL.md`, in the body-builder sketch — appends
+`CapabilityWarning(option="images", action="rejected", detail="text-only")` and then **returns the body**,
+so the request goes out with the images dropped and a warning claiming it did not. Still present as of
+2026-08-27, and it sits a few lines above the two sketches in the same file that *were* corrected that
+day (§ T31), which is § Q16's shape: a partially corrected file reads as a swept one.
+
+DeepSeek now hard-raises `KbError(VALIDATION)` for images regardless of `on_unsupported`, on a
+distinction worth keeping: **every other entry is an *option* whose absence changes the wording, while
+an image is *content* whose absence changes the question.** Answering a different question at HTTP 200
+is the failure. The other four adapters have not been checked for the same shape.
+
+### T13 — `ExclusionReason` has no member for a chunk with no body in PostgreSQL *(OPEN — needs a ruling; the closed vocabulary is right to be closed and is missing a member)*
+
+A candidate can clear stage 12 and then hydrate to nothing: the payload projection deliberately excludes
+chunk text (ADR-010), so the body is a separate PostgreSQL read that can miss. **Two stages now report
+that same condition two different ways, and both are defensible.** `app/rag/rerank.py` files it under
+`ExclusionReason.BELOW_RERANK_CANDIDATE_CUTOFF` with a comment saying it is doing so because the
+vocabulary has no member for it, and refusing to score against an empty string — *"which returns a real
+number that ranks a missing passage against present ones"*. Stage 13 refuses that label, because by then
+the reason would be a lie, and puts the chunk in `PackedContext.unhydrated` instead.
+
+The repair is a new member of a closed contract in `app/rag/stages.py`, which no single stage owner may
+add alone — a label that appears in a trace is read by the playground, the eval suite and the analytics
+aggregates. Recorded so that neither site is later "tidied" into agreeing with the other by accident.
+
+### T14 — the refusal and small-talk replies are English placeholders, and they are two more config-snapshot fields *(OPEN — D2 input)*
+
+Strict RAG has no prompt that makes falling through to model knowledge safe, so a refusal and a greeting
+stream a **canned** reply rather than calling a provider. `RetrievalConfig.refusal_text` and
+`.small_talk_text` (`app/rag/runner.py`) default to English, and `runner.py` selects between them by
+`GenerationMode`. **A Spanish bot therefore refuses in English** until the control plane supplies
+localized text — so these are two more fields the D2 configuration snapshot has to carry, and they were
+on nobody's list. The failure is invisible on every English tenant.
+
+### T15 — four retrieval defaults were chosen rather than read, and that is not yet a finding *(OPEN — needs an evaluation run; deliberately not stated as a defect)*
+
+`max_per_document = 3`, `reserve_output = 1024`, `history_window_turns = 8`, `question_max_chars = 4000`
+(and, in the sparse arm, `MAX_QUERY_TERMS = 64` with its shedding order). None is in the contract or the
+specification; each is named as a choice in its own docstring rather than presented as a value.
+
+Per `kb-rag-query-contract`, every default moves only through an evaluation run against an immutable
+config snapshot — so **none of these is a finding yet and none should be quoted as one.** The row exists
+so that the next person to read one of those numbers finds it labelled as a choice rather than
+rediscovering it as a mystery, which is the failure mode `docs/23`'s **M** class is about.
+
+### T16 — §12.4's "skips stages 6–13" versus `stages.py`'s "a stage is never jumped" *(RECONCILED — the spec sentence still reads the other way)*
+
+A greeting needs no retrieval. The runner executes all eight as **recorded no-ops** carrying
+`not_applicable = "needs_retrieval=false"` (`NOT_APPLICABLE_NO_RETRIEVAL` in `app/rag/runner.py`), and a
+test proves no dependency was called.
+
+The alternative — literal skipping — produces a thirteen-row trace that cannot be aligned with a
+twenty-row one, which breaks every playground panel and every evaluation comparison that diffs two runs
+stage by stage. Recorded rather than fixed because `docs/07` §12.4 is verbatim specification and may not
+be edited; this is the deviation, stated here as ADR-062's status line states its own.
+
+### T17 — the evidence fence is nonce-delimited, and the signature is the better half *(RECORDED — a pattern worth propagating, not a defect)*
+
+Retrieved text sits in one fence, `<<<KB-SOURCE-DATA:{nonce}>>>` … `-END:{nonce}`, with a per-request
+`secrets.token_hex(8)`. The standard defeat — injected text writing its own closing tag — now needs a
+value it cannot guess.
+
+**The part worth copying is not the nonce.** `build_prompt` has **no parameter that accepts source text
+anywhere except the evidence position, and no `question` parameter at all**: it reads
+`Rewrite.original_query` itself. So *"the rewrite never reaches an instruction section"* is enforced by
+the function signature rather than remembered by the caller. Non-negotiable 7 is the kind of rule that
+is obeyed for a year and then broken by one convenience argument; making the argument unrepresentable is
+the only version of it that does not decay.
+
+### T18 — measured: the retrieval leg is essentially all network *(RECORDED — a baseline, not a defect)*
+
+Median over 30 runs against fakes: all twenty stages of our own compute total **0.28 ms**, and the
+retrieval leg (stages 6–13) is **0.14 ms** against a 1500 ms budget. ADR-030 predicted exactly this when
+it moved embedding and reranking to provider round trips.
+
+Kept as a baseline with its measurement conditions attached, per `docs/23`'s **M** class: any future
+regression in that leg is a network or provider change, never our arithmetic — and a future entry
+claiming otherwise should be made to produce a number before it is believed.
+
+### T19 — chunk size and the rerank pair window are coupled, and nothing in the repo said so *(OPEN — not a design decision; it needs one recorded response per pinned model id, and is now tracked in `docs/23`)*
+
+`app/ingestion/chunking/chunker.py:171` sets `MAX_TOKENS = 700`. A rerank model's `context_window` is an
+admin-set `provider_models.capability_flags` value. `nim.py`'s `validate_rerank` refuses a
+`(query, passage)` pair that over-runs it — deliberately the loud direction — so **a 700-token chunk
+against a 512-token ranking model is refused before the call**, and reranking is dead for that
+organization with an accurate message.
+
+**The finding is not the refusal; it is what the refusal reveals.** Without it, such a pair is *silently
+truncated on every request*: the reranker scores the first two-thirds of every chunk, and the evidence
+threshold then thresholds a number computed from a fragment. Nothing raises, nothing is metered, and
+answer quality degrades for one tenant only — the exact shape `kb-rag-query-contract` calls out for an
+uncalibrated scale, arriving through a different door. Both repairs are outside the adapter: a ranking
+model whose window exceeds `MAX_TOKENS`, or a smaller `MAX_TOKENS`, which is a full re-index.
+
+**Why this row is not a decision and must not become one.** Verified in the shipped code rather than
+assumed: `validate_rerank` refuses the over-long pair before the call, `ESTIMATED_CHARS_PER_TOKEN = 3.0`
+deliberately over-states so the refusal errs safe, and `nim.py`'s module docstring names the whole
+coupling and reports it upward instead of absorbing it. That is the correct handling of an unknown —
+loud, greppable, and wrong in the safe direction. What is missing is **one recorded response from each
+pinned ranking id**, which discharges this row and five `UNVERIFIED` ranking constants beside it in the
+same stroke. It is therefore recorded in
+[`docs/23-unverified-claims.md`](23-unverified-claims.md) § *Raised by the adapter and RAG-stage effort*,
+not resolved by an argument here. Neither `kb-chunking-rules` nor `bge-reranker` states the coupling.
+
+### T20 — rerank spend is invisible to the quota it shares *(OPEN — E4 input)*
+
+NIM's ranking response carries no usage object, so `RerankResult.usage` is all zeros with
+`source="estimated"`. **ADR-030 put reranking inside the same per-organization quota accounting as
+chat**, and this surface reports nothing to account. E4 must not silently treat a rerank call as free:
+either the quota counts *calls* rather than tokens on this surface, or it estimates **and says on the
+row that it estimated**. The failure otherwise is a tenant whose reranking is free in the ledger and
+billed by the vendor.
+
+### T21 — NIM's usage reading is right for a reason that is invisible today *(RECORDED — not a defect; the kind of choice that is free to get wrong now and expensive to discover later)*
+
+NIM reports only `prompt_tokens`/`completion_tokens` — no details object to be a subset of, no sibling
+field to add. The adapter reads it as the **degenerate OpenAI subset** rather than as the Anthropic
+sibling shape. **The two are indistinguishable today** because the cached bucket is always zero.
+
+They stop being indistinguishable the day NVIDIA reports one, and the sibling reading would then add a
+number that is already inside `prompt_tokens` — over-billing by exactly that amount, in the one field
+billing reads. `_usage`'s comment records this. Written down here because a correct choice with no
+observable consequence is the one that gets "simplified" by a later reader.
+### T22 — `relationLoaded()` is true while the relation is null, under a fail-closed global scope *(CLOSED — a live defect, and the general shape is worth more than the fix)*
+
+`Message`, `RetrievalTrace`, `Citation` and `Feedback` reach their organization through `conversation`;
+none of the four holds `organization_id`. The first spelling of `Message::organizationId()` guarded with
+`assert($conversation instanceof Conversation)`. That is reachable and wrong: `->with('conversation')`
+**resolves to null while `relationLoaded()` returns `true`** whenever `TenantContext` is unbound or bound
+to another organization, because `Conversation` is `#[ScopedBy]` and `OrganizationScope` fails closed by
+design. `assert()` is compiled out under `zend.assertions=-1`, so in production this is a bare
+return-type `TypeError` raised from inside a policy — **an authorization path failing with a type
+error.** All four models now throw a `LogicException` naming both causes and the fix.
+
+**The general shape:** a fail-closed global scope turns *"relation loaded"* and *"relation present"*
+into different questions, and **every `assert()` in this codebase that guards a scoped relation is
+exposed to it.** That is the sweep this row is really asking for. **It was run on 2026-08-27 and the live
+population is empty**, which is worth recording rather than leaving as an open action:
+`grep -rn 'assert(' services/core-api/app` returns hits in five files and **every one of them is a
+docblock or comment warning against the pattern**, four of them the very warnings this finding
+produced. That is the § M6 shape read the other way round — a grep whose every hit is prose about the
+defect rather than the defect — so the pattern to re-run is the same one, and a hit that is a *call*
+rather than a warning is this finding returning.
+
+### T23 — `messages` and `provider_calls` partitioning *(CLOSED 2026-08-27 — ruled; **ADR-075**)*
+
+`postgresql-patterns`' Definition of done requires both tables `PARTITION BY RANGE (created_at)` with
+`created_at` in the primary key, **decided before the first row lands**. D1's brief enumerated
+`docs/11` §16.6's columns with no partition key. They shipped **unpartitioned**, with
+`retention_expires_at` plus a partial index on `conversations` as the retention mechanism, and the
+contradiction written into `2026_08_26_002800`'s docblock rather than resolved silently.
+
+Ruled 2026-08-27 as **ADR-075**: they stay unpartitioned. The ruling is **not** *"the skill is wrong"* —
+it is that the skill's precedent does not transfer, and the precedent is the argument. `audit_logs` is
+partitioned (ADR-041) and is the right shape for it: append-only, no children, nothing holding a foreign
+key into it. `messages` is referenced, so partitioning trades referential-integrity constraints for a
+retention mechanism the schema already has. § Q3 is this repository's own record of what a quietly
+weakened composite key costs.
+
+**What the ruling owed, and both halves are now discharged.** The docblock in `2026_08_26_002800` no
+longer records a contradiction; it records the ruling **with its expiry**, which is a measurement and
+never a feeling — a retention sweep's p99 outgrowing its batch window, or the partial index no longer
+being chosen. Verified against the tree: the docblock's *"HOW THIS RULING BECOMES WRONG"* paragraph and
+the `conversations_retention_due` partial index are both present. One refinement the ADR carries and
+this row records: the docblock counts four references into `messages`, and the tree holds a fifth it does
+not count — `messages`' own self-referencing `messages_parent_same_conversation`. The count is not the
+rule (ADR-036); `grep -rn 'REFERENCES messages' services/core-api/database/migrations/` is.
+
+### T24 — two hard deletes become 500s the moment `provider_calls` has a row *(OPEN — D3 obligation)*
+
+`ProviderModelService::delete()` and `ProviderConnectionService::delete()` are hard deletes. Both parents
+are now `ON DELETE RESTRICT` from `provider_calls`, because **a row that appears in billing history must
+make its parent undeletable** — the same rule the whole conversation graph is built on.
+`ConversationSchemaTest` asserts the RESTRICT, so forgetting is red rather than a production 500.
+
+What is unwritten is the repair: turning both into refusals that carry a sentence, the way the bot delete
+now does (§ T25). Until then the constraint is correct and the error a user sees is a driver exception
+rendered as an internal error — the § J3 shape, where a deliberate refusal is indistinguishable from a
+defect on the client.
+
+### T25 — bot deletion: refuse and archive, rather than cascade or null *(CLOSED — decided, and it discharges `BotService.php`'s `TODO(phase-e)`)*
+
+`conversations.bot_id` is `RESTRICT` through the composite key `(organization_id, bot_id)`.
+`EloquentBotRepository::delete()` counts conversations under the same `lockForUpdate()` and returns
+`BotDeletion::HasConversations`; the service turns that into a 409 naming archiving as the route.
+
+**CASCADE was rejected because it is the *dangerous* wrong answer**: deleting a bot would destroy every
+transcript, every provider call that billed the organization for it, and every piece of feedback a
+customer left — from a button labelled "delete bot". The TODO's own words were that it *"makes the data
+loss invisible"*. **SET NULL was rejected** because every `docs/04` §8.23 aggregate groups by bot, so a
+null id is a row that appears in the totals and in no breakdown, and the cost lands on whoever
+reconciles a provider invoice months later; it also makes `bot_id` nullable, which removes the table from
+the NOT NULL foreign-key chain `kb-tenancy-isolation` NN1 requires. `BotStatus::Archived` already existed
+for exactly this, and its own docblock already said why.
+
+### T26 — the plan's own Pest invocation was wrong, and so was one correction to it *(RECORDED — both, because the second is the more instructive)*
+
+`infrastructure/docker/compose.override.yaml` mounts `../../services/core-api:/app` — the
+subdirectory-as-repo-root shape that produces the sixteen fake `tests/Contract/OpenApiDocumentTest.php`
+failures. So `docker compose run --rm laravel-api php artisan test` **cannot** be the verification
+command; a scratch container with the repo root at `/repo` is. The plan said otherwise and was wrong.
+
+**But the accompanying claim that `valkey-cache` "does not exist as a Compose service" is also wrong, and
+the misreading is the part to keep.** `compose.yaml:146`'s `# valkey-cache: DELIBERATELY ABSENT. Do not
+add it.` sits inside the **`volumes:`** block. It is the *volume* that is absent, and that absence is the
+erasure control for the only place tenant text lives in Valkey; the service itself is defined at
+`compose.yaml:1800`. **A comment read one block out of context inverted its meaning entirely** — and it
+inverted it in the direction that reads as a missing dependency, which is the kind of "finding" that gets
+fixed by adding the very thing a deliberate absence exists to keep out. Both line numbers re-measured
+against the tree on 2026-08-27.
+
+### T27 — the successor to pin #79 fired on the day, and this is the whole point *(CLOSED — recorded as a success, and as § T40's counter-example)*
+
+`tests/unit/test_write_allow_list.py::test_an_excused_table_no_longer_needs_its_excuse[retrieval_traces]`
+went red the moment D1 landed `2026_08_26_003100_create_retrieval_traces_table.php`.
+
+`retrieval_traces` sat in `NO_MIGRATION_YET` with the excuse *"`app/retrieval/` holds no statement
+against it and `app/deletion/tasks.py` only names it in prose"*. Laravel then defined the schema, so the
+excuse expired and the name belonged under the property-3 assertion. **Fixed by deleting the excuse —
+which is the fix the assertion message itself names**, in as many words: *"remove the name from
+`NO_MIGRATION_YET` so the property-3 assertion covers it."*
+
+**Why this is a success rather than a chore, and why it belongs beside § T40.** `KB_MIGRATION_PIN_79` was
+a `gates.yml` check with the same three self-expiry paths, and it was deleted with `.github/` on
+2026-08-17 — **three days before the event it was built to catch**, which then had to be caught by hand
+on review alone (§ *Removing CI/CD*, and the closing note on § G2). Its replacement is a **test** rather
+than a workflow. It survived the deletion of CI, and it fired on the day.
+
+`CLAUDE.md`'s standing question is *what would say so if this stopped being true*. Here the answer was a
+real mechanism, and it spoke first. The three self-expiry paths are all still in the file and all three
+are parametrized over the excuse list rather than restated beside it — an excused name that **gains a
+migration** fails, one that **gains a writer** fails, and one that **leaves `ALLOWED_TABLES`** is caught
+by a closing set comparison. § T40 is what the same day looked like where no such mechanism existed.
+
+### T28 — D5 and D6 read a table only the data plane may write *(CLOSED 2026-08-27 — ruled; **ADR-074**)*
+
+ADR-033's property 2 is *"the public API neither reads nor writes it"*, and ADR-033 calls it the one that
+actually bites. `retrieval_traces` was on the allow-list, so the data plane wrote it — and D5's playground
+panel and D6's per-turn transcript diagnostics are exactly a request to **read** it from an admin
+endpoint. Three ways out were enumerated and they are **not equivalent**: serve the playground from the
+live `retrieval.trace` frame and never the table (works for D5, useless for a historical transcript);
+declare that an admin read is not "the public API" (an interpretation that weakens the property for every
+other name on the list); or `retrieval_traces` leaves the allow-list and Laravel writes it from the
+relay's finalizer.
+
+**Ruled: the third, and the deciding argument is the sibling rather than the property in the abstract.**
+`citations` and `retrieval_traces` are the same kind of row — per-message diagnostics of one turn,
+written once at finalization, read afterwards by an admin screen — and `citations` has always been
+Laravel's. The split across planes was the anomaly. The predicted cost, *"a round trip of trace data back
+across the seam"*, turned out to be **already paid**: `app/rag/runner.py` builds the whole trace and emits
+it as the `retrieval.trace` frame, so persisting it costs one `INSERT` in a transaction that is already
+open — and buys atomicity the split could not, since a trace can no longer outlive or precede the message
+it describes.
+
+**The consequence that is invisible from the ADR**, and the reason it is restated here: `erase_data_subject`
+overwrites three verbatim columns in place, and **two of the three are now swept over the core-api seam**
+— only `evaluation_results.retrieved_evidence` remains a local statement. Verified in the tree:
+`app/deletion/tasks.py`'s own docstring says so, and `writes.py` names itself the authority if the two
+ever disagree. Verified also, and stated because it is the honest state rather than the plan:
+`ClientEvents` does not yet exist anywhere in `services/core-api`, and **no writer for `retrieval_traces`
+exists on either plane today** — the migration and the model exist, the relay finalizer is Phase 4.
+
+### T29 — OpenRouter routing pins have no path across the internal contract *(OPEN)*
+
+`provider_models.routing_pin` and `canonical_slug` are OpenRouter-only columns, and
+`ChatRequest`/`ModelCapabilities` are `extra="forbid"` five-vendor models, so neither can ride along.
+Every request is therefore `UNPINNED`: `allow_fallbacks: false`, `require_parameters: true` and
+`data_collection: "deny"` still go out, `provider.order` is omitted, and `extras["routing_pin"] =
+"unpinned"` records the absence on the trace rather than leaving it silent.
+
+**The consequence to carry:** the rule that *an OpenRouter model may be a fallback target only if its
+`routing_pin` names exactly one slug* is **currently unenforceable in the adapter**, because the adapter
+cannot see the column. `zdr` has the same cause and the same seam. Recorded so the rule is not read as
+enforced somewhere it is not.
+
+### T30 — the shared httpx client belongs in the lifespan, not the registry *(OPEN — design)*
+
+`registry.py` passes `http=None`, so `OpenRouterAdapter` builds a short-lived client per call — the same
+arrangement the four siblings have one SDK layer down, and correct as an interim. A single shared client
+must live in `app/core/runtime.py`'s `open_runtime_clients`, with a matching arm in
+`close_runtime_clients`, because **a client constructed at module import binds its connection pool to
+whichever event loop first uses it** — and `registry.py` is imported by Celery workers that run a fresh
+loop per task. The failure is not an error at import; it is a pool bound to a dead loop, which surfaces
+later and somewhere else.
+
+### T31 — five-adapter agreement, verified, and two skills are what need correcting *(CLOSED — the code is right; the divergence is documented, not resolved)*
+
+All five adapters were written independently by five agents. All five set
+`error_class=ErrorClass.USER_CANCELLATION.value` on the terminal `ChatResult`, all five emit it from
+`except asyncio.CancelledError` and re-raise, and **none yields from `finally`**. Re-measured against
+the tree: `grep -c USER_CANCELLATION` returns one occurrence in each of the five adapter modules.
+
+**The two documents that were wrong have since been corrected, and how they were corrected is worth
+more than the fact of it.** When the register was written, `kb-provider-adapter-contract`'s sketch
+showed `None` for the cancel path and `deepseek-api/SKILL.md`'s stream sketch still ended in a
+`finally:` that yielded the terminal `ChatResult`. Both were fixed on 2026-08-27 by their owner — and
+the fix found **a second defect underneath the first**, which the correction now states in place: a
+`yield` reached while `GeneratorExit` unwinds raises `RuntimeError: async generator ignored
+GeneratorExit`, the ASGI layer swallows it, and **the usage row disappears on exactly the code path the
+`finally` was written to protect**. So the `finally` form loses the row it exists to save. Both skills
+now say so beside the corrected sketch, and both name `contract.py`'s `ChatResult` docstring as the
+thing that had always been right. Recorded rather than dropped, because *"five independent
+implementations agreed against the document"* is the evidence that made anyone look, and the second
+defect was only reachable by looking.
+
+**The half worth more than the agreement.** Usage arithmetic was the thing most likely to diverge across
+five independent implementations, and it came out as **three genuinely different shapes correctly
+distinguished**: OpenAI and OpenRouter subtract (cached ⊆ input), Anthropic assigns verbatim (the
+buckets are siblings), DeepSeek reads the miss half of a partition, and NIM is the degenerate subset
+with nothing to subtract. `total_input_tokens` equals the vendor's billed input on all five. That is the
+number billing reads, and five agents arrived at it five ways.
+
+
+### T32 — `retrieval.trace` has no name in the client event union, the parser drops it in silence, and the absence turns out to be **deliberate** *(OPEN — blocks D5, and it is a contract decision rather than the one-line fix the register recorded)*
+
+`packages/contracts/src/sse/events.ts` pins `CLIENT_EVENT_NAMES` as a closed list of six —
+`message.start`, `status`, `citations`, `token`, `message.complete`, `error` — and `toKbEvent()` returns
+**`null`** for a frame whose name is not in it. That default is *right*: its own comment says it is for
+"anything this client has no business rendering", and the name allow-list is described as the part with
+a security consequence. **The rightness of the default is exactly what makes this dangerous.**
+
+D5's playground renders the `retrieval.trace` frame, and everything below the last link is already built
+to carry it: `app/rag/runner.py` assembles `RetrievalTrace` with every field `docs/04` §8.24 requires and
+emits the frame, and ADR-074 now makes Laravel's finalizer the thing that persists it.
+
+**The failure mode is a diagnostics panel that stays empty, with no error, on a stream that is otherwise
+working.** Every other frame renders. The trace is on the wire. `null` is indistinguishable from "the
+server sent nothing", so the first hypothesis is that the data plane is not emitting it, which sends the
+investigation to the far end of the system from the defect. There is no exception, no console warning
+and no failing test, because a parser that drops unknown names is behaving as designed.
+
+**Two corrections from the tree, and the second one changes what this finding is.**
+
+*First, the location.* The register attributes the drop to *"`parseFrame`'s `default:` arm"*. `parseFrame`
+lives in `packages/contracts/src/sse/parse-frame.ts` and does something else entirely — it parses one
+event-stream block into an `SseFrame` per the WHATWG rules, and its `default:` arm ignores unknown
+**field** names (not event names) so that *"the wire can add a field without breaking three deployed
+clients"*, which is correct and unrelated. The name allow-list is enforced one layer up, in
+`toKbEvent()`, by a guard rather than a switch. A fix applied to the function the report named would have
+changed the WHATWG parser and left the defect in place — § T26's shape again.
+
+*Second, and this is the substantive one: the absence is not an omission.* `events.ts:8` says so
+explicitly, and names three siblings:
+
+> DELIBERATELY ABSENT: `provider.usage`, `retrieval.trace`, `provider.fallback` and `heartbeat`. They
+> are internal-only — Laravel consumes them and does not forward them — and a client that can *name*
+> them is a client that can render them. Cost data and internal topology stop at Laravel.
+
+So the register's *"the one link missing is the last"* is wrong about the kind of thing that is missing.
+This union is **shared by the widget, hosted chat, mobile and the playground** — its own docblock says
+so — and it is deliberately the set of names *every* client may have. Adding `retrieval.trace` to it
+hands a name for internal retrieval topology to the embedded widget on a customer's page, which is a
+boundary `kb-security-baseline` and ADR-007 both care about, for the benefit of one admin screen.
+
+**So this is a decision and it is not taken here.** The options, with what each costs:
+
+- **(a) Grow the shared union by one member.** One line plus its type, and it is what the register
+  assumed. It contradicts `events.ts`'s stated rule for all four absent names, not just this one, and the
+  next request — `provider.usage` on a cost panel — arrives with the precedent already set. The
+  containment is `ClientEvents::allows($frame->name, $ctx->actorType)` on the Laravel side, so a
+  non-admin actor never receives the frame and the name is merely unusable rather than dangerous. **That
+  containment does not exist**: `grep -rn 'ClientEvents' services/core-api` returns nothing, and the
+  relay is Phase 4. A name in the union before the forwarding rule exists is the mirror-image lie.
+- **(b) A second, admin-only union and parser entry point in `packages/contracts`**, alongside the
+  shared six. Keeps the widget's name set exactly as it is and makes the admin surface's wider set
+  explicit rather than implied. Costs a second exported type and the standing risk that the two drift —
+  which is the drift `contract-steward` exists to catch, now with two legitimate sets to compare.
+- **(c) The playground does not use the shared parser for this frame at all**, reading it out of the raw
+  `SseFrame` in `apps/web`. Cheapest, and it is the option that puts a second frame-interpreting code
+  path in the repository, which is the one thing `parse-frame.ts`'s own header forbids by name.
+
+**Recommendation, not a decision: (b), with the Laravel forwarding rule landing first.** It is the only
+one of the three that makes the admin surface's wider capability a written fact rather than an
+exception, and it does not require weakening a rule that currently covers four names to serve one.
+
+**The ordering trap stands regardless of which is chosen, and it is the reason this row is long.** The
+two halves are three phases apart and each is individually green. The **forwarding** rule lives in
+Laravel (Phase 4); the **name** lives in the client (Phase 6). Adding the name first is a client that
+declares it can render a frame nothing forwards — an empty panel for a completely different reason.
+Adding the forwarding first is harmless and invisible. Neither half can be verified by the suite that
+owns it.
+
+**`packages/contracts` is `admin-web-engineer`'s to write, and the parser must never be forked** — a
+second copy is the drift `contract-steward` exists to catch, and `parse-frame.ts`'s own header carries
+the reviewer grep for it.
+
+### T33 — `MessageCompleteData.usage` has two buckets and `Usage` has five *(OPEN — decide in Phase 4)*
+
+The client sees `usage: {prompt_tokens, completion_tokens}` (`packages/contracts/src/sse/events.ts`) —
+the OpenAI shape, and the vocabulary five vendors do not share. `app/providers/contract.py::Usage`
+carries five **disjoint** buckets — `input_tokens`, `cache_read_tokens`, `cache_write_tokens`,
+`output_tokens`, `reasoning_tokens` — plus the derived `total_input_tokens`, and **the disjointness is
+load-bearing**: four vendors compute it four different ways and `total_input_tokens` is the one number
+that equals the vendor's billed input on all five (§ T31).
+
+So the relay must **project** five onto two, and the projection is a decision rather than a mechanical
+map. The recommendation, with the argument rather than the answer:
+
+- `prompt_tokens` = `total_input_tokens`. Unambiguous; that is what the derived field is for.
+- `completion_tokens` = `output_tokens + reasoning_tokens`, **not** `output_tokens` alone. Every vendor
+  here bills reasoning at the output rate, so a client showing bare `output_tokens` under-reports a
+  reasoning turn by however much the model thought — **silently and plausibly**, which is the worst
+  available failure mode for a number a customer reads. If the two are ever to be shown apart, that is a
+  second field, not a redefinition of this one.
+
+Whichever is chosen, the projection belongs in **one** place in Laravel with the arithmetic written down
+beside it, and `provider_calls` keeps all five buckets regardless: billing reads the row, never this
+frame. Verified against the tree: no Laravel file currently mentions `prompt_tokens`, so the relay does
+not exist yet and nothing has been decided by accident.
+
+### T34 — FastAPI's native SSE works, but only if the endpoint is wired one exact way *(VERIFIED — Phase 2 input)*
+
+Measured on the installed tree rather than recalled: `fastapi 0.141.1`, and `sse_starlette` is **not
+installed and not needed**.
+
+`fastapi.responses.EventSourceResponse` reads like it does nothing — its body is
+`media_type = "text/event-stream"` and its docstring says *"This class serves mainly as a marker"*. That
+reading is wrong, and the docstring says why in the preceding sentence: *"The actual encoding logic lives
+in the FastAPI routing layer."* It does, and all three properties are real, at these sites in the pinned
+`fastapi/routing.py`: framing at `:524 _serialize_sse_item` → `fastapi/sse.py:165 format_sse_event`;
+keep-alive at `:596`, an `anyio.fail_after(_PING_INTERVAL)` around the receive that emits
+`sse.py:237 KEEPALIVE_COMMENT = b": ping\n\n"` whenever the generator is idle; and cancellation
+checkpoints at `:621 _sse_with_checkpoints`.
+
+**The trap, and it is silent.** All of it is gated on `routing.py:400`,
+`is_sse_stream = lenient_issubclass(actual_response_class, EventSourceResponse)` — the **declared**
+`response_class` on the path operation — combined at `:1075` with `is_generator`, so the handler must
+*itself* be an async generator that `yield`s. Build the response the ordinary way instead —
+`return EventSourceResponse(agen)` — and `is_sse_stream` is `False`, so what ships is a plain
+`StreamingResponse` carrying the right `Content-Type` and having **no framing, no ping and no
+checkpoints**. Nothing raises. The symptom is unframed bytes on a response the client's parser drops
+silently (§ T32) plus an idle connection with no heartbeat — and the heartbeat is load-bearing
+downstream, because `laravel-control-plane` doctrine is that PHP learns the client is gone only when a
+write fails.
+
+Two smaller facts that cost a cycle each if unknown: `ServerSentEvent` is importable from `fastapi.sse`
+and **not** from `fastapi.responses`; and yielding a plain object wraps it as `data:` with no `event:`
+line, so every *named* frame must yield `ServerSentEvent(event=…, data=…)`. It takes `comment=` too,
+which is how the data plane could emit its own comment — the capability Laravel's `eventStream()` lacks,
+and the whole reason the relay uses `response()->stream()`.
+
+### T35 — the embedding designation was audited by nothing, and it was found while adding an audit trail to the *less* consequential twin *(CLOSED 2026-08-27 in the tree, after this register recorded it open — the asymmetry is the finding and it outlives the fix)*
+
+Surfaced by the fallback-router step while adding an audit trail for the **rerank** designation, which is
+the lesser of the two. At the moment it was found, `designateEmbeddingConnection()` had **no audit call
+and no closure to carry one**, so *"who moved the vector space, and from what"* had no answer in
+`audit_logs`.
+
+**The asymmetry is the finding, and it is worth more than the repair.** Re-designating embedding changes
+`(provider, model)`, and that pair **is** the vector space (ADR-031): it renames the Qdrant collection,
+so every previously indexed chunk becomes unreachable until a re-index at a provider's per-token price.
+Clearing it instead hands the choice back to `embedding_selection.py`'s resolution rule, which may pick a
+different connection or refuse outright and **block ingestion for the whole organization**. Re-designating
+rerank changes ranking quality and nothing else — which is precisely why `RESTRICT` rather than `SET NULL`
+is right for it. **The consequential one was untracked while the harmless one was being given two audit
+operations.**
+
+**Why this row stays even though the gap is now closed.** The gap was not found by auditing the embedding
+surface; it was found by building the thing *next to* it, and it had survived every prior pass over the
+provider surface — including the one that produced ADR-047…052 and the seven J-findings, all of which
+were about this exact area. The generalizable question is not "is the embedding designation audited"; it
+is **"which of a pair of near-identical surfaces got the attention, and what did the other one silently
+not get"**. § T36 is the same question asked one table over, and it is still open.
+
+**Verified against the tree on 2026-08-27, and the register and the tree disagree.** The register records
+this as `OPEN — REAL`, explicitly not closed because closing it changes `designateEmbeddingConnection()`'s
+signature and its callers while a different task was in flight. Since then it has been closed:
+`EmbeddingDesignationService::record()` exists and writes one audit row inside the repository's
+transaction, `AuditLogger::EMBEDDING_DESIGNATION_SET` and `EMBEDDING_DESIGNATION_CLEARED` exist, both are
+`ON_FAILURE_ABORT` on the stated test — *"can this still be rolled back"* — and both the current and the
+`previous_*` pair are read off the **locked** `organizations` row rather than from request input, so
+"nothing credential-shaped can appear here" is a property of the code rather than of the caller's
+discipline. The `previous_*` echo is the half that makes the row useful: it is the only record of **which
+vector space the existing corpus is in**, which is the answer to *"what do I have to re-index back to"*.
+
+### T36 — deleting the `provider_models` row a rerank designation names is unguarded *(OPEN)*
+
+`ProviderModelService` / `EloquentProviderModelRepository` / `ProviderModelDeletion` check the
+**embedding** pair only — the enum's cases are `Deleted`, `Missing` and `Designated`, and `Designated`
+means the embedding designation. Delete the model row a rerank designation points at and **reranking
+stops silently**: no error, no metric movement. That is the same failure mode `SET NULL` was rejected for
+one finding earlier (§ T25), arriving through a different door.
+
+Closing it means a fourth `ProviderModelDeletion` case, or renaming `Designated` so it can carry both —
+a design decision rather than a drive-by, because the enum is what the 409's message is built from. **The
+write side is already protected in the direction that produces a wrong 200:** the designation's
+in-transaction re-verification takes the same `organizations` lock the model delete takes, so
+designate-then-delete is caught. It is delete-then-nothing that is not.
+
+### T37 — `packages/contracts/` had a published pointer with nothing behind it *(CLOSED 2026-08-27 by a regeneration in flight while this entry was being written — the mechanism that would catch the next one is still absent, and that half stays open under § *Removing CI/CD*)*
+
+`kb:dump-openapi` emits `x-kb-request-rules: ../rules/<RequestClass>.json` for every operation whose
+FormRequest has one, and for a period on 2026-08-27
+`packages/contracts/rules/DesignateRerankConnectionRequest.json` did not exist while
+`services/core-api/app/Http/Requests/DesignateRerankConnectionRequest.php` and the two
+`/rerank-configuration` routes did.
+
+**The suite does not catch it, and the reason is the durable half of this row.** `OpenApiDocumentTest`
+asserts manifest existence for exactly **one** request class (`StoreProviderConnectionRequest`), and the
+test that kept the committed document current was **deleted with `.github/` on 2026-08-17**. So this is
+the deleted-gate population producing its first real artifact rather than a hypothetical one — the
+"committed OpenAPI artifact unchecked again" regression named in § *Removing CI/CD*, arriving.
+
+**This row was measured three times in one day and read differently each time, which is why the sequence
+is recorded rather than just the outcome.** The working register said the published document *"now
+emits"* a dangling pointer. First re-measurement against the tree found something one step earlier: the
+committed `core-api.openapi.json` held no `/rerank-configuration` path at all, so it was **stale rather
+than dangling**, and the dangling pointer was a state that would appear the moment somebody ran
+`kb:dump-openapi` **without** `kb:dump-form-rules`. Second re-measurement, a few hours later, found both
+artifacts regenerated by the effort still in flight in `services/core-api`: the manifest exists, the
+document carries the path, and the pointer resolves.
+
+**Three readings of one file in one day, all three accurate when taken.** That is not a criticism of any
+of them; it is the reason a finding in this file should carry the command rather than the verdict. For
+this property the command is a whole-document check rather than the single assertion the suite makes,
+and it is cheap enough that nothing justifies the narrower one:
+
+```bash
+python3 -c "
+import json, os
+d = json.load(open('packages/contracts/openapi/core-api.openapi.json'))
+bad = [(p, v, op['x-kb-request-rules'])
+       for p, ops in d['paths'].items() for v, op in ops.items()
+       if isinstance(op, dict) and 'x-kb-request-rules' in op
+       and not os.path.exists(os.path.join('packages/contracts/openapi', op['x-kb-request-rules']))]
+print(bad or 'no dangling x-kb-request-rules')"
+```
+
+It reports clean against the tree as of 2026-08-27. **What is still open is that nothing runs it**, and
+that the one assertion which does exist covers a single named class, so the next request class added
+without a regeneration reproduces this exactly. The fix ordering is load-bearing and is worth stating
+because getting it backwards manufactures the dangling state:
+`php artisan kb:dump-form-rules && php artisan kb:dump-openapi`, in that order. `packages/contracts/` is
+`admin-web-engineer`'s to write, and the step that found this correctly did not cross into it.
+
+### T38 — the router's `Retry-After` divergence from its brief, accepted *(CLOSED — a brief overridden by the code it described)*
+
+The brief said an unaffordable `Retry-After` should abandon the **chain**. The router implemented abandon
+the **wait**, handing the original error class to the fallback decision — and it was right to, because
+`app/providers/errors.py` already says so out loud: *"a floor larger than what is left ends the turn as
+`provider_temporary` — which is fallback-eligible — instead of sleeping past it."* With no fallback
+configured the two readings coincide; with one, the stricter reading abandons a turn it could still
+serve. Both cases are tested and both assert `slept == []`.
+
+Recorded because **a brief overridden by the code it describes is the good outcome, not a deviation** —
+the same convention § *The rulings of 2026-08-12* set when four of nine rulings went a different way from
+the brief that asked for them.
+
+### T39 — `app/providers/__init__.py`'s capability table has already drifted *(OPEN — the ADR-036 repair is to delete the table, not to correct it)*
+
+The module docstring's reStructuredText table shows `embed` as *yes* for `openai` and *unverified* for
+the other four, and `rerank` as *yes* for `nvidia_nim` only. The live lookup, read out of
+`capabilities.PROVIDER_TASKS` on 2026-08-27, says `embed` is `SUPPORTED` for `nvidia_nim`, `openai` and
+`openrouter`, and `rerank` for `nvidia_nim` and `openrouter` — while `RERANK_SCALE` has one entry, so
+`can_rerank` still answers `False` for `openrouter` (§ J1's cell, unchanged).
+
+**Nothing is broken.** The file's own text says `capabilities.PROVIDER_TASKS` is the fact and the table is
+documentation. But it is **a second copy of a fact, and it drifted the day the adapters landed** — which
+is ADR-036's exact shape inside a code comment rather than inside a document. The repair is to delete the
+table and print the lookup:
+
+```bash
+python3 -c "from app.providers.capabilities import providers_offering, ProviderSurface as S, RERANK_SCALE; \
+print('embed ', sorted(providers_offering(S.EMBEDDING))); \
+print('rerank', sorted(providers_offering(S.RERANK))); \
+print('scaled', sorted(RERANK_SCALE))"
+```
+
+`services/ai-service` is not `docs/`'s to edit; recorded for `provider-adapter-engineer`.
+
+### T40 — a stale sentence in `CLAUDE.md` was read, believed, implemented as a defect, pinned by a passing test, and reported upward as a property of the repository *(CLOSED — a live defect; the highest-value row in this section and not because of the bug)*
+
+`app/api/internal/v1/chat.py` shipped `sparse=None` hardcoded, with a comment citing
+`app/retrieval/sparse.py::tokenize` as raising `NotImplementedError`, *"held by ruling (`docs/22` § G6)"*.
+That was false at the moment it was written: `grep -rc 'raise NotImplementedError'` over
+`app/retrieval/` and `app/rag/` together returns **zero**. `tokenize` is fully implemented,
+`encode_query` is exported and complete, and the analyzer's own docstring is the record of the decision
+(now **ADR-073**).
+
+**The agent did not guess. It read `CLAUDE.md`**, which said in two separate places that the tokenizer
+was still a stub held by a dated ruling. Both sentences had been false for days.
+
+**The consequence chain is the part worth keeping, because every link in it behaved correctly.**
+Dense-only retrieval → `retrieve_branches` returns a one-key mapping → `select_unranked` raises
+`BranchAgreementUnavailable`, **by design**, because it *"is not this function's job to resolve C2, only
+to refuse to hide it"* → every grounded turn errors. The agent then reported *"on this tree, a grounded
+answer is currently unreachable end to end"* as a **property of the repository**, with a passing test
+pinning it. The test is correct. The behaviour it pins is correct. **The configuration underneath it was
+wrong, and a green suite proved the honest handling of a gap the same commit had created.**
+
+**Three things this demonstrates that this register has been circling for weeks.**
+
+1. **A stale sentence in `CLAUDE.md` does not merely misinform — it gets implemented**, then defended by
+   a test, then reported upward as a fact about the codebase. Each of those steps launders it further
+   from its source.
+2. **Every self-expiring mechanism this repository has built watches a claim made in *code*.** § Q5's AST
+   scan reads statements. § Q6's tripwire reads column names. § T27's excuse list reads migrations and
+   writers. `assert_writable` reads a table name at runtime. **Nothing watches `CLAUDE.md`'s claims about
+   code** — and `CLAUDE.md` is the file every agent reads first, which makes it the highest-leverage
+   place in the repository for a false sentence to sit.
+3. **It was caught only because the conclusion was surprising enough to check.** *"The end-to-end goal is
+   unreachable"* is a claim that invites verification. A smaller wrong claim — one stage degraded, one
+   branch missing — would have shipped, and the register would have recorded it as a property.
+
+**Fixed**: both `CLAUDE.md` sentences corrected, with the first one keeping this episode inline as its own
+worked example rather than being quietly swapped — a stale claim removed without a trace is a stale claim
+that can return. The endpoint was sent back to wire the sparse branch with a deadline around the
+statistics read; verified against the tree on 2026-08-27, `chat.py` now builds a lexical task and passes
+`sparse=sparse`, and `sparse` is `None` only for a query that analyzed to no terms, which is the real
+dense-only case § T31's neighbour `EmptySparseQuery` exists to name.
+
+**What this row asks for and does not have.** A mechanism that fails when `CLAUDE.md` asserts something
+about the tree that the tree contradicts. `CLAUDE.md` already carries several *measuring commands*
+instead of claims, which is ADR-036 applied to it and is the only defence currently in place — but a
+command a reader must choose to run is not a mechanism, and this row is the evidence for that
+distinction. Read § T27 immediately after this one: same class of decay, same week, and a real mechanism
+caught it on the day.
+
+### T41 — ADR-069 was assigned twice, so the analyzer decision had no ADR and its citations pointed at an unrelated one *(CLOSED — **ADR-073** is the number; the citations had already been corrected before this was written down)*
+
+`docs/19` §2542 is *ADR-069: The Two Mutable Payload Terms Are Carried by Two Synchronous, Verified
+Internal Operations — `source.status.sync` and `bot.access.sync`*. Five sites in `services/ai-service`
+cited **ADR-069** for the BM25 analyzer decision instead — `app/retrieval/sparse.py:63` and `:268`,
+`tests/unit/test_sparse_arm.py:99` and `:347`, `tests/unit/test_embedding_batching.py:131`.
+
+**It needed a number, and it is a consequential decision to have left unrecorded.** The analyzer is inside
+the collection name (ADR-034), so changing it re-embeds the **dense** vectors at a provider's per-token
+price. `SPARSE_ANALYZER_VERSION` is `bm25/v1` and that is correct **only while no corpus has ever been
+indexed** — which is simultaneously the argument for having decided it at that moment and the argument
+for writing it down before that stops being true. **ADR-073** is now that record, and its revisit
+condition is that expiry stated as an expiry.
+
+**Re-measured against the tree on 2026-08-27, and the register is behind it.** The five citations no
+longer name a number: `grep -rn 'ADR-069' services/ai-service --include=*.py` returns exactly one hit,
+`sparse.py:67`, and that one is the *record of the collision* rather than a citation — it names ADR-069's
+real title, says the highest allocated number is ADR-072, and declines to mint 073 in a code comment
+because *"minting a number in a code comment is how two decisions end up sharing one and neither can be
+looked up."* That paragraph is right and should stay right: **a number is assigned in `docs/19` and
+nowhere else.** The corrected sites name the decision — *"the analyzer decision"* — which is the correct
+interim spelling and remains correct after ADR-073 lands; a citation that names the decision cannot be
+falsified by a renumbering, which is the same argument ADR-036 makes about counts.
+
+## Found while wiring the chat path and verifying the tree — T42–T62, 2026-08-27/31
+
+**Where they came from, and the split is not chronological.** T42–T54 came out of building D1–D6 and
+E1–E4 — the conversation tables, the relay, the two `sdk/v1` endpoints, usage, quotas and the six
+admin screens. T57–T58 are rulings the playground needed and did not get. **T59–T62 are different in
+kind: they came from running all four suites together, after every phase had already reported green
+on its own.** That distinction is the most useful thing in this section and § T59 is why.
+
+**Each row's own status line is the authority**, and
+`grep -n '^### T.*(OPEN' docs/22-spec-findings-and-decisions.md` is the measure. Do not read a state
+from this preamble (ADR-036).
+
+### T42 — the cross-plane column checker had no notion of an output alias *(CLOSED — a false positive, fixed narrowly and verified by positive control)*
+
+`tests/unit/test_control_plane_schema_agreement.py::test_every_bare_column_in_a_single_table_statement_exists`
+walks every SQL statement in the data plane and asserts each bare column name exists on the single
+table the statement names. `SELECT sum(document_frequency) AS df FROM …` made it fail: `df` is an
+**output alias**, not a column, and the checker had no concept for one.
+
+The fix is a `_PRECEDED_BY_AS` regex and a skip, which is deliberately the narrowest thing that
+works — **and the failure direction it trades into is recorded in the code beside it**, because a
+checker that silently stops checking is worse than one that never existed. Verified by positive
+control: renaming `document_frequency` to `document_frequenc` still fires.
+
+### T43 — two absences asserted without running the grep, in the same report whose first absence claim had already been refuted *(CLOSED — both claims false)*
+
+Phase 2 reported that "nothing writes `sparse_term_frequencies` / `sparse_version_statistics` from
+the ingestion side". `_write_sparse_statistics` is at `app/ingestion/pipeline.py:450` and is called at
+`:237`, inside the same transaction as `replace_chunks`. `app/ingestion/` contains zero
+`raise NotImplementedError`.
+
+**What makes this a row rather than a correction** is that it was the *replacement* claim for § T40's,
+raised after that one had been shown false by a two-second grep, and it was arrived at the same way.
+An absence is the one kind of claim that cannot be established by reading the file you happen to be
+in, and it is the kind this repository's agents assert most confidently.
+
+### T44 — `input_tokens` names two different quantities on the two sides of the seam *(CLOSED — the rule is in the shipped code; the trap is that a field-by-name copy passes every check)*
+
+Reported as a "contradiction" between the data plane's token arithmetic and the control plane's. It is
+not one. `app/providers/contract.py`'s `Usage.input_tokens` is a **disjoint** bucket — cache reads and
+cache writes are siblings, and `total_input_tokens` is the derived sum. `provider_calls.input_tokens`
+is the **normalized total**, and `provider_calls_cache_within_input` CHECKs that the two cache columns
+partition it.
+
+**So a field-by-name copy at the relay type-checks, satisfies the CHECK, and under-reports every
+cached token** — silently, on the only row anyone bills from. The rule was made explicit in the Phase 4
+brief and is in the shipped code as `UsageArithmetic::totalInputTokens()`, used by `UsageRecorder:109`.
+Two fields with one name and different meanings need a converter with a name of its own; this is what
+that converter is for.
+
+### T45, T47, T55, T56 — lost *(RECORDED — the register lived in exactly one place, and that place was conversation context)*
+
+There are no entries under these numbers. They were raised, numbered, and never written to a file:
+the working register for T42 onward was the conversation itself, and two context compactions summarized
+it. The summaries preserved the numbers that happened to be cited in a later paragraph and dropped the
+rest.
+
+**This is recorded rather than renumbered, and the gap is the point.** A sequence with four numbers
+missing and no explanation reads as a transcription error and invites someone to "fix" it. More
+usefully: every mechanism this file celebrates — § Q5's AST scan, § Q6's tripwire, § T27's excuse list —
+watches a claim made in code, and § T40 records that nothing watches `CLAUDE.md`. **This row is the
+third position: nothing watches the register either.** T1–T41 survived because they were written to a
+scratch file as they were raised. T42 onward were not, and four of them are simply gone.
+
+### T46 — `kb:prune-usage-partitions` is written, tested, and scheduled by nothing *(OPEN — needs a ruling)*
+
+E1 shipped the command and its Feature coverage. `routes/console.php` does not call it. The sibling
+`kb:create-usage-partitions` **is** scheduled, so the runway grows and nothing ever retires — which is
+the failure mode that is invisible for two quarters and then is a disk alert.
+
+It is left open rather than scheduled because the retention window is a **policy** decision that has
+not been taken, and a default written into a scheduler entry is a policy taken by whoever typed it.
+`kb:prune-audit-partitions` has the same shape and the same gap.
+
+### T48 — the widget drops a malformed grant one layer earlier than I said it did, and the wrong description was mine *(CLOSED — settled by mutation, not by reading)*
+
+I described the failure as `undefined` reaching the bearer as the literal string `"undefined"`.
+`apps/widget/src/app/bridge.ts:177` guards `typeof grant?.token !== 'string'` and drops the grant —
+the same silence, one layer earlier, with a different fix. I also said "two sites"; there is one
+`response.json()` reached by two call paths through a unified `mint()` closure.
+
+**Both errors were mine, both were about code I had read, and both were settled by mutating the file
+and watching what went red.** That is the note worth carrying: reading a guard tells you it exists,
+not what it does with the value you are worried about.
+
+### T49 — the plan assumed two admin endpoints that did not exist *(CLOSED — caught by inventory before the brief, not after it)*
+
+Phase 6's brief described `/conversations` and `/audit` screens as consumers of existing endpoints.
+There was no conversations controller and no audit-log controller among the twenty-one that existed.
+Caught by listing `app/Http/Controllers/Api/V1/` **before** briefing the screens agent rather than by
+the agent failing; Phase 6 was split into 6a (the endpoints) and 6b (the screens).
+
+The general form: a plan written from a specification describes the system the specification describes.
+`ls` is cheap and the brief is the expensive artifact to get wrong.
+
+### T50 — `InternalAiClient::relay()` narrated the wrong operation in two places *(CLOSED)*
+
+`relay()` is shared by four call sites and composed its failure message from a hard-coded subject, so
+a failed ingestion submission and a failed retrieval-scope sync produced the same sentence — and a
+second hard-coded sentence at `:766` claimed every failure was an embedding-readiness failure. Both now
+derive from a `$subject` supplied at each of the four call sites.
+
+An error message that names the wrong operation is worse than one that names none: it sends the reader
+to the wrong subsystem with confidence.
+
+### T51 — nothing compares the widget's session-envelope expectation against real `ChatSessionResource` output *(CLOSED 2026-08-31 — and closing it needed a third mechanism nobody had asked for)*
+
+The widget's loader was corrected to unwrap `{"data": {...}}` (§ T48), and `ChatSessionResource`'s own
+docblock was corrected to stop claiming the loader does not. **Two documents now agree, and no
+mechanism compares them.** That is precisely the shape `tests/contract/test_object_key_cross_language.py`
+exists for — it runs the PHP class and compares the produced strings byte for byte, because two
+transcriptions agreeing with their own documentation and disagreeing on bytes is a failure neither
+runtime's suite can see.
+
+The check must live **outside `apps/widget`**: a test inside the widget can only assert the widget's
+own idea of the shape, which is the half already known to have been wrong once.
+
+**Closed by two tests and one gate, and the gate is the part that was not in the brief.**
+`packages/contracts/test/session-envelope.test.ts` pins the server's promise — that both mint
+operations (`sdk.session.store` and, three phases later, `admin.bots.playground-session.store`)
+answer `{data: $ref ChatSessionResource}` with `additionalProperties: false`, and that the payload
+carries exactly `token` and `expires_in`. The widget's `session-grant.test.ts` gained a block that
+builds its body **from that document** rather than from a literal, through `@kb/contracts`'s new
+`./openapi/*.json` export, and asserts the loader accepts it — and refuses the same instance
+unwrapped. Three mutations of the document (rename the payload field, drop the envelope, drop the
+bounds) each turn **both** halves red.
+
+**Where the brief was wrong is worth more than where it was right.** It said the check must live
+outside `apps/widget`, and the reasoning was sound — a widget test asserts the widget's own idea.
+But *where the file sits* was never the property that mattered: what matters is whether the test's
+input is authored or derived. The widget-side block lives inside `apps/widget` and is a real
+cross-side check, because its body comes from a PHP-generated artifact; a test in
+`packages/contracts` typing out a literal body would have been no check at all while satisfying the
+brief exactly.
+
+**And it could not be trusted until a third thing existed.** Both halves read
+`packages/contracts/openapi/core-api.openapi.json`, and § *Removing CI/CD* had left that artifact
+with nothing asserting it matched the code — `OpenApiDocumentTest` proved the generator was
+deterministic and that `--check` *can* fail, against a temp path, while a comment in the same file
+named the gap and declined to close it as "a decision about what the suite guarantees, not a
+drive-by edit." That deferral was correct when written and had since been forced twice (§ T37,
+§ T54), so it was taken: `it('keeps the committed document current')` is restored, its positive
+control confirmed by tampering with the committed file. **Without it, two suites would have been
+comparing themselves against a build output that nothing kept honest** — which is the exact shape
+of the failure they were built to catch, one level up.
+
+**One laxity fell out of writing it.** The published schema typed `token` as a bare `string` and
+`expires_in` as a bare `integer`, so `""` and `0` were both contractual — and both are refused by
+`readSessionGrant`. A server could satisfy the published contract and be rejected by every client.
+`minLength: 1` and `minimum: 1` now say what the consumers require, which turns the loader's
+strictness into contract enforcement rather than a client being defensive alone.
+
+### T52 — `AuditAtomicityTest` went red because the operation list it guards grew *(CLOSED — the mechanism working)*
+
+Phase 5 took `AuditLogger::OPERATIONS` from 34 to 39 `ON_FAILURE_ABORT` operations and the atomicity
+test's fixture no longer covered them. Repaired with five real atomicity tests that drop the current
+month's `audit_logs` partition and assert SQLSTATE 23514 reaches the caller, plus a can-it-fail check:
+moving the audit write outside the transaction turns exactly those five red and nothing else.
+
+### T53 — the permission bar I set was unsatisfiable, and the matrix test's comment was false the day it was written *(CLOSED)*
+
+I asked for a new `Permission` case whose role subset matched no existing case. All five reachable
+Owner-containing subsets are already occupied, so no such subset exists. `quotas.manage` takes
+Owner-alone — the same shape as `members.manage_owner` — justified on **subject** rather than on shape.
+
+The secondary find is the better one: `tests/Unit/RolePermissionMatrixTest.php` carried a comment
+asserting "no case already here has either shape", and it was false when it was written. A comment that
+states a property of a set beside the set is a claim with no mechanism, which is § Q5's shape in a
+different runtime.
+
+### T54 — `packages/contracts` was red, and its own `--check` dumpers cannot see why *(CLOSED — the mechanism gap is the finding)*
+
+Phase 6a landed nine `FormRequest`s and twenty-seven components and registered none of them on the
+TypeScript side; eleven contract tests failed. **The PHP-side `kb:dump-form-rules --check` and
+`kb:dump-openapi --check` both passed**, because they verify that the dump is current with respect to
+the code — not that the consuming side claimed each entry. The two halves of the contract are checked
+by two mechanisms with a gap between them, and the gap is exactly one direction: **added on the server,
+unclaimed by the client.**
+
+### T57 — three gaps between the playground's design and its wire *(OPEN — rulings owed)*
+
+Found while making D5 work end to end, and left as three separate open questions because they have
+three different answers:
+
+1. **The temporary model override is designed in `ConfigSnapshot` and absent from the wire.** The panel
+   renders saved bot settings read-only rather than offering a comparison it cannot make — two answers
+   from the same model is worse than no comparison.
+2. **Hosted chat cannot record consent.** `conversations` carries `consent_required` and
+   `consent_text_snapshot`; the hosted surface has no path to set them.
+3. **A 409 from the session mint has no distinguishable error class**, so "this bot is in draft" and
+   "an unhandled exception" render as the same envelope. `NotRunnableNotice` exists because the generic
+   taxonomy rendered every deliberate 409 as *"Something on our side is unavailable"* — false, and
+   unactionable.
+
+### T58 — `BotStatus` contradicts itself about the playground *(OPEN — implemented fail-closed, and the contradiction is recorded where the code is)*
+
+One paragraph says the playground is reachable for any bot the actor may edit; another says the
+playground checks status like every other runtime surface. The mint was implemented **fail-closed**
+(status is checked), and the contradiction was written into the new method's docblock rather than the
+contradicted paragraph being quietly edited to match the implementation.
+
+**Editing the losing paragraph is the tempting repair and it destroys the evidence.** A future reader
+needs to know the document disagreed with itself and which way the disagreement was resolved, because
+the other reading may be the one someone depended on.
+
+### T59 — a conversation opened across a second boundary violates its own clock constraint *(CLOSED — a live product defect, found only by running the suites together)*
+
+`EloquentConversationRepository::create()` read the clock twice. `Conversation::CREATED_AT` is
+`started_at`, so Eloquent stamps that column from `freshTimestamp()` inside `save()`; the repository
+read `CarbonImmutable::now('UTC')` separately for `last_activity_at`, earlier. The table CHECKs
+`conversations_activity_after_start (last_activity_at >= started_at)`.
+
+**Laravel's date cast stores a date attribute as a `Y-m-d H:i:s` string, so both columns are truncated
+to the second — in PostgreSQL and in memory.** Two readings microseconds apart therefore disagree
+whenever they straddle a second boundary: `06:34:05.999999` and `06:34:06.000001` become `06:34:05`
+and `06:34:06`, activity *before* the start, and the insert dies with SQLSTATE 23514. The caller gets a
+500 from `POST /rt/v1/conversations` on a request with nothing wrong with it, and the retry a moment
+later succeeds. Fixed by taking one `$now` and assigning `started_at` explicitly — `updateTimestamps()`
+skips `CREATED_AT` when the attribute is already dirty — with `retention_expires_at` on the same anchor
+against the sibling constraint.
+
+**Three things about how it was found and pinned are worth more than the fix.**
+
+*It was invisible to every per-phase run.* The endpoint, its Feature tests, its Security tests and its
+contract tests were all green, and stayed green when re-run alone. It appeared once, in a 332-second
+Feature run, because that run happened to cross a boundary in the microseconds between two statements.
+
+*The first regression test was useless and looked rigorous.* It compared the two timestamps to the
+microsecond, on the reasoning that two clock readings differ in their microseconds and one reading does
+not. That reasoning is sound and the premise is false: the cast has already flattened both to whole
+seconds before any assertion sees them. **The test passed with the defect present, and passed its
+positive control** — a mutation that restored the second reading did not turn it red. Pinning the clock
+is what made the boundary a certainty rather than a coincidence: a Carbon closure test-now returning
+`…05.999999` on its first call and `…06.000001` afterwards reproduces the exact production failure on
+every run, and the positive control against the faithful original prints
+`conversations_activity_after_start`.
+
+*A positive control is only worth what its mutant is faithful to.* The first mutation left the shared
+`$now` in place while removing only the two assignments, which is not the code that shipped; it made the
+test fail for a different reason and would have been read as confirmation. The second reproduced the
+original exactly — no shared anchor, one clock read per column — and that is the one that proved the test.
+
+### T60 — nine correlation tests 401ed because Phase D put a credential in front of the group they register into *(CLOSED)*
+
+`tests/Feature/RequestIdLoggingTest.php` registers ad-hoc probe routes with
+`Route::middleware('runtime')`. That group used to be `SubstituteBindings` and nothing else. D3 put
+`ResolveChatSession` at the front of it — which is the group's whole purpose, since one class resolves
+the credential, binds `Surface` and binds the tenant context together. The probes then 401ed before
+their route bodies ran, and the failures read as correlation defects.
+
+Fixed by minting a real chat session, **before** the log capture rather than inside the request call:
+building the fixture touches the database and Valkey, and anything it logged after the redirect would be
+counted as a line the request wrote. Moving the probes off the group was the other available repair and
+is the wrong one — this file's own header says it drives the shipped channel rather than a private copy,
+and the same argument applies to the middleware stack.
+
+### T61 — an assertion that a deadline "is in the future" is a stopwatch on total suite duration *(CLOSED)*
+
+`ChatStreamRelayTest` asserted `$deadline > microtime(true) * 1000`. Under PHP-FPM that is the intended
+statement, because one request is one process. Under PHPUnit it is not: `tests/bootstrap.php` defines
+`LARAVEL_START` at the suite's first statement — deliberately, so `requestEpoch()`'s production branch
+is the branch the suite executes — so every request-scoped deadline in the suite is measured from the
+**suite's** boot. The assertion is therefore really "this test is reached within `kb.timeouts.internal`
+seconds of the suite starting". It was, alone (24 s). It was not in the Feature run (332 s), where the
+deadline arrived 9.7 seconds stale.
+
+Re-anchored to the request epoch: an exact equality against `LARAVEL_START + budget`, plus the half a
+copied constant cannot fake — that the deadline is **less** than `now + budget`, which is what separates
+`requestEpoch()` from `callEpoch()` and holds for any elapsed time above zero.
+
+**`tests/bootstrap.php` names its own consequence and stops one clause short.** It says the suite now
+computes deadlines from the suite's boot "exactly as an FPM request computes it from the request's
+boot", and that is true; what it does not say is that any assertion phrased against wall-clock *now*
+becomes a function of how long the suite has been running. That is finding B1/Q2's shape arriving in
+the harness that was built to expose B1/Q2.
+
+### T62 — the audit-partition tests did calendar arithmetic the product does not do *(CLOSED — one red for seven days a year, and one green that skipped half its runway)*
+
+`tests/Feature/AuditLogTest.php` called `addMonth()` and `addMonths($offset)` on a raw
+`CarbonImmutable::now('UTC')`. PHP's calendar arithmetic overflows rather than clamping, so from 31
+August `addMonth()` is **1 October**. The test asserted `audit_logs_2026_10` while the migration had
+created `_08` and `_09`, and went red on 2026-08-31 with the partition scheme working perfectly.
+
+Every product site already anchors first — `CreatePartitionsCommand.php:104`,
+`MonthlyPartitionRepository.php:116`, and both migrations all call `startOfMonth()` before adding — so
+the defect was the test disagreeing with the code about what "the next month" means.
+
+**The second site is the more instructive and it was green.** The `--months 4` loop named offsets 0–4
+from 31 August, which are `_08`, `_10`, `_10`, `_12`, `_12`: it asserted two months twice, never checked
+`_09` or `_11`, and passed because the command had created them anyway. A test that skips half the runway
+it exists to measure is the more dangerous of the two, because nothing goes red to say so.
+
+### T63 — "without loss of function" was asserted as a floor rather than as a comparison, and the floor was wrong in both directions *(CLOSED — a spec defect, found by the first Playwright run after Phase D)*
+
+`tests/e2e/public/reflow.spec.ts`'s WCAG 1.4.4 test asserted, at 200% zoom only:
+
+```ts
+const controls = page.locator('button:visible, a[href]:visible');
+expect(await controls.count()).toBeGreaterThan(0);
+```
+
+**That is not the criterion.** 1.4.4 is about what is *lost* between one scale and another, which is a
+comparison between two measurements; a floor at the second measurement is a different claim, and it is
+wrong in both directions at once. It **fails** a page that legitimately offers no function, and it
+**passes** a page that dropped nine controls out of ten — which is the only failure the test exists to
+catch.
+
+**Both halves were live.** `/c/e2e-probe-bot` went red on 2026-08-31 for a bot whose origin
+allow-list does not include the e2e host: the page renders `BotUnavailable`, and that state has no
+affordance **on purpose** — `<ErrorState>` gates the retry control on the envelope's own `retryable`,
+so a 404 gets none, because retrying cannot change an allow-list. The assertion was demanding a button
+that would have been a lie. Meanwhile `/login`, `/register` and `/this-route-does-not-exist` each
+carry exactly **one** visible control, so the floor of `> 0` was one control away from vacuous on every
+route that passed it.
+
+**It now measures at 1280px, resizes without re-navigating, and requires equality** — measured
+`1 → 1` on the three routes that have a control and `0 → 0` on the error page, with a `+1` mutation
+turning all four red. Resizing rather than re-navigating is deliberate: a control lost to a responsive
+rule is exactly what this should catch, and a fresh `goto` at the small viewport would render the
+small layout from scratch and never compare anything.
+
+**The general shape is worth more than the fix.** A test whose assertion is a *proxy* for the property
+it names will be wrong on the first input that separates the two, and it will look correct until then —
+this one had been green since 2026-08-24 and was only separated from its property when Phase D gave one
+route a legitimately control-free state.
+
+### T64 — five Phase D/E screens shipped with no browser coverage at all *(CLOSED 2026-08-31 — five specs written and executed; see the closing note)*
+
+`ls apps/web/tests/e2e/admin/` is eight specs — bots, embedding, members, models, providers,
+source-detail, source-upload, sources — and every one of them predates Phase D. The screens this effort
+added have **none**: `/conversations`, `/audit-logs`, `/quotas`, the dashboard at `(admin)/page.tsx`,
+and the playground tab inside `/bots/[botId]`. The public side is the same story in miniature: three
+specs, none of which drives a chat turn.
+
+**What that means, precisely, and it is not "these screens are untested".** They carry unit and
+component tests, and `--project components` runs in a real browser. What they have never had is a page
+rendered by the shipped Next build, authenticated through a real Laravel session, scanned by axe and
+walked by keyboard. `docs/22` § R1–R4 is the measure of what that finds and unit tests do not: of
+thirteen first-run failures, one was a real WCAG violation invisible in light mode, one a real focus
+bug, and five were harness facts nobody had written down.
+
+**Not closed here because writing five specs is a phase, not a follow-up** — the eight that exist are
+between 90 and 360 lines each, and the conversations and playground screens both need seeded data that
+no factory currently produces on a live stack. What is cheap and is done: this row, so the next reader
+does not infer coverage from the suite being green.
+
+**CLOSING NOTE, 2026-08-31.** The five specs exist and have run: `conversations.spec.ts`,
+`audit-logs.spec.ts`, `quotas.spec.ts`, `dashboard.spec.ts` and `playground.spec.ts` under
+`apps/web/tests/e2e/admin/`, **40 tests, 33 pass, 8 skip** — and then **the whole `admin` project was
+re-run to check nothing regressed: 13 specs, 91 tests, 62 pass, 29 skip, 0 red**, exit 0 under
+`--workers=1 --fail-on-flaky-tests`, against the same stack `harness.ts` describes, which now carries
+the run's account as it does for the two before it. Four things about the close are worth more than
+the fact of it.
+
+**It found a live defect on the first execution, and not where the effort was looking.** Every axe scan
+of `/audit-logs` reported `definition-list` (serious) — § T65 below. The route had shipped, been
+reviewed, and passed a component test that renders the very cell.
+
+**Two of the five surfaces are covered thinner than a green run reads.** `/conversations` skipped five
+of its nine tests because the organization has held no thread and nothing in this repository creates
+one; `/quotas` skipped three because the harness account is an **admin** and `quotas.manage` is
+owner-only by design, so the ceilings form — a number input, an Unlimited switch, and a submit that is
+disabled on a raise — **has never been rendered in a browser by any run**. Both are written into each
+spec's own header rather than left to be counted out of a summary line.
+
+**The playground spec deliberately never takes a turn**, and that is a rule rather than a convenience:
+a playground turn spends the organization's provider quota, writes a `conversations` row that
+`/conversations` and `/` would then both read, and — on a stack with no provider connection — would
+prove nothing anyway. What only a browser can check is the surface *before* the turn, and that is all
+it touches.
+
+**And the pre-existing eight lost coverage between the second run and this one without a line
+changing in them.** They contribute 21 of the 29 skips, up from the second run's profile, because the
+organization's DATA moved: it held 2 knowledge sources on 2026-08-25 and holds **0** today, so
+`source-detail.spec.ts` skipped all eight of its tests and `sources.spec.ts` skipped its row-dependent
+one. That retires, for this run, `harness.ts`'s recorded *"NOT VACUOUS on `/sources`"* property — R1's
+per-row accent link was scanned in the second run and was not scanned in this one. **Nothing
+regressed; the evidence is simply not the same evidence**, which is the entire reason a pass/skip
+split belongs beside every pass count in this repository.
+
+The one thing this close does **not** buy: no spec drives a chat turn end to end, in any project. The
+public side is still three specs, none of which streams an answer.
+
+### T67 — a run figure recorded in a docblock could not be decomposed, and reads as a regression from the next run *(CLOSED 2026-08-31)*
+
+`apps/web/tests/e2e/admin/harness.ts` recorded its two executions as *"55 pass, 24 skip, three
+failures"* and *"58 PASS, 24 SKIP, 0 RED"*. Neither says **which Playwright projects it counted**, and
+the natural reading — the `admin` project, since that is the file those specs belong to — is wrong.
+
+Measured with `--list` on 2026-08-31: `admin` is **92** tests in 14 files (13 specs plus
+`auth.setup.ts`), `public` is **30** in 3, and the eight specs predating Phase D contribute **51** of
+the admin total. So `51 + 30 + 1 = 82 = 58 + 24`: **the second run's headline was every project at
+once.**
+
+**Why this is a finding and not pedantry.** The third run's note sits directly beneath it. A reader
+comparing the new figures — 33 for the five new specs, or 63 for the whole admin project — against 58
+would conclude coverage had *shrunk*, when it grew by 40 tests. The defect is not the number, it is
+that the number cannot be decomposed, so nobody can check it or compare against it; and a figure in
+prose that cannot be checked is exactly the shape § T40 is about, one runtime over. Fixed by stating
+the decomposition in `harness.ts` beside both figures rather than by restating a corrected total —
+per ADR-036, the durable artefact is the command (`playwright test --project=<name> --list`), not the
+count.
+
+### T65 — every scan of `/audit-logs` reported a serious violation, and the component test that renders the same cell could not see it *(CLOSED 2026-08-31)*
+
+`features/audit/audit-columns.tsx`'s `Recorded` cell shows up to four `<dt>`/`<dd>` pairs and then a
+note — *"3 more fields"* — for the remainder. That note was a `<div>` **directly inside the `<dl>`**.
+
+A `<dl>` may contain `<dt>`, `<dd>`, `<script>`, `<template>` and `<div>`, but the `<div>` is admitted
+only as a *wrapper around a term/definition group*, never as a place for loose text. So every row whose
+`details` carried more than four keys put unstructured content inside a definition list, and axe
+reported `definition-list` (serious) on the route — **three of the four scans in the new spec, red on
+one node**, at first execution.
+
+**The reason it survived review and a component test is the part to carry.**
+`tests/components/audit-screen.test.tsx` renders this exact cell and asserts this exact string. It
+passes, and it would pass over any markup that produced the words: a component test reads the DOM it
+was given and holds no opinion about whether that DOM is a legal definition list. **Only a scanner
+against a rendered page asks that question, and until 2026-08-31 no scanner had ever reached this
+route.** § Q5's shape, in a different runtime — a rule that was true, stated nowhere, and enforced by
+nothing.
+
+Fixed by moving the note out of the list, into a sibling `<p>`, with both inside a flex column at the
+same gap so nothing moved visually. Pinned by a DOM assertion in `audit-logs.spec.ts` rather than left
+to a scanner reaching the right row — the note renders only for a row with more than four detail keys,
+so whether any scan sees it depends on what is on page one, and the assertion **skips out loud** when
+no such row is visible instead of passing vacuously. Verified by reintroducing the defect (`4 of 4`
+notes loose) and removing it again (`0 of 4`).
+
+**A second finding fell out of writing that assertion, and it applies to every spec on every
+`ServerDataTable` route.** The first version used `closest('dl')` and reported two *legal* notes as
+violations: `ServerDataTable` renders **both layouts into the DOM** — the real `<table>` above 768px
+and a stack of row-cards below it — hiding one with CSS, and the card variant puts every cell inside a
+`<dd>` of the card's own `<dl>`. **So a locator over a table cell matches it twice, and any count
+assertion that does not expect that is off by a factor of two.** `closest('dt, dd, dl')` returning the
+`<dl>` is the predicate that separates loose content from content legitimately nested inside a
+definition.
+
+### T66 — one component test fails intermittently under the full project run and passes alone *(OPEN)*
+
+`tests/components/providers-screen.test.tsx`'s *"deleting the designated embedding connection…"* case
+failed on the first of two full `--project components` runs on 2026-08-31 and passed on the second,
+which was started immediately after and changed nothing. Run alone, the file passes 19/19. The failure is an MSW handler miss —
+`intercepted a request without a matching request handler: GET …/provider-connections`, gracefully
+handled as a 500 — which is cross-file worker state rather than anything the assertion is about.
+
+**Recorded rather than chased, and the reason it is recorded at all:** Vitest has no
+`--fail-on-flaky-tests`, so unlike the Playwright invocation there is nothing here that would turn an
+intermittent green into a red. A case that goes green on a re-run with nothing changed is reported by this suite as
+passing, and the next person to see it red will reasonably read it as a regression in the change they
+are holding. It is not one.
+
+### T68 — hosted chat asks for a bot theme on a route that was never built, and the comment explaining the absence went false when `rt/v1` landed *(OPEN — the stale claim is corrected; the endpoint is a decision, not a repair)*
+
+`apps/web/src/app/(chat)/c/[publicBotId]/theme.css/route.ts` fetches
+`GET {API_ORIGIN}/rt/v1/bots/{publicBotId}/theme` on every hosted-chat page load. **Measured
+2026-08-31 against a running stack: 404.** `php artisan route:list --path=rt` shows six `rt/v1`
+routes and this is not one of them — the nearest, `GET rt/v1/bot`, is the session-bound configuration
+read and answers **401** without a chat-session bearer, so it is not a substitute: it resolves the bot
+from the token rather than from a public id in the path, which is the whole property the stylesheet
+route needs.
+
+The consequence is small per request and permanent: a doomed round trip and a `[kb] bot theme
+unavailable` warning per bot per minute (the fetch is cached 60 s), and **no tenant's palette has ever
+reached hosted chat.** The fail-open is correct and is not the finding — a theme is decoration, and an
+error page is not a better answer than a bot in the platform's colours.
+
+**The finding is the sentence beside it.** The docblock read *"THIS ENDPOINT DOES NOT EXIST YET
+(`rt/v1` is out of scope — plan-status §9)"*, which was true when written and stopped being true when
+Phase D built the group. A reader deciding whether this is a to-do was told "blocked, by design". That
+is § T40's shape exactly — a stale claim that survives because nothing watches prose — and it is why
+the correction went in immediately while the endpoint did not: **writing the route is a decision with
+a security posture attached**, and it is not a repair anybody should make in passing. It is public and
+unauthenticated, it is cached by URL, and it must answer a byte-identical 404 for an unknown id, an
+unpublished bot and a private one, or it becomes an existence oracle for bot ids — the same deny split
+`BootstrapController` maintains. Owner: `control-plane-engineer`, with `admin-web-engineer` holding
+the consumer.
+
+### T69 — the public project is green, and its eight most interesting tests scanned an error page *(OPEN — a harness gap with a one-row remediation)*
+
+`--project=public` passes **30/30** (2026-08-31, `--workers=1 --fail-on-flaky-tests`). Eight of those
+thirty target `/c/e2e-probe-bot` across `accessibility`, `reduced-motion` and `reflow`. **None of them
+has ever seen a chat surface.**
+
+Measured directly: loading that route renders *"This chat is not available at this address"*, because
+`POST /sdk/v1/bootstrap` answers **404**. The refusal is **correct product behaviour**, not a defect —
+`BootstrapController` refuses unless the bot is retrievable, anonymous-accessible **and**
+`BotDomainMatcher::matches()` finds an active `bot_domains` row for the request's `Origin`. The
+harness organization's probe bot has no origin allow-listed, so `http://localhost:3000` is refused,
+and every rejection on that surface is a byte-identical 404 by design.
+
+**So the harness cannot currently exercise hosted chat at all**, and nothing said so: the specs pass,
+the assertions are real, and the page they run against is the platform's four-line unavailable notice.
+A reflow check over an error page is a reflow check over an error page.
+
+**Remediation is one operator action, not code**: allow-list `http://localhost:3000` on the probe bot
+through the Publishing tab's origins panel (`features/bots/bot-origins.tsx`), which writes the
+`bot_domains` row `BotDomainMatcher` reads. It is deliberately **not** done here — it changes what
+every future public run measures, and the person who owns the stack should be the one who decides that
+the harness organization gets a live embeddable origin. Until it is done, read a green `public` run as
+covering `/login`, `/register` and the 404 page, and **not** hosted chat.
+
+The related coverage statement is already in `docs/23` § *Raised by the chat-path effort*: no relay has
+ever consumed a FastAPI-emitted frame. This row is the narrower, nearer one — no browser has ever
+rendered the hosted composer.

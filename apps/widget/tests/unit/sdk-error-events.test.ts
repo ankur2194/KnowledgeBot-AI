@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { isErrorClass } from '@kb/contracts';
 
 import { FRAME_BLOCKED, degrade, resetDegradeForTest } from '../../src/loader/degrade.js';
-import { MINT_FAILED, REFRESH_FAILED } from '../../src/loader/bridge.js';
+import { MINT_FAILED, REFRESH_FAILED, SESSION_MALFORMED } from '../../src/loader/bridge.js';
 import type { SdkErrorPayload } from '../../src/bridge/protocol.js';
 
 /**
@@ -67,7 +67,7 @@ afterEach(() => {
 
 describe('the `error` SDK event payload', () => {
   it('states BOTH the class and `retryable` on every constant — a class name is not a retry answer', () => {
-    for (const payload of [FRAME_BLOCKED, MINT_FAILED, REFRESH_FAILED]) {
+    for (const payload of [FRAME_BLOCKED, MINT_FAILED, REFRESH_FAILED, SESSION_MALFORMED]) {
       // `Object.hasOwn`, not a truthiness check: `retryable: false` is the value we most want to
       // assert is PRESENT, and `if (payload.retryable)` would read a missing field identically.
       expect(Object.hasOwn(payload, 'retryable')).toBe(true);
@@ -76,8 +76,20 @@ describe('the `error` SDK event payload', () => {
     }
   });
 
+  it('gives every failure a DISTINCT `reason` — the class alone cannot separate three of them', () => {
+    // Three of the four now share `error_class: 'authentication'`, so `reason` is the only thing
+    // telling a customer whether their embedding configuration is wrong (mint_failed /
+    // refresh_failed) or OUR response contract broke against a loader pinned on their page
+    // (session_malformed). Two constants sharing a reason would silently merge two remedies.
+    const reasons = [FRAME_BLOCKED, MINT_FAILED, REFRESH_FAILED, SESSION_MALFORMED].map(
+      (payload) => payload.reason,
+    );
+    expect(new Set(reasons).size).toBe(reasons.length);
+    expect(reasons).not.toContain(undefined);
+  });
+
   it('never carries the envelope `message` — it is operator-facing and this payload lands in a page we do not control', () => {
-    for (const payload of [FRAME_BLOCKED, MINT_FAILED, REFRESH_FAILED]) {
+    for (const payload of [FRAME_BLOCKED, MINT_FAILED, REFRESH_FAILED, SESSION_MALFORMED]) {
       expect(Object.hasOwn(payload, 'message')).toBe(false);
       // No hostname, no stack, no upstream provider text.
       expect(JSON.stringify(payload)).not.toMatch(/http|stack|Error:/i);
@@ -131,13 +143,13 @@ describe('degrade(): the frame could not be rendered on this page', () => {
   });
 
   it('survives structuredClone: the payload is JSON-shaped and could cross a postMessage boundary', () => {
-    for (const payload of [FRAME_BLOCKED, MINT_FAILED, REFRESH_FAILED]) {
+    for (const payload of [FRAME_BLOCKED, MINT_FAILED, REFRESH_FAILED, SESSION_MALFORMED]) {
       expect(structuredClone(payload)).toEqual(payload);
     }
   });
 
   it('is FROZEN — a host-page handler receives it by reference and must not be able to rewrite `retryable` for every later event', () => {
-    for (const payload of [FRAME_BLOCKED, MINT_FAILED, REFRESH_FAILED]) {
+    for (const payload of [FRAME_BLOCKED, MINT_FAILED, REFRESH_FAILED, SESSION_MALFORMED]) {
       expect(Object.isFrozen(payload)).toBe(true);
     }
     // Sloppy mode swallows the write; strict mode throws inside THEIR handler. Either way our value

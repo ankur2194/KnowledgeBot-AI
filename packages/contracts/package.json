@@ -29,7 +29,18 @@
         "default": "./dist/forms/index.cjs"
       }
     },
+    "./admin": {
+      "import": {
+        "types": "./dist/admin.d.ts",
+        "default": "./dist/admin.js"
+      },
+      "require": {
+        "types": "./dist/admin.d.cts",
+        "default": "./dist/admin.cjs"
+      }
+    },
     "./rules/*.json": "./rules/*.json",
+    "./openapi/*.json": "./openapi/*.json",
     "./package.json": "./package.json"
   },
   "files": [

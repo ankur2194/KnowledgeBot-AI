@@ -18,9 +18,11 @@ use App\Repositories\Contracts\PendingSourceObjectRepositoryInterface;
 use App\Services\Audit\AuditLogger;
 use App\Services\Sources\Upload\SourceObjectWriter;
 use App\Services\Sources\Upload\UploadIntake;
+use App\Services\Usage\UsageRecorder;
 use App\Support\Http\ListQuery;
 use App\Support\Kb\CanonicalKey;
 use App\Support\Kb\ObjectKey;
+use Carbon\CarbonImmutable;
 use Illuminate\Contracts\Filesystem\Filesystem;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Http\Request;
@@ -133,6 +135,9 @@ final class SourceService
         // source that never committed is permanent AND invisible — it sits under a prefix the
         // phase-2 purge only visits for sources that exist, so verification certifies it clean.
         private PendingSourceObjectRepositoryInterface $pendingObjects,
+        // THE QUOTA LEDGER'S ONLY WRITER. Storage usage is recorded AFTER the transaction commits —
+        // see `recordStorageUsage()` for why it cannot be inside it.
+        private UsageRecorder $usage,
     ) {}
 
     /**
@@ -218,7 +223,9 @@ final class SourceService
      *
      * `UploadIntake::screen()` runs `kb-security-baseline`'s six-step gate over every part, IN
      * ORDER, and the whole batch is all-or-nothing: one refusal and nothing is written — no object,
-     * no source row, no item. A partial success would leave a source whose name describes ten
+     * no source row, no item. IT ALSO ENFORCES THE ORGANIZATION'S STORAGE QUOTA, before it touches a
+     * file and again once the batch has passed; that refusal is `tenant_quota` (403) rather than an
+     * `UploadRejected`, because it is a fact about the organization and not about the file. A partial success would leave a source whose name describes ten
      * documents and whose corpus holds seven, with nothing anywhere recording which three are
      * missing.
      *
@@ -272,7 +279,7 @@ final class SourceService
         $items = match ($input->type) {
             SourceType::Text => [$this->pastedItem($organizationId, $sourceId, $input)],
             SourceType::File => $this->uploadedItems(
-                $organizationId, $sourceId, $files, $actorId, $request,
+                $organization, $sourceId, $files, $actorId, $request,
             ),
             SourceType::Url => [new NewSourceItem(
                 canonicalKey: CanonicalKey::forUrl((string) $input->originUrl),
@@ -363,9 +370,82 @@ final class SourceService
         // returning with its only witness deleted.
         $this->releaseReservations($organizationId, $sourceId);
 
+        $this->recordStorageUsage($source);
+
         $this->dispatchSubmission($organizationId, $source->id, $jobId, null, $actorId);
 
         return $source;
+    }
+
+    /**
+     * Meter the bytes this source put into object storage.
+     *
+     * ── AFTER THE COMMIT, AND THAT IS THE WHOLE OF THE DESIGN ─────────────────────────────────
+     *
+     * `UsageRecorder::record()` writes a `usage_events` row AND bumps the Valkey counter, and the
+     * counter is not transactional. Inside the transaction, a later rollback would take the ledger
+     * row back and leave the BUMP — which makes the counter HIGH, the one direction
+     * `QuotaCounters` relies on being impossible. A high counter refuses an upload that was inside
+     * its allowance, and nothing anywhere would say so. So this runs after `create()` has returned,
+     * which is after COMMIT.
+     *
+     * ── THE COST IS A LOST EVENT, AND THAT IS RECOVERABLE BY DESIGN ──────────────────────────
+     *
+     * A crash between the commit and this call loses the metering: the items exist and nothing
+     * charged for them. `kb:rollup-usage` closes that by re-deriving storage events from
+     * `source_items` — the dedupe key is the ITEM'S OWN ULID, so a re-derivation collides with this
+     * write instead of adding, which is what makes the reconciliation safe to run hourly forever.
+     *
+     * ── IT NEVER FAILS THE REQUEST ───────────────────────────────────────────────────────────
+     *
+     * Same asymmetry as `releaseReservations()` one method down, and for a stronger reason: the
+     * source exists, its objects are written, the caller's work succeeded, and the only thing left
+     * undone is a meter reading the hourly rollup will take anyway. Throwing here would turn a
+     * healthy 201 into a 500 for a source that WAS created, and the retry it invites would create a
+     * SECOND source with a second set of objects — and, this time, charge for both.
+     *
+     * ── `occurred_at` IS THE ITEM'S `created_at`, NOT `now()` ────────────────────────────────
+     *
+     * Because it is half of the dedupe identity: `usage_events_dedupe` must contain the partition
+     * key, so the same item metered under two different instants would be two rows. The item row's
+     * own timestamp is stable across every re-derivation.
+     */
+    private function recordStorageUsage(KnowledgeSource $source): void
+    {
+        try {
+            foreach ($source->items as $item) {
+                // KEYED ON `byte_size` BEING PRESENT rather than on the source type. A crawl target
+                // has no object until the crawler fetches one — `storage_key`, `content_hash`,
+                // `mime` and `byte_size` are four nulls together, which
+                // `source_items_stored_object_is_complete` requires — so this loop cannot meter
+                // bytes that do not exist yet, whatever the caller passed.
+                if ($item->byte_size === null || $item->storage_key === null) {
+                    continue;
+                }
+
+                // `created_at` IS NOT NULL IN THE DATABASE and Eloquent still types it nullable, so
+                // the fallback is a type narrowing rather than a real branch. It falls back to NOW
+                // and not to a sentinel: a row whose timestamp we somehow could not read still has
+                // to be metered, and `occurred_at` only has to be STABLE across re-derivations for
+                // the dedupe to work — which it is, because the next derivation reads the column.
+                $createdAt = $item->created_at;
+
+                $this->usage->recordStorageAdded(
+                    $source->organization_id,
+                    $item->id,
+                    $item->byte_size,
+                    $createdAt === null
+                        ? CarbonImmutable::now('UTC')
+                        : CarbonImmutable::instance($createdAt),
+                );
+            }
+        } catch (Throwable $failure) {
+            Log::warning('kb.source.usage.storage_record_failed', [
+                'organization_id' => $source->organization_id,
+                'source_id' => $source->id,
+                'exception' => $failure::class,
+            ]);
+        }
     }
 
     /**
@@ -998,13 +1078,21 @@ final class SourceService
      * @throws ValidationException 422, with one entry per refused file, keyed `files.{index}`
      */
     private function uploadedItems(
-        string $organizationId,
+        Organization $organization,
         string $sourceId,
         array $files,
         ?string $actorId,
         ?Request $request,
     ): array {
-        $screening = $this->intake->screen($files);
+        $organizationId = $organization->organizationId();
+
+        // THE GATE NOW TAKES THE ORGANIZATION, because it also enforces the STORAGE QUOTA — once
+        // before it touches a file (is this organization already over?) and once after the batch has
+        // passed (would this batch take it over?). A quota breach leaves `screen()` as a
+        // `KbException` with class `tenant_quota`, NOT as an `UploadRejected`: it is a batch refusal
+        // rather than a per-file one and it refused no step of the six, so it has no token in
+        // `UploadRejectionReason` and no entry in the `files.{index}` map below. It propagates.
+        $screening = $this->intake->screen($organization, $files);
 
         if ($screening->hasRejections()) {
             $errors = [];
